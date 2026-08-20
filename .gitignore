@@ -1,0 +1,17 @@
+.idea
+.vscode
+.DS_Store
+*.log
+*.swp
+
+bin/
+dist/
+coverage.out
+coverage.html
+*.test
+*.exe
+
+vendor/
+
+data/*
+!data/README.md
