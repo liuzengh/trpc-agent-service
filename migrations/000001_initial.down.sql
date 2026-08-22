@@ -1,0 +1,15 @@
+DROP TABLE IF EXISTS tenant_config_version;
+DROP TABLE IF EXISTS agent_release;
+DROP TABLE IF EXISTS dead_letter;
+DROP TABLE IF EXISTS outbox_message;
+DROP TABLE IF EXISTS audit_log;
+DROP TABLE IF EXISTS artifact;
+DROP TABLE IF EXISTS summary;
+DROP TABLE IF EXISTS memory;
+DROP TABLE IF EXISTS message_dedup;
+DROP TABLE IF EXISTS session_event;
+DROP TABLE IF EXISTS session;
+DROP TABLE IF EXISTS user_identity;
+DROP TABLE IF EXISTS channel_binding;
+DROP TABLE IF EXISTS agent_app;
+DROP TABLE IF EXISTS tenant;

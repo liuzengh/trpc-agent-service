@@ -15,3 +15,13 @@ vendor/
 
 data/*
 !data/README.md
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local database backups
+*.dump
+*.backup
+*.sql.gz
