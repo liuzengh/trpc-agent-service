@@ -1,382 +1,295 @@
-# tRPC-Agent-Go 多租户节点化平台实施计划
+# tRPC-Agent-Go 多租户平台实施总计划
 
-## 目标与范围
+> 版本：2026-08-23，基于 Git `62d6963`。P0-01 至 P0-06 已完成；本文只规划从当前 HEAD 继续的工作，并保留已完成阶段作为基线。旧的 `implementation-plan-p0.md`、`implementation-plan-p01.md`、`plan006*` 是历史过程材料，不再作为任务状态来源。
 
-将当前 Go 骨架实现为可部署的多租户 Agent 平台：以 tRPC-Agent-Go 作为 Worker 内部 Agent 执行内核，平台层负责租户、AgentApp、ChannelBinding、Gateway、Worker、Session、Memory、Tool 治理、审计、Outbox 和部署。首个可用版本支持 Web 与企业微信，Telegram 紧随其后；数据后端基线为 PostgreSQL、Redis 和一个向量库；对象存储用于文件与 Artifact。
+## 1. 目标、交付口径和当前起点
 
-平台必须支持：无状态 Worker 水平扩展、共享 Session/Memory、企业微信和 Telegram Adapter、租户级 Agent/Tool/Backend 配置、原子幂等、同 Session 串行化、事件顺序、Context 取消、Outbox 重试/DLQ、审计与 OpenTelemetry。
+### 1.1 目标
 
-当前 `EchoResponder` 只保留为本地联调模式；生产执行必须通过 tRPC-Agent-Go Runner Adapter。当前内存存储只作为测试和开发 fallback，不能用于生产。
+交付一个可本地部署、可测试、可审计的首个生产版本：
 
-## 固定架构决策
+- Web Chat、企业微信、Telegram 三类入口。
+- PostgreSQL 作为业务事实源，Redis 负责协调、幂等、Lease、fencing、限流和热缓存。
+- tRPC-Agent-Go Runner 执行 Agent，支持 Tool、MCP、Guardrail 和 Context 取消。
+- Gateway 与 Worker 分离，Worker 无状态，可水平扩展。
+- 同一 Session 串行、消息至少一次投递下业务幂等、Outbox 重试和 DLQ。
+- 租户级 Agent、Binding、BackendPolicy、Tool Policy、配额、审计和配置发布。
+- OTel Trace/Metrics/Logs、Docker Compose、迁移/备份/恢复和集成测试。
+
+### 1.2 当前起点
+
+已经完成的基础层：
+
+| 阶段 | 已交付 |
+| --- | --- |
+| P0-01 | Go 依赖和 CI 质量基线 |
+| P0-02 | Tenant、AgentApp、ChannelBinding、BackendPolicy、TenantContext、Resolver 契约 |
+| P0-03 | Session/Event/Memory/Summary/Artifact/Audit 领域模型和测试 |
+| P0-04 | Session key、DedupKey、Repository/Claim/Lease/Outbox 契约和 Fake/contract tests |
+| P0-05 | PostgreSQL 迁移器、checksum、advisory lock、readiness，初始 15 表 schema |
+| P0-06 | Redis/PostgreSQL Claim、Lease、epoch/fencing、failover、circuit breaker、三维限流和真实集成测试 |
+
+当前仍是开发联调状态：主进程注入 `MemoryStore` 和 `EchoResponder`；设置 `DATABASE_URL` 只会初始化迁移 readiness，不会切换业务 Repository。企业微信、Telegram、HTTP chat、Resolver 也仍是最小壳。详细核对见 [`project-status.md`](project-status.md)。
+
+## 2. 固定决策
+
+1. **Worker 无状态。** 不依赖 sticky session；共享 Repository + Session Lease 保证跨节点一致性。
+2. **PostgreSQL 是事实源。** Redis、向量库、对象存储都不能成为唯一业务数据源。
+3. **Gateway 快速 ACK。** IM 回调不执行模型和长时间 Tool；入站消息转换为 AgentJob，Job 丢失时通过同事务 Outbox 恢复。
+4. **fencing 是提交条件。** Lease owner、epoch 和 fencing token 在事件、Claim 完成和 Outbox 创建时再次验证。
+5. **所有外部发送至少一次。** 通过 Outbox、provider dedup key、有限重试和 DLQ 处理不确定发送。
+6. **租户 ID 只由服务端解析。** 不信任请求 body、header 或 Agent 输出中的 tenant ID。
+7. **危险工具默认关闭。** 首个生产版本不提供任意 Shell/代码执行；后续必须配合审批和沙箱。
+8. **版本化而非破坏性修改。** Session ID 和协调 key 使用 v1 规则；配置和 Agent release immutable，回滚移动指针。
+9. **先完成可验证垂直链路。** 每一阶段必须有单测、竞态测试或真实依赖测试和可运行验收，不以“接口已定义”算完成。
+
+## 3. 阶段总览
+
+| 阶段 | 目标 | 任务 | 退出条件 |
+| --- | --- | --- | --- |
+| Foundation | P0-01 至 P0-06 基础层 | 已完成 | 质量、领域、迁移、协调验收矩阵通过 |
+| Runtime Core | 真正运行 Agent | P0-07、P0-08 | Runner 可取消、事件可排空、租户版本隔离 |
+| Durable Execution | 事实源 Repository、Job、Outbox | P0-09、P0-10、P0-11 | 重启、重复、接管、DLQ 验收通过 |
+| Channels & API | 真实入口和鉴权 | P1-01 至 P1-04 | Web/企业微信/Telegram 端到端通过 |
+| Governance & Ops | 治理、观测、发布和部署 | P1-05 至 P1-09 | 安全、成本、灰度、Compose 和 OTel 可验收 |
+| Resilience Release | 迁移、恢复、压测和安全 | P2-01 至 P2-04 | 发布清单和生产前验收全部通过 |
+
+每个任务独立提交，提交说明包含任务 ID；不要把真实外部服务接入、迁移和大范围重构混入同一任务。
+
+## 4. 任务清单
+
+### Foundation：已完成，不重复实施
+
+#### P0-01 依赖与质量基线：已完成
+
+证据：`go.mod`、`go.sum`、`.github/workflows/ci.yml`、`lint.sh`。现有基线包含 `go test ./...`、`go vet ./...`、gofmt、golangci-lint 和租户边界 race test。
+
+#### P0-02 租户领域与 Context：已完成
+
+证据：`trpcservice/tenant/`、`trpcservice/config/`。已覆盖状态、版本、BackendPolicy、Binding 映射、Context 校验和权限判断。
+
+#### P0-03 领域模型：已完成
+
+证据：`trpcservice/session/`、`memory/`、`artifact/`、`audit/`。已覆盖状态迁移、事件、版本、生命周期字段和审计脱敏。
+
+#### P0-04 存储契约：已完成
+
+证据：`trpcservice/storage/`、`session/key.go`。已固定 Repository、Claim、Lease、epoch/fencing、Summary、Artifact、Audit 和 Outbox 的接口形状。
+
+#### P0-05 PostgreSQL Schema：已完成
+
+证据：`migrations/000001_initial.*`、`trpcservice/storage/postgres/`。已完成迁移目录校验、checksum、advisory lock、事务、readiness 和测试数据库脚本。
+
+#### P0-06 Redis/PostgreSQL 协调：已完成
+
+证据：`migrations/000002_coordination.*`、`trpcservice/storage/{redis,postgres,coordination}/`、`trpcservice/ratelimit/`、`docs/p0-06-acceptance-matrix.md`。已完成 Claim、takeover、Complete/Fail fencing、Session Lease、renewal runner、epoch authority、failover/circuit breaker、三维限流和跨后端/真实依赖验收。
+
+### Runtime Core：从当前 HEAD 开始
+
+#### P0-07 tRPC-Agent-Go Runner Adapter
+
+**目标：** 替换 `EchoResponder`，建立可测试的 `AgentRuntime`，把平台事件和 tRPC-Agent-Go Runner 事件连接起来。
+
+**主要修改：** `trpcservice/agent/`、`trpcservice/tool/`、`trpcservice/platform/`、必要的 tRPC-Agent-Go 依赖升级。
+
+**交付内容：**
+
+- `AgentFactory` 按租户、AgentApp、AgentRelease 创建 Runner。
+- `AgentInput`/`AgentResult`/`RunnerEvent` 平台类型，不向上层泄露不稳定的框架内部类型。
+- Model、Tool、MCP、Guardrail 的 Context、TenantContext 和 trace 传播。
+- 事件消费者在成功、错误、取消三种路径排空 channel；明确 goroutine owner 和关闭顺序。
+- `MODEL_PROVIDER=echo` 只保留为测试/开发 provider。
+
+**测试与验收：**真实或 fake model 成功、模型错误、Tool 错误、Context 取消、事件 channel 排空、不同租户 Agent 配置隔离、预算拒绝。执行 `go test ./trpcservice/agent ./trpcservice/tool ./trpcservice/platform -race`。
+
+**不做：** 不接 IM、不持有长数据库事务、不允许 Agent 修改租户配置。
+
+#### P0-08 Session Execution Orchestrator
+
+**目标：** 将现有同步 Runner 逻辑改造成可被 Job 消费的执行编排器。
+
+**主要修改：** `trpcservice/execution/`、`trpcservice/session/`、`trpcservice/platform/`、`trpcservice/storage/`。
+
+**交付内容：**
+
+- `ExecutionRequest`、`ExecutionState`、`ExecutionResult` 和 failure 分类。
+- Get/Create Session、Acquire/Renew/Release Lease、读取历史和 Memory、执行 Agent、提交事件的明确步骤。
+- 执行期间不持有 SQL 长事务；提交时校验 Session version、epoch 和 fencing token。
+- `user.received`、`agent.started`、`tool.*`、`assistant.completed/failed` 事件序列。
+- Assistant 事件、Audit 和 Outbox 按 Repository 事务边界提交。
+
+**测试与验收：**同 Session 串行、不同 Session 并行、Lease 续租失败取消、旧 fencing token 拒绝、Agent 超时、进程重启接管。执行 `go test ./trpcservice/execution ./trpcservice/session -race`。
+
+### Durable Execution：事实源和异步基础设施
+
+#### P0-09 PostgreSQL 业务 Repository 和 Unit of Work
+
+**前置：** P0-03、P0-04、P0-05、P0-06、P0-08。
+
+**主要修改：** `trpcservice/storage/postgres/repository/` 或与现有包一致的子包、`trpcservice/storage/`。
+
+**交付内容：**
+
+- Tenant/Agent/Binding/Identity/Session/Event/Memory/Summary/Artifact/Audit/Outbox Repository。
+- `TenantContext` 二次校验、所有 SQL 的 tenant 条件和跨租户拒绝测试。
+- Session CAS/行锁、事件序号、同事务 assistant + audit + outbox。
+- 生产连接池、超时、错误分类和事务 rollback。
+- 根据 BackendPolicy 组装 Repository；主进程不再隐式使用 MemoryStore。
+
+**测试与验收：**重复写、唯一约束、事件顺序、CAS 冲突、事务回滚、租户隔离、数据库重连。执行真实 PostgreSQL 测试和 `-race`；迁移后运行 `go test ./...`。
+
+**不做：** RLS 的完整启用、备份自动化和向量 Repository，分别在 P2-02/P2-03 实施。
+
+#### P0-10 Agent Job Queue、Gateway 和 Worker
+
+**前置：** P0-06、P0-08、P0-09。
+
+**主要修改：** `trpcservice/gateway/`、`trpcservice/worker/`、`trpcservice/queue/`、`cmd/trpc-service/main.go`。
+
+**交付内容：**
+
+- `AgentJob` 包含 tenant/agent/binding/session/message/request/execution/trace、attempt 和 deadline。
+- Gateway 只做入口解析、认证/验签、Claim、Job 入队和快速 ACK。
+- Worker consumer 并发、优雅退出、可见性超时、Job 重试和执行编排。
+- Session 分区或 Lease 竞争策略；不同 Session 可并行。
+- 队列不可用时写 PostgreSQL Outbox，恢复后补投。
+
+**测试与验收：**快速 ACK、ACK 后重启恢复、同 Session 串行、不同 Session 并行、重复 Job、Lease takeover、SIGTERM drain、Context deadline。执行 `go test ./trpcservice/gateway ./trpcservice/worker ./trpcservice/queue -race`。
+
+#### P0-11 Outbox Dispatcher、Retry 和 DLQ
+
+**前置：** P0-09、P0-10。
+
+**主要修改：** `trpcservice/outbox/`、`trpcservice/retry/`、`trpcservice/storage/`。
+
+**交付内容：**
+
+- `ClaimBatch` 使用 `SKIP LOCKED` 或等价租约，租约超时可恢复。
+- Reply、Memory Index、Audit Export、Job Requeue 等 kind 的 Dispatcher。
+- 可配置的有限指数退避、可重试/不可重试错误分类、最大尝试次数。
+- Dead Letter 记录原始 outbox、原因、最后错误和人工重放入口。
+- provider dedup key 和发送不确定状态处理。
+
+**测试与验收：**多 Dispatcher 竞争、重启恢复、429/5xx、永久错误 DLQ、同一 outbox 不重复执行、重放幂等。执行 `go test ./trpcservice/outbox ./trpcservice/retry -race`。
+
+### Channels & API
+
+#### P1-01 企业微信 Adapter
+
+**前置：** P0-10、P0-11。
+
+实现回调 challenge、签名计算、AES 加解密、消息类型/群聊解析、MsgID 去重、Binding/Identity 映射、异步发送、长度切分和 429/5xx 重试。新增 `trpcservice/channels/wecom/` 和 `trpcservice/identity/`，禁止信任 payload tenant ID。验收覆盖重放、错误签名、密文、图片/文件、群聊和快速 ACK。
+
+#### P1-02 Telegram Adapter
+
+**前置：** P0-10、P0-11。
+
+实现 secret token、`update_id` 去重、private/group/supergroup/topic Session scope、Bot API sender、`retry_after`、400/403、消息长度和文件下载取消。新增 `trpcservice/channels/telegram/`，使用 numeric user/chat ID，不使用 username 作为主身份。
+
+#### P1-03 Web Chat、SSE 和 API 鉴权
+
+**前置：** P0-09、P0-10、P1-05。
+
+实现 API key/JWT 或企业统一认证的 `Authenticator`、Principal 与 TenantContext，替换当前未经认证的最小路由；支持 body/timeout/并发配额、SSE Runner event、断开取消、分页审计和管理 API 基础鉴权。不得信任 `X-Tenant-ID`，不得开放未认证的租户创建。
+
+#### P1-04 Channel Binding 与 Identity 管理
+
+**前置：** P0-09、P1-01 或 P1-02。
+
+实现 Binding CRUD、Secret Manager 引用、用户/群身份映射、启停和 webhook external app 路由；所有变更写 Audit。覆盖同一外部 App 跨租户拒绝、身份首次创建、禁用 Binding、跨群 Session 隔离。
+
+### Governance & Ops
+
+#### P1-05 Tool Policy、Guardrail 和审计脱敏
+
+**前置：** P0-07、P0-09、P1-03。
+
+新增 `trpcservice/governance/`，实现 Tool 白名单、参数 schema、用户权限、审批 token、预算检查、输入/输出 Guardrail 和统一 Redactor。危险工具默认 deny；测试 Prompt、Tool 参数、错误和 Trace 属性均不能泄露凭据。
+
+#### P1-06 Memory、Summary 和 Vector Index
+
+**前置：** P0-09、P0-11。
+
+实现 Memory/ Summary Repository、Embedding Provider、Vector Repository 和异步 Indexer。SQL 原文先提交，向量写入通过 Outbox；搜索 filter 由服务端附加 tenant/scope；向量不可用时回退 SQL 最近记忆。覆盖版本覆盖、跨租户过滤、向量失败重试和写后最终可见。
+
+#### P1-07 OTel、Metrics 和结构化日志
+
+**前置：** P0-08、P0-10、P0-11。
+
+新增 `trpcservice/telemetry/`，统一传播 trace/request/message/execution/outbox ID，接入模型、Tool、存储和发送 Span；增加低基数指标、成本估算、Redactor 和采样。测试取消后 Span 结束、属性过滤和跨进程 carrier。
+
+#### P1-08 配置发布、灰度和回滚
+
+**前置：** P0-09、P1-03、P1-05。
+
+使用 `tenant_config_version`、`agent_release` 实现校验、immutable 发布、租户/Binding 灰度、健康门禁和回滚指针。Session 创建时固定 Agent version；历史版本不可删除，回滚不改变已发生事件。
+
+#### P1-09 Docker Compose 和运行文档
+
+**前置：** P0-09、P0-10、P1-06、P1-07。
+
+新增 `deploy/compose/`、`.env.example`、readiness/liveness、依赖健康检查、资源限制、日志和 OTEL 配置。验收要求干净环境启动、自动/显式迁移、重启恢复、`/healthz`、Web/IM fake 端到端和无默认生产密钥。
+
+### Resilience Release
+
+#### P2-01 RLS、备份、恢复和事件回放
+
+**前置：** P0-09、P1-06、P1-08。
+
+在应用 tenant 过滤之外逐步启用 PostgreSQL RLS；提供 schema/data 备份校验、恢复演练、按租户/Session 的事件回放、Summary/Vector 重建和 checksum 报告。测试断点续传、幂等、校验失败中止，不删除源数据。
+
+#### P2-02 故障恢复、断路器和容量保护
+
+**前置：** P0-10、P0-11、P1-01、P1-02、P1-07。
+
+统一模型/Tool/IM/DB/Redis failure class、断路器、租户级并发/token/cost/发送配额、DrainController 和容量告警。测试重试风暴、依赖分区、节点失效、优雅退出和 DLQ 告警。
+
+#### P2-03 集成、压力和安全测试
+
+**前置：** P1 全部完成。
+
+新增 `tests/integration/`、`tests/e2e/`、`tests/load/`、`tests/security/`，提供 Fake IM、Fake Model、FaultInjector、TenantFixture。必须覆盖跨租户拒绝、重复消息单执行、同 Session 串行、乱序、Memory 可见性、Trace/Audit 完整性、签名重放、Secret 脱敏和依赖故障。压力测试固定峰值、P95/P99、错误率、租户公平性和成本预算。
+
+#### P2-04 发布检查和生产运维手册
+
+**前置：** P2-01、P2-02、P2-03。
+
+输出部署拓扑、配置清单、迁移前检查、回滚、密钥轮换、备份恢复、DLQ 重放、告警阈值、容量公式、值班操作和已知限制。建立发布门禁：全量 test/vet/race、镜像扫描、迁移 checksum、灾备恢复报告、压测报告和安全测试报告齐全后才能标记首个生产版本。
+
+## 5. 依赖和建议顺序
 
 ```text
-Web / 企业微信 / Telegram
-          |
-     Agent Gateway
-验签、身份、租户映射、幂等、快速 ACK
-          |
-       AgentJob Queue
-          |
-       Agent Worker
-          |
- tRPC-Agent-Go Runner
-Agent / Tool / MCP / Guardrail
-          |
- Session / Memory / Summary / Artifact
-          |
- PostgreSQL + Redis + Vector DB + Object Storage
-          |
- Outbox Dispatcher + OTel Collector
+P0-07 -> P0-08 -> P0-10
+P0-09 -> P0-08, P0-10, P0-11
+P0-10 -> P1-01, P1-02, P1-03
+P0-11 -> P1-01, P1-02, P1-06
+P1-03 -> P1-04, P1-05, P1-08
+P0-09 + P1-06 -> P2-01
+P0-10 + P0-11 + P1-07 -> P2-02
+P1 全部 -> P2-03 -> P2-04
 ```
 
-- Gateway 不执行模型和 Tool，只负责验证、解析、幂等 Claim、投递 Job 和快速 ACK。
-- Worker 无状态；不依赖 sticky session；同一 Session 通过队列分区或 Redis lease 串行化。
-- 所有领域表、缓存 key、对象存储 key、向量 metadata 和 Repository 查询都强制包含 `tenant_id`。
-- `TenantContext` 在验签和 Binding 解析后创建，并贯穿 Gateway、Job、Runner、Tool、Store、Audit、Outbox 和 IM 发送。
-- `session_id = base64url(SHA-256("v1|" + tenant_id + "|" + channel + "|" + binding_id + "|" + scope))`；私聊 scope 为用户，群聊 scope 为群，Telegram Forum Topic 额外加入 `message_thread_id`。
-- 企业微信使用 token/timestamp/nonce/signature 与 AES 回调处理；Telegram 使用 webhook secret token、`update_id` 幂等和 Bot API。
-- PostgreSQL 是租户、配置、Session、Event、Memory 原文、Summary、Artifact 元数据、Audit 和 Outbox 的事实源；Redis 用于幂等、lease、fencing、限流、热缓存和队列；向量库保存 embedding 与受租户过滤的索引；对象存储保存文件。
-- Agent 执行不持有数据库长事务；执行期间持有可续租的 Session lease。lease 续租失败必须取消 Context，旧 Worker 使用 fencing token 不能提交结果。
-- Outbox 统一承载 AgentJob、IM 回复、Memory 索引和审计投递；有限指数退避后进入 DLQ。
-
-## 领域模型与接口
-
-新增或稳定以下模型：
-
-- `Tenant`：`tenant_id`、名称、状态、配置版本、默认 Agent、BackendPolicy、预算。
-- `AgentApp`：`tenant_id`、Agent ID、版本、状态、模型配置引用、SystemPrompt、ToolPolicy、Guardrail 引用。
-- `ChannelBinding`：租户、Binding ID、channel、external_app_id/Bot ID、Secret Manager 引用、启用状态。
-- `Session`：租户、Session ID、Agent 版本、Channel、外部会话、state、state_version、summary_version、last_event_seq。
-- `SessionEvent`：租户、Session、Seq、event_id、event_type、message_id、execution_id、parent_event_id、attempt、trace_id、脱敏 Payload。
-- `Memory`：租户、Memory ID、Session/User scope、kind、content、vector_ref、version、source_seq、删除状态。
-- `Summary`：租户、Session、version、covered_seq、内容和 token 估算。
-- `Artifact`：租户、Artifact ID、Session/message、object_key、媒体类型、大小、SHA256、状态和过期时间。
-- `AuditLog`：租户、audit ID、trace/request/execution ID、Channel、用户、Session、Agent、Tool、decision、latency、cost、error type、脱敏 metadata。
-- `TenantContext`：`TenantID`、`AgentAppID`、`BindingID`、Channel、外部/内部用户、SessionID、RequestID、MessageID、TraceID、权限和 BackendPolicy。
-
-固定接口：
-
-```go
-type TenantResolver interface {
-    Resolve(ctx context.Context, channel, externalAppID string) (TenantContext, error)
-}
-
-type SessionRepository interface {
-    Get(ctx context.Context, tc TenantContext, id string) (Session, error)
-    AppendEvent(ctx context.Context, tc TenantContext, expectedVersion int64, e SessionEvent) (Session, error)
-    AcquireLease(ctx context.Context, tc TenantContext, id string, ttl time.Duration) (Lease, error)
-}
-
-type IdempotencyRepository interface {
-    Claim(ctx context.Context, tc TenantContext, externalMessageID string, ttl time.Duration) (Claim, error)
-    Complete(ctx context.Context, tc TenantContext, key, responseRef string) error
-}
-
-type MemoryRepository interface {
-    Put(ctx context.Context, tc TenantContext, m Memory) error
-    Search(ctx context.Context, tc TenantContext, query string, limit int) ([]Memory, error)
-}
-
-type SummaryRepository interface {
-    UpsertIfNewer(ctx context.Context, tc TenantContext, s Summary) error
-}
-
-type ArtifactRepository interface {
-    Create(ctx context.Context, tc TenantContext, a Artifact) error
-    PresignedURL(ctx context.Context, tc TenantContext, id string, ttl time.Duration) (string, error)
-}
-
-type AuditRepository interface {
-    Append(ctx context.Context, tc TenantContext, a AuditLog) error
-}
-
-type AgentRuntime interface {
-    Run(ctx context.Context, tc TenantContext, s Session, input string) (AgentResult, error)
-}
-```
-
-Repository 实现必须在内部再次校验 `tc.TenantID`，不能只依赖调用方；Vector Search 接口不可允许调用方覆盖 `tenant_id` filter；Artifact 对象 key 固定为 `tenants/{tenant_id}/...`。
-
-## PostgreSQL 迁移
-
-实现以下表和索引：
-
-- `tenant`
-- `agent_app`
-- `channel_binding`
-- `user_identity`
-- `session`
-- `session_event`
-- `message_dedup`
-- `memory`
-- `summary`
-- `artifact`
-- `audit_log`
-- `outbox_message`
-- `dead_letter`
-- `tenant_config_version` / `agent_release`
-
-关键唯一约束：
-
-```text
-channel_binding(channel, external_app_id)
-session(tenant_id, session_id)
-session_event(tenant_id, session_id, seq)
-session_event(tenant_id, event_id)
-session_event(tenant_id, session_id, message_id, event_type)
-message_dedup(tenant_id, channel, binding_id, external_message_id)
-summary(tenant_id, session_id)
-artifact(tenant_id, artifact_id)
-audit_log(tenant_id, audit_id)
-outbox_message(tenant_id, id)
-```
-
-Session 事件、状态版本和 assistant message 在有限 PostgreSQL 事务中提交。所有迁移可重复执行，并提供迁移版本、回滚策略和生产前备份验证。生产逐步启用 PostgreSQL Row-Level Security，应用层租户过滤作为第一层，数据库策略作为第二层。
-
-## 实施任务与提交边界
-
-### P0-01：依赖、CI 和质量基线，0.5 天
-
-- 目标：固定 Go/tRPC-Agent-Go/Redis/PostgreSQL/OTel 版本，接入 test、vet、format、lint。
-- 前置依赖：无。
-- 修改目录：`go.mod`、`go.sum`、`.github/workflows/`、`lint.sh`、`coverage.sh`。
-- 接口/结构：无业务接口。
-- 测试：CI 执行 `go test ./...`、`go vet ./...`、`gofmt -l .`。
-- 验收：`go test ./... && go vet ./... && test -z "$(gofmt -l .)"`。
-- 不修改：业务逻辑、数据库结构、HTTP 路由。
-- 风险：框架 API/Go 版本不兼容；回滚为恢复 `go.mod/go.sum` 和 CI。
-
-### P0-02：租户领域模型和 TenantContext，1 天
-
-- 前置：P0-01。
-- 修改：`trpcservice/tenant/`、`trpcservice/config/`、`trpcservice/platform/`。
-- 接口：`Tenant`、`AgentApp`、`ChannelBinding`、`TenantContext`、`TenantResolver`、`BackendPolicy`。
-- 测试：状态、配置版本、Binding 映射、Context 错配和跨租户拒绝。
-- 验收：`go test ./trpcservice/tenant ./trpcservice/config ./trpcservice/platform -race`。
-- 不修改：真实数据库、IM 协议和 Runner。
-- 风险/回滚：防止信任请求租户 ID；删除新 Resolver 即可回退内存租户。
-
-### P0-03：Session/Event/Memory/Summary/Artifact/Audit 模型，1 天
-
-- 前置：P0-02。
-- 修改：`trpcservice/session/`、`memory/`、`artifact/`、`audit/`。
-- 接口：领域实体、事件类型、状态枚举、版本字段。
-- 测试：字段校验、状态迁移、事件合法性、版本递增、审计脱敏。
-- 验收：`go test ./trpcservice/session ./trpcservice/memory ./trpcservice/artifact ./trpcservice/audit`。
-- 不修改：具体数据库、Redis、IM Adapter。
-- 风险/回滚：避免泄露框架内部类型；删除新增领域包并保留兼容 Message。
-
-### P0-04：ID、幂等键和存储契约，1 天
-
-- 前置：P0-02、P0-03。
-- 修改：`trpcservice/session/`、`storage/`、`platform/`。
-- 接口：`SessionKey`、`DedupKey`、`IdempotencyRepository`、`SessionRepository`、`MemoryRepository`、`OutboxRepository`。
-- 测试：ID 稳定性、租户/Binding/Topic 隔离、空值和长度校验。
-- 验收：`go test ./trpcservice/session ./trpcservice/storage -race`。
-- 不修改：Web 字段名、具体 Redis/SQL 实现。
-- 风险/回滚：ID 规则变化导致历史数据不可读；采用 `v1` 版本前缀，保留旧算法。
-
-### P0-05：PostgreSQL Schema 和迁移，1 天
-
-- 前置：P0-02、P0-03、P0-04。
-- 修改：`migrations/`、`trpcservice/storage/postgres/`、`scripts/`。
-- 接口：`Migrator`、`PostgresConfig`、`MigrationVersion`。
-- 测试：重复迁移、唯一约束、租户条件、事务回滚。
-- 验收：`docker compose -f deploy/compose.test.yml up -d postgres && go test ./trpcservice/storage/postgres -count=1`。
-- 不修改：生产数据迁移和 Agent 逻辑。
-- 风险/回滚：锁表和错误外键；每个迁移提供可控 down/forward 方案，生产执行前备份。
-
-### P0-06：Redis 幂等、Lease、Fencing 和限流，1.5 天
-
-- 前置：P0-04、P0-05。
-- 修改：`storage/redis/`、`queue/`、`ratelimit/`。
-- 接口：`RedisIdempotencyRepository`、`Lease`、`FenceToken`、`RateLimiter`、`ClaimStatus`。
-- 测试：100 goroutine 竞争同一消息、lease 接管、旧 token 拒绝、限流窗口。
-- 验收：`docker compose -f deploy/compose.test.yml up -d redis && go test ./trpcservice/storage/redis ./trpcservice/ratelimit -race`。
-- 不修改：模型和 IM 逻辑。
-- 风险/回滚：Redis 分区导致重复执行；切回 PostgreSQL Claim，保留幂等记录。
-
-### P0-07：tRPC-Agent-Go Runner Adapter，2 天
-
-- 前置：P0-01、P0-02、P0-03、P0-04。
-- 修改：`trpcservice/agent/`、`tool/`、`platform/`。
-- 接口：`AgentFactory`、`AgentRuntime`、`AgentInput`、`AgentResult`、`RunnerEvent`。
-- 测试：成功、模型错误、Context 取消、Event channel 排空、租户 Agent 隔离。
-- 验收：`go test ./trpcservice/agent ./trpcservice/tool ./trpcservice/platform -race`。
-- 不修改：IM webhook、生产密钥存储。
-- 风险/回滚：Runner goroutine 泄漏或依赖 API 变化；保留 `MODEL_PROVIDER=echo` 本地模式。
-
-### P0-08：Gateway、AgentJob 和 Worker，2 天
-
-- 前置：P0-04、P0-06、P0-07。
-- 修改：`gateway/`、`worker/`、`queue/`、`web/`。
-- 接口：`AgentJob`、`JobQueue`、`GatewayHandler`、`Worker`、`ExecutionState`。
-- 测试：快速 ACK、Context/Trace 恢复、同 Session 串行、不同 Session 并行、崩溃接管。
-- 验收：`go test ./trpcservice/gateway ./trpcservice/worker ./trpcservice/queue -race`。
-- 不修改：复杂管理后台和具体 IM 协议。
-- 风险/回滚：ACK 后 Job 丢失；队列不可用时写 Job Outbox，临时可回退同步模式。
-
-### P0-09：Outbox、发送 Dispatcher、Retry 和 DLQ，1.5 天
-
-- 前置：P0-05、P0-06、P0-08。
-- 修改：`outbox/`、`queue/`、`audit/`。
-- 接口：`OutboxMessage`、`OutboxDispatcher`、`RetryPolicy`、`DeadLetterRecord`。
-- 测试：SKIP LOCKED 竞争、退避、永久错误 DLQ、重启恢复、同一 Outbox 不重复发送。
-- 验收：`go test ./trpcservice/outbox ./trpcservice/queue -race`。
-- 不修改：具体企业微信/Telegram API。
-- 风险/回滚：外部超时但实际已发送；暂停 Dispatcher，保留 pending/retry。
-
-### P1-01：企业微信 Adapter，2 天
-
-- 前置：P0-02、P0-04、P0-08、P0-09。
-- 修改：`channels/wecom/`、`identity/`。
-- 接口：`WeComAdapter`、`WeComBinding`、`WeComSender`、`IdentityResolver`。
-- 测试：challenge、签名、时间戳重放、AES、XML/JSON、文本/图片/群聊、MsgID 幂等、长消息和 429/5xx。
-- 验收：`go test ./trpcservice/channels/wecom ./trpcservice/identity -race`。
-- 不修改：租户核心表、TenantContext、日志密钥。
-- 风险/回滚：协议差异和回调超时；按 Binding 禁用并保留 Outbox。
-
-### P1-02：Telegram Adapter，2 天
-
-- 前置：P0-02、P0-04、P0-08、P0-09。
-- 修改：`channels/telegram/`、`identity/`、`artifact/`。
-- 接口：`TelegramAdapter`、`TelegramUpdate`、`TelegramBinding`、`TelegramSender`、`MessagePart`。
-- 测试：secret token、update_id 幂等、private/group/supergroup/topic、429 retry_after、400/403、长消息、文件下载取消。
-- 验收：`go test ./trpcservice/channels/telegram ./trpcservice/identity ./trpcservice/artifact -race`。
-- 不修改：企业微信 XML/AES 解析，不使用 username 作为主身份。
-- 风险/回滚：Bot API 限频、Markdown 转义、发送不确定性；停用 Binding 并保留 Outbox。
-
-### P1-03：Web Chat、SSE 和 API 鉴权，1.5 天
-
-- 前置：P0-02、P0-08、P0-09。
-- 修改：`web/`、`auth/`、`tenant/`。
-- 接口：`Authenticator`、`Principal`、`ChatRequest`、`SSEEvent`、`AdminService`。
-- 测试：认证、租户越权、SSE 断开取消、重复 request_id、body 限制、分页。
-- 验收：`go test ./trpcservice/web ./trpcservice/auth -race`。
-- 不修改：不信任 `X-Tenant-ID`，不开放未认证租户创建。
-- 风险/回滚：连接泄漏和 Session 泄露；关闭管理/SSE 路由。
-
-### P1-04：PostgreSQL Repository 和事务一致性，2 天
-
-- 前置：P0-03、P0-05、P0-08、P0-09。
-- 修改：`storage/postgres/`、`session/`、`audit/`。
-- 接口：实现 Session/Memory/Audit/Outbox Repository，新增 `UnitOfWork`。
-- 测试：CAS、行锁、事件 Seq、租户过滤、事务回滚、同事务 Outbox。
-- 验收：`go test ./trpcservice/storage/postgres ./trpcservice/session ./trpcservice/audit -count=1`。
-- 不修改：领域 ID、Channel 逻辑、破坏性迁移。
-- 风险/回滚：长事务和遗漏租户条件；切回 Memory/Redis，保留数据。
-
-### P1-05：Memory、Summary 和向量索引，2 天
-
-- 前置：P0-05、P0-09、P1-04、embedding Provider。
-- 修改：`memory/`、`knowledge/`、`storage/vector/`。
-- 接口：`EmbeddingProvider`、`VectorRepository`、`MemoryIndexer`、`SearchFilter`。
-- 测试：数据库成功/向量失败、重试、版本覆盖、跨租户过滤、写入后可见。
-- 验收：`go test ./trpcservice/memory ./trpcservice/knowledge ./trpcservice/storage/vector -race`。
-- 不修改：向量库不能成为原文事实源，不能覆盖租户 filter。
-- 风险/回滚：最终一致和 embedding 成本；关闭向量检索，使用 PostgreSQL 最近记忆。
-
-### P1-06：Tool Policy、Guardrail 和审计脱敏，1.5 天
-
-- 前置：P0-02、P0-07、P1-04。
-- 修改：`tool/`、`governance/`、`log/`、`audit/`。
-- 接口：`ToolPolicy`、`ToolAuthorizer`、`ApprovalService`、`Guardrail`、`Redactor`。
-- 测试：工具越权、审批、凭据隔离、Prompt/日志/Trace 脱敏、超时取消。
-- 验收：`go test ./trpcservice/tool ./trpcservice/governance ./trpcservice/log ./trpcservice/audit -race`。
-- 不修改：不执行任意 Shell，不把密钥写入 Prompt。
-- 风险/回滚：工具越权和提示注入；默认关闭危险 Tool，只保留只读白名单。
-
-### P1-07：OpenTelemetry、Metrics 和结构化日志，1.5 天
-
-- 前置：P0-08、P0-09、P1-04。
-- 修改：`metrics/`、`telemetry/`、`log/`。
-- 接口：`TracerProvider`、`MetricsRecorder`、`TraceCarrier`、`AuditEnricher`。
-- 测试：trace/request/message ID 跨进程、敏感属性过滤、取消后 span 结束、低基数指标。
-- 验收：`go test ./trpcservice/metrics ./trpcservice/telemetry ./trpcservice/log -race`。
-- 不修改：不记录完整 Prompt、Key、Authorization 和文件内容。
-- 风险/回滚：高基数标签和 Collector 压力；关闭 exporter，保留审计和错误日志。
-
-### P2-01：对象存储和 Artifact 生命周期，1.5 天
-
-- 前置：P0-03、P1-01 或 P1-02、P1-04。
-- 修改：`artifact/`、`storage/object/`、清理 Job。
-- 接口：`ObjectStore`、`ArtifactService`、`PresignRequest`、`RetentionPolicy`。
-- 测试：跨租户 URL、hash、大小/MIME、过期清理、下载取消。
-- 验收：`go test ./trpcservice/artifact ./trpcservice/storage/object -race`。
-- 不修改：不把二进制放 PostgreSQL，不生成永久公开 URL。
-- 风险/回滚：恶意文件和误删；禁用文件消息，保留对象和元数据。
-
-### P2-02：配置发布、灰度和回滚，1.5 天
-
-- 前置：P0-02、P0-05、P1-03、P1-06。
-- 修改：`tenant/`、`config/`、`web/`。
-- 接口：`ConfigVersion`、`Release`、`RolloutRule`、`RollbackService`。
-- 测试：非法配置、稳定灰度、回滚、新旧 Session Agent 版本隔离。
-- 验收：`go test ./trpcservice/tenant ./trpcservice/config ./trpcservice/web -race`。
-- 不修改：不修改运行中 Session 的 Agent 版本，不删除历史版本。
-- 风险/回滚：灰度不稳定；切回 Release 指针，保留事件和审计。
-
-### P2-03：故障恢复、断路器和容量保护，2 天
-
-- 前置：P0-06、P0-08、P0-09、P1-01、P1-02。
-- 修改：`retry/`、`worker/`、`queue/`、`config/`。
-- 接口：`RetryPolicy`、`CircuitBreaker`、`QuotaManager`、`DrainController`、`FailureClass`。
-- 测试：429、模型超时、DB/Redis 断开、SIGTERM、队列重投、DLQ、租户配额。
-- 验收：`go test ./trpcservice/retry ./trpcservice/worker ./trpcservice/queue -race`。
-- 不修改：不改变事件语义，不无限重试，不删除 DLQ。
-- 风险/回滚：重试风暴和重复外部发送；关闭自动重试并保留 DLQ。
-
-### P2-04：Docker Compose 和部署清单，1 天
-
-- 前置：P0-05、P0-06、P1-04、P1-07。
-- 修改：`deploy/compose/`、`deploy/nginx/`、`.env.example`、部署文档。
-- 接口：健康检查和配置 Schema。
-- 测试：干净启动、迁移、重启、readiness、依赖不可用处理。
-- 验收：`docker compose -f deploy/compose/docker-compose.yml up -d && curl -fsS http://localhost:8080/healthz && go test ./...`。
-- 不修改：真实密钥、生产数据和外部端口默认暴露。
-- 风险/回滚：默认密码、资源限制、依赖启动顺序；停止新 Compose，使用旧脚本。
-
-### P2-05：迁移、备份、恢复和事件回放，2 天
-
-- 前置：P0-05、P1-04、P1-05。
-- 修改：`cmd/migrate/`、`cmd/replay/`、`trpcservice/migration/`、运维文档。
-- 接口：`MigrationJob`、`ReplayCursor`、`ChecksumReport`、`RestorePlan`。
-- 测试：断点续传、幂等、租户分片、事件回放一致、向量重建、校验失败中止。
-- 验收：`go test ./trpcservice/migration ./cmd/migrate ./cmd/replay -race`。
-- 不修改：不删除源数据，不执行无确认生产迁移。
-- 风险/回滚：双写不一致和误迁移；保留源后端与 checkpoint，切回旧读路径。
-
-### P2-06：完整集成、压力、安全和容灾测试，2 天
-
-- 前置：P1 全部任务和 P2 部署任务。
-- 修改：`tests/integration/`、`tests/e2e/`、`tests/load/`、`tests/security/`、`testdata/`。
-- 接口：Test Fixture、Fake IM、Fake Model、FaultInjector、TenantFixture。
-- 测试：跨租户拒绝、重复消息单执行、同 Session 串行、乱序拒绝、Memory 可见、审计不丢、故障恢复。
-- 验收：`go test ./tests/... -race -count=1`，压力测试使用约定的 benchmark 或 k6 命令。
-- 不修改：不连接生产，不写真实租户数据，不跳过签名和权限。
-- 风险/回滚：测试环境差异和外部服务费用；销毁测试资源，保留报告和失败样本。
-
-## 端到端验收标准
-
-1. `go test ./...`, `go vet ./...` 和竞态测试通过。
-2. 企业微信 webhook 能完成验签、租户/Agent/User/Channel 映射、原子去重和快速 ACK。
-3. Telegram Adapter 能完成 secret token、`update_id` 去重、群聊/Topic Session、长消息、文件和 Bot API 重试。
-4. 同一 Session 的并发消息无状态覆盖、无重复 Seq、无非法事件迁移。
-5. tRPC-Agent-Go Runner 能响应 `context.Context` 取消，Tool、模型和 IM 失败都有明确状态、重试或 DLQ。
-6. Redis、PostgreSQL、向量库和对象存储分别承担明确职责，租户隔离通过应用层和数据库层双重验证。
-7. trace_id、request_id、message_id、execution_id 和 outbox_id 可从入口追踪到最终回复。
-8. Docker Compose 可启动最小环境，生产部署具备健康检查、资源限制、备份、回滚和告警方案。
-
-## 明确不在首个生产版本的范围
-
-- 微信公众号、微信客服和其他未明确要求的 IM 通道。
-- 多 Region 强一致部署。
-- 任意代码执行型 Tool；危险 Tool 必须后置到审批和沙箱阶段。
-- 不受控的 Agent 自主修改租户配置。
-- 将 Redis 或向量库作为唯一业务事实源。
-- 在未完成安全测试前开放公网未认证管理接口。
-
-## 推荐实施顺序
-
-按 `P0-01 -> P0-02 -> P0-03 -> P0-04 -> P0-05 -> P0-06 -> P0-07 -> P0-08 -> P0-09` 顺序提交；P1-01、P1-02、P1-03 在 P0-08 后并行；P1-04 完成后实现 P1-05；P1-06 和 P1-07 可并行；最后执行 P2。每个任务独立提交、独立测试、独立回滚，禁止把所有模块合并成一个大提交。
+推荐执行顺序：`P0-07 -> P0-08/P0-09 -> P0-10 -> P0-11 -> P1-01/P1-02/P1-03 -> P1-04/P1-05/P1-06/P1-07 -> P1-08 -> P1-09 -> P2-01/P2-02 -> P2-03 -> P2-04`。
+
+可并行的任务必须共享稳定契约后再启动；例如 P1-01 和 P1-02 可以并行，但都依赖 Gateway/Worker/Outbox 的统一消息合同。每项任务完成时同步更新本文件的状态、验收命令和风险，不再通过单独的临时 `plan006*` 文件维护隐含状态。
+
+## 6. 首个生产版本验收
+
+1. `go test ./...`、`go vet ./...`、格式和 lint 通过；关键包 race test 通过。
+2. Web、企业微信、Telegram 都能从入口完成鉴权/验签、Binding、TenantContext、Claim、Job、Runner、事件、Audit、Outbox 和回复。
+3. 重复入站消息只产生一次 Agent 执行；同 Session 无重复 sequence、状态覆盖或旧 fencing token 提交。
+4. Worker 节点可横向扩展；节点中止后 Job 能接管，Context 和 goroutine 没有泄漏。
+5. PostgreSQL、Redis、向量库、对象存储职责清晰；向量和缓存故障不会造成跨租户读或事实源丢失。
+6. Tool 权限、审批、预算、Secret 脱敏和审计字段可被测试证明。
+7. `trace_id`、`request_id`、`message_id`、`execution_id`、`outbox_id` 可从入口追踪到外部回复或 DLQ。
+8. Compose 可在干净环境启动并完成 readiness；备份恢复、事件回放、灰度回滚和容量/安全报告齐全。
+9. 未实现或关闭的能力在 API、配置和运维文档中明确返回/呈现，不以静默降级冒充生产可用。
+
+## 7. 每个任务的完成定义
+
+- 代码、迁移和配置变更只落在任务声明的边界内。
+- 领域契约和错误语义有单测；并发/协调代码有 race 或真实依赖测试。
+- 至少有一个失败、取消、重试或恢复路径测试，而不是只测 happy path。
+- 所有入口和 Repository 都验证租户边界，日志和 Trace 不含 Secret。
+- 文档同步更新运行前置、验收命令、回滚方式和已知限制。
+- `go test ./...`、`go vet ./...`、格式/lint 以及受影响集成测试通过后，才将任务标记为完成。
