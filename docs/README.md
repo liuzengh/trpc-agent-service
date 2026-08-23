@@ -1,8 +1,5 @@
-# 文档目录
+# 文档索引
 
-在此放置架构设计、时序图、数据模型和运维方案。建议至少包含：
-
-- 系统架构图：Gateway、Worker、Channel Adapter、Storage Adapter、Plugin / Guardrail、Telemetry
-- 核心时序图：IM 消息 → Runner 执行 → Tool 调用 → Session / Memory 写入 → IM 回复
-- 数据模型与多后端适配说明
-- 风险清单
+- [design.md](design.md)：架构、双 IM 差异、数据模型、一致性、迁移、治理、容量和风险。
+- [demo-checklist.md](demo-checklist.md)：真实双长连接验收与脱敏证据模板。
+- [../migrations/001_init.sql](../migrations/001_init.sql)：可审阅的 PostgreSQL 核心表结构。

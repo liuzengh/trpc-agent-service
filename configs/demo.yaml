@@ -1,0 +1,51 @@
+http_addr: 127.0.0.1:8080
+database:
+  postgres_dsn: ""
+  redis_addr: ""
+  queue_name: trpc:agent:inbound
+  consumer_group: trpc-agent-workers
+model_defaults:
+  provider: deepseek
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
+  api_key_ref: fileenv:DEEPSEEK_KEY_FILE
+  timeout: 45s
+tenants:
+  - id: tenant_wecom_demo
+    name: 企业微信演示租户
+    enabled: true
+    agent:
+      id: assistant
+      version: 0.1.0
+      instruction: 你是企业微信中的多租户智能助手。优先使用工具回答需要实时信息的问题，不得泄露其他租户的数据。
+      tool_allowlist: [get_server_time]
+    backend:
+      session: redis
+      memory: redis
+      knowledge: qdrant
+      artifact: s3
+      namespace: tenant_wecom_demo
+    channels:
+      - id: wecom-primary
+        type: wecom
+        enabled: false
+        credential_ref: fileenv:WECOM_CREDENTIAL_FILE
+  - id: tenant_feishu_demo
+    name: 飞书演示租户
+    enabled: true
+    agent:
+      id: assistant
+      version: 0.1.0
+      instruction: 你是飞书中的多租户智能助手。群聊仅响应明确提及机器人的消息，不得泄露其他租户的数据。
+      tool_allowlist: [get_server_time]
+    backend:
+      session: postgres
+      memory: postgres
+      knowledge: qdrant
+      artifact: s3
+      namespace: tenant_feishu_demo
+    channels:
+      - id: feishu-primary
+        type: feishu
+        enabled: false
+        credential_ref: fileenv:FEISHU_CREDENTIAL_FILE

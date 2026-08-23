@@ -1,0 +1,9 @@
+.git
+.env
+.env.local
+bin
+data
+coverage.out
+*.log
+*.pid
+docs/demo-evidence
