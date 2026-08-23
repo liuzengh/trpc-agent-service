@@ -322,6 +322,20 @@ func (m *migrator) validateApplied(ctx context.Context, conn *pgxpool.Conn, appl
 	for _, item := range m.migrations {
 		known[item.version] = item
 	}
+	maxApplied := int64(0)
+	for version := range applied {
+		if version > maxApplied {
+			maxApplied = version
+		}
+	}
+	for _, item := range m.migrations {
+		if item.version >= maxApplied {
+			break
+		}
+		if _, ok := applied[item.version]; !ok {
+			return fmt.Errorf("%w: version %d", ErrMigrationMissingVersion, item.version)
+		}
+	}
 	for version, existing := range applied {
 		item, ok := known[version]
 		if !ok {

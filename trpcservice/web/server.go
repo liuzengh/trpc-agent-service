@@ -15,11 +15,17 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
+// ReadinessGate controls whether the serving health endpoint may report ready.
+type ReadinessGate interface {
+	Ready(context.Context) error
+}
+
 type Server struct {
-	Runner   platform.Runner
-	Store    platform.Store
-	Resolver tenant.TenantResolver
-	adapters map[string]channels.Adapter
+	Runner    platform.Runner
+	Store     platform.Store
+	Resolver  tenant.TenantResolver
+	Readiness ReadinessGate
+	adapters  map[string]channels.Adapter
 }
 
 func NewServer(store platform.Store, runner platform.Runner) *Server {
@@ -33,7 +39,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/webhook/", s.webhook)
 	return requestLog(mux)
 }
-func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	if s.Readiness != nil {
+		if err := s.Readiness.Ready(r.Context()); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 func (s *Server) tenants(w http.ResponseWriter, r *http.Request) {

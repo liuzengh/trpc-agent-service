@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,7 +13,11 @@ func dedupKeyString(k DedupKey) string {
 	return strings.Join([]string{k.TenantID, k.Channel, k.BindingID, k.ExternalMessageID}, "\x00")
 }
 
-func validateDedupKey(k DedupKey) error {
+func ClaimEpochResource(k DedupKey) string {
+	return "claim:" + strconv.Itoa(len(k.Channel)) + ":" + k.Channel + ":" + strconv.Itoa(len(k.BindingID)) + ":" + k.BindingID
+}
+
+func ValidateDedupKey(k DedupKey) error {
 	for name, value := range map[string]string{"tenant_id": k.TenantID, "channel": k.Channel, "binding_id": k.BindingID, "external_message_id": k.ExternalMessageID} {
 		if value == "" || len(value) > 256 || strings.TrimSpace(value) != value || strings.ContainsAny(value, "|\\/\x00") {
 			return fmt.Errorf("%w: invalid %s", ErrInvalidArgument, name)
@@ -20,6 +25,8 @@ func validateDedupKey(k DedupKey) error {
 	}
 	return nil
 }
+
+func validateDedupKey(k DedupKey) error { return ValidateDedupKey(k) }
 
 const maxOutboxPayloadBytes = 1 << 20
 

@@ -11,11 +11,37 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
+type CoordinationBackend string
+
+const (
+	BackendRedis    CoordinationBackend = "redis"
+	BackendPostgres CoordinationBackend = "postgres"
+)
+
+type Epoch uint64
+
+type OperationGuard struct {
+	Backend    CoordinationBackend
+	Epoch      Epoch
+	OwnerID    string
+	FenceToken uint64
+}
+
+type EpochAuthority interface {
+	GetEpoch(context.Context, string, string) (Epoch, error)
+	BumpEpoch(context.Context, string, string) (Epoch, error)
+	ValidateEpoch(context.Context, string, string, Epoch) error
+}
+
 type Lease struct {
+	TenantID   string
 	SessionID  string
+	ResourceID string
 	OwnerID    string
 	FenceToken uint64
 	ExpiresAt  time.Time
+	Backend    CoordinationBackend
+	Epoch      Epoch
 }
 
 type SessionRepository interface {
@@ -49,12 +75,27 @@ type Claim struct {
 	ResponseRef string
 	ClaimedAt   time.Time
 	ExpiresAt   time.Time
+	Backend     CoordinationBackend
+	Epoch       Epoch
 }
 
 type IdempotencyRepository interface {
 	Claim(context.Context, tenant.TenantContext, string, time.Duration) (Claim, error)
 	Complete(context.Context, tenant.TenantContext, DedupKey, string, uint64) error
 	Fail(context.Context, tenant.TenantContext, DedupKey, uint64, bool) error
+}
+
+type ClaimStore interface {
+	Claim(context.Context, tenant.TenantContext, DedupKey, time.Duration, string) (Claim, error)
+	Complete(context.Context, tenant.TenantContext, DedupKey, string, string, OperationGuard) error
+	Fail(context.Context, tenant.TenantContext, DedupKey, string, OperationGuard, bool) error
+}
+
+type LeaseStore interface {
+	Acquire(context.Context, tenant.TenantContext, string, string, time.Duration) (Lease, error)
+	Renew(context.Context, tenant.TenantContext, Lease, time.Duration) (Lease, error)
+	Release(context.Context, tenant.TenantContext, Lease) error
+	Validate(context.Context, tenant.TenantContext, Lease) error
 }
 
 type MemoryRepository interface {
