@@ -43,7 +43,9 @@ flowchart LR
 
 ## 3. 租户、配置与隔离
 
-`Tenant` 是每次执行前解析的不可变运行画像，包含 Agent ID/版本、模型、工具白名单、Channel Binding 和 Backend Profile。入站消息必须携带 `tenant_id + binding_id`；通道凭据只以 `SecretRef` 存在。配置校验禁止重复 tenant/binding，工具只能从 allowlist 构造，未授权 Tool 不会注册到 LLMAgent。
+`Tenant` 是控制面身份与 Channel Binding，`RuntimeProfile` 是每次执行前解析的不可变运行画像，包含 Agent ID/版本、模型、工具白名单、预算和 Backend Profile。入站消息必须携带 `tenant_id + binding_id`；通道凭据只以 `SecretRef` 存在。配置校验禁止重复 tenant/binding，Tool Callback 在执行前再次校验 allowlist，不能靠模型提示词绕过。
+
+每个 AgentVersion 的完整 RuntimeProfile 以不可变 JSON 写入 PostgreSQL。发布事务更新 `published_version` 和单调 revision、写 audit，并通过 `pg_notify('agent_profile_changed', ...)` 通知 Worker。Worker 的 `RuntimeProfileResolver` 失效租户缓存，通知丢失时 30 秒 TTL 兜底。新请求按 revision 构造新 Runner；正在执行的旧 Runner 标记 retiring，活动请求归零后再关闭。把旧版本再次发布就是回滚，不需要重启 Worker。
 
 隔离分五层：配置按 tenant 路由；Inbox、Outbox、session 和审计唯一键包含 tenant；Redis Session 使用租户 key prefix，PostgreSQL Session 的 app name 包含 tenant；Qdrant collection/namespace 与 MinIO prefix 使用 Backend Profile 的 namespace；日志只记录引用名称、业务 ID 和 trace，不记录 API Key、Secret、消息原始附件。即使两个 IM 用户 ID 相同，也无法复用 session。
 
@@ -55,7 +57,7 @@ flowchart LR
 
 企业微信 Adapter 使用 `wss://openws.work.weixin.qq.com`，凭据顺序为 BotID、Secret。SDK 完成认证、心跳、ACK 与自动重连；Adapter 保存短期 `req_id → frame` 映射，Agent 完成后调用流式 Markdown Reply，frame 过期时可按 chat ID 降级为主动消息。同一个 Bot 多连接会互踢，因此 `tenant + binding` 先取得 45 秒 lease，每 15 秒续租，fencing token 防止旧 Gateway 恢复后继续写。
 
-飞书 Adapter 使用官方 v3.7.2 的 `ws.Client` 和 `EventDispatcher` 订阅 `im.message.receive_v1`。EventID 是幂等消息 ID，MessageID 用于 Reply API，ChatID 与 Sender OpenID 用于会话映射。单聊总是处理；群聊要求事件包含机器人 mention，并拒绝 `@所有人`。回复使用 API UUID 去重。v3.7.2 没有公开 OnReady，本实现只有在 WSS bootstrap/dial 没有在一秒内返回错误时才标记 ready；真实验收还需后台连接日志与一次实发消息共同证明。
+飞书 Adapter 使用官方 v3.7.2 的 `ws.Client` 和 `EventDispatcher` 订阅 `im.message.receive_v1`。启动时先调用 Bot Info API 得到机器人自己的 OpenID；EventID 是幂等消息 ID，MessageID 用于 Reply API，ChatID 与 Sender OpenID 用于会话映射。单聊总是处理；群聊只有 mention OpenID 等于机器人自身时才处理，只删除自身 mention token；`@其他成员` 和 `@所有人` 都被忽略。回复使用 API UUID 去重。v3.7.2 没有公开 OnReady，本实现只有在 WSS bootstrap/dial 没有在一秒内返回错误时才标记 ready；真实验收还需后台连接日志与一次实发消息共同证明。
 
 两边差异如下：
 
@@ -111,9 +113,11 @@ Redis consumer group 提供至少一次投递，Worker 会 `XAUTOCLAIM` 超过 3
 
 ## 6. Agent、Session 与后端选择
 
-每个 `tenant + agent version + model` 建立一个 Runner。模型通过 `model/openai` 指向 `https://api.deepseek.com`，默认 `deepseek-v4-flash`，配置可切换 pro。Runner deadline 为 45 秒，request ID 等于全链路 trace ID。`get_server_time` 使用 tRPC-Agent-Go `FunctionTool`，且只有白名单租户可见。
+每个 `tenant + agent version + model + revision` 建立一个 Runner。模型通过 `model/openai` 指向 `https://api.deepseek.com`，默认 `deepseek-v4-flash`，配置可切换 pro。Runner deadline 为 45 秒，request ID 等于全链路 trace ID。`get_server_time` 使用 tRPC-Agent-Go `FunctionTool`；Agent/Tool Callback 承担治理、审计和 span，不让业务层绕开 tRPC-Agent-Go 执行链。
 
 企业微信租户调用官方 Redis Session Service，key prefix 含 tenant；飞书租户调用 PostgreSQL Session Service。两者都由 session lease 串行更新，因此 Worker 可水平扩缩。平台自己的 `sessions/session_events` 表保存控制面可审计的用户/助手事件，Runner Session 保存模型所需的完整 event/state/summary，两者职责不同。
+
+Qdrant 与 MinIO 在首版做真实隔离读写而非完整 RAG。Qdrant 为每个 Backend Profile namespace 建独立 collection，payload 再写入 `tenant_id` 并在 search filter 中强制匹配；固定四维 smoke 向量覆盖 upsert/search/delete。MinIO 使用统一 bucket 和 `<namespace>/<logical-key>` 对象键，smoke 覆盖 put/get/checksum/delete。两个演示租户故意使用相同 logical ID/key，仍必须互不可见。
 
 | 后端 | 适合数据 | 一致性与代价 |
 |---|---|---|
@@ -130,7 +134,7 @@ Qdrant 本地 → 远端同理：新写同时进入两个 collection，按 docum
 
 ## 8. 治理、观测和容量
 
-控制面发布不可变 AgentVersion，Channel Binding 和 Backend Profile 通过引用关联。生产版在 Admin 前增加 OIDC/mTLS、RBAC 与审批；危险 Tool 需要二次确认。预算器应在模型前检查租户并发、token 和日成本，调用后回写 Usage。当前实现输出入站、重复、Agent 结果/耗时、回复结果、channel ready 和 lease contention 指标，并写包含 tenant、channel、user、session、agent、tool、decision、latency、error type、cost、trace 的审计行。
+控制面发布不可变 AgentVersion，Channel Binding 和 Backend Profile 通过引用关联。生产版在 Admin 前增加 OIDC/mTLS、RBAC 与审批；危险 Tool 人工确认只保留扩展点。治理控制器在 Agent before callback 原子预占并发和基于最大输出的日预算，检查估算输入 token；Agent after callback 按模型 Usage 结算实际费用。成功、错误、超时与取消均幂等释放 reservation，Tool before callback 拒绝未授权调用。Redis Lua 保证多 Worker 共享额度，本地测试可使用内存实现。平台输出入站、重复、Agent 结果/耗时、回复、channel ready、lease contention、治理拒绝、token 和费用指标，并写包含 tenant、channel、user、session、agent、tool、decision、error type、cost、trace 的审计行。
 
 容量先测三个瓶颈：单 Worker 并发由模型延迟和租户 semaphore 决定；Redis QPS 约为每条消息 1 次 XADD、1 次消费、2–4 次 lease 操作和 Session event 操作；PostgreSQL 每条消息至少两个事务。以 P95 10 秒模型延迟、每 Worker 50 并发估算单节点约 5 msg/s，再用实际 token 长度、IM 峰值与 API 限流压测校准。Gateway 扩容不增加同一 Bot 连接数，只提高不同 binding 的承载与故障接管。
 

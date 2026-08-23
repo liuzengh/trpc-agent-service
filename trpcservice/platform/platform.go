@@ -16,6 +16,7 @@ import (
 	"github.com/DocJlm/trpc-agent-service/trpcservice/channels/feishu"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/config"
+	"github.com/DocJlm/trpc-agent-service/trpcservice/governance"
 	platformmetrics "github.com/DocJlm/trpc-agent-service/trpcservice/metrics"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/queue"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/secrets"
@@ -49,22 +50,27 @@ func ParseRole(value string) (Role, error) {
 }
 
 type Options struct {
-	Repository store.Repository
-	Queue      queue.Queue
-	Locker     queue.Locker
-	Engine     agent.Engine
-	Secrets    secrets.Provider
-	Logger     *slog.Logger
+	Repository      store.Repository
+	RuntimeResolver store.RuntimeProfileResolver
+	Governance      governance.Controller
+	Queue           queue.Queue
+	Locker          queue.Locker
+	Engine          agent.Engine
+	Secrets         secrets.Provider
+	Logger          *slog.Logger
 }
 
 type Platform struct {
-	cfg     config.Config
-	repo    store.Repository
-	queue   queue.Queue
-	locker  queue.Locker
-	engine  agent.Engine
-	secrets secrets.Provider
-	logger  *slog.Logger
+	cfg             config.Config
+	repo            store.Repository
+	resolver        store.RuntimeProfileResolver
+	governance      governance.Controller
+	governanceOwned bool
+	queue           queue.Queue
+	locker          queue.Locker
+	engine          agent.Engine
+	secrets         secrets.Provider
+	logger          *slog.Logger
 
 	registry *prometheus.Registry
 	metrics  *platformmetrics.Registry
@@ -110,6 +116,10 @@ func New(ctx context.Context, cfg config.Config, options Options) (*Platform, er
 		p.repo.Close()
 		return nil, err
 	}
+	p.resolver = options.RuntimeResolver
+	if p.resolver == nil {
+		p.resolver = store.NewCachedRuntimeResolver(p.repo, 30*time.Second)
+	}
 
 	p.queue = options.Queue
 	p.locker = options.Locker
@@ -135,10 +145,20 @@ func New(ctx context.Context, cfg config.Config, options Options) (*Platform, er
 	}
 	p.engine = options.Engine
 	if p.engine == nil {
+		p.governance = options.Governance
+		if p.governance == nil {
+			p.governance, err = governance.New(cfg.Database.RedisAddr)
+			if err != nil {
+				p.Close()
+				return nil, err
+			}
+			p.governanceOwned = true
+		}
 		p.engine = agent.NewTRPCEngine(
 			p.secrets,
 			agent.WithRedisURL(cfg.Database.RedisAddr),
 			agent.WithPostgresDSN(cfg.Database.PostgresDSN),
+			agent.WithGovernance(p.governance),
 		)
 	}
 	if err := p.buildAdapters(); err != nil {
@@ -185,8 +205,10 @@ func (p *Platform) Run(ctx context.Context, role Role) error {
 	p.mu.Unlock()
 
 	group, groupCtx := errgroup.WithContext(ctx)
-	admin := web.New(p.cfg, p.repo, p.registry, p.readiness)
-	group.Go(func() error { return admin.Run(groupCtx) })
+	if role == RoleAll || role == RoleAdmin {
+		admin := web.New(p.cfg, p.repo, p.registry, p.readiness)
+		group.Go(func() error { return admin.Run(groupCtx) })
+	}
 
 	if role == RoleAll || role == RoleGateway {
 		group.Go(func() error { return p.dispatchRelay(groupCtx) })
@@ -198,6 +220,7 @@ func (p *Platform) Run(ctx context.Context, role Role) error {
 		}
 	}
 	if role == RoleAll || role == RoleWorker {
+		group.Go(func() error { return p.resolver.Run(groupCtx) })
 		group.Go(func() error { return p.worker(groupCtx) })
 	}
 	return group.Wait()
@@ -249,13 +272,20 @@ func (p *Platform) relayDispatchBatch(ctx context.Context) error {
 		return err
 	}
 	for _, task := range tasks {
-		if err := p.queue.Publish(ctx, task); err != nil {
-			_ = p.repo.RetryDispatch(ctx, task.ID, err)
+		taskCtx := platformtelemetry.ContextWithTraceID(ctx, task.Message.TraceID)
+		taskCtx, span := otel.Tracer("trpc-agent-service/outbox").Start(taskCtx, "outbox.dispatch")
+		if err := p.queue.Publish(taskCtx, task); err != nil {
+			span.RecordError(err)
+			span.End()
+			_ = p.repo.RetryDispatch(taskCtx, task.ID, err)
 			continue
 		}
-		if err := p.repo.CompleteDispatch(ctx, task.ID); err != nil {
+		if err := p.repo.CompleteDispatch(taskCtx, task.ID); err != nil {
+			span.RecordError(err)
+			span.End()
 			return err
 		}
+		span.End()
 	}
 	return nil
 }
@@ -287,11 +317,18 @@ func (p *Platform) processDelivery(ctx context.Context, delivery queue.Delivery)
 		attribute.String("messaging.system", message.Channel),
 		attribute.String("session.id", message.SessionID()),
 	)
-	tenantProfile, ok := p.cfg.TenantByID(message.TenantID)
-	if !ok || !tenantProfile.Enabled {
+	baseProfile, ok := p.cfg.TenantByID(message.TenantID)
+	if !ok || !baseProfile.Enabled {
 		_ = p.queue.Dead(ctx, delivery, errors.New("tenant is missing or disabled"))
 		return
 	}
+	runtimeProfile, err := p.resolver.Resolve(ctx, message.TenantID)
+	if err != nil {
+		span.RecordError(err)
+		_ = p.queue.Retry(ctx, delivery)
+		return
+	}
+	tenantProfile := runtimeProfile.Apply(baseProfile)
 	replyID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(delivery.Task.ID+"|reply")).String()
 	exists, err := p.repo.ReplyExists(ctx, replyID)
 	if err == nil && exists {
@@ -322,18 +359,28 @@ func (p *Platform) processDelivery(ctx context.Context, delivery queue.Delivery)
 	}
 
 	started := time.Now()
-	result, runErr := p.engine.Run(ctx, agent.Request{
+	runCtx, runSpan := otel.Tracer("trpc-agent-service/runner").Start(ctx, "runner.run")
+	result, runErr := p.engine.Run(runCtx, agent.Request{
 		Tenant: tenantProfile, UserID: message.ExternalUserID,
 		SessionID: message.SessionID(), Content: message.Content, TraceID: message.TraceID,
 	})
+	if runErr != nil {
+		runSpan.RecordError(runErr)
+	}
+	runSpan.End()
 	latency := time.Since(started)
 	if runErr != nil {
 		span.RecordError(runErr)
 		p.metrics.AgentRuns.WithLabelValues(message.TenantID, "error").Inc()
+		decision := "agent_error"
+		if reason := governanceReason(runErr); reason != "" {
+			decision = "governance_rejected"
+			p.metrics.GovernanceReject.WithLabelValues(message.TenantID, reason).Inc()
+		}
 		_ = p.repo.AppendAudit(ctx, store.AuditLog{
 			TenantID: message.TenantID, Channel: message.Channel, UserID: message.ExternalUserID,
 			SessionID: message.SessionID(), AgentName: tenantProfile.Agent.ID,
-			Decision: "agent_error", Latency: latency, ErrorType: classifyError(runErr),
+			Decision: decision, Latency: latency, ErrorType: classifyError(runErr),
 			TraceID: message.TraceID,
 		})
 		if delivery.Task.Attempts >= 7 {
@@ -345,17 +392,24 @@ func (p *Platform) processDelivery(ctx context.Context, delivery queue.Delivery)
 	}
 	p.metrics.AgentRuns.WithLabelValues(message.TenantID, "success").Inc()
 	p.metrics.AgentLatency.WithLabelValues(message.TenantID).Observe(latency.Seconds())
+	p.metrics.TokenUsage.WithLabelValues(message.TenantID, "input").Add(float64(result.PromptTokens))
+	p.metrics.TokenUsage.WithLabelValues(message.TenantID, "output").Add(float64(result.CompletionTokens))
+	p.metrics.CostUSD.WithLabelValues(message.TenantID).Add(result.CostUSD)
 	out := channels.OutboundEnvelope{
 		ID: replyID, TenantID: message.TenantID, BindingID: message.BindingID,
 		Channel: message.Channel, ExternalConversationID: message.ExternalConversationID,
 		ConversationType: message.ConversationType, ReplyToMessageID: message.ReplyToken,
 		ReplyToken: message.ReplyToken, Content: result.Content, Final: true, TraceID: message.TraceID,
 	}
-	if err := p.repo.CommitAgentResult(ctx, message, out); err != nil {
+	commitCtx, commitSpan := otel.Tracer("trpc-agent-service/session").Start(ctx, "session.commit_result")
+	if err := p.repo.CommitAgentResult(commitCtx, message, out); err != nil {
+		commitSpan.RecordError(err)
+		commitSpan.End()
 		span.RecordError(err)
 		_ = p.queue.Retry(ctx, delivery)
 		return
 	}
+	commitSpan.End()
 	for _, toolName := range result.ToolCalls {
 		_ = p.repo.AppendAudit(ctx, store.AuditLog{
 			TenantID: message.TenantID, Channel: message.Channel, UserID: message.ExternalUserID,
@@ -366,7 +420,7 @@ func (p *Platform) processDelivery(ctx context.Context, delivery queue.Delivery)
 	_ = p.repo.AppendAudit(ctx, store.AuditLog{
 		TenantID: message.TenantID, Channel: message.Channel, UserID: message.ExternalUserID,
 		SessionID: message.SessionID(), AgentName: tenantProfile.Agent.ID,
-		Decision: "reply_queued", Latency: latency, TraceID: message.TraceID,
+		Decision: "reply_queued", Latency: latency, Cost: result.CostUSD, TraceID: message.TraceID,
 	})
 	if err := p.queue.Ack(ctx, delivery); err != nil {
 		p.logger.ErrorContext(ctx, "ack completed dispatch", "error", err, "trace_id", message.TraceID)
@@ -484,6 +538,9 @@ func (p *Platform) Close() {
 	if p.engine != nil {
 		_ = p.engine.Close()
 	}
+	if p.governanceOwned && p.governance != nil {
+		_ = p.governance.Close()
+	}
 	if p.queue != nil {
 		_ = p.queue.Close()
 	}
@@ -533,6 +590,27 @@ func classifyError(err error) string {
 		return "rate_limit"
 	default:
 		return "agent"
+	}
+}
+
+func governanceReason(err error) string {
+	switch {
+	case errors.Is(err, governance.ErrConcurrencyLimit):
+		return "concurrency"
+	case errors.Is(err, governance.ErrInputTokenLimit):
+		return "input_tokens"
+	case errors.Is(err, governance.ErrDailyCostLimit):
+		return "daily_cost"
+	case errors.Is(err, governance.ErrToolDenied):
+		return "tool_denied"
+	default:
+		text := strings.ToLower(err.Error())
+		for _, reason := range []string{"concurrency", "input token", "daily cost", "tool denied"} {
+			if strings.Contains(text, reason) {
+				return strings.ReplaceAll(reason, " ", "_")
+			}
+		}
+		return ""
 	}
 }
 

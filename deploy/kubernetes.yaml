@@ -12,15 +12,12 @@ spec:
         - name: gateway
           image: ghcr.io/docjlm/trpc-agent-service:0.1.0
           args: ["serve", "--config", "/app/configs/container.yaml", "--role", "gateway"]
-          ports: [{name: http, containerPort: 8080}]
           env:
             - {name: WECOM_CREDENTIAL_FILE, value: /run/secrets/wecom.txt}
             - {name: FEISHU_CREDENTIAL_FILE, value: /run/secrets/feishu.txt}
             - {name: DEEPSEEK_KEY_FILE, value: /run/secrets/deepseek.txt}
           volumeMounts:
             - {name: credentials, mountPath: /run/secrets, readOnly: true}
-          readinessProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 5}
-          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
       volumes:
         - name: credentials
           secret: {secretName: trpc-agent-credentials}
@@ -39,12 +36,10 @@ spec:
         - name: worker
           image: ghcr.io/docjlm/trpc-agent-service:0.1.0
           args: ["serve", "--config", "/app/configs/container.yaml", "--role", "worker"]
-          ports: [{name: http, containerPort: 8080}]
           env:
             - {name: DEEPSEEK_KEY_FILE, value: /run/secrets/deepseek.txt}
           volumeMounts:
             - {name: credentials, mountPath: /run/secrets, readOnly: true}
-          readinessProbe: {httpGet: {path: /readyz, port: http}}
       volumes:
         - name: credentials
           secret: {secretName: trpc-agent-credentials}
@@ -64,6 +59,8 @@ spec:
           image: ghcr.io/docjlm/trpc-agent-service:0.1.0
           args: ["serve", "--config", "/app/configs/container.yaml", "--role", "admin"]
           ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
 ---
 apiVersion: v1
 kind: Service

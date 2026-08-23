@@ -30,9 +30,10 @@ type Adapter struct {
 	provider      secrets.Provider
 	handler       channels.InboundHandler
 
-	mu     sync.RWMutex
-	health channels.ChannelHealth
-	api    *lark.Client
+	mu        sync.RWMutex
+	health    channels.ChannelHealth
+	api       *lark.Client
+	botOpenID string
 }
 
 func New(tenantID, bindingID, credentialRef string, provider secrets.Provider, handler channels.InboundHandler) *Adapter {
@@ -57,9 +58,15 @@ func (a *Adapter) Run(ctx context.Context) error {
 	if len(values) != 2 {
 		return fmt.Errorf("feishu credential must contain AppID and App Secret, got %d values", len(values))
 	}
+	api := lark.NewClient(values[0], values[1])
+	botOpenID, err := resolveBotOpenID(ctx, api)
+	if err != nil {
+		a.setHealth(false, "identity_error", err)
+		return fmt.Errorf("resolve feishu bot identity: %w", err)
+	}
 	eventHandler := dispatcher.NewEventDispatcher("", "").OnP2MessageReceiveV1(
 		func(handlerCtx context.Context, event *larkim.P2MessageReceiveV1) error {
-			message, mentionAll, normalizeErr := NormalizeMessage(a.tenantID, a.bindingID, event)
+			message, mentionAll, normalizeErr := NormalizeMessage(a.tenantID, a.bindingID, botOpenID, event)
 			if normalizeErr != nil {
 				return normalizeErr
 			}
@@ -70,7 +77,8 @@ func (a *Adapter) Run(ctx context.Context) error {
 		},
 	)
 	a.mu.Lock()
-	a.api = lark.NewClient(values[0], values[1])
+	a.api = api
+	a.botOpenID = botOpenID
 	a.mu.Unlock()
 	client := larkws.NewClient(
 		values[0], values[1], larkws.WithEventHandler(eventHandler),
@@ -156,7 +164,7 @@ func (a *Adapter) setHealth(ready bool, state string, err error) {
 	}
 }
 
-func NormalizeMessage(tenantID, bindingID string, event *larkim.P2MessageReceiveV1) (channels.InboundEnvelope, bool, error) {
+func NormalizeMessage(tenantID, bindingID, botOpenID string, event *larkim.P2MessageReceiveV1) (channels.InboundEnvelope, bool, error) {
 	if event == nil || event.Event == nil || event.Event.Message == nil || event.Event.Sender == nil {
 		return channels.InboundEnvelope{}, false, errors.New("incomplete feishu message event")
 	}
@@ -171,14 +179,22 @@ func NormalizeMessage(tenantID, bindingID string, event *larkim.P2MessageReceive
 		return channels.InboundEnvelope{}, false, fmt.Errorf("decode feishu text: %w", err)
 	}
 	mentionAll := false
+	mentionedBot := false
 	for _, mention := range message.Mentions {
 		if mention == nil {
 			continue
 		}
 		key, name := value(mention.Key), strings.ToLower(value(mention.Name))
-		body.Text = strings.ReplaceAll(body.Text, key, "")
 		if key == "@_all" || name == "all" || name == "所有人" {
 			mentionAll = true
+		}
+		mentionOpenID := ""
+		if mention.Id != nil {
+			mentionOpenID = value(mention.Id.OpenId)
+		}
+		if botOpenID != "" && mentionOpenID == botOpenID {
+			mentionedBot = true
+			body.Text = strings.ReplaceAll(body.Text, key, "")
 		}
 	}
 	conversationType := channels.ConversationP2P
@@ -211,12 +227,42 @@ func NormalizeMessage(tenantID, bindingID string, event *larkim.P2MessageReceive
 		ExternalMessageID: eventID, ExternalUserID: userID,
 		ExternalConversationID: value(message.ChatId), ConversationType: conversationType,
 		Content: strings.TrimSpace(body.Text), ReceivedAt: receivedAt, TraceID: traceID,
-		ReplyToken: value(message.MessageId), MentionedBot: len(message.Mentions) > 0,
+		ReplyToken: value(message.MessageId), MentionedBot: mentionedBot,
 	}
 	if err := envelope.Validate(); err != nil {
 		return channels.InboundEnvelope{}, false, err
 	}
 	return envelope, mentionAll, nil
+}
+
+func resolveBotOpenID(ctx context.Context, api *lark.Client) (string, error) {
+	if api == nil {
+		return "", errors.New("feishu client is nil")
+	}
+	resp, err := api.Get(ctx, "/open-apis/bot/v3/info", nil, larkcore.AccessTokenTypeTenant)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("bot info request returned HTTP %d", resp.StatusCode)
+	}
+	var body struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Bot  struct {
+			OpenID string `json:"open_id"`
+		} `json:"bot"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &body); err != nil {
+		return "", fmt.Errorf("decode bot info: %w", err)
+	}
+	if body.Code != 0 {
+		return "", fmt.Errorf("bot info rejected: code=%d msg=%s", body.Code, body.Msg)
+	}
+	if body.Bot.OpenID == "" {
+		return "", errors.New("bot info did not return open_id")
+	}
+	return body.Bot.OpenID, nil
 }
 
 func value(value *string) string {

@@ -31,10 +31,11 @@ func TestMemoryControlPlaneAndRetryLifecycle(t *testing.T) {
 	if err := repository.CreateAgent(ctx, "tenant", "agent", "Agent"); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.CreateAgentVersion(ctx, "tenant", "agent", "1", json.RawMessage(`{"instruction":"help"}`)); err != nil {
+	runtimePayload, _ := json.Marshal(tenant.RuntimeProfile{TenantID: "tenant", Agent: tenant.AgentProfile{ID: "agent", Version: "1", Instruction: "help"}})
+	if err := repository.CreateAgentVersion(ctx, "tenant", "agent", "1", runtimePayload); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.PublishAgent(ctx, "tenant", "agent", "1"); err != nil {
+	if _, err := repository.PublishAgent(ctx, "tenant", "agent", "1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := repository.SaveChannelBinding(ctx, "tenant", tenant.ChannelBinding{ID: "feishu", Type: "feishu"}); err != nil {
@@ -70,6 +71,9 @@ func TestMemoryControlPlaneAndRetryLifecycle(t *testing.T) {
 	}
 	if err := repository.AppendAudit(ctx, AuditLog{TenantID: "tenant"}); err != nil {
 		t.Fatal(err)
+	}
+	if audits, err := repository.ListAudits(ctx, "tenant", 10); err != nil || len(audits) != 1 || audits[0].CreatedAt.IsZero() {
+		t.Fatalf("audits=%+v err=%v", audits, err)
 	}
 	stats, err := repository.Stats(ctx)
 	if err != nil || stats.InboundTotal != 1 || stats.ReplyReady != 0 || stats.AuditTotal != 1 {

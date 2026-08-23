@@ -14,18 +14,32 @@ import (
 )
 
 type RedisQueue struct {
-	client *redis.Client
-	stream string
-	group  string
+	client       *redis.Client
+	stream       string
+	group        string
+	claimMinIdle time.Duration
 }
 
-func NewRedisQueue(ctx context.Context, addr, stream, group string) (*RedisQueue, error) {
+type RedisQueueOption func(*RedisQueue)
+
+func WithClaimMinIdle(value time.Duration) RedisQueueOption {
+	return func(queue *RedisQueue) {
+		if value > 0 {
+			queue.claimMinIdle = value
+		}
+	}
+}
+
+func NewRedisQueue(ctx context.Context, addr, stream, group string, options ...RedisQueueOption) (*RedisQueue, error) {
 	client := redis.NewClient(&redis.Options{Addr: addr})
 	if err := client.Ping(ctx).Err(); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("ping redis: %w", err)
 	}
-	q := &RedisQueue{client: client, stream: stream, group: group}
+	q := &RedisQueue{client: client, stream: stream, group: group, claimMinIdle: 30 * time.Second}
+	for _, option := range options {
+		option(q)
+	}
 	if err := client.XGroupCreateMkStream(ctx, stream, group, "0").Err(); err != nil && !stringsContains(err.Error(), "BUSYGROUP") {
 		client.Close()
 		return nil, fmt.Errorf("create redis consumer group: %w", err)
@@ -44,7 +58,7 @@ func (q *RedisQueue) Publish(ctx context.Context, task store.DispatchTask) error
 func (q *RedisQueue) Receive(ctx context.Context, consumer string, block time.Duration) (Delivery, error) {
 	pending, _, err := q.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
 		Stream: q.stream, Group: q.group, Consumer: consumer,
-		MinIdle: 30 * time.Second, Start: "0-0", Count: 1,
+		MinIdle: q.claimMinIdle, Start: "0-0", Count: 1,
 	}).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return Delivery{}, err

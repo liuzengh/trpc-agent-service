@@ -9,8 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DocJlm/trpc-agent-service/trpcservice/governance"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/secrets"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/tenant"
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	agentgo "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -38,6 +42,7 @@ type Result struct {
 	ToolCalls        []string
 	PromptTokens     int
 	CompletionTokens int
+	CostUSD          float64
 }
 
 type Engine interface {
@@ -58,9 +63,14 @@ func (EchoEngine) Run(_ context.Context, req Request) (Result, error) {
 func (EchoEngine) Close() error { return nil }
 
 type runtime struct {
-	runner  runner.Runner
-	session session.Service
-	model   string
+	runner   runner.Runner
+	session  session.Service
+	model    string
+	key      string
+	tenantID string
+	agentID  string
+	active   int
+	retiring bool
 }
 
 // TRPCEngine builds one runner per immutable tenant/version/model profile.
@@ -74,6 +84,7 @@ type TRPCEngine struct {
 	redisURL     string
 	postgresDSN  string
 	modelFactory func(tenant.ModelProfile, string) model.Model
+	governance   governance.Controller
 }
 
 type EngineOption func(*TRPCEngine)
@@ -84,6 +95,10 @@ func WithRedisURL(value string) EngineOption {
 
 func WithPostgresDSN(value string) EngineOption {
 	return func(engine *TRPCEngine) { engine.postgresDSN = value }
+}
+
+func WithGovernance(controller governance.Controller) EngineOption {
+	return func(engine *TRPCEngine) { engine.governance = controller }
 }
 
 func withModelFactory(factory func(tenant.ModelProfile, string) model.Model) EngineOption {
@@ -99,6 +114,9 @@ func NewTRPCEngine(provider secrets.Provider, options ...EngineOption) *TRPCEngi
 	for _, option := range options {
 		option(engine)
 	}
+	if engine.governance == nil {
+		engine.governance = governance.NewMemoryController()
+	}
 	return engine
 }
 
@@ -106,10 +124,14 @@ func (e *TRPCEngine) Run(ctx context.Context, req Request) (Result, error) {
 	if strings.TrimSpace(req.Content) == "" {
 		return Result{}, errors.New("agent input is empty")
 	}
+	if req.TraceID == "" {
+		req.TraceID = uuid.NewString()
+	}
 	rt, err := e.runtime(ctx, req.Tenant)
 	if err != nil {
 		return Result{}, err
 	}
+	defer e.releaseRuntime(rt)
 	timeout := 45 * time.Second
 	if req.Tenant.Model.Timeout != "" {
 		parsed, parseErr := time.ParseDuration(req.Tenant.Model.Timeout)
@@ -120,6 +142,12 @@ func (e *TRPCEngine) Run(ctx context.Context, req Request) (Result, error) {
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	runCtx = context.WithValue(runCtx, requestIDContextKey{}, req.TraceID)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cleanupCancel()
+		_ = e.governance.Cancel(cleanupCtx, req.Tenant, req.TraceID)
+	}()
 	events, err := rt.runner.Run(
 		runCtx,
 		req.UserID,
@@ -166,24 +194,29 @@ func (e *TRPCEngine) Run(ctx context.Context, req Request) (Result, error) {
 	if strings.TrimSpace(result.Content) == "" {
 		return Result{}, errors.New("agent returned no text response")
 	}
+	result.CostUSD = governance.CostUSD(req.Tenant.Budget, result.PromptTokens, result.CompletionTokens)
 	return result, nil
 }
 
 func (e *TRPCEngine) runtime(ctx context.Context, t tenant.Tenant) (*runtime, error) {
-	key := strings.Join([]string{t.ID, t.Agent.ID, t.Agent.Version, t.Model.Model, t.Model.BaseURL}, "|")
+	key := strings.Join([]string{t.ID, t.Agent.ID, t.Agent.Version, fmt.Sprint(t.RuntimeRevision), t.Model.Model, t.Model.BaseURL}, "|")
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if rt := e.runners[key]; rt != nil {
+		rt.active++
+		e.mu.Unlock()
 		return rt, nil
 	}
 	if e.secrets == nil {
+		e.mu.Unlock()
 		return nil, errors.New("secret provider is not configured")
 	}
 	values, err := e.secrets.Resolve(ctx, t.Model.APIKeyRef)
 	if err != nil {
+		e.mu.Unlock()
 		return nil, fmt.Errorf("resolve model credential: %w", err)
 	}
 	if len(values) != 1 {
+		e.mu.Unlock()
 		return nil, fmt.Errorf("model credential must contain exactly one value, got %d", len(values))
 	}
 	modelName := t.Model.Model
@@ -202,15 +235,25 @@ func (e *TRPCEngine) runtime(ctx context.Context, t tenant.Tenant) (*runtime, er
 	}
 	sessionService, err := e.sessionService(t)
 	if err != nil {
+		e.mu.Unlock()
 		return nil, err
 	}
 	tools := e.allowedTools(t)
+	agentCallbacks := e.agentCallbacks(t)
+	toolCallbacks := e.toolCallbacks(t)
+	maxOutputTokens := t.Budget.MaxOutputTokens
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = 2048
+	}
 	ag := llmagent.New(
 		t.Agent.ID,
 		llmagent.WithDescription("A tenant-isolated IM assistant"),
 		llmagent.WithInstruction(t.Agent.Instruction),
 		llmagent.WithModel(llm),
 		llmagent.WithTools(tools),
+		llmagent.WithAgentCallbacks(agentCallbacks),
+		llmagent.WithToolCallbacks(toolCallbacks),
+		llmagent.WithGenerationConfig(model.GenerationConfig{MaxTokens: &maxOutputTokens, Stream: true}),
 	)
 	rt := &runtime{
 		runner: runner.NewRunner(
@@ -220,9 +263,128 @@ func (e *TRPCEngine) runtime(ctx context.Context, t tenant.Tenant) (*runtime, er
 		),
 		session: sessionService,
 		model:   modelName,
+		key:     key, tenantID: t.ID, agentID: t.Agent.ID, active: 1,
 	}
 	e.runners[key] = rt
+	var stale []*runtime
+	for oldKey, old := range e.runners {
+		if oldKey == key || old.tenantID != t.ID || old.agentID != t.Agent.ID {
+			continue
+		}
+		old.retiring = true
+		if old.active == 0 {
+			delete(e.runners, oldKey)
+			stale = append(stale, old)
+		}
+	}
+	e.mu.Unlock()
+	_ = closeRuntimes(stale)
 	return rt, nil
+}
+
+func (e *TRPCEngine) releaseRuntime(rt *runtime) {
+	if rt == nil {
+		return
+	}
+	e.mu.Lock()
+	if rt.active > 0 {
+		rt.active--
+	}
+	shouldClose := rt.retiring && rt.active == 0
+	if shouldClose {
+		delete(e.runners, rt.key)
+	}
+	e.mu.Unlock()
+	if shouldClose {
+		_ = closeRuntimes([]*runtime{rt})
+	}
+}
+
+func closeRuntimes(items []*runtime) error {
+	var errs []error
+	for _, rt := range items {
+		if err := rt.runner.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		if err := rt.session.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+type requestIDContextKey struct{}
+
+func requestID(ctx context.Context, fallback string) string {
+	if value, ok := ctx.Value(requestIDContextKey{}).(string); ok && value != "" {
+		return value
+	}
+	return fallback
+}
+
+func (e *TRPCEngine) agentCallbacks(t tenant.Tenant) *agentgo.Callbacks {
+	callbacks := agentgo.NewCallbacks()
+	callbacks.RegisterBeforeAgent(agentgo.BeforeAgentCallbackStructured(func(ctx context.Context, args *agentgo.BeforeAgentArgs) (*agentgo.BeforeAgentResult, error) {
+		if args == nil || args.Invocation == nil {
+			return nil, errors.New("agent callback invocation is missing")
+		}
+		ctx, span := otel.Tracer("trpc-agent-service/agent").Start(ctx, "agent.governance")
+		id := requestID(ctx, args.Invocation.InvocationID)
+		if err := e.governance.Reserve(ctx, t, id, args.Invocation.Message.Content); err != nil {
+			span.RecordError(err)
+			span.End()
+			return nil, err
+		}
+		return &agentgo.BeforeAgentResult{Context: ctx}, nil
+	}))
+	callbacks.RegisterAfterAgent(agentgo.AfterAgentCallbackStructured(func(ctx context.Context, args *agentgo.AfterAgentArgs) (*agentgo.AfterAgentResult, error) {
+		var promptTokens, completionTokens int
+		fallback := ""
+		if args != nil && args.Invocation != nil {
+			fallback = args.Invocation.InvocationID
+		}
+		if args != nil && args.FullResponseEvent != nil && args.FullResponseEvent.Response != nil && args.FullResponseEvent.Response.Usage != nil {
+			promptTokens = args.FullResponseEvent.Response.Usage.PromptTokens
+			completionTokens = args.FullResponseEvent.Response.Usage.CompletionTokens
+		}
+		_, err := e.governance.Finalize(ctx, t, requestID(ctx, fallback), promptTokens, completionTokens)
+		span := oteltrace.SpanFromContext(ctx)
+		if args != nil && args.Error != nil {
+			span.RecordError(args.Error)
+		}
+		if err != nil {
+			span.RecordError(err)
+		}
+		span.End()
+		return &agentgo.AfterAgentResult{Context: ctx}, err
+	}))
+	return callbacks
+}
+
+func (e *TRPCEngine) toolCallbacks(t tenant.Tenant) *tool.Callbacks {
+	callbacks := tool.NewCallbacks()
+	callbacks.RegisterBeforeTool(tool.BeforeToolCallbackStructured(func(ctx context.Context, args *tool.BeforeToolArgs) (*tool.BeforeToolResult, error) {
+		if args == nil {
+			return nil, errors.New("tool callback arguments are missing")
+		}
+		ctx, span := otel.Tracer("trpc-agent-service/tool").Start(ctx, "tool."+args.ToolName)
+		if !t.AllowsTool(args.ToolName) {
+			err := fmt.Errorf("%w: %s", governance.ErrToolDenied, args.ToolName)
+			span.RecordError(err)
+			span.End()
+			return nil, err
+		}
+		return &tool.BeforeToolResult{Context: ctx}, nil
+	}))
+	callbacks.RegisterAfterTool(tool.AfterToolCallbackStructured(func(ctx context.Context, args *tool.AfterToolArgs) (*tool.AfterToolResult, error) {
+		span := oteltrace.SpanFromContext(ctx)
+		if args != nil && args.Error != nil {
+			span.RecordError(args.Error)
+		}
+		span.End()
+		return &tool.AfterToolResult{Context: ctx}, nil
+	}))
+	return callbacks
 }
 
 func (e *TRPCEngine) sessionService(t tenant.Tenant) (session.Service, error) {
@@ -285,18 +447,13 @@ func (e *TRPCEngine) allowedTools(t tenant.Tenant) []tool.Tool {
 
 func (e *TRPCEngine) Close() error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	var errs []error
-	for key, rt := range e.runners {
-		if err := rt.runner.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close runner %s: %w", key, err))
-		}
-		if err := rt.session.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close session %s: %w", key, err))
-		}
+	items := make([]*runtime, 0, len(e.runners))
+	for _, rt := range e.runners {
+		items = append(items, rt)
 	}
 	e.runners = make(map[string]*runtime)
-	return errors.Join(errs...)
+	e.mu.Unlock()
+	return closeRuntimes(items)
 }
 
 func appendUnique(items []string, value string) []string {

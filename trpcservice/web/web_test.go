@@ -27,15 +27,24 @@ func TestAdminAPIControlPlaneLifecycle(t *testing.T) {
 	assertRequest(t, server, http.MethodGet, "/healthz", nil, http.StatusOK)
 	assertRequest(t, server, http.MethodGet, "/readyz", nil, http.StatusServiceUnavailable)
 	assertRequest(t, server, http.MethodGet, "/api/v1/tenants", nil, http.StatusOK)
+	assertRequest(t, server, http.MethodGet, "/api/v1/runtime/tenant", nil, http.StatusOK)
+	if err := repository.AppendAudit(context.Background(), store.AuditLog{TenantID: "tenant", Decision: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	assertRequest(t, server, http.MethodGet, "/api/v1/audit-logs?tenant_id=tenant&limit=10", nil, http.StatusOK)
 	assertRequest(t, server, http.MethodPost, "/api/v1/agents", map[string]any{
 		"tenant_id": "tenant", "id": "agent", "name": "Agent",
 	}, http.StatusCreated)
 	assertRequest(t, server, http.MethodPost, "/api/v1/agents/agent/versions", map[string]any{
-		"tenant_id": "tenant", "version": "1.0.0", "profile": map[string]any{"instruction": "help"},
+		"tenant_id": "tenant", "version": "1.0.0", "profile": map[string]any{
+			"agent": map[string]any{"instruction": "help"},
+		},
 	}, http.StatusCreated)
 	assertRequest(t, server, http.MethodPost, "/api/v1/agents/agent:publish", map[string]any{
 		"tenant_id": "tenant", "version": "1.0.0",
 	}, http.StatusOK)
+	assertRequest(t, server, http.MethodGet, "/api/v1/agents/agent?tenant_id=tenant", nil, http.StatusOK)
+	assertRequest(t, server, http.MethodGet, "/api/v1/agents/agent/versions?tenant_id=tenant", nil, http.StatusOK)
 	assertRequest(t, server, http.MethodPost, "/api/v1/channel-bindings", map[string]any{
 		"tenant_id": "tenant", "binding": map[string]any{"id": "feishu", "type": "feishu", "credential_ref": "FEISHU", "enabled": true},
 	}, http.StatusCreated)
@@ -45,6 +54,15 @@ func TestAdminAPIControlPlaneLifecycle(t *testing.T) {
 	assertRequest(t, server, http.MethodPost, "/api/v1/agents/agent:publish", map[string]any{
 		"tenant_id": "tenant", "version": "missing",
 	}, http.StatusConflict)
+	assertRequest(t, server, http.MethodPost, "/api/v1/agents/default/versions", map[string]any{
+		"tenant_id": "tenant", "version": "2.0.0", "profile": map[string]any{
+			"agent": map[string]any{"instruction": "published at runtime"},
+		},
+	}, http.StatusCreated)
+	assertRequest(t, server, http.MethodPost, "/api/v1/agents/default:publish", map[string]any{
+		"tenant_id": "tenant", "version": "2.0.0",
+	}, http.StatusOK)
+	assertRequest(t, server, http.MethodGet, "/api/v1/runtime/tenant", nil, http.StatusOK)
 }
 
 func TestAdminAPIRejectsInvalidInput(t *testing.T) {
@@ -59,6 +77,7 @@ func TestAdminAPIRejectsInvalidInput(t *testing.T) {
 	assertRequest(t, server, http.MethodPost, "/api/v1/agents", map[string]any{"id": "missing"}, http.StatusBadRequest)
 	assertRequest(t, server, http.MethodPost, "/api/v1/channel-bindings", map[string]any{}, http.StatusBadRequest)
 	assertRequest(t, server, http.MethodPost, "/api/v1/backend-profiles", map[string]any{}, http.StatusBadRequest)
+	assertRequest(t, server, http.MethodGet, "/api/v1/audit-logs?limit=invalid", nil, http.StatusBadRequest)
 }
 
 func assertRequest(t *testing.T, server *Server, method, path string, body any, want int) {

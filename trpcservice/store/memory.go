@@ -29,12 +29,15 @@ type MemoryRepository struct {
 	bindings map[string]tenant.ChannelBinding
 	backends map[string]tenant.BackendProfile
 	sessions map[string][]map[string]string
+	watchers map[chan RuntimeChange]struct{}
 }
 
 type memoryAgent struct {
 	name      string
 	versions  map[string]json.RawMessage
 	published string
+	revision  int64
+	updatedAt time.Time
 }
 
 func NewMemoryRepository() *MemoryRepository {
@@ -47,6 +50,7 @@ func NewMemoryRepository() *MemoryRepository {
 		bindings: make(map[string]tenant.ChannelBinding),
 		backends: make(map[string]tenant.BackendProfile),
 		sessions: make(map[string][]map[string]string),
+		watchers: make(map[chan RuntimeChange]struct{}),
 	}
 }
 
@@ -57,6 +61,24 @@ func (r *MemoryRepository) SeedTenants(_ context.Context, tenants []tenant.Tenan
 	defer r.mu.Unlock()
 	for _, item := range tenants {
 		r.tenants[item.ID] = item
+		key := item.ID + "|" + item.Agent.ID
+		agent := r.agents[key]
+		if agent == nil {
+			agent = &memoryAgent{name: item.Agent.ID, versions: make(map[string]json.RawMessage), updatedAt: time.Now().UTC()}
+			r.agents[key] = agent
+		}
+		profile := tenant.RuntimeProfileFromTenant(item)
+		payload, err := json.Marshal(profile)
+		if err != nil {
+			return err
+		}
+		if _, exists := agent.versions[item.Agent.Version]; !exists {
+			agent.versions[item.Agent.Version] = payload
+		}
+		if agent.published == "" {
+			agent.published = item.Agent.Version
+			agent.revision = 1
+		}
 	}
 	return nil
 }
@@ -81,7 +103,7 @@ func (r *MemoryRepository) CreateAgent(_ context.Context, tenantID, id, name str
 	if _, ok := r.agents[key]; ok {
 		return errors.New("agent already exists")
 	}
-	r.agents[key] = &memoryAgent{name: name, versions: make(map[string]json.RawMessage)}
+	r.agents[key] = &memoryAgent{name: name, versions: make(map[string]json.RawMessage), updatedAt: time.Now().UTC()}
 	return nil
 }
 
@@ -99,18 +121,98 @@ func (r *MemoryRepository) CreateAgentVersion(_ context.Context, tenantID, agent
 	return nil
 }
 
-func (r *MemoryRepository) PublishAgent(_ context.Context, tenantID, agentID, version string) error {
+func (r *MemoryRepository) PublishAgent(_ context.Context, tenantID, agentID, version string) (AgentApp, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	agent := r.agents[tenantID+"|"+agentID]
 	if agent == nil {
-		return errors.New("agent not found")
+		return AgentApp{}, errors.New("agent not found")
 	}
 	if _, ok := agent.versions[version]; !ok {
-		return errors.New("agent version not found")
+		return AgentApp{}, errors.New("agent version not found")
 	}
 	agent.published = version
-	return nil
+	agent.revision++
+	agent.updatedAt = time.Now().UTC()
+	change := RuntimeChange{TenantID: tenantID, AgentID: agentID, Version: version, Revision: agent.revision}
+	r.notifyRuntimeChangeLocked(change)
+	return AgentApp{TenantID: tenantID, ID: agentID, Name: agent.name, PublishedVersion: version, Revision: agent.revision, UpdatedAt: agent.updatedAt}, nil
+}
+
+func (r *MemoryRepository) GetAgent(_ context.Context, tenantID, agentID string) (AgentApp, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	agent := r.agents[tenantID+"|"+agentID]
+	if agent == nil {
+		return AgentApp{}, errors.New("agent not found")
+	}
+	return AgentApp{TenantID: tenantID, ID: agentID, Name: agent.name, PublishedVersion: agent.published, Revision: agent.revision, UpdatedAt: agent.updatedAt}, nil
+}
+
+func (r *MemoryRepository) ListAgentVersions(_ context.Context, tenantID, agentID string) ([]AgentVersion, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	agent := r.agents[tenantID+"|"+agentID]
+	if agent == nil {
+		return nil, errors.New("agent not found")
+	}
+	result := make([]AgentVersion, 0, len(agent.versions))
+	for version, payload := range agent.versions {
+		var profile tenant.RuntimeProfile
+		if err := json.Unmarshal(payload, &profile); err != nil {
+			return nil, err
+		}
+		status := "ready"
+		if version == agent.published {
+			status = "published"
+		}
+		result = append(result, AgentVersion{TenantID: tenantID, AgentID: agentID, Version: version, Profile: profile, Status: status, CreatedAt: agent.updatedAt})
+	}
+	return result, nil
+}
+
+func (r *MemoryRepository) ResolveRuntimeProfile(_ context.Context, tenantID string) (tenant.RuntimeProfile, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	base, ok := r.tenants[tenantID]
+	if !ok {
+		return tenant.RuntimeProfile{}, errors.New("tenant not found")
+	}
+	agent := r.agents[tenantID+"|"+base.Agent.ID]
+	if agent == nil || agent.published == "" {
+		return tenant.RuntimeProfileFromTenant(base), nil
+	}
+	var profile tenant.RuntimeProfile
+	if err := json.Unmarshal(agent.versions[agent.published], &profile); err != nil {
+		return tenant.RuntimeProfile{}, err
+	}
+	profile.PublishedVersion = agent.published
+	profile.Revision = agent.revision
+	return profile, nil
+}
+
+func (r *MemoryRepository) WatchRuntimeChanges(ctx context.Context) (<-chan RuntimeChange, error) {
+	ch := make(chan RuntimeChange, 8)
+	r.mu.Lock()
+	r.watchers[ch] = struct{}{}
+	r.mu.Unlock()
+	go func() {
+		<-ctx.Done()
+		r.mu.Lock()
+		delete(r.watchers, ch)
+		close(ch)
+		r.mu.Unlock()
+	}()
+	return ch, nil
+}
+
+func (r *MemoryRepository) notifyRuntimeChangeLocked(change RuntimeChange) {
+	for watcher := range r.watchers {
+		select {
+		case watcher <- change:
+		default:
+		}
+	}
 }
 
 func (r *MemoryRepository) SaveChannelBinding(_ context.Context, tenantID string, binding tenant.ChannelBinding) error {
@@ -281,6 +383,22 @@ func (r *MemoryRepository) AppendAudit(_ context.Context, audit AuditLog) error 
 	}
 	r.audits = append(r.audits, audit)
 	return nil
+}
+
+func (r *MemoryRepository) ListAudits(_ context.Context, tenantID string, limit int) ([]AuditLog, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]AuditLog, 0, limit)
+	for index := len(r.audits) - 1; index >= 0 && len(result) < limit; index-- {
+		item := r.audits[index]
+		if tenantID == "" || item.TenantID == tenantID {
+			result = append(result, item)
+		}
+	}
+	return result, nil
 }
 
 func (r *MemoryRepository) Stats(context.Context) (Stats, error) {

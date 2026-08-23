@@ -43,13 +43,42 @@ type Stats struct {
 	AuditTotal    int64 `json:"audit_total"`
 }
 
+type AgentApp struct {
+	TenantID         string    `json:"tenant_id"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	PublishedVersion string    `json:"published_version,omitempty"`
+	Revision         int64     `json:"revision"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type AgentVersion struct {
+	TenantID  string                `json:"tenant_id"`
+	AgentID   string                `json:"agent_id"`
+	Version   string                `json:"version"`
+	Profile   tenant.RuntimeProfile `json:"profile"`
+	Status    string                `json:"status"`
+	CreatedAt time.Time             `json:"created_at"`
+}
+
+type RuntimeChange struct {
+	TenantID string `json:"tenant_id"`
+	AgentID  string `json:"agent_id"`
+	Version  string `json:"version"`
+	Revision int64  `json:"revision"`
+}
+
 type Repository interface {
 	Migrate(context.Context) error
 	SeedTenants(context.Context, []tenant.Tenant) error
 	ListTenants(context.Context) ([]tenant.Tenant, error)
 	CreateAgent(context.Context, string, string, string) error
 	CreateAgentVersion(context.Context, string, string, string, json.RawMessage) error
-	PublishAgent(context.Context, string, string, string) error
+	PublishAgent(context.Context, string, string, string) (AgentApp, error)
+	GetAgent(context.Context, string, string) (AgentApp, error)
+	ListAgentVersions(context.Context, string, string) ([]AgentVersion, error)
+	ResolveRuntimeProfile(context.Context, string) (tenant.RuntimeProfile, error)
+	WatchRuntimeChanges(context.Context) (<-chan RuntimeChange, error)
 	SaveChannelBinding(context.Context, string, tenant.ChannelBinding) error
 	SaveBackendProfile(context.Context, string, string, tenant.BackendProfile) error
 	AcceptInbound(context.Context, channels.InboundEnvelope) (bool, error)
@@ -63,6 +92,7 @@ type Repository interface {
 	CompleteReply(context.Context, string) error
 	RetryReply(context.Context, string, error) error
 	AppendAudit(context.Context, AuditLog) error
+	ListAudits(context.Context, string, int) ([]AuditLog, error)
 	Stats(context.Context) (Stats, error)
 	Close()
 }

@@ -14,6 +14,7 @@ import (
 type Config struct {
 	HTTPAddr     string              `json:"http_addr" yaml:"http_addr"`
 	Database     Database            `json:"database" yaml:"database"`
+	Backends     ExternalBackends    `json:"external_backends" yaml:"external_backends"`
 	ModelDefault tenant.ModelProfile `json:"model_defaults" yaml:"model_defaults"`
 	Tenants      []tenant.Tenant     `json:"tenants" yaml:"tenants"`
 }
@@ -23,6 +24,15 @@ type Database struct {
 	RedisAddr     string `json:"redis_addr" yaml:"redis_addr"`
 	QueueName     string `json:"queue_name" yaml:"queue_name"`
 	ConsumerGroup string `json:"consumer_group" yaml:"consumer_group"`
+}
+
+type ExternalBackends struct {
+	QdrantURL         string `json:"qdrant_url" yaml:"qdrant_url"`
+	MinIOEndpoint     string `json:"minio_endpoint" yaml:"minio_endpoint"`
+	MinIOAccessKeyRef string `json:"minio_access_key_ref" yaml:"minio_access_key_ref"`
+	MinIOSecretKeyRef string `json:"minio_secret_key_ref" yaml:"minio_secret_key_ref"`
+	MinIOBucket       string `json:"minio_bucket" yaml:"minio_bucket"`
+	MinIOSecure       bool   `json:"minio_secure" yaml:"minio_secure"`
 }
 
 func Load(path string) (Config, error) {
@@ -50,6 +60,12 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("TRPC_REDIS_ADDR"); v != "" {
 		cfg.Database.RedisAddr = v
+	}
+	if v := os.Getenv("TRPC_QDRANT_URL"); v != "" {
+		cfg.Backends.QdrantURL = v
+	}
+	if v := os.Getenv("TRPC_MINIO_ENDPOINT"); v != "" {
+		cfg.Backends.MinIOEndpoint = v
 	}
 }
 

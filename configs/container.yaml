@@ -4,6 +4,13 @@ database:
   redis_addr: redis:6379
   queue_name: trpc:agent:inbound
   consumer_group: trpc-agent-workers
+external_backends:
+  qdrant_url: http://qdrant:6333
+  minio_endpoint: minio:9000
+  minio_access_key_ref: env:MINIO_ACCESS_KEY
+  minio_secret_key_ref: env:MINIO_SECRET_KEY
+  minio_bucket: trpc-agent-artifacts
+  minio_secure: false
 model_defaults:
   provider: deepseek
   base_url: https://api.deepseek.com
@@ -25,6 +32,13 @@ tenants:
       knowledge: qdrant
       artifact: s3
       namespace: tenant_wecom_demo
+    budget:
+      max_concurrent: 4
+      max_input_tokens: 8192
+      max_output_tokens: 1024
+      daily_cost_usd: 5
+      input_cost_per_million_usd: 1
+      output_cost_per_million_usd: 2
     channels:
       - id: wecom-primary
         type: wecom
@@ -44,6 +58,13 @@ tenants:
       knowledge: qdrant
       artifact: s3
       namespace: tenant_feishu_demo
+    budget:
+      max_concurrent: 4
+      max_input_tokens: 8192
+      max_output_tokens: 1024
+      daily_cost_usd: 5
+      input_cost_per_million_usd: 1
+      output_cost_per_million_usd: 2
     channels:
       - id: feishu-primary
         type: feishu

@@ -48,6 +48,30 @@ func (r *PostgresRepository) SeedTenants(ctx context.Context, tenants []tenant.T
 		if err != nil {
 			return fmt.Errorf("seed tenant %s: %w", item.ID, err)
 		}
+		runtimePayload, err := json.Marshal(tenant.RuntimeProfileFromTenant(item))
+		if err != nil {
+			return err
+		}
+		if _, err = r.pool.Exec(ctx, `INSERT INTO agent_apps(tenant_id,id,name,published_version,revision,updated_at)
+			VALUES($1,$2,$3,$4,1,now()) ON CONFLICT(tenant_id,id) DO UPDATE SET
+			name=excluded.name,published_version=COALESCE(agent_apps.published_version,excluded.published_version),
+			revision=CASE WHEN agent_apps.revision=0 THEN 1 ELSE agent_apps.revision END`,
+			item.ID, item.Agent.ID, item.Agent.ID, item.Agent.Version); err != nil {
+			return fmt.Errorf("seed agent %s: %w", item.ID, err)
+		}
+		if _, err = r.pool.Exec(ctx, `INSERT INTO agent_versions(tenant_id,agent_id,version,profile,status)
+			VALUES($1,$2,$3,$4,'published') ON CONFLICT(tenant_id,agent_id,version) DO NOTHING`,
+			item.ID, item.Agent.ID, item.Agent.Version, runtimePayload); err != nil {
+			return fmt.Errorf("seed agent version %s: %w", item.ID, err)
+		}
+		for _, binding := range item.Channels {
+			if err := r.SaveChannelBinding(ctx, item.ID, binding); err != nil {
+				return fmt.Errorf("seed channel binding %s: %w", binding.ID, err)
+			}
+		}
+		if err := r.SaveBackendProfile(ctx, item.ID, "default", item.Backend); err != nil {
+			return fmt.Errorf("seed backend profile %s: %w", item.ID, err)
+		}
 	}
 	return nil
 }
@@ -94,20 +118,134 @@ func (r *PostgresRepository) CreateAgentVersion(ctx context.Context, tenantID, a
 	return nil
 }
 
-func (r *PostgresRepository) PublishAgent(ctx context.Context, tenantID, agentID, version string) error {
-	tag, err := r.pool.Exec(ctx, `UPDATE agent_apps SET published_version=$3
-		WHERE tenant_id=$1 AND id=$2 AND EXISTS(
-			SELECT 1 FROM agent_versions WHERE tenant_id=$1 AND agent_id=$2 AND version=$3)`,
-		tenantID, agentID, version)
+func (r *PostgresRepository) PublishAgent(ctx context.Context, tenantID, agentID, version string) (AgentApp, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return fmt.Errorf("publish agent: %w", err)
+		return AgentApp{}, err
 	}
-	if tag.RowsAffected() == 0 {
-		return errors.New("agent or version not found")
+	defer tx.Rollback(ctx)
+	var app AgentApp
+	err = tx.QueryRow(ctx, `UPDATE agent_apps SET published_version=$3,revision=revision+1,updated_at=now()
+		WHERE tenant_id=$1 AND id=$2 AND EXISTS(
+			SELECT 1 FROM agent_versions WHERE tenant_id=$1 AND agent_id=$2 AND version=$3)
+		RETURNING tenant_id,id,name,published_version,revision,updated_at`,
+		tenantID, agentID, version).Scan(&app.TenantID, &app.ID, &app.Name, &app.PublishedVersion, &app.Revision, &app.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentApp{}, errors.New("agent or version not found")
 	}
-	_, err = r.pool.Exec(ctx, `UPDATE agent_versions SET status=CASE WHEN version=$3 THEN 'published' ELSE status END
-		WHERE tenant_id=$1 AND agent_id=$2`, tenantID, agentID, version)
-	return err
+	if err != nil {
+		return AgentApp{}, fmt.Errorf("publish agent: %w", err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE agent_versions SET status=CASE WHEN version=$3 THEN 'published' ELSE 'ready' END
+		WHERE tenant_id=$1 AND agent_id=$2`, tenantID, agentID, version); err != nil {
+		return AgentApp{}, err
+	}
+	change := RuntimeChange{TenantID: tenantID, AgentID: agentID, Version: version, Revision: app.Revision}
+	payload, err := json.Marshal(change)
+	if err != nil {
+		return AgentApp{}, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_notify('agent_profile_changed',$1)`, string(payload)); err != nil {
+		return AgentApp{}, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_logs
+		(tenant_id,channel,user_id,session_id,agent_name,decision,latency_ms,cost,trace_id,created_at)
+		VALUES($1,'admin','control-plane','-',$2,'agent_version_published',0,0,$3,now())`,
+		tenantID, agentID, fmt.Sprintf("publish-%s-%d", version, app.Revision)); err != nil {
+		return AgentApp{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentApp{}, err
+	}
+	return app, nil
+}
+
+func (r *PostgresRepository) GetAgent(ctx context.Context, tenantID, agentID string) (AgentApp, error) {
+	var app AgentApp
+	err := r.pool.QueryRow(ctx, `SELECT tenant_id,id,name,COALESCE(published_version,''),revision,updated_at
+		FROM agent_apps WHERE tenant_id=$1 AND id=$2`, tenantID, agentID).
+		Scan(&app.TenantID, &app.ID, &app.Name, &app.PublishedVersion, &app.Revision, &app.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentApp{}, errors.New("agent not found")
+	}
+	return app, err
+}
+
+func (r *PostgresRepository) ListAgentVersions(ctx context.Context, tenantID, agentID string) ([]AgentVersion, error) {
+	rows, err := r.pool.Query(ctx, `SELECT tenant_id,agent_id,version,profile,status,created_at
+		FROM agent_versions WHERE tenant_id=$1 AND agent_id=$2 ORDER BY created_at,version`, tenantID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []AgentVersion
+	for rows.Next() {
+		var item AgentVersion
+		var payload []byte
+		if err := rows.Scan(&item.TenantID, &item.AgentID, &item.Version, &payload, &item.Status, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(payload, &item.Profile); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (r *PostgresRepository) ResolveRuntimeProfile(ctx context.Context, tenantID string) (tenant.RuntimeProfile, error) {
+	var payload []byte
+	var version string
+	var revision int64
+	err := r.pool.QueryRow(ctx, `SELECT v.profile,a.published_version,a.revision
+		FROM tenants t JOIN agent_apps a ON a.tenant_id=t.id AND a.id=t.profile->'agent'->>'id'
+		JOIN agent_versions v ON v.tenant_id=a.tenant_id AND v.agent_id=a.id AND v.version=a.published_version
+		WHERE t.id=$1 AND t.enabled=true`, tenantID).Scan(&payload, &version, &revision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return tenant.RuntimeProfile{}, errors.New("published runtime profile not found")
+	}
+	if err != nil {
+		return tenant.RuntimeProfile{}, err
+	}
+	var profile tenant.RuntimeProfile
+	if err := json.Unmarshal(payload, &profile); err != nil {
+		return tenant.RuntimeProfile{}, err
+	}
+	profile.PublishedVersion = version
+	profile.Revision = revision
+	return profile, profile.Validate()
+}
+
+func (r *PostgresRepository) WatchRuntimeChanges(ctx context.Context) (<-chan RuntimeChange, error) {
+	conn, err := r.pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Exec(ctx, `LISTEN agent_profile_changed`); err != nil {
+		conn.Release()
+		return nil, err
+	}
+	changes := make(chan RuntimeChange, 8)
+	go func() {
+		defer close(changes)
+		defer conn.Release()
+		for {
+			notification, err := conn.Conn().WaitForNotification(ctx)
+			if err != nil {
+				return
+			}
+			var change RuntimeChange
+			if json.Unmarshal([]byte(notification.Payload), &change) != nil {
+				continue
+			}
+			select {
+			case changes <- change:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return changes, nil
 }
 
 func (r *PostgresRepository) SaveChannelBinding(ctx context.Context, tenantID string, binding tenant.ChannelBinding) error {
@@ -310,6 +448,32 @@ func (r *PostgresRepository) AppendAudit(ctx context.Context, a AuditLog) error 
 	return err
 }
 
+func (r *PostgresRepository) ListAudits(ctx context.Context, tenantID string, limit int) ([]AuditLog, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `SELECT tenant_id,channel,user_id,session_id,agent_name,
+		COALESCE(tool_name,''),decision,latency_ms,COALESCE(error_type,''),cost,trace_id,created_at
+		FROM audit_logs WHERE ($1='' OR tenant_id=$1) ORDER BY created_at DESC LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]AuditLog, 0, limit)
+	for rows.Next() {
+		var item AuditLog
+		var latencyMillis int64
+		if err := rows.Scan(&item.TenantID, &item.Channel, &item.UserID, &item.SessionID,
+			&item.AgentName, &item.ToolName, &item.Decision, &latencyMillis, &item.ErrorType,
+			&item.Cost, &item.TraceID, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.Latency = time.Duration(latencyMillis) * time.Millisecond
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (r *PostgresRepository) Stats(ctx context.Context) (Stats, error) {
 	var result Stats
 	err := r.pool.QueryRow(ctx, `SELECT
@@ -366,7 +530,10 @@ CREATE TABLE IF NOT EXISTS tenants(
   updated_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS agent_apps(
   tenant_id text NOT NULL REFERENCES tenants(id),id text NOT NULL,name text NOT NULL,
-  published_version text,PRIMARY KEY(tenant_id,id));
+  published_version text,revision bigint NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(tenant_id,id));
+ALTER TABLE agent_apps ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 0;
+ALTER TABLE agent_apps ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 CREATE TABLE IF NOT EXISTS agent_versions(
   tenant_id text NOT NULL,agent_id text NOT NULL,version text NOT NULL,profile jsonb NOT NULL,
   status text NOT NULL DEFAULT 'draft',created_at timestamptz NOT NULL DEFAULT now(),

@@ -28,11 +28,11 @@ func TestNormalizeMessage(t *testing.T) {
 				MessageId: stringPointer("message-1"), ChatId: stringPointer("chat-1"),
 				ChatType: stringPointer("group"), MessageType: stringPointer("text"),
 				Content:  stringPointer(`{"text":"@_user_1 hello"}`),
-				Mentions: []*larkim.MentionEvent{{Key: stringPointer("@_user_1"), Name: stringPointer("robot")}},
+				Mentions: []*larkim.MentionEvent{{Key: stringPointer("@_user_1"), Id: &larkim.UserId{OpenId: stringPointer("bot-open-id")}, Name: stringPointer("robot")}},
 			},
 		},
 	}
-	message, mentionAll, err := NormalizeMessage("tenant", "binding", event)
+	message, mentionAll, err := NormalizeMessage("tenant", "binding", "bot-open-id", event)
 	if err != nil {
 		t.Fatalf("NormalizeMessage: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestNormalizeMessageRejectsMentionAll(t *testing.T) {
 			},
 		},
 	}
-	message, mentionAll, err := NormalizeMessage("tenant", "binding", event)
+	message, mentionAll, err := NormalizeMessage("tenant", "binding", "bot-open-id", event)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,14 +93,33 @@ func TestAdapterValidationAndHealth(t *testing.T) {
 }
 
 func TestNormalizeMessageRejectsMalformedEvents(t *testing.T) {
-	if _, _, err := NormalizeMessage("tenant", "binding", nil); err == nil {
+	if _, _, err := NormalizeMessage("tenant", "binding", "bot-open-id", nil); err == nil {
 		t.Fatal("nil event should fail")
 	}
 	event := &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
 		Sender:  &larkim.EventSender{SenderId: &larkim.UserId{OpenId: stringPointer("user")}},
 		Message: &larkim.EventMessage{MessageId: stringPointer("message"), MessageType: stringPointer("image"), Content: stringPointer(`{}`)},
 	}}
-	if _, _, err := NormalizeMessage("tenant", "binding", event); err == nil {
+	if _, _, err := NormalizeMessage("tenant", "binding", "bot-open-id", event); err == nil {
 		t.Fatal("unsupported message should fail")
+	}
+}
+
+func TestNormalizeMessageIgnoresOtherMentions(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{
+		Sender: &larkim.EventSender{SenderId: &larkim.UserId{OpenId: stringPointer("open-1")}},
+		Message: &larkim.EventMessage{
+			MessageId: stringPointer("message-1"), ChatId: stringPointer("chat-1"),
+			ChatType: stringPointer("group"), MessageType: stringPointer("text"),
+			Content:  stringPointer(`{"text":"@_user_1 hello"}`),
+			Mentions: []*larkim.MentionEvent{{Key: stringPointer("@_user_1"), Id: &larkim.UserId{OpenId: stringPointer("other-open-id")}, Name: stringPointer("other")}},
+		},
+	}}
+	message, mentionAll, err := NormalizeMessage("tenant", "binding", "bot-open-id", event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mentionAll || message.MentionedBot || channels.ShouldHandleGroup(message.ConversationType, message.MentionedBot, mentionAll) {
+		t.Fatalf("other mention must not trigger bot: %+v", message)
 	}
 }

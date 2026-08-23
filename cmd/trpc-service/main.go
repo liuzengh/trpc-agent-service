@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,9 +13,11 @@ import (
 
 	"github.com/DocJlm/trpc-agent-service/trpcservice"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/agent"
+	"github.com/DocJlm/trpc-agent-service/trpcservice/backend"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/config"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/platform"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/queue"
+	"github.com/DocJlm/trpc-agent-service/trpcservice/secrets"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/store"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/telemetry"
 )
@@ -39,6 +42,8 @@ func run() error {
 		return migrate(args)
 	case "channel-smoke":
 		return channelSmoke(args)
+	case "backend-smoke":
+		return backendSmoke(args)
 	case "version":
 		fmt.Println(trpcservice.Version)
 		return nil
@@ -49,6 +54,39 @@ func run() error {
 		usage()
 		return fmt.Errorf("unknown command %q", command)
 	}
+}
+
+func backendSmoke(args []string) error {
+	flags := flag.NewFlagSet("backend-smoke", flag.ContinueOnError)
+	configPath := flags.String("config", "configs/demo.yaml", "YAML configuration path")
+	tenantID := flags.String("tenant", "all", "tenant id or all")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	selected := cfg.Tenants[:0:0]
+	for _, item := range cfg.Tenants {
+		if *tenantID == "all" || item.ID == *tenantID {
+			selected = append(selected, item)
+		}
+	}
+	if len(selected) == 0 {
+		return fmt.Errorf("tenant %q not found", *tenantID)
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	router, err := backend.NewRouter(ctx, cfg.Backends, cfg.Tenants, secrets.FileEnvProvider{})
+	if err != nil {
+		return err
+	}
+	results, err := backend.Smoke(ctx, router, selected)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"status": "ok", "results": results})
 }
 
 func serve(args []string) error {
@@ -83,7 +121,11 @@ func serve(args []string) error {
 		return err
 	}
 	defer app.Close()
-	log.Printf("trpc-agent-service %s role=%s admin=http://%s", trpcservice.Version, role, cfg.HTTPAddr)
+	if role == platform.RoleAll || role == platform.RoleAdmin {
+		log.Printf("trpc-agent-service %s role=%s admin=http://%s", trpcservice.Version, role, cfg.HTTPAddr)
+	} else {
+		log.Printf("trpc-agent-service %s role=%s", trpcservice.Version, role)
+	}
 	return app.Run(ctx, role)
 }
 
@@ -167,6 +209,7 @@ Usage:
   trpc-service serve [--config path] [--role all|gateway|worker|admin] [--fake-model]
   trpc-service migrate [--config path]
   trpc-service channel-smoke --channel wecom|feishu [--config path]
+  trpc-service backend-smoke --tenant id|all [--config path]
   trpc-service version
 `, trpcservice.Version)
 }

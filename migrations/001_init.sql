@@ -11,8 +11,13 @@ CREATE TABLE IF NOT EXISTS agent_apps (
   id text NOT NULL,
   name text NOT NULL,
   published_version text,
+	revision bigint NOT NULL DEFAULT 0,
+	updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, id)
 );
+
+ALTER TABLE agent_apps ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 0;
+ALTER TABLE agent_apps ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS agent_versions (
   tenant_id text NOT NULL,

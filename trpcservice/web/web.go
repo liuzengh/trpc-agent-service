@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -81,8 +82,29 @@ func (s *Server) routes(registry *prometheus.Registry) {
 	s.mux.HandleFunc("POST /api/v1/tenants", s.createTenant)
 	s.mux.HandleFunc("POST /api/v1/agents", s.createAgent)
 	s.mux.HandleFunc("POST /api/v1/agents/", s.agentAction)
+	s.mux.HandleFunc("GET /api/v1/agents/", s.getAgentAction)
+	s.mux.HandleFunc("GET /api/v1/runtime/", s.getRuntimeProfile)
+	s.mux.HandleFunc("GET /api/v1/audit-logs", s.listAudits)
 	s.mux.HandleFunc("POST /api/v1/channel-bindings", s.createBinding)
 	s.mux.HandleFunc("POST /api/v1/backend-profiles", s.createBackend)
+}
+
+func (s *Server) listAudits(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 200 {
+			writeError(w, http.StatusBadRequest, "invalid_audit_limit", errors.New("limit must be between 1 and 200"))
+			return
+		}
+		limit = parsed
+	}
+	items, err := s.repo.ListAudits(r.Context(), strings.TrimSpace(r.URL.Query().Get("tenant_id")), limit)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "list_audits", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -189,17 +211,65 @@ func (s *Server) agentAction(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotFound, "not_found", errors.New("unknown agent action"))
 }
 
+func (s *Server) getAgentAction(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/agents/"), "/")
+	tenantID := strings.TrimSpace(r.URL.Query().Get("tenant_id"))
+	if path == "" || tenantID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_agent_query", errors.New("agent id and tenant_id are required"))
+		return
+	}
+	if strings.HasSuffix(path, "/versions") {
+		id := strings.TrimSuffix(path, "/versions")
+		items, err := s.repo.ListAgentVersions(r.Context(), tenantID, id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "list_agent_versions", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		return
+	}
+	item, err := s.repo.GetAgent(r.Context(), tenantID, path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "get_agent", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) getRuntimeProfile(w http.ResponseWriter, r *http.Request) {
+	tenantID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/runtime/"), "/")
+	if tenantID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_runtime_query", errors.New("tenant id is required"))
+		return
+	}
+	profile, err := s.repo.ResolveRuntimeProfile(r.Context(), tenantID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "runtime_profile", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
 func (s *Server) createAgentVersion(w http.ResponseWriter, r *http.Request, id string) {
 	var body struct {
-		TenantID string `json:"tenant_id"`
-		Version  string `json:"version"`
-		Profile  any    `json:"profile"`
+		TenantID string                `json:"tenant_id"`
+		Version  string                `json:"version"`
+		Profile  tenant.RuntimeProfile `json:"profile"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.Version == "" {
-		writeError(w, http.StatusBadRequest, "invalid_version", errors.New("version is required"))
+	if body.TenantID == "" || body.Version == "" || id == "" {
+		writeError(w, http.StatusBadRequest, "invalid_version", errors.New("tenant_id, agent id and version are required"))
+		return
+	}
+	body.Profile.TenantID = body.TenantID
+	body.Profile.Agent.ID = id
+	body.Profile.Agent.Version = body.Version
+	body.Profile.PublishedVersion = body.Version
+	body.Profile.Revision = 0
+	if err := body.Profile.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_profile", err)
 		return
 	}
 	profile, err := json.Marshal(body.Profile)
@@ -231,7 +301,8 @@ func (s *Server) publishAgent(w http.ResponseWriter, r *http.Request, id string)
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if err := s.repo.PublishAgent(r.Context(), body.TenantID, id, body.Version); err != nil {
+	app, err := s.repo.PublishAgent(r.Context(), body.TenantID, id, body.Version)
+	if err != nil {
 		writeError(w, http.StatusConflict, "persist_publish", err)
 		return
 	}
@@ -244,7 +315,7 @@ func (s *Server) publishAgent(w http.ResponseWriter, r *http.Request, id string)
 		s.agents[key] = agent
 	}
 	agent.PublishedVersion = body.Version
-	writeJSON(w, http.StatusOK, agent)
+	writeJSON(w, http.StatusOK, app)
 }
 
 func (s *Server) createBinding(w http.ResponseWriter, r *http.Request) {

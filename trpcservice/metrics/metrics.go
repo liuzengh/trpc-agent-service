@@ -4,13 +4,16 @@ package metrics
 import "github.com/prometheus/client_golang/prometheus"
 
 type Registry struct {
-	Inbound         *prometheus.CounterVec
-	Duplicate       *prometheus.CounterVec
-	AgentRuns       *prometheus.CounterVec
-	AgentLatency    *prometheus.HistogramVec
-	Reply           *prometheus.CounterVec
-	ChannelReady    *prometheus.GaugeVec
-	LeaseContention *prometheus.CounterVec
+	Inbound          *prometheus.CounterVec
+	Duplicate        *prometheus.CounterVec
+	AgentRuns        *prometheus.CounterVec
+	AgentLatency     *prometheus.HistogramVec
+	Reply            *prometheus.CounterVec
+	ChannelReady     *prometheus.GaugeVec
+	LeaseContention  *prometheus.CounterVec
+	GovernanceReject *prometheus.CounterVec
+	TokenUsage       *prometheus.CounterVec
+	CostUSD          *prometheus.CounterVec
 }
 
 func New(registerer prometheus.Registerer) *Registry {
@@ -43,9 +46,22 @@ func New(registerer prometheus.Registerer) *Registry {
 			Namespace: "trpc_agent_service", Name: "lease_contention_total",
 			Help: "Failed attempts to acquire a unique channel or session lease.",
 		}, []string{"scope"}),
+		GovernanceReject: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "trpc_agent_service", Name: "governance_rejections_total",
+			Help: "Agent requests rejected by a tenant governance policy.",
+		}, []string{"tenant", "reason"}),
+		TokenUsage: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "trpc_agent_service", Name: "model_tokens_total",
+			Help: "Model tokens accounted by tenant and direction.",
+		}, []string{"tenant", "direction"}),
+		CostUSD: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "trpc_agent_service", Name: "model_cost_usd_total",
+			Help: "Configured model cost accounted in US dollars.",
+		}, []string{"tenant"}),
 	}
 	if registerer != nil {
-		registerer.MustRegister(r.Inbound, r.Duplicate, r.AgentRuns, r.AgentLatency, r.Reply, r.ChannelReady, r.LeaseContention)
+		registerer.MustRegister(r.Inbound, r.Duplicate, r.AgentRuns, r.AgentLatency, r.Reply, r.ChannelReady,
+			r.LeaseContention, r.GovernanceReject, r.TokenUsage, r.CostUSD)
 	}
 	return r
 }
