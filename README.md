@@ -14,7 +14,9 @@
 - 真实后端隔离：Qdrant 独立 collection/tenant filter，MinIO 统一 bucket 下独立租户前缀，提供可重复的写入、查询、校验和删除 smoke。
 - 运维：`all/gateway/worker/admin` 四种角色、健康检查、Prometheus 指标、审计日志、Docker Compose 和 Kubernetes 示例。
 
-详细设计见 [docs/design.md](docs/design.md)，实测证据模板见 [docs/demo-checklist.md](docs/demo-checklist.md)。
+详细设计见 [docs/design.md](docs/design.md)，完整验收项见
+[docs/demo-checklist.md](docs/demo-checklist.md)，公开脱敏截图与最终 Trace ID 见
+[docs/demo-evidence/README.md](docs/demo-evidence/README.md)。
 
 ## 快速开始
 
@@ -51,7 +53,12 @@ $env:FEISHU_CREDENTIAL_FILE = 'C:\path\outside\repo\feishu.txt'
 $env:DEEPSEEK_KEY_FILE = 'C:\path\outside\repo\deepseek.txt'
 $env:TRPC_POSTGRES_DSN = 'postgres://trpc:trpc@127.0.0.1:5432/trpc_agent?sslmode=disable'
 $env:TRPC_REDIS_ADDR = '127.0.0.1:6379'
+$env:OTEL_EXPORTER_OTLP_ENDPOINT = 'http://127.0.0.1:4317'
 ```
+
+本项目使用 OTLP gRPC exporter；本地 Docker Compose 只把 Collector 的 gRPC
+receiver `4317` 映射到 `127.0.0.1`。不要把本机进程指向未映射的 `4318`，否则
+Batch exporter 会在后台重试而 Jaeger 中看不到 Trace。
 
 企业微信文件按两行保存 `BotID`、`Secret`；飞书文件按两行保存 `AppID`、`App Secret`，也接受 `名称: 值` 或 `名称=值`。通道日志只记录 binding、状态和错误分类，不输出凭据值、文件内容、App/Bot ID 或指纹。
 

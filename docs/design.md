@@ -138,6 +138,8 @@ Qdrant 本地 → 远端同理：新写同时进入两个 collection，按 docum
 
 控制面发布不可变 AgentVersion，Channel Binding 和 Backend Profile 通过引用关联。生产版在 Admin 前增加 OIDC/mTLS、RBAC 与审批；危险 Tool 人工确认只保留扩展点。治理控制器在 Agent before callback 原子预占并发和基于最大输出的日预算，检查估算输入 token；Agent after callback 按模型 Usage 结算实际费用。成功、错误、超时与取消均幂等释放 reservation，Tool before callback 拒绝未授权调用。Redis Lua 保证多 Worker 共享额度，本地测试可使用内存实现。平台输出入站、重复、Agent 结果/耗时、回复、channel ready、lease contention、治理拒绝、token 和费用指标，并写包含 tenant、channel、user、session、agent、tool、decision、error type、cost、trace 的审计行。
 
+本地与容器部署统一使用 OTLP gRPC：本机四个角色连接 `127.0.0.1:4317`，容器内连接 `otel-collector:4317`。Collector 的 HTTP receiver `4318` 不对宿主机发布，避免 gRPC exporter 误连 HTTP 端口后只在后台重试、启动表面成功但 Jaeger 无数据。
+
 容量先测三个瓶颈：单 Worker 并发由模型延迟和租户 semaphore 决定；Redis QPS 约为每条消息 1 次 XADD、1 次消费、2–4 次 lease 操作和 Session event 操作；PostgreSQL 每条消息至少两个事务。以 P95 10 秒模型延迟、每 Worker 50 并发估算单节点约 5 msg/s，再用实际 token 长度、IM 峰值与 API 限流压测校准。Gateway 扩容不增加同一 Bot 连接数，只提高不同 binding 的承载与故障接管。
 
 所有 goroutine 都由父 context 管理；Runner 用 deadline；SDK callback 不启动无界 goroutine；Relay 使用 ticker 并在取消时退出；Runner event channel 必须持续 drain 到关闭。Feishu v3.7.2 的 Start 内部永久 select 是 SDK 限制，底层网络循环仍接收 context；进程级停止负责回收最终 goroutine。

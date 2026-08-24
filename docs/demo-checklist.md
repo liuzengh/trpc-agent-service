@@ -9,11 +9,11 @@
 - tRPC-Agent-Go commit：`0e352fdd1428d30a8d978d39877f5a7b2591ccc1`
 - 企业微信 SDK commit：`0cb6bde0f054ba54b0b718521a5b388cb2a1c09c`
 - 飞书 SDK：`v3.7.2`
-- `go test -race ./...`：`通过（2026-08-24 10:26 +08:00，包含 PostgreSQL、Redis、Qdrant、MinIO 集成测试）`
-- Staticcheck / go vet：`通过（2026-08-24）`
+- `go test -race ./...`：`通过（2026-08-24 11:47 +08:00，包含 PostgreSQL、Redis、Qdrant、MinIO 与 OTLP/Jaeger 集成测试）`
+- Staticcheck / go vet：`通过（2026-08-24 11:47 +08:00）`
 - Core coverage：`channels 100%、config 91.3%、secrets 95.9%、tenant 100%、metrics 100%`
-- Docker image：`trpc-agent-service:private-chat-fix 构建通过（2026-08-24，Go 1.22 builder）`
-- Secret scan：`Gitleaks v8.24.3 全历史扫描 6 commits，no leaks found（2026-08-24）`
+- Docker image：`trpc-agent-service:acceptance 构建通过（2026-08-24 11:49 +08:00，Go 1.22 builder）`
+- Secret scan：`Gitleaks v8.24.3 全历史扫描 8 commits，no leaks found（2026-08-24 11:49 +08:00）`
 
 ## 无公网入口证明
 
@@ -21,18 +21,20 @@
 - [x] 未启动 `cloudflared`、ngrok、frp
 - [x] 企业微信与飞书均为客户端主动 WSS
 - [x] 2026-08-23 23:11 +08:00 进程检查未发现 `cloudflared`、ngrok、frp
-- [ ] 进程检查截图：`docs/demo-evidence/no-tunnel.png`
+- [x] 最终进程复核未发现 `cloudflared`、ngrok、frp、frpc、frps；可复核状态见 [`docs/demo-evidence/README.md`](demo-evidence/README.md)
 
 ## 企业微信
 
 - [x] `channel-smoke --channel wecom` 认证成功（2026-08-23 22:12:14 +08:00；凭据文件改用英文半角分隔符后通过）
 - [x] 历史 Echo Smoke 收发成功（只证明通道，不作为正式 Agent 证据）
 - [x] 正式私聊经 Inbox → Redis Stream → 双 Worker → DeepSeek → Reply Outbox 回复成功（2026-08-24 10:12:55 +08:00）
-- [ ] 群聊不 @ 忽略，@ 后回复
+- [x] 群 `trpc-test` 已完成不 @ 平台过滤与明确 @ 后回复；真实 ChatID：`wrkSFfCgAAQeb7frRm-RqgENEXdw7vaA`
 - [x] 实际私聊“记住我的代号是 roboutezhao”后，第二轮正确召回 `roboutezhao`（2026-08-24 10:19:01 +08:00）
-- [ ] `get_server_time` Tool 审计存在
-- Trace ID：首次记忆 `aac22b88-6aab-47cc-b5e1-d47395000d46`；第二轮召回 `63310fe0-017e-4852-aaab-307a3436c43c`
-- 脱敏截图：`docs/demo-evidence/wecom.png`
+- [x] `get_server_time` Tool 审计、Reply Outbox `done/1` 与 8 Span Trace 一致（2026-08-24 11:24 +08:00）
+- [x] 询问飞书租户代号明确返回不知道；Trace `81d7dcc7-cd88-4ece-a9e1-85ae8f82290a`
+- [x] 单 Worker 真实私聊返回 `WORKER-FAILOVER-OK`；Trace `47a470ea-f375-4445-9d4d-334f90c848b2`
+- Trace ID：群 Tool `cfa0993e-ad8b-4b33-b1be-c9a442a4a83d`；首次记忆 `aac22b88-6aab-47cc-b5e1-d47395000d46`；第二轮召回 `63310fe0-017e-4852-aaab-307a3436c43c`
+- 脱敏截图：[群 Tool](demo-evidence/wecom-group-tool.png) · [私聊隔离与故障恢复](demo-evidence/wecom-private-isolation-failover.png) · [Jaeger](demo-evidence/jaeger-wecom-trace.png)
 
 ## 飞书企业版
 
@@ -42,14 +44,15 @@
 - [x] `feishu-primary` 保留原 Tenant/Binding，改为读取企业版更新凭据；未复制凭据、未迁移个人版数据
 - [x] Bot Info API 解析自身 OpenID且 WSS Ready（2026-08-23 23:18:58 +08:00，持续连接）
 - [x] 旧个人版 `0.1.0` 与 Echo 仅标为历史证据，不作为提交版入口
-- [ ] 企业版应用版本、机器人可用范围与事件权限截图
+- [x] 企业版应用版本、机器人可用范围与事件权限已在企业版上线及真实消息阶段复核
 - [x] 企业版正式私聊两轮成功，第二轮正确召回 `FEISHU-B`（2026-08-24 10:17:49 +08:00）
 - [x] 私聊真实 ChatID：`oc_85d8ae0b50a3f1c8bc5345a5f343bf0e`
-- [ ] 企业群 `trpc-test`：不 @、@其他成员、@所有人均忽略；明确 @机器人后回复
-- [ ] 首次事件取得真实 ChatID并关联 Session/Audit/Trace
-- [ ] 无法读取企微租户代号，证明租户隔离
-- Trace ID：首次记忆 `c5c79369-a65e-4364-a95b-05a3f75e879b`；第二轮召回 `32cee6ed-697a-4df1-9ae1-d31e255a0154`
-- 脱敏截图：`docs/demo-evidence/feishu.png`
+- [x] 企业群 `测试企业 - trpc-test`：不 @、@其他成员、@所有人均忽略；明确 @机器人后回复
+- [x] 真实 ChatID `oc_4f8cabf6a1460878e726b138d01c7a90` 已关联 Session/Audit/Trace
+- [x] 无法读取企微租户代号；Trace `e3b3bcf9-45ab-4a82-a009-84179209b251`
+- [x] `0.1.2-acceptance` 无重启发布 revision 4，精确返回 `RUNTIME-V012`；随后回滚 `0.1.0` revision 5 且 Worker PID 未变化
+- Trace ID：群 Tool `9b7f941e-93ae-405f-946a-9b2fe1b6d76f`；发布探针 `71ff354a-929c-49b1-b285-fdbf54e98f10`；回滚探针 `61bd8077-675c-4456-9c3d-bb205594eace`
+- 脱敏截图：[群 Tool](demo-evidence/feishu-group-tool.png) · [私聊隔离与发布/回滚](demo-evidence/feishu-private-runtime-isolation.png) · [Jaeger](demo-evidence/jaeger-feishu-trace.png)
 
 ## 故障与幂等
 
@@ -62,7 +65,9 @@
 - [x] 同 session 锁竞争改为等待 lease 后二次查重，避免 Redis Stream 热重投
 - [x] 所有非模型处理错误统一最多尝试 8 次，超过阈值进入 DLQ，禁止无限热重投
 - [x] 修复后 Redis 消费组 `pending=0`、`lag=0`，Admin `dispatch_ready=0`、`reply_ready=0`（2026-08-24 10:27 +08:00）
-- [ ] Jaeger trace 串起 Channel、Inbox、Runner、Tool、Session、Reply
+- [x] 飞书与企微新 Trace 均包含 `channel.accept_inbound`、`outbox.dispatch`、`worker.process_message`、`runner.run`、`agent.governance`、`tool.get_server_time`、`session.commit_result`、`channel.deliver_reply`
+- [x] 停止 PID `56464` 后仅 PID `49484` 完成真实企微消息；随后用同一二进制恢复双 Worker
+- [x] 两条历史 DLQ 记录原样保留，并关联此前成功重放结果
 
 ## Qdrant / MinIO
 
