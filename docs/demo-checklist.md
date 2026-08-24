@@ -9,11 +9,11 @@
 - tRPC-Agent-Go commit：`0e352fdd1428d30a8d978d39877f5a7b2591ccc1`
 - 企业微信 SDK commit：`0cb6bde0f054ba54b0b718521a5b388cb2a1c09c`
 - 飞书 SDK：`v3.7.2`
-- `go test -race ./...`：`通过（2026-08-23 23:15 +08:00，包含 PostgreSQL、Redis、Qdrant、MinIO 集成测试）`
-- Staticcheck / go vet：`通过（2026-08-23）`
+- `go test -race ./...`：`通过（2026-08-24 10:26 +08:00，包含 PostgreSQL、Redis、Qdrant、MinIO 集成测试）`
+- Staticcheck / go vet：`通过（2026-08-24）`
 - Core coverage：`channels 100%、config 91.3%、secrets 95.9%、tenant 100%、metrics 100%`
-- Docker image：`trpc-agent-service:test 构建通过（Go 1.22 builder）`
-- Secret scan：`Gitleaks v8.24.3 全历史扫描 5 commits，no leaks found（2026-08-23）`
+- Docker image：`trpc-agent-service:private-chat-fix 构建通过（2026-08-24，Go 1.22 builder）`
+- Secret scan：`Gitleaks v8.24.3 全历史扫描 6 commits，no leaks found（2026-08-24）`
 
 ## 无公网入口证明
 
@@ -27,10 +27,11 @@
 
 - [x] `channel-smoke --channel wecom` 认证成功（2026-08-23 22:12:14 +08:00；凭据文件改用英文半角分隔符后通过）
 - [x] 历史 Echo Smoke 收发成功（只证明通道，不作为正式 Agent 证据）
+- [x] 正式私聊经 Inbox → Redis Stream → 双 Worker → DeepSeek → Reply Outbox 回复成功（2026-08-24 10:12:55 +08:00）
 - [ ] 群聊不 @ 忽略，@ 后回复
-- [ ] “记住我的代号是 WECOM-A”后续可召回
+- [x] 实际私聊“记住我的代号是 roboutezhao”后，第二轮正确召回 `roboutezhao`（2026-08-24 10:19:01 +08:00）
 - [ ] `get_server_time` Tool 审计存在
-- Trace ID：`待填写`
+- Trace ID：首次记忆 `aac22b88-6aab-47cc-b5e1-d47395000d46`；第二轮召回 `63310fe0-017e-4852-aaab-307a3436c43c`
 - 脱敏截图：`docs/demo-evidence/wecom.png`
 
 ## 飞书企业版
@@ -42,11 +43,12 @@
 - [x] Bot Info API 解析自身 OpenID且 WSS Ready（2026-08-23 23:18:58 +08:00，持续连接）
 - [x] 旧个人版 `0.1.0` 与 Echo 仅标为历史证据，不作为提交版入口
 - [ ] 企业版应用版本、机器人可用范围与事件权限截图
-- [ ] 单聊 echo 成功
+- [x] 企业版正式私聊两轮成功，第二轮正确召回 `FEISHU-B`（2026-08-24 10:17:49 +08:00）
+- [x] 私聊真实 ChatID：`oc_85d8ae0b50a3f1c8bc5345a5f343bf0e`
 - [ ] 企业群 `trpc-test`：不 @、@其他成员、@所有人均忽略；明确 @机器人后回复
 - [ ] 首次事件取得真实 ChatID并关联 Session/Audit/Trace
-- [ ] 无法读取 WECOM-A，证明租户隔离
-- Trace ID：`待填写`
+- [ ] 无法读取企微租户代号，证明租户隔离
+- Trace ID：首次记忆 `c5c79369-a65e-4364-a95b-05a3f75e879b`；第二轮召回 `32cee6ed-697a-4df1-9ae1-d31e255a0154`
 - 脱敏截图：`docs/demo-evidence/feishu.png`
 
 ## 故障与幂等
@@ -55,6 +57,11 @@
 - [x] PostgreSQL 实测：发布 `0.1.1` 后 revision 2，重新发布 `0.1.0` 回滚后 revision 3；LISTEN/NOTIFY 缓存失效测试连续通过
 - [x] Redis 集成测试：Worker 2 使用 XAUTOCLAIM 接管 Worker 1 未 ACK 的 pending message
 - [x] 平台测试：回复连续失败只重试 Reply Outbox，Agent 调用次数保持一次
+- [x] 实机恢复：休眠唤醒后的 Redis `i/o timeout` 不再终止 Worker，新增瞬时读错误退避回归测试
+- [x] 实机恢复：tRPC-Agent-Go PostgreSQL Session 改用 `runner_` 表前缀，避开控制面 `session_events`；两条原 DLQ 消息按序重放成功
+- [x] 同 session 锁竞争改为等待 lease 后二次查重，避免 Redis Stream 热重投
+- [x] 所有非模型处理错误统一最多尝试 8 次，超过阈值进入 DLQ，禁止无限热重投
+- [x] 修复后 Redis 消费组 `pending=0`、`lag=0`，Admin `dispatch_ready=0`、`reply_ready=0`（2026-08-24 10:27 +08:00）
 - [ ] Jaeger trace 串起 Channel、Inbox、Runner、Tool、Session、Reply
 
 ## Qdrant / MinIO

@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/DocJlm/trpc-agent-service/trpcservice/secrets"
 	"github.com/DocJlm/trpc-agent-service/trpcservice/tenant"
+	"github.com/google/uuid"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -111,5 +113,38 @@ func TestTRPCEngineConfigurationErrors(t *testing.T) {
 	}
 	if _, err := (EchoEngine{}).Run(context.Background(), Request{}); err == nil {
 		t.Fatal("empty echo input should fail")
+	}
+}
+
+func TestTRPCEnginePostgresSessionIntegration(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("TEST_POSTGRES_DSN is not set")
+	}
+	fake := &fakeModel{}
+	engine := NewTRPCEngine(
+		staticSecrets{values: []string{"test-key"}},
+		WithPostgresDSN(dsn),
+		withModelFactory(func(tenant.ModelProfile, string) model.Model { return fake }),
+	)
+	defer engine.Close()
+	profile := tenant.Tenant{
+		ID: "postgres-session-" + uuid.NewString(), Enabled: true,
+		Agent:   tenant.AgentProfile{ID: "assistant", Version: "1", Instruction: "answer"},
+		Model:   tenant.ModelProfile{Model: "fake-model", APIKeyRef: "test", Timeout: "5s"},
+		Backend: tenant.BackendProfile{Session: "postgres"},
+	}
+	sessionID := uuid.NewString()
+	for index, content := range []string{"first", "second"} {
+		result, err := engine.Run(context.Background(), Request{
+			Tenant: profile, UserID: "user", SessionID: sessionID, Content: content,
+			TraceID: uuid.NewString(),
+		})
+		if err != nil {
+			t.Fatalf("run %d: %v", index+1, err)
+		}
+		if index == 1 && result.Content != "answer with history" {
+			t.Fatalf("postgres session did not restore history: %+v", result)
+		}
 	}
 }

@@ -9,7 +9,7 @@
 - DeepSeek：OpenAI-compatible 模型接入、流式 Runner、45 秒 deadline、`get_server_time` Function Tool；普通测试不会调用真实模型。
 - 多租户：不可变 AgentVersion、无重启发布/回滚、工具白名单、Channel Binding、Session/Memory/Knowledge/Artifact 后端画像。
 - 无状态 Worker：企业微信演示租户使用 tRPC-Agent-Go Redis Session，飞书演示租户使用 PostgreSQL Session；同一 session 通过 lease + fencing token 串行执行。
-- 可靠性：PostgreSQL Inbox/Outbox、四字段幂等键、Redis Stream consumer group、pending reclaim、回复重试与 DLQ。
+- 可靠性：PostgreSQL Inbox/Outbox、四字段幂等键、Redis Stream consumer group、pending reclaim、瞬时 Redis 读错误退避恢复、同会话锁等待、回复重试与 DLQ。
 - 治理：租户级并发、输入/输出 token、每日费用上限和 Tool allowlist；预算预占、Usage 结算、拒绝审计及指标完整闭环。
 - 真实后端隔离：Qdrant 独立 collection/tenant filter，MinIO 统一 bucket 下独立租户前缀，提供可重复的写入、查询、校验和删除 smoke。
 - 运维：`all/gateway/worker/admin` 四种角色、健康检查、Prometheus 指标、审计日志、Docker Compose 和 Kubernetes 示例。

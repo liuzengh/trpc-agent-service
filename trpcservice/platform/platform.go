@@ -292,17 +292,27 @@ func (p *Platform) relayDispatchBatch(ctx context.Context) error {
 
 func (p *Platform) worker(ctx context.Context) error {
 	consumer := p.workerID + ":worker"
+	consecutiveReceiveErrors := 0
 	for {
 		delivery, err := p.queue.Receive(ctx, consumer, 2*time.Second)
 		if errors.Is(err, context.DeadlineExceeded) {
+			consecutiveReceiveErrors = 0
 			continue
 		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("receive dispatch: %w", err)
+			consecutiveReceiveErrors++
+			backoff := time.Duration(min(consecutiveReceiveErrors, 5)) * 250 * time.Millisecond
+			p.logger.WarnContext(ctx, "receive dispatch failed; retrying",
+				"error", err, "backoff", backoff, "consumer", consumer)
+			if !wait(ctx, backoff) {
+				return nil
+			}
+			continue
 		}
+		consecutiveReceiveErrors = 0
 		p.processDelivery(ctx, delivery)
 	}
 }
@@ -325,7 +335,7 @@ func (p *Platform) processDelivery(ctx context.Context, delivery queue.Delivery)
 	runtimeProfile, err := p.resolver.Resolve(ctx, message.TenantID)
 	if err != nil {
 		span.RecordError(err)
-		_ = p.queue.Retry(ctx, delivery)
+		p.retryOrDead(ctx, delivery, err)
 		return
 	}
 	tenantProfile := runtimeProfile.Apply(baseProfile)
@@ -335,12 +345,17 @@ func (p *Platform) processDelivery(ctx context.Context, delivery queue.Delivery)
 		_ = p.queue.Ack(ctx, delivery)
 		return
 	}
-	lockCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	lease, err := p.locker.Acquire(lockCtx, "session:"+message.TenantID+":"+message.SessionID(), 60*time.Second)
+	lockCtx, cancel := context.WithTimeout(ctx, 50*time.Second)
+	lease, contended, err := acquireLeaseWithWait(
+		lockCtx, p.locker, "session:"+message.TenantID+":"+message.SessionID(),
+		60*time.Second, 100*time.Millisecond,
+	)
 	cancel()
-	if err != nil {
+	if contended {
 		p.metrics.LeaseContention.WithLabelValues("session").Inc()
-		_ = p.queue.Retry(ctx, delivery)
+	}
+	if err != nil {
+		p.retryOrDead(ctx, delivery, err)
 		return
 	}
 	defer lease.Release(context.Background())
@@ -350,7 +365,7 @@ func (p *Platform) processDelivery(ctx context.Context, delivery queue.Delivery)
 	exists, err = p.repo.ReplyExists(ctx, replyID)
 	if err != nil {
 		span.RecordError(err)
-		_ = p.queue.Retry(ctx, delivery)
+		p.retryOrDead(ctx, delivery, err)
 		return
 	}
 	if exists {
@@ -383,11 +398,7 @@ func (p *Platform) processDelivery(ctx context.Context, delivery queue.Delivery)
 			Decision: decision, Latency: latency, ErrorType: classifyError(runErr),
 			TraceID: message.TraceID,
 		})
-		if delivery.Task.Attempts >= 7 {
-			_ = p.queue.Dead(ctx, delivery, runErr)
-		} else {
-			_ = p.queue.Retry(ctx, delivery)
-		}
+		p.retryOrDead(ctx, delivery, runErr)
 		return
 	}
 	p.metrics.AgentRuns.WithLabelValues(message.TenantID, "success").Inc()
@@ -406,7 +417,7 @@ func (p *Platform) processDelivery(ctx context.Context, delivery queue.Delivery)
 		commitSpan.RecordError(err)
 		commitSpan.End()
 		span.RecordError(err)
-		_ = p.queue.Retry(ctx, delivery)
+		p.retryOrDead(ctx, delivery, err)
 		return
 	}
 	commitSpan.End()
@@ -424,6 +435,31 @@ func (p *Platform) processDelivery(ctx context.Context, delivery queue.Delivery)
 	})
 	if err := p.queue.Ack(ctx, delivery); err != nil {
 		p.logger.ErrorContext(ctx, "ack completed dispatch", "error", err, "trace_id", message.TraceID)
+	}
+}
+
+func (p *Platform) retryOrDead(ctx context.Context, delivery queue.Delivery, cause error) {
+	if delivery.Task.Attempts >= 7 {
+		_ = p.queue.Dead(ctx, delivery, cause)
+		return
+	}
+	_ = p.queue.Retry(ctx, delivery)
+}
+
+func acquireLeaseWithWait(ctx context.Context, locker queue.Locker, key string, ttl, retryInterval time.Duration) (queue.Lease, bool, error) {
+	contended := false
+	for {
+		lease, err := locker.Acquire(ctx, key, ttl)
+		if err == nil {
+			return lease, contended, nil
+		}
+		if !errors.Is(err, queue.ErrLeaseBusy) {
+			return nil, contended, err
+		}
+		contended = true
+		if !wait(ctx, retryInterval) {
+			return nil, contended, ctx.Err()
+		}
 	}
 }
 

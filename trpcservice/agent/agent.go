@@ -412,6 +412,10 @@ func (e *TRPCEngine) sessionService(t tenant.Tenant) (session.Service, error) {
 		}
 		service, err := sessionpostgres.NewService(
 			sessionpostgres.WithPostgresClientDSN(e.postgresDSN),
+			// The platform owns a control-plane session_events table. Keep the
+			// tRPC-Agent-Go runner schema isolated to avoid a same-name table
+			// collision while still sharing the PostgreSQL database.
+			sessionpostgres.WithTablePrefix("runner"),
 			sessionpostgres.WithSessionEventLimit(1000),
 		)
 		if err != nil {

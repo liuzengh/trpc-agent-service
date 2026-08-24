@@ -109,13 +109,15 @@ Gateway 在一个 PostgreSQL 事务写 Inbox 和 Dispatch Outbox，唯一约束�
 
 Redis consumer group 提供至少一次投递，Worker 会 `XAUTOCLAIM` 超过 30 秒的 pending 消息。回复 ID由 dispatch ID 确定性生成；执行前发现 Reply Outbox 已存在就直接 ACK，避免 Worker 在提交完成后、ACK 前崩溃导致模型重跑。模型完成后，平台在一个事务推进 session version、追加单调 sequence event，并写 Reply Outbox。IM 投递失败只重试 reply，不重新执行模型；八次后状态为 dead。Worker 执行失败最多重试八次，随后写入 Redis `:dlq` stream。
 
+Worker 的 Redis 阻塞读取若遇到休眠唤醒、连接重建等瞬时 `i/o timeout`，会有限退避后继续消费，不退出进程。同一 session 的消息被不同 Worker 同时领取时，后到者在本地等待 Redis lease，而不是立即 XADD 重投；取得 lease 后再次查询确定性 Reply ID。这样既保持串行，也避免锁竞争形成热重试风暴。
+
 严格意义上的“模型调用恰好一次”无法由跨服务事务保证：若进程恰好在模型返回后、数据库提交前崩溃，恢复后可能再次调用模型。因此 Tool 应携带 trace/idempotency key，副作用工具必须在自己的系统做幂等；平台保证从持久化提交点开始不重复。
 
 ## 6. Agent、Session 与后端选择
 
 每个 `tenant + agent version + model + revision` 建立一个 Runner。模型通过 `model/openai` 指向 `https://api.deepseek.com`，默认 `deepseek-v4-flash`，配置可切换 pro。Runner deadline 为 45 秒，request ID 等于全链路 trace ID。`get_server_time` 使用 tRPC-Agent-Go `FunctionTool`；Agent/Tool Callback 承担治理、审计和 span，不让业务层绕开 tRPC-Agent-Go 执行链。
 
-企业微信租户调用官方 Redis Session Service，key prefix 含 tenant；飞书租户调用 PostgreSQL Session Service。两者都由 session lease 串行更新，因此 Worker 可水平扩缩。平台自己的 `sessions/session_events` 表保存控制面可审计的用户/助手事件，Runner Session 保存模型所需的完整 event/state/summary，两者职责不同。
+企业微信租户调用官方 Redis Session Service，key prefix 含 tenant；飞书租户调用 PostgreSQL Session Service。tRPC-Agent-Go 的 PostgreSQL 表统一使用 `runner_` 前缀，避免与平台控制面的 `session_events` 同名冲突；Runner 的 app name 继续包含 tenant。两者都由 session lease 串行更新，因此 Worker 可水平扩缩。平台自己的 `sessions/session_events` 表保存控制面可审计的用户/助手事件，Runner Session 保存模型所需的完整 event/state/summary，两者职责不同。
 
 Qdrant 与 MinIO 在首版做真实隔离读写而非完整 RAG。Qdrant 为每个 Backend Profile namespace 建独立 collection，payload 再写入 `tenant_id` 并在 search filter 中强制匹配；固定四维 smoke 向量覆盖 upsert/search/delete。MinIO 使用统一 bucket 和 `<namespace>/<logical-key>` 对象键，smoke 覆盖 put/get/checksum/delete。两个演示租户故意使用相同 logical ID/key，仍必须互不可见。
 
