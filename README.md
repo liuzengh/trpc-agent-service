@@ -14,7 +14,7 @@
 
 请设计一个基于 tRPC-Agent-Go 的多租户节点化 Agent 部署平台。平台需要支持多个租户创建和部署自己的 Agent，每个租户可以绑定不同 IM 通道、选择不同数据后端、配置不同工具权限和知识库，并允许多个 Agent 节点水平扩展。系统需要考虑跨节点会话路由、数据同步、后端适配、IM 消息接入、监控审计和故障恢复。
 
-本题以架构设计为主，可以包含少量关键 Go 伪代码、接口定义或数据模型示例。不要求实现完整系统，但方案必须足够具体，能指导后续工程落地。
+
 
 ## 具体要求
 
@@ -136,6 +136,20 @@
     |-- web                # 管理 / 对话页面
     `-- workspace          # 工作目录，包含本地、容器等沙箱环境
 ```
+
+## 设计文档
+
+完整设计已拆分到 [`docs`](docs/README.md)，包括：
+
+- [总体架构和系统架构图](docs/architecture.md)
+- [企业微信完整执行时序](docs/sequence.md)
+- [核心数据模型和表结构](docs/data-model.md)
+- [数据同步、一致性和幂等策略](docs/data-consistency.md)
+- [多后端适配方案](docs/backend-adapters.md)
+- [企业微信、微信公众号和 Telegram 接入](docs/im-channels.md)
+- [治理、安全、监控、故障恢复和部署](docs/governance-operations.md)
+- [生产风险清单](docs/risks.md)
+- [代码实施路线和验收映射](docs/implementation-roadmap.md)
 
 ## 快速开始
 
