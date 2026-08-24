@@ -92,6 +92,26 @@ func TestAdapterValidationAndHealth(t *testing.T) {
 	}
 }
 
+func TestFeishuPlainTextRemovesStrongMarkdown(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "single", in: "你的代号是 **FEISHU-B**。", want: "你的代号是 FEISHU-B。"},
+		{name: "multiple", in: "**第一项**和**第二项**", want: "第一项和第二项"},
+		{name: "multiline", in: "**第一行\n第二行**", want: "第一行\n第二行"},
+		{name: "unmatched", in: "2 ** 3", want: "2 ** 3"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := feishuPlainText(test.in); got != test.want {
+				t.Fatalf("feishuPlainText(%q)=%q want=%q", test.in, got, test.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeMessageRejectsMalformedEvents(t *testing.T) {
 	if _, _, err := NormalizeMessage("tenant", "binding", "bot-open-id", nil); err == nil {
 		t.Fatal("nil event should fail")

@@ -126,7 +126,7 @@ func (a *Adapter) Send(ctx context.Context, out channels.OutboundEnvelope) error
 	if api == nil {
 		return errors.New("feishu client is not started")
 	}
-	content, err := json.Marshal(map[string]string{"text": out.Content})
+	content, err := json.Marshal(map[string]string{"text": feishuPlainText(out.Content)})
 	if err != nil {
 		return fmt.Errorf("encode feishu text: %w", err)
 	}
@@ -144,6 +144,25 @@ func (a *Adapter) Send(ctx context.Context, out channels.OutboundEnvelope) error
 		return fmt.Errorf("feishu reply rejected: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+// feishuPlainText removes formatting markers that Feishu's text message type
+// displays literally. The adapter intentionally keeps using text replies so
+// quoted replies retain their native chat appearance; richer Markdown output
+// would require a different message type such as an interactive card.
+func feishuPlainText(content string) string {
+	for {
+		start := strings.Index(content, "**")
+		if start < 0 {
+			return content
+		}
+		remainder := content[start+2:]
+		end := strings.Index(remainder, "**")
+		if end < 0 {
+			return content
+		}
+		content = content[:start] + remainder[:end] + remainder[end+2:]
+	}
 }
 
 func (a *Adapter) Health() channels.ChannelHealth {
