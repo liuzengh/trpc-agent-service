@@ -1,0 +1,72 @@
+http_addr: 0.0.0.0:8080
+database:
+  postgres_dsn: postgres://trpc:trpc@postgres:5432/trpc_agent?sslmode=disable
+  redis_addr: redis:6379
+  queue_name: trpc:agent:inbound
+  consumer_group: trpc-agent-workers
+external_backends:
+  qdrant_url: http://qdrant:6333
+  minio_endpoint: minio:9000
+  minio_access_key_ref: env:MINIO_ACCESS_KEY
+  minio_secret_key_ref: env:MINIO_SECRET_KEY
+  minio_bucket: trpc-agent-artifacts
+  minio_secure: false
+model_defaults:
+  provider: deepseek
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
+  api_key_ref: fileenv:DEEPSEEK_KEY_FILE
+  timeout: 45s
+tenants:
+  - id: tenant_wecom_demo
+    name: 企业微信演示租户
+    enabled: true
+    agent:
+      id: assistant
+      version: 0.1.0
+      instruction: 你是企业微信中的多租户智能助手。需要实时信息时优先使用工具，不得泄露其他租户的数据。
+      tool_allowlist: [get_server_time]
+    backend:
+      session: redis
+      memory: redis
+      knowledge: qdrant
+      artifact: s3
+      namespace: tenant_wecom_demo
+    budget:
+      max_concurrent: 4
+      max_input_tokens: 8192
+      max_output_tokens: 1024
+      daily_cost_usd: 5
+      input_cost_per_million_usd: 1
+      output_cost_per_million_usd: 2
+    channels:
+      - id: wecom-primary
+        type: wecom
+        enabled: true
+        credential_ref: fileenv:WECOM_CREDENTIAL_FILE
+  - id: tenant_feishu_demo
+    name: 飞书演示租户
+    enabled: true
+    agent:
+      id: assistant
+      version: 0.1.0
+      instruction: 你是飞书中的多租户智能助手。群聊只响应明确提及机器人的消息，不得泄露其他租户的数据。
+      tool_allowlist: [get_server_time]
+    backend:
+      session: postgres
+      memory: postgres
+      knowledge: qdrant
+      artifact: s3
+      namespace: tenant_feishu_demo
+    budget:
+      max_concurrent: 4
+      max_input_tokens: 8192
+      max_output_tokens: 1024
+      daily_cost_usd: 5
+      input_cost_per_million_usd: 1
+      output_cost_per_million_usd: 2
+    channels:
+      - id: feishu-primary
+        type: feishu
+        enabled: true
+        credential_ref: fileenv:FEISHU_CREDENTIAL_FILE

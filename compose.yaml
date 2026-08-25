@@ -1,0 +1,81 @@
+name: trpc-agent-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: trpc_agent
+      POSTGRES_USER: trpc
+      POSTGRES_PASSWORD: trpc
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trpc -d trpc_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.4
+    ports: ["127.0.0.1:6333:6333"]
+    volumes: ["qdrant-data:/qdrant/storage"]
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+    volumes: ["minio-data:/data"]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.68.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports: ["127.0.0.1:16686:16686"]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.131.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes: ["./configs/otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
+    ports: ["127.0.0.1:4317:4317"]
+    depends_on: [jaeger]
+
+  platform:
+    profiles: ["platform"]
+    build: .
+    command: ["serve", "--config", "/app/configs/container.yaml", "--role", "all"]
+    environment:
+      WECOM_CREDENTIAL_FILE: /run/secrets/wecom.txt
+      WECOM_CREDENTIAL_ORDER: ${WECOM_CREDENTIAL_ORDER:-botid_secret}
+      FEISHU_CREDENTIAL_FILE: /run/secrets/feishu.txt
+      DEEPSEEK_KEY_FILE: /run/secrets/deepseek.txt
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    volumes:
+      - "${WECOM_CREDENTIAL_FILE:-./secrets/wecom.txt}:/run/secrets/wecom.txt:ro"
+      - "${FEISHU_CREDENTIAL_FILE:-./secrets/feishu.txt}:/run/secrets/feishu.txt:ro"
+      - "${DEEPSEEK_KEY_FILE:-./secrets/deepseek.txt}:/run/secrets/deepseek.txt:ro"
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+volumes:
+  postgres-data:
+  redis-data:
+  qdrant-data:
+  minio-data:

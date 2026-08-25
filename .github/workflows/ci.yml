@@ -1,0 +1,89 @@
+name: ci
+
+on:
+  push:
+    branches: [main, feat/multitenant-im-platform]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: trpc_agent
+          POSTGRES_USER: trpc
+          POSTGRES_PASSWORD: trpc
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trpc -d trpc_agent"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+    env:
+      TEST_POSTGRES_DSN: postgres://trpc:trpc@127.0.0.1:5432/trpc_agent?sslmode=disable
+      TEST_REDIS_ADDR: 127.0.0.1:6379
+      TEST_QDRANT_URL: http://127.0.0.1:6333
+      TEST_MINIO_ENDPOINT: 127.0.0.1:9000
+      TEST_MINIO_ACCESS_KEY: minioadmin
+      TEST_MINIO_SECRET_KEY: minioadmin
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache: true
+
+      - name: Start Qdrant and MinIO
+        run: |
+          docker run -d --name qdrant -p 6333:6333 qdrant/qdrant:v1.15.4
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2025-07-23T15-54-02Z server /data
+          for i in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:6333/readyz >/dev/null && \
+              curl -fsS http://127.0.0.1:9000/minio/health/ready >/dev/null && exit 0
+            sleep 2
+          done
+          docker logs qdrant
+          docker logs minio
+          exit 1
+
+      - name: Formatting
+        run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))"
+
+      - name: Vet and staticcheck
+        run: |
+          go vet ./...
+          go install honnef.co/go/tools/cmd/staticcheck@v0.5.1
+          staticcheck ./...
+
+      - name: Race and integration tests
+        run: go test -race ./...
+
+      - name: Coverage gate
+        run: bash ./coverage.sh
+
+      - name: Build binary and image
+        run: |
+          go build ./cmd/trpc-service
+          docker build -t trpc-agent-service:test .
+
+      - name: Secret scan
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.24.3 \
+            detect --source=/repo --no-banner --redact
