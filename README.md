@@ -92,6 +92,16 @@
 6. 必须列出至少 8 个生产风险和缓解措施。
 7. 方案需要明确哪些能力可直接复用 tRPC-Agent-Go，哪些需要新增平台层模块。
 
+## 设计方案
+
+完整方案文档见 [`docs/design.md`](docs/design.md)，覆盖多租户模型、节点化部署、数据同步与多后端、
+IM 接入、核心时序、数据模型、治理监控、故障恢复、测试计划与风险清单。分章索引见
+[`docs/README.md`](docs/README.md)。
+
+核心结论：以 `AppName = "t:<tenant_id>/<app_id>"` 作为唯一隔离维度复用框架既有分键；
+Worker 不依赖网络级 sticky session，靠共享 Session/Memory 后端加会话租约保证同会话串行；
+存储按租户惰性装配，切换后端不改 Worker 代码；治理与审计以 `plugin.Plugin` 注入 Runner。
+
 ## 可直接复用的 tRPC-Agent-Go 能力对照
 
 | 平台需求 | 可复用的框架能力 | 需要新增的平台层 |
