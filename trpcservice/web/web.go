@@ -1,2 +1,2 @@
-// Package web serves admin and chat pages for the Agent platform.
+// Package web exposes the HTTP API for the Agent platform.
 package web

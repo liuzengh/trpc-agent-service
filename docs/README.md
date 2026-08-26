@@ -4,6 +4,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [getting-started.md](getting-started.md) | 从 `POST /chat` 开始认识 Message、Runner、Event 和 Session |
 | [architecture.md](architecture.md) | 总体架构、组件职责、节点拓扑、租户隔离和框架复用边界 |
 | [sequence.md](sequence.md) | 企业微信消息进入平台后的完整执行时序，以及取消和故障处理 |
 | [data-model.md](data-model.md) | 控制面、运行面核心表结构和索引设计 |
@@ -16,7 +17,7 @@
 
 ## 推荐阅读顺序
 
-第一次了解方案时，先读总体架构和核心时序，再看数据模型及一致性设计。准备编码时，从实施路线开始，按其中的里程碑逐步完成。准备上线时，重点复核治理运维和风险清单。
+第一次接触 Agent 框架时，从上手指南开始，先运行两轮对话。理解 Message、Runner、Event 和 Session 后，再读总体架构和核心时序。准备编码时，从实施路线开始，按其中的里程碑逐步完成。准备上线时，重点复核治理运维和风险清单。
 
 ## 文档约定
 

@@ -141,6 +141,7 @@
 
 完整设计已拆分到 [`docs`](docs/README.md)，包括：
 
+- [从一个可运行 Agent 开始](docs/getting-started.md)
 - [总体架构和系统架构图](docs/architecture.md)
 - [企业微信完整执行时序](docs/sequence.md)
 - [核心数据模型和表结构](docs/data-model.md)
@@ -160,6 +161,41 @@ cd trpc-agent-service
 ./build.sh
 ./start.sh
 ```
+
+当前仓库包含一个不需要 API Key 的教学 Agent。发送第一轮消息：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"alice","session_id":"demo","message":"我叫小明。"}'
+```
+
+保持相同的 `user_id` 和 `session_id` 再问：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"alice","session_id":"demo","message":"我叫什么？"}'
+```
+
+切换到真实 OpenAI-compatible 模型：
+
+```bash
+cp .env.example .env
+```
+
+然后编辑 `.env`：
+
+```dotenv
+TRPC_AGENT_MODEL_PROVIDER=openai
+TRPC_AGENT_MODEL_NAME="你的模型 ID"
+OPENAI_API_KEY="你的 API Key"
+
+# 兼容服务可额外设置：
+OPENAI_BASE_URL="https://your-provider.example/v1"
+```
+
+详细说明见 [从一个可运行 Agent 开始](docs/getting-started.md)。
 
 停止服务：
 
