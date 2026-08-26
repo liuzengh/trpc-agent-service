@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 )
@@ -27,6 +28,8 @@ type ChatService interface {
 		sessionID string,
 		text string,
 	) (agentservice.ChatResult, error)
+
+	Ready(ctx context.Context) error
 }
 
 // Handler serves the tutorial HTTP API.
@@ -43,8 +46,29 @@ func NewHandler(chatService ChatService) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.handleHealth)
+	mux.HandleFunc("/readyz", h.handleReady)
 	mux.HandleFunc("/chat", h.handleChat)
 	return mux
+}
+
+func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if h.chatService == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "chat service is unavailable"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := h.chatService.Ready(ctx); err != nil {
+		log.Printf("readiness check failed: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "service is not ready"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 type chatRequest struct {

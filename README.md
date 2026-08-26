@@ -195,7 +195,28 @@ OPENAI_API_KEY="你的 API Key"
 OPENAI_BASE_URL="https://your-provider.example/v1"
 ```
 
-详细说明见 [从一个可运行 Agent 开始](docs/getting-started.md)。
+使用 Redis 保存 Session：
+
+```bash
+docker compose up -d redis
+```
+
+编辑 `.env`：
+
+```dotenv
+TRPC_AGENT_SESSION_BACKEND=redis
+REDIS_URL=redis://127.0.0.1:6379/0
+REDIS_KEY_PREFIX=trpc-agent-service
+TRPC_AGENT_SESSION_TTL=0s
+```
+
+依赖就绪检查：
+
+```bash
+curl -sS http://127.0.0.1:8080/readyz
+```
+
+Redis 接入后的启动装配、首轮 Session 创建、历史恢复、模型消息构造和 Event 回写链路，见 [Redis Session 接入后的运行链路](docs/getting-started.md#10-redis-session-接入后的运行链路)。
 
 停止服务：
 

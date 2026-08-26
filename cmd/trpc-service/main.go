@@ -15,6 +15,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 )
 
@@ -56,8 +57,23 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("build model: %w", err)
 	}
-	runtime, err := agentservice.NewRuntime(selectedModel, modelConfig.Stream)
+	sessionConfig, err := config.LoadSessionConfigFromEnv()
 	if err != nil {
+		return fmt.Errorf("load session config: %w", err)
+	}
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
+	sessionService, err := platformstorage.NewSessionService(startupCtx, sessionConfig)
+	cancelStartup()
+	if err != nil {
+		return fmt.Errorf("build session service: %w", err)
+	}
+	runtime, err := agentservice.NewRuntimeWithSession(
+		selectedModel,
+		sessionService,
+		modelConfig.Stream,
+	)
+	if err != nil {
+		_ = sessionService.Close()
 		return fmt.Errorf("create agent runtime: %w", err)
 	}
 	fmt.Printf(
@@ -65,6 +81,11 @@ func run() error {
 		modelConfig.Provider,
 		selectedModel.Info().Name,
 		modelConfig.Stream,
+	)
+	fmt.Printf(
+		"session backend=%s ttl=%s\n",
+		sessionConfig.Backend,
+		sessionConfig.TTL,
 	)
 	fmt.Printf("tutorial chat server listening on %s\n", listenAddr)
 	defer func() {

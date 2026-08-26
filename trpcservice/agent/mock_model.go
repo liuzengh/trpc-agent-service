@@ -134,5 +134,11 @@ func extractName(message string) string {
 	if len(matches) != 2 {
 		return ""
 	}
-	return matches[1]
+	name := matches[1]
+	for _, invalidPrefix := range []string{"什么", "啥", "谁"} {
+		if strings.HasPrefix(name, invalidPrefix) {
+			return ""
+		}
+	}
+	return name
 }

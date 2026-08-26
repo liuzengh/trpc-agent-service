@@ -48,6 +48,19 @@ func TestRuntimeRemembersNameWithinSession(t *testing.T) {
 	if second.RequestID == first.RequestID {
 		t.Fatal("two turns unexpectedly share one request ID")
 	}
+
+	third, err := runtime.Chat(
+		context.Background(),
+		"alice",
+		"getting-started",
+		"我叫什么？",
+	)
+	if err != nil {
+		t.Fatalf("third chat turn: %v", err)
+	}
+	if !strings.Contains(third.Reply, "你叫小明") {
+		t.Fatalf("third reply %q treated the previous question as a name", third.Reply)
+	}
 }
 
 func TestRuntimeSeparatesSessions(t *testing.T) {
@@ -117,5 +130,28 @@ func TestRuntimeValidatesInput(t *testing.T) {
 func TestNewRuntimeRequiresModel(t *testing.T) {
 	if _, err := NewRuntime(nil, false); err == nil {
 		t.Fatal("expected nil model error")
+	}
+}
+
+func TestNewRuntimeWithSessionRequiresSessionService(t *testing.T) {
+	if _, err := NewRuntimeWithSession(NewTutorialModel(), nil, false); err == nil {
+		t.Fatal("expected nil session service error")
+	}
+}
+
+func TestRuntimeReady(t *testing.T) {
+	runtime := NewDemoRuntime()
+	t.Cleanup(func() {
+		if err := runtime.Close(); err != nil {
+			t.Fatalf("close runtime: %v", err)
+		}
+	})
+	if err := runtime.Ready(context.Background()); err != nil {
+		t.Fatalf("runtime readiness: %v", err)
+	}
+
+	var nilRuntime *Runtime
+	if err := nilRuntime.Ready(context.Background()); err == nil {
+		t.Fatal("expected nil runtime readiness error")
 	}
 }

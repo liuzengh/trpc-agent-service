@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,10 +15,15 @@ import (
 type fakeChatService struct {
 	result agentservice.ChatResult
 	err    error
+	ready  error
 
 	userID    string
 	sessionID string
 	message   string
+}
+
+func (f *fakeChatService) Ready(context.Context) error {
+	return f.ready
 }
 
 func (f *fakeChatService) Chat(
@@ -108,6 +114,30 @@ func TestHandlerHealth(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandlerReadiness(t *testing.T) {
+	handler := NewHandler(&fakeChatService{})
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandlerReadinessFailure(t *testing.T) {
+	handler := NewHandler(&fakeChatService{ready: errors.New("Redis is unavailable")})
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }

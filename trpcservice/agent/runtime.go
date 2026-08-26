@@ -27,7 +27,7 @@ type ChatResult struct {
 	EventCount int
 }
 
-// Runtime owns the Agent Runner and its in-memory Session service.
+// Runtime owns the Agent Runner and its configured Session service.
 type Runtime struct {
 	runner         runner.Runner
 	sessionService session.Service
@@ -40,13 +40,35 @@ type Runtime struct {
 	chatMu sync.Mutex
 }
 
-// NewRuntime creates an LLMAgent with the selected model and an in-memory
-// Session service.
+// NewRuntime creates an LLMAgent with the selected model and a default
+// in-memory Session service.
 func NewRuntime(selectedModel model.Model, stream bool) (*Runtime, error) {
+	sessionService := inmemory.NewSessionService()
+	runtime, err := NewRuntimeWithSession(
+		selectedModel,
+		sessionService,
+		stream,
+	)
+	if err != nil {
+		_ = sessionService.Close()
+		return nil, err
+	}
+	return runtime, nil
+}
+
+// NewRuntimeWithSession creates an LLMAgent with a caller-provided Session
+// service. Runtime takes ownership of sessionService after a successful call.
+func NewRuntimeWithSession(
+	selectedModel model.Model,
+	sessionService session.Service,
+	stream bool,
+) (*Runtime, error) {
 	if selectedModel == nil {
 		return nil, errors.New("model is required")
 	}
-	sessionService := inmemory.NewSessionService()
+	if sessionService == nil {
+		return nil, errors.New("session service is required")
+	}
 	agentInstance := llmagent.New(
 		tutorialAgentName,
 		llmagent.WithModel(selectedModel),
@@ -118,6 +140,17 @@ func (r *Runtime) Chat(
 		return ChatResult{}, runErr
 	}
 	return result, nil
+}
+
+// Ready checks whether the configured Session service is reachable.
+func (r *Runtime) Ready(ctx context.Context) error {
+	if r == nil || r.sessionService == nil {
+		return errors.New("session service is not initialized")
+	}
+	if _, err := r.sessionService.ListAppStates(ctx, tutorialAppName); err != nil {
+		return fmt.Errorf("session service is not ready: %w", err)
+	}
+	return nil
 }
 
 func collectChatResult(
