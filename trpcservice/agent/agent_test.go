@@ -10,6 +10,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	frameworkevent "trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 type fakeProvider struct {
@@ -72,6 +73,25 @@ func validSpec() AgentSpec {
 
 func validInput() AgentInput {
 	return AgentInput{TenantContext: validContext(), Agent: validSpec(), History: []Message{{ID: "h1", Role: "user", Content: "previous"}}, Input: Message{ID: "message-a", Role: "user", Content: "hello"}}
+}
+
+func runnerCompletionEvent(errType string) *frameworkevent.Event {
+	return runnerCompletionEventWithCode(errType, "")
+}
+
+func runnerCompletionEventWithCode(errType, code string) *frameworkevent.Event {
+	response := &frameworkevent.Event{Response: &model.Response{Done: true, Object: model.ObjectTypeRunnerCompletion}}
+	if errType != "" {
+		response.Response.Error = &model.ResponseError{Type: errType, Message: "sensitive provider body", Code: stringPointer(code)}
+	}
+	return response
+}
+
+func stringPointer(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func TestFactoryValidatesTenantBoundary(t *testing.T) {
@@ -187,15 +207,16 @@ func TestDrainEventsTimesOutWithoutClosingChannel(t *testing.T) {
 }
 
 func TestDrainEventsKeepsOrderedEvents(t *testing.T) {
-	events := make(chan *frameworkevent.Event, 2)
+	events := make(chan *frameworkevent.Event, 3)
 	events <- &frameworkevent.Event{Author: "user"}
 	events <- &frameworkevent.Event{Author: "assistant"}
+	events <- runnerCompletionEvent("")
 	close(events)
 	result, err := drainEvents(context.Background(), events, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Events) != 2 || result.Events[0].Sequence != 1 || result.Events[1].Sequence != 2 {
+	if len(result.Events) != 3 || result.Events[0].Sequence != 1 || result.Events[1].Sequence != 2 || result.Events[2].Sequence != 3 {
 		t.Fatalf("unexpected event order: %+v", result.Events)
 	}
 }

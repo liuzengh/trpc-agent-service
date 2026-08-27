@@ -131,6 +131,7 @@ type OutboxMessage struct {
 	ID          string
 	Kind        string
 	AggregateID string
+	DedupKey    string
 	Payload     []byte
 	Status      OutboxStatus
 	Attempt     int

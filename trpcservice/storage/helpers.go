@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -28,7 +29,69 @@ func ValidateDedupKey(k DedupKey) error {
 
 func validateDedupKey(k DedupKey) error { return ValidateDedupKey(k) }
 
-const maxOutboxPayloadBytes = 1 << 20
+const (
+	MaxOutboxPayloadBytes     = 1 << 20
+	DefaultOutboxLockDuration = time.Minute
+	DefaultOutboxBatchSize    = 100
+	maxOutboxPayloadBytes     = MaxOutboxPayloadBytes
+)
+
+func ValidateOutboxMessage(value OutboxMessage) error {
+	if err := validateOutboxText("tenant_id", value.TenantID, 128); err != nil {
+		return err
+	}
+	if err := validateOutboxText("outbox_id", value.ID, 256); err != nil {
+		return err
+	}
+	if err := validateOutboxText("kind", value.Kind, 128); err != nil {
+		return err
+	}
+	if err := validateOutboxText("aggregate_id", value.AggregateID, 256); err != nil {
+		return err
+	}
+	if value.DedupKey != "" {
+		if err := validateOutboxText("dedup_key", value.DedupKey, 256); err != nil {
+			return err
+		}
+	}
+	if value.Status != "" && value.Status != OutboxPending {
+		return fmt.Errorf("%w: new outbox messages must be pending", ErrInvalidArgument)
+	}
+	if value.Attempt != 0 && value.Attempt != 1 {
+		return fmt.Errorf("%w: initial outbox attempt must be one", ErrInvalidArgument)
+	}
+	if len(value.Payload) > MaxOutboxPayloadBytes {
+		return fmt.Errorf("%w: outbox payload is too large", ErrInvalidArgument)
+	}
+	if len(value.Payload) > 0 && !json.Valid(value.Payload) {
+		return fmt.Errorf("%w: outbox payload must be valid JSON", ErrInvalidArgument)
+	}
+	return nil
+}
+
+func ValidateOutboxFailureCode(value string) error {
+	if value == "" || len(value) > 64 || strings.TrimSpace(value) != value {
+		return fmt.Errorf("%w: failure code must be a short stable token", ErrUnsafeFailureCode)
+	}
+	for _, r := range value {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.') {
+			return fmt.Errorf("%w: failure code must be a short stable token", ErrUnsafeFailureCode)
+		}
+	}
+	return nil
+}
+
+func validateOutboxText(name, value string, maxBytes int) error {
+	if value == "" || len(value) > maxBytes || strings.TrimSpace(value) != value {
+		return fmt.Errorf("%w: invalid %s", ErrInvalidArgument, name)
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%w: invalid %s", ErrInvalidArgument, name)
+		}
+	}
+	return nil
+}
 
 func outboxKey(tenantID, id string) string { return tenantID + "\x00" + id }
 

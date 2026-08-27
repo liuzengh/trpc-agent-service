@@ -33,12 +33,13 @@ var defaultFrameworkRunnerFactory frameworkRunnerFactory = newFrameworkRunner
 var defaultToolFrameworkRunnerFactory frameworkRunnerFactoryWithDeps = newFrameworkRunnerWithDeps
 
 type execution struct {
-	events                 <-chan *frameworkevent.Event
-	done                   <-chan struct{}
-	pumpCancel             context.CancelFunc
-	frameworkErr           error
-	pumpCompleted          atomic.Bool
-	frameworkChannelClosed atomic.Bool
+	events                      <-chan *frameworkevent.Event
+	done                        <-chan struct{}
+	pumpCancel                  context.CancelFunc
+	frameworkErr                error
+	frameworkCompletionObserved atomic.Bool
+	pumpCompleted               atomic.Bool
+	frameworkChannelClosed      atomic.Bool
 }
 
 func newExecution(events <-chan *frameworkevent.Event, runErr error) *execution {
@@ -183,8 +184,8 @@ func (r *agentRuntimeImpl) Run(ctx context.Context, input AgentInput) (result Ag
 	if drainErr != nil {
 		return result, drainErr
 	}
-	if !exec.pumpCompleted.Load() || !exec.frameworkChannelClosed.Load() {
-		return result, combineExecutionErrors(exec, fmt.Errorf("%w: event pump did not observe framework completion", ErrProducerIncomplete))
+	if !exec.frameworkCompletionObserved.Load() {
+		return result, combineExecutionErrors(exec, fmt.Errorf("%w: runner completion event was not observed", ErrProducerIncomplete))
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return result, ctxErr
@@ -280,11 +281,15 @@ func drainExecution(ctx context.Context, exec *execution, drainTimeout, stopTime
 		select {
 		case eventValue, ok := <-exec.events:
 			if !ok {
-				if !exec.waitPump(stopTimeout) || !exec.frameworkChannelClosed.Load() {
+				pumpDone := exec.waitPump(stopTimeout)
+				if !pumpDone || !exec.frameworkChannelClosed.Load() {
 					return result, combineExecutionErrors(exec, cancelErr, ErrProducerIncomplete)
 				}
 				if cancelErr != nil {
 					return result, combineExecutionErrors(exec, cancelErr)
+				}
+				if !exec.frameworkCompletionObserved.Load() {
+					return result, combineExecutionErrors(exec, ErrProducerIncomplete)
 				}
 				return result, nil
 			}
@@ -292,10 +297,16 @@ func drainExecution(ctx context.Context, exec *execution, drainTimeout, stopTime
 				continue
 			}
 			sequence++
+			isCompletion := eventValue.IsRunnerCompletion()
+			duplicateCompletion := isCompletion && exec.frameworkCompletionObserved.Load()
 			converted := convertEvent(sequence, eventValue)
+			if duplicateCompletion {
+				converted.ErrorType = ""
+				delete(converted.Metadata, "error_code")
+			}
 			result.Events = append(result.Events, converted)
 			if eventValue.Response != nil {
-				if eventValue.Response.Error != nil {
+				if eventValue.Response.Error != nil && !duplicateCompletion {
 					result.FinishType = eventValue.Response.Error.Type
 				}
 				if len(eventValue.Response.Choices) > 0 {
@@ -317,6 +328,9 @@ func drainExecution(ctx context.Context, exec *execution, drainTimeout, stopTime
 					result.Usage.InputTokens += int64(eventValue.Response.Usage.PromptTokens)
 					result.Usage.OutputTokens += int64(eventValue.Response.Usage.CompletionTokens)
 				}
+			}
+			if isCompletion && !duplicateCompletion {
+				exec.frameworkCompletionObserved.Store(true)
 			}
 		case <-ctxDone:
 			if !stopped {
@@ -348,8 +362,12 @@ func drainExecution(ctx context.Context, exec *execution, drainTimeout, stopTime
 			}
 		case <-drainC:
 			exec.cancelPump()
-			exec.waitPump(stopTimeout)
-			return result, combineExecutionErrors(exec, cancelErr, fmt.Errorf("%w after %s", ErrDrainTimeout, drainTimeout), incompleteError(exec))
+			pumpDone := exec.waitPump(stopTimeout)
+			incomplete := incompleteError(exec)
+			if !pumpDone || !exec.frameworkChannelClosed.Load() {
+				incomplete = errors.Join(incomplete, ErrProducerIncomplete)
+			}
+			return result, combineExecutionErrors(exec, cancelErr, fmt.Errorf("%w after %s", ErrDrainTimeout, drainTimeout), incomplete)
 		}
 	}
 }
@@ -370,7 +388,7 @@ func combineExecutionErrors(exec *execution, primary ...error) error {
 }
 
 func incompleteError(exec *execution) error {
-	if exec != nil && exec.pumpCompleted.Load() && exec.frameworkChannelClosed.Load() {
+	if exec != nil && exec.frameworkCompletionObserved.Load() {
 		return nil
 	}
 	return ErrProducerIncomplete
@@ -395,6 +413,9 @@ func convertEvent(sequence int64, value *frameworkevent.Event) RunnerEvent {
 		out.ErrorType = ""
 		if value.Response.Error != nil {
 			out.ErrorType = value.Response.Error.Type
+			if value.Response.Error.Code != nil {
+				out.Metadata["error_code"] = *value.Response.Error.Code
+			}
 		}
 		if len(value.Response.Choices) > 0 {
 			choice := value.Response.Choices[0]
@@ -423,7 +444,7 @@ func classifyResultEvents(result AgentResult) error {
 		if eventValue.ErrorType == "" {
 			continue
 		}
-		return fmt.Errorf("%w: %w", ErrProviderFailure, &ProviderResponseError{Type: eventValue.ErrorType, Message: eventValue.ErrorType})
+		return fmt.Errorf("%w: %w", ErrProviderFailure, &ProviderResponseError{Type: eventValue.ErrorType, Code: eventValue.Metadata["error_code"], Message: eventValue.ErrorType})
 	}
 	return nil
 }

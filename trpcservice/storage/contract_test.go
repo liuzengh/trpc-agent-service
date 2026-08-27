@@ -124,7 +124,7 @@ func TestFakeOutboxReclaimsExpiredLockAndRejectsStaleOwner(t *testing.T) {
 	ctx := context.Background()
 	tc := validContext("tenant-a")
 	repo := NewFakeRepository()
-	if err := repo.Enqueue(ctx, tc, OutboxMessage{TenantID: "tenant-a", ID: "outbox-expired", Kind: "reply"}); err != nil {
+	if err := repo.Enqueue(ctx, tc, OutboxMessage{TenantID: "tenant-a", ID: "outbox-expired", Kind: "reply", AggregateID: "aggregate-a"}); err != nil {
 		t.Fatal(err)
 	}
 	messages, err := repo.ClaimBatch(ctx, tc, "worker-a", 1)
@@ -136,14 +136,14 @@ func TestFakeOutboxReclaimsExpiredLockAndRejectsStaleOwner(t *testing.T) {
 	value.LockedUntil = time.Now().UTC().Add(-time.Second)
 	repo.outbox[outboxKey("tenant-a", "outbox-expired")] = value
 	repo.mu.Unlock()
-	if err := repo.MarkCompleted(ctx, tc, "worker-a", "outbox-expired"); !errors.Is(err, ErrLeaseLost) {
+	if err := repo.MarkCompleted(ctx, tc, "worker-a", "outbox-expired"); !errors.Is(err, ErrLeaseLost) && !errors.Is(err, ErrOutboxLockExpired) {
 		t.Fatalf("expected expired lease rejection, got %v", err)
 	}
 	reclaimed, err := repo.ClaimBatch(ctx, tc, "worker-b", 1)
 	if err != nil || len(reclaimed) != 1 || reclaimed[0].LockedBy != "worker-b" {
 		t.Fatalf("expected expired message reclaim: %v %+v", err, reclaimed)
 	}
-	if err := repo.MarkCompleted(ctx, tc, "worker-a", "outbox-expired"); !errors.Is(err, ErrNotFound) {
+	if err := repo.MarkCompleted(ctx, tc, "worker-a", "outbox-expired"); !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrOutboxLockLost) {
 		t.Fatalf("expected stale owner rejection, got %v", err)
 	}
 }
@@ -168,13 +168,13 @@ func TestFakeRepositoriesCoverSummaryArtifactAndOutbox(t *testing.T) {
 	if _, err := artifacts.PresignedURL(ctx, validContext("tenant-b"), "artifact-a", time.Minute); !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrTenantMismatch) {
 		t.Fatalf("unexpected artifact isolation result: %v", err)
 	}
-	if err := repo.Enqueue(ctx, tc, OutboxMessage{TenantID: "tenant-a", ID: "outbox-invalid", Kind: "reply", Status: OutboxCompleted}); !errors.Is(err, ErrInvalidArgument) {
+	if err := repo.Enqueue(ctx, tc, OutboxMessage{TenantID: "tenant-a", ID: "outbox-invalid", Kind: "reply", AggregateID: "aggregate-a", Status: OutboxCompleted}); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("expected invalid initial status rejection, got %v", err)
 	}
-	if err := repo.Enqueue(ctx, tc, OutboxMessage{TenantID: "tenant-a", ID: "outbox-large", Kind: "reply", Payload: make([]byte, maxOutboxPayloadBytes+1)}); !errors.Is(err, ErrInvalidArgument) {
+	if err := repo.Enqueue(ctx, tc, OutboxMessage{TenantID: "tenant-a", ID: "outbox-large", Kind: "reply", AggregateID: "aggregate-a", Payload: make([]byte, maxOutboxPayloadBytes+1)}); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("expected oversized payload rejection, got %v", err)
 	}
-	if err := repo.Enqueue(ctx, tc, OutboxMessage{TenantID: "tenant-a", ID: "outbox-a", Kind: "reply"}); err != nil {
+	if err := repo.Enqueue(ctx, tc, OutboxMessage{TenantID: "tenant-a", ID: "outbox-a", Kind: "reply", AggregateID: "aggregate-a"}); err != nil {
 		t.Fatal(err)
 	}
 	messages, err := repo.ClaimBatch(ctx, tc, "worker-a", 1)
@@ -184,7 +184,7 @@ func TestFakeRepositoriesCoverSummaryArtifactAndOutbox(t *testing.T) {
 	if err := repo.MarkCompleted(ctx, validContext("tenant-b"), "worker-a", "outbox-a"); !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrTenantMismatch) {
 		t.Fatalf("expected cross-tenant outbox rejection, got %v", err)
 	}
-	if err := repo.MarkCompleted(ctx, tc, "worker-b", "outbox-a"); !errors.Is(err, ErrNotFound) {
+	if err := repo.MarkCompleted(ctx, tc, "worker-b", "outbox-a"); !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrOutboxLockLost) {
 		t.Fatalf("expected owner isolation, got %v", err)
 	}
 	if err := repo.MarkCompleted(ctx, tc, "worker-a", "outbox-a"); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -884,6 +885,10 @@ func TestPostgreSQLMigrations(t *testing.T) {
 		t.Fatal("cannot locate repository root")
 	}
 	source := os.DirFS(filepath.Join(filepath.Dir(file), "../../../migrations"))
+	loaded, err := loadMigrations(source)
+	if err != nil || len(loaded) < 1 {
+		t.Fatalf("load current migrations: %v", err)
+	}
 	migrator, err := NewMigratorWithPool(pool, cfg, source)
 	if err != nil {
 		t.Fatal(err)
@@ -891,7 +896,7 @@ func TestPostgreSQLMigrations(t *testing.T) {
 	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cleanupCancel()
-		if err := migrator.Down(cleanupCtx, 2); err != nil {
+		if err := migrator.Down(cleanupCtx, len(loaded)); err != nil {
 			t.Logf("test database cleanup failed: %v", err)
 		}
 	}()
@@ -900,15 +905,11 @@ func TestPostgreSQLMigrations(t *testing.T) {
 		t.Fatal(err)
 	}
 	current, err := migrator.Current(ctx)
-	if err != nil || current.Version != 2 {
+	if err != nil || current.Version != loaded[len(loaded)-1].version {
 		t.Fatalf("unexpected current migration: %+v, %v", current, err)
 	}
 	if err := migrator.Up(ctx); err != nil {
 		t.Fatalf("repeat Up failed: %v", err)
-	}
-	loaded, err := loadMigrations(source)
-	if err != nil || len(loaded) < 1 {
-		t.Fatalf("load current migrations: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `DELETE FROM schema_migration WHERE version = 1`); err != nil {
 		t.Fatal(err)
@@ -923,6 +924,18 @@ func TestPostgreSQLMigrations(t *testing.T) {
 	checksumSource := fstest.MapFS{
 		"000001_changed.up.sql":   {Data: []byte("SELECT 1")},
 		"000001_changed.down.sql": {Data: []byte("SELECT 1")},
+	}
+	for _, name := range []string{
+		"000002_coordination.up.sql", "000002_coordination.down.sql",
+		"000003_execution_result.up.sql", "000003_execution_result.down.sql",
+		"000004_job_queue.up.sql", "000004_job_queue.down.sql",
+		"000005_outbox_repository.up.sql", "000005_outbox_repository.down.sql",
+	} {
+		data, readErr := fs.ReadFile(source, name)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		checksumSource[name] = &fstest.MapFile{Data: data}
 	}
 	checksumMigrator, err := NewMigratorWithPool(pool, cfg, checksumSource)
 	if err != nil {
@@ -942,10 +955,22 @@ func TestPostgreSQLMigrations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	failedSource := fstest.MapFS{
-		"000003_broken.up.sql":   {Data: []byte("CREATE TABLE migration_failure_probe (id integer); SELECT * FROM missing_migration_table;")},
-		"000003_broken.down.sql": {Data: []byte("DROP TABLE IF EXISTS migration_failure_probe;")},
+	failedSource := fstest.MapFS{}
+	for _, name := range []string{
+		"000001_initial.up.sql", "000001_initial.down.sql",
+		"000002_coordination.up.sql", "000002_coordination.down.sql",
+		"000003_execution_result.up.sql", "000003_execution_result.down.sql",
+		"000004_job_queue.up.sql", "000004_job_queue.down.sql",
+		"000005_outbox_repository.up.sql", "000005_outbox_repository.down.sql",
+	} {
+		data, readErr := fs.ReadFile(source, name)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		failedSource[name] = &fstest.MapFile{Data: data}
 	}
+	failedSource["000006_broken.up.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE migration_failure_probe (id integer); SELECT * FROM missing_migration_table;")}
+	failedSource["000006_broken.down.sql"] = &fstest.MapFile{Data: []byte("DROP TABLE IF EXISTS migration_failure_probe;")}
 	failedMigrator, err := NewMigratorWithPool(pool, cfg, failedSource)
 	if err != nil {
 		t.Fatal(err)
@@ -965,7 +990,7 @@ func TestPostgreSQLMigrations(t *testing.T) {
 	}
 	var failedVersionExists bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS (
-		SELECT 1 FROM schema_migration WHERE version = 3
+		SELECT 1 FROM schema_migration WHERE version = 6
 	)`).Scan(&failedVersionExists); err != nil {
 		t.Fatal(err)
 	}
@@ -1068,7 +1093,7 @@ func TestPostgreSQLMigrations(t *testing.T) {
 		}
 	}
 
-	if err := migrator.Down(ctx, 2); err != nil {
+	if err := migrator.Down(ctx, len(loaded)); err != nil {
 		t.Fatalf("Down failed: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT EXISTS (

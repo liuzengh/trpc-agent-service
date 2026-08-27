@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -336,19 +337,20 @@ func (f *FakeRepository) Enqueue(ctx context.Context, tc tenant.TenantContext, v
 	if err := f.contextOK(ctx, tc); err != nil {
 		return err
 	}
-	if value.TenantID != tc.TenantID || value.ID == "" || value.Kind == "" || len(value.Payload) > maxOutboxPayloadBytes {
-		return ErrInvalidArgument
+	if err := ValidateOutboxMessage(value); err != nil {
+		return err
 	}
-	if value.Status != "" && value.Status != OutboxPending {
-		return fmt.Errorf("%w: new outbox messages must be pending", ErrInvalidArgument)
+	if err := sameTenant(tc.TenantID, value.TenantID); err != nil {
+		return err
+	}
+	if len(value.Payload) == 0 {
+		value.Payload = []byte("{}")
+	} else {
+		value.Payload = append([]byte(nil), value.Payload...)
 	}
 	now := time.Now().UTC()
-	if value.Status == "" {
-		value.Status = OutboxPending
-	}
-	if value.Attempt < 1 {
-		value.Attempt = 1
-	}
+	value.Status = OutboxPending
+	value.Attempt = 1
 	if value.NextAttempt.IsZero() {
 		value.NextAttempt = now
 	}
@@ -358,6 +360,13 @@ func (f *FakeRepository) Enqueue(ctx context.Context, tc tenant.TenantContext, v
 	key := outboxKey(value.TenantID, value.ID)
 	if _, ok := f.outbox[key]; ok {
 		return ErrConflict
+	}
+	if value.DedupKey != "" {
+		for _, existing := range f.outbox {
+			if existing.TenantID == value.TenantID && existing.DedupKey == value.DedupKey {
+				return fmt.Errorf("%w: %w", ErrDedupConflict, ErrConflict)
+			}
+		}
 	}
 	f.outbox[key] = value
 	return nil
@@ -374,18 +383,23 @@ func (f *FakeRepository) ClaimBatch(ctx context.Context, tc tenant.TenantContext
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	result := make([]OutboxMessage, 0, limit)
+	keys := make([]string, 0, len(f.outbox))
 	for key, value := range f.outbox {
+		if value.TenantID == tc.TenantID {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
 		if len(result) == limit {
 			break
 		}
-		if value.TenantID != tc.TenantID {
-			continue
-		}
+		value := f.outbox[key]
 		if ((value.Status == OutboxPending || value.Status == OutboxRetry) && !value.NextAttempt.After(now)) || (value.Status == OutboxProcessing && !value.LockedUntil.After(now)) {
 			if value.Status == OutboxProcessing {
 				value.Attempt++
 			}
-			value.Status, value.LockedBy, value.LockedUntil = OutboxProcessing, workerID, now.Add(time.Minute)
+			value.Status, value.LockedBy, value.LockedUntil = OutboxProcessing, workerID, now.Add(DefaultOutboxLockDuration)
 			value.UpdatedAt = now
 			f.outbox[key] = value
 			result = append(result, value)
@@ -406,11 +420,20 @@ func (f *FakeRepository) updateOutbox(ctx context.Context, tc tenant.TenantConte
 	if !ok {
 		return ErrNotFound
 	}
-	if value.Status != OutboxProcessing || value.LockedBy != workerID {
-		return ErrNotFound
+	if value.Status == OutboxCompleted {
+		return ErrAlreadyCompleted
+	}
+	if value.Status == OutboxDead {
+		return ErrAlreadyDead
+	}
+	if value.Status != OutboxProcessing {
+		return ErrConflict
+	}
+	if value.LockedBy != workerID {
+		return fmt.Errorf("%w: %w", ErrOutboxLockLost, ErrFenceRejected)
 	}
 	if !value.LockedUntil.After(now) {
-		return ErrLeaseLost
+		return fmt.Errorf("%w: %w", ErrOutboxLockExpired, ErrLeaseLost)
 	}
 	if err := mutate(&value); err != nil {
 		return err
@@ -425,6 +448,12 @@ func (f *FakeRepository) MarkCompleted(ctx context.Context, tc tenant.TenantCont
 }
 
 func (f *FakeRepository) MarkRetry(ctx context.Context, tc tenant.TenantContext, workerID, id string, nextAttempt time.Time, errorType string) error {
+	if err := ValidateOutboxFailureCode(errorType); err != nil {
+		return err
+	}
+	if nextAttempt.IsZero() {
+		return ErrInvalidArgument
+	}
 	return f.updateOutbox(ctx, tc, workerID, id, func(value *OutboxMessage) error {
 		value.Status, value.NextAttempt, value.LastError = OutboxRetry, nextAttempt, errorType
 		value.Attempt++
@@ -433,6 +462,9 @@ func (f *FakeRepository) MarkRetry(ctx context.Context, tc tenant.TenantContext,
 }
 
 func (f *FakeRepository) MoveToDLQ(ctx context.Context, tc tenant.TenantContext, workerID, id, reason string) error {
+	if err := ValidateOutboxFailureCode(reason); err != nil {
+		return err
+	}
 	return f.updateOutbox(ctx, tc, workerID, id, func(value *OutboxMessage) error { value.Status, value.LastError = OutboxDead, reason; return nil })
 }
 

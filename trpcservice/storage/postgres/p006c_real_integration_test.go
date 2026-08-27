@@ -556,12 +556,16 @@ func recoveredPoolOr(oldPool, recoveredPool *pgxpool.Pool) *pgxpool.Pool {
 
 func checkMigrationMetadata(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema string) {
 	t.Helper()
+	migrations, err := loadMigrations(os.DirFS(filepath.Join(repoRoot(t), "migrations")))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var count int
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migration").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 2 {
-		t.Fatalf("migration metadata count=%d, expected exactly two successful migrations", count)
+	if count != len(migrations) {
+		t.Fatalf("migration metadata count=%d, expected %d successful migrations", count, len(migrations))
 	}
 }
 
