@@ -25,15 +25,19 @@ const (
 )
 
 const (
-	SenderUnavailableCode      = "sender_unavailable"
-	SenderTimeoutCode          = "sender_timeout"
-	SenderRateLimitedCode      = "sender_rate_limited"
-	SenderInvalidPayloadCode   = "sender_invalid_payload"
-	SenderRejectedCode         = "sender_rejected"
-	DeliveryOutcomeUnknownCode = "delivery_outcome_unknown"
-	RepositoryLockLostCode     = "repository_lock_lost"
-	RepositoryUnavailableCode  = "repository_unavailable"
-	DispatcherShutdownCode     = "dispatcher_shutdown"
+	SenderUnavailableCode        = "sender_unavailable"
+	SenderTimeoutCode            = "sender_timeout"
+	SenderRateLimitedCode        = "sender_rate_limited"
+	SenderInvalidPayloadCode     = "sender_invalid_payload"
+	SenderInvalidDestinationCode = "sender_invalid_destination"
+	SenderUnknownChannelCode     = "sender_unknown_channel"
+	SenderMalformedResponseCode  = "sender_malformed_response"
+	SenderRejectedCode           = "sender_rejected"
+	SenderNotConfiguredCode      = "sender_not_configured"
+	DeliveryOutcomeUnknownCode   = "delivery_outcome_unknown"
+	RepositoryLockLostCode       = "repository_lock_lost"
+	RepositoryUnavailableCode    = "repository_unavailable"
+	DispatcherShutdownCode       = "dispatcher_shutdown"
 )
 
 const (
@@ -184,7 +188,8 @@ func normalizeOutcome(outcome SenderOutcome) SenderOutcome {
 		}
 	case OutcomePermanentFailure:
 		switch outcome.Code {
-		case SenderInvalidPayloadCode, SenderRejectedCode:
+		case SenderInvalidPayloadCode, SenderInvalidDestinationCode, SenderUnknownChannelCode,
+			SenderMalformedResponseCode, SenderNotConfiguredCode, SenderRejectedCode:
 			return SenderOutcome{Class: outcome.Class, Code: outcome.Code}
 		default:
 			return SenderOutcome{Class: outcome.Class, Code: SenderRejectedCode}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/liuzengh/trpc-agent-service/internal/testinfra"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	postgresstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -163,6 +165,35 @@ func stopPostgresDispatcher(t *testing.T, dispatcher *Dispatcher, runDone <-chan
 	}
 	if err := <-runDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error=%v", err)
+	}
+}
+
+func TestPostgresDispatcherClaimsCommittedChannelReply(t *testing.T) {
+	fixture := newPostgresDispatcherFixture(t, 2*time.Second)
+	message := channelOutboxMessage(t, fixture.tc.TenantID)
+	if err := fixture.repo.Enqueue(fixture.ctx, fixture.tc, message); err != nil {
+		t.Fatal(err)
+	}
+	doer := &sequenceHTTPDoer{responses: []sequenceHTTPResponse{{status: http.StatusOK, body: `{"accepted":true}`}}}
+	httpSender, err := channels.NewHTTPSender(channels.HTTPSenderConfig{
+		Registry: channels.DefaultRegistry(), Client: doer,
+		Endpoints: map[string]string{"web": "https://web.invalid/base"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender, err := NewChannelSender(httpSender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, runDone := runPostgresDispatcher(t, fixture, "dispatcher-channel-pg", sender)
+	waitForPostgresStatus(t, fixture, message.ID, storage.OutboxCompleted)
+	stopPostgresDispatcher(t, dispatcher, runDone)
+	doer.mu.Lock()
+	keys := append([]string(nil), doer.keys...)
+	doer.mu.Unlock()
+	if len(keys) != 1 {
+		t.Fatalf("channel-aware PostgreSQL claim sent %d times", len(keys))
 	}
 }
 

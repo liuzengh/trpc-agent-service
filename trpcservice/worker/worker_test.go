@@ -314,7 +314,7 @@ func (s *testSink) Commit(ctx context.Context, commit execution.ExecutionCommit)
 func workerJob(t *testing.T) queue.AgentJob {
 	t.Helper()
 	now := time.Now().UTC()
-	tc := tenant.TenantContext{TenantID: "tenant-worker", AgentAppID: "agent-worker", BindingID: "binding-worker", Channel: "web", SessionID: "session-worker", RequestID: "request-worker", MessageID: "message-worker", TraceID: "trace-worker", ConfigVersion: 1, BackendPolicy: tenant.BackendPolicy{Session: "memory", Memory: "memory", Vector: "none", Object: "none"}}
+	tc := tenant.TenantContext{TenantID: "tenant-worker", AgentAppID: "agent-worker", BindingID: "binding-worker", Channel: "web", ExternalUser: "worker-user", ExternalChat: "worker-chat", SessionID: "session-worker", RequestID: "request-worker", MessageID: "message-worker", TraceID: "trace-worker", ConfigVersion: 1, BackendPolicy: tenant.BackendPolicy{Session: "memory", Memory: "memory", Vector: "none", Object: "none"}}
 	return queue.AgentJob{SchemaVersion: queue.SchemaVersion, JobID: "job-worker", ExecutionID: "execution-worker", Tenant: queue.TenantContextDTOFromContext(tc), Agent: queue.AgentRefDTO{TenantID: tc.TenantID, AgentAppID: tc.AgentAppID, Version: 1}, Message: queue.MessageDTO{ID: tc.MessageID, Role: "user", Content: "hello", CreatedAt: now}, Trace: queue.TraceContextDTO{TraceID: tc.TraceID, RequestID: tc.RequestID, MessageID: tc.MessageID, ExecutionID: "execution-worker"}, CreatedAt: now, Deadline: now.Add(time.Minute), Attempt: 1}
 }
 

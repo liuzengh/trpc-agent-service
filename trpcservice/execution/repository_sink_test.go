@@ -51,7 +51,7 @@ func TestValidateRepositoryCommitRejectsTenantAndFenceMismatch(t *testing.T) {
 
 func validRepositoryCommitForTest() ExecutionCommit {
 	now := time.Now().UTC()
-	tc := tenant.TenantContext{TenantID: "tenant-sink", SessionID: "session-sink", RequestID: "request-sink", MessageID: "message-sink", TraceID: "trace-sink"}
+	tc := tenant.TenantContext{TenantID: "tenant-sink", SessionID: "session-sink", RequestID: "request-sink", MessageID: "message-sink", TraceID: "trace-sink", Channel: "web", ExternalUser: "user-sink"}
 	job := queue.AgentJob{JobID: "job-sink", ExecutionID: "execution-sink", Tenant: queue.TenantContextDTOFromContext(tc)}
 	lease := storage.Lease{TenantID: tc.TenantID, SessionID: tc.SessionID, ResourceID: tc.SessionID, OwnerID: "owner-sink", Epoch: 2, FenceToken: 7, ExpiresAt: now.Add(time.Minute)}
 	return ExecutionCommit{
@@ -75,7 +75,9 @@ func TestAtomicCompletionRequestForIncludesDurableReply(t *testing.T) {
 	if err := json.Unmarshal(request.Outbox.Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.ExecutionID != commit.ExecutionID || payload.ReplyText != commit.Result.Text {
+	if payload.ExecutionID != commit.ExecutionID || payload.ReplyText != commit.Result.Text ||
+		payload.Channel != "web" || payload.DestinationType != "user" || payload.DestinationID != "user-sink" ||
+		payload.SenderRoutingVersion != 1 {
 		t.Fatalf("request reply payload=%+v", payload)
 	}
 }
@@ -104,7 +106,8 @@ func TestBuildReplyOutboxMessageIsStableAndBounded(t *testing.T) {
 	}
 	if payload.SchemaVersion != ReplyOutboxSchemaVersion || payload.TenantID != commit.TenantID ||
 		payload.SessionID != commit.SessionID || payload.JobID != commit.JobID || payload.ExecutionID != commit.ExecutionID ||
-		payload.ReplyText != commit.Result.Text || payload.FinishType != commit.Result.FinishType {
+		payload.Channel != "web" || payload.DestinationType != "user" || payload.DestinationID != "user-sink" ||
+		payload.SenderRoutingVersion != 1 || payload.ReplyText != commit.Result.Text || payload.FinishType != commit.Result.FinishType {
 		t.Fatalf("reply payload identity=%+v", payload)
 	}
 	if string(first.Payload) == "" || containsSensitiveReplyData(first.Payload) {

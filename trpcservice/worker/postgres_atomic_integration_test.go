@@ -76,6 +76,7 @@ func newPostgresAtomicWorkerFixture(t *testing.T) *postgresAtomicWorkerFixture {
 	}
 	tc := tenant.TenantContext{
 		TenantID: "tenant-worker", AgentAppID: "agent-worker", BindingID: "binding-worker", Channel: "web",
+		ExternalUser: "worker-user", ExternalChat: "worker-chat",
 		RequestID: "request-worker", MessageID: "message-worker", TraceID: "trace-worker", ConfigVersion: 1,
 		BackendPolicy: tenant.BackendPolicy{Session: "memory", Memory: "memory", Vector: "none", Object: "none"},
 	}

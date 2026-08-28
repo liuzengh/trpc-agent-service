@@ -7,31 +7,19 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/queue"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 )
 
 const (
-	ReplyOutboxSchemaVersion = 1
-	ReplyOutboxKind          = "agent.reply"
+	ReplyOutboxSchemaVersion = channels.ReplyOutboxSchemaVersion
+	ReplyOutboxKind          = channels.ReplyOutboxKind
 )
 
-// ReplyOutboxPayload is the bounded, stable payload sent to a later delivery
-// adapter. It intentionally contains no prompt, history, provider response,
-// token accounting, authorization material, or arbitrary event metadata.
-type ReplyOutboxPayload struct {
-	SchemaVersion int    `json:"schema_version"`
-	Kind          string `json:"kind"`
-	TenantID      string `json:"tenant_id"`
-	SessionID     string `json:"session_id"`
-	JobID         string `json:"job_id"`
-	ExecutionID   string `json:"execution_id"`
-	RequestID     string `json:"request_id"`
-	MessageID     string `json:"message_id"`
-	TraceID       string `json:"trace_id"`
-	ReplyText     string `json:"reply_text"`
-	FinishType    string `json:"finish_type,omitempty"`
-}
+// ReplyOutboxPayload remains exported from execution for compatibility. The
+// channel package owns the versioned sender-facing contract.
+type ReplyOutboxPayload = channels.ReplyOutboxPayload
 
 // BuildReplyOutboxMessage deterministically maps one successful execution to
 // a durable reply fact. The execution result remains a separate complete fact;
@@ -40,20 +28,28 @@ func BuildReplyOutboxMessage(commit ExecutionCommit) (storage.OutboxMessage, err
 	if err := validateRepositoryCommit(commit); err != nil {
 		return storage.OutboxMessage{}, err
 	}
-	payload := ReplyOutboxPayload{
-		SchemaVersion: ReplyOutboxSchemaVersion,
-		Kind:          ReplyOutboxKind,
-		TenantID:      commit.TenantID,
-		SessionID:     commit.SessionID,
-		JobID:         commit.JobID,
-		ExecutionID:   commit.ExecutionID,
-		RequestID:     commit.TenantContext.RequestID,
-		MessageID:     commit.TenantContext.MessageID,
-		TraceID:       commit.TenantContext.TraceID,
-		ReplyText:     commit.Result.Text,
-		FinishType:    commit.Result.FinishType,
+	routing, err := channels.RoutingFromTenantContext(commit.TenantContext)
+	if err != nil {
+		return storage.OutboxMessage{}, fmt.Errorf("execution: reply routing: %w", err)
 	}
-	encoded, err := json.Marshal(payload)
+	payload := ReplyOutboxPayload{
+		SchemaVersion:        ReplyOutboxSchemaVersion,
+		Kind:                 ReplyOutboxKind,
+		TenantID:             commit.TenantID,
+		SessionID:            commit.SessionID,
+		JobID:                commit.JobID,
+		ExecutionID:          commit.ExecutionID,
+		RequestID:            commit.TenantContext.RequestID,
+		MessageID:            commit.TenantContext.MessageID,
+		TraceID:              commit.TenantContext.TraceID,
+		Channel:              routing.Channel,
+		DestinationType:      routing.DestinationType,
+		DestinationID:        routing.DestinationID,
+		ReplyText:            commit.Result.Text,
+		FinishType:           commit.Result.FinishType,
+		SenderRoutingVersion: channels.SenderRoutingVersion,
+	}
+	encoded, err := channels.EncodeReplyOutboxPayload(payload)
 	if err != nil {
 		return storage.OutboxMessage{}, fmt.Errorf("execution: marshal reply outbox: %w", err)
 	}
