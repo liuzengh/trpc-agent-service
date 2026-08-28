@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -480,6 +482,195 @@ func (f *FakeArtifactRepository) Create(ctx context.Context, tc tenant.TenantCon
 	return f.CreateArtifact(ctx, tc, value)
 }
 
+// FakeAtomicCompletionFault controls failures at the three logical steps. The
+// fake applies no state when any configured step fails, matching the atomic
+// contract without pretending to provide PostgreSQL durability.
+type FakeAtomicCompletionFault struct {
+	Result  error
+	Outbox  error
+	Ack     error
+	Unknown error
+}
+
+// FakeAtomicCompletionCoordinator is a contract-level atomic completion model.
+// It is intentionally separate from FakeRepository because queue delivery
+// state is part of this test seam, not the general business repository.
+type FakeAtomicCompletionCoordinator struct {
+	mu         sync.Mutex
+	results    map[string]ExecutionResultRecord
+	outbox     map[string]OutboxMessage
+	deliveries map[string]string
+	fault      FakeAtomicCompletionFault
+}
+
+func NewFakeAtomicCompletionCoordinator() *FakeAtomicCompletionCoordinator {
+	return &FakeAtomicCompletionCoordinator{
+		results:    make(map[string]ExecutionResultRecord),
+		outbox:     make(map[string]OutboxMessage),
+		deliveries: make(map[string]string),
+	}
+}
+
+func (f *FakeAtomicCompletionCoordinator) SetFault(fault FakeAtomicCompletionFault) {
+	f.mu.Lock()
+	f.fault = fault
+	f.mu.Unlock()
+}
+
+func (f *FakeAtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, request AtomicCompletionRequest) error {
+	if f == nil || ctx == nil {
+		return ErrInvalidArgument
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateFakeAtomicRequest(request); err != nil {
+		return err
+	}
+	request = cloneFakeAtomicRequest(request)
+	resultKey := request.Commit.TenantID + "\x00" + request.Commit.ExecutionID
+	outboxKeyValue := ""
+	if request.Outbox != nil {
+		outboxKeyValue = outboxKey(request.Outbox.TenantID, request.Outbox.ID)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if existing, ok := f.results[resultKey]; ok {
+		if !sameFakeResult(existing, request) {
+			return fmt.Errorf("fake atomic completion: %w", ErrConflict)
+		}
+		if f.deliveries[resultKey] != request.Delivery.DeliveryID {
+			return ErrDeliveryFinished
+		}
+		if request.Outbox != nil {
+			existingOutbox, ok := f.outbox[outboxKeyValue]
+			if !ok || !sameFakeOutbox(existingOutbox, *request.Outbox) {
+				return fmt.Errorf("fake atomic completion: %w", ErrConflict)
+			}
+		}
+		return nil
+	}
+	if fault := f.fault; fault.Result != nil {
+		return fault.Result
+	}
+	if request.Outbox != nil {
+		for key, existing := range f.outbox {
+			if existing.TenantID == request.Outbox.TenantID && existing.DedupKey == request.Outbox.DedupKey {
+				if key != outboxKeyValue || !sameFakeOutbox(existing, *request.Outbox) {
+					return fmt.Errorf("fake atomic completion: %w", ErrConflict)
+				}
+				return fmt.Errorf("fake atomic completion: %w", ErrCompletionPartial)
+			}
+		}
+		if fault := f.fault; fault.Outbox != nil {
+			return fault.Outbox
+		}
+	}
+	if fault := f.fault; fault.Ack != nil {
+		return fault.Ack
+	}
+	if fault := f.fault; fault.Unknown != nil {
+		return fmt.Errorf("fake atomic completion: %w: %v", ErrCompletionOutcomeUnknown, fault.Unknown)
+	}
+	if current, ok := f.deliveries[resultKey]; ok && current != request.Delivery.DeliveryID {
+		return ErrDeliveryFinished
+	}
+
+	now := time.Now().UTC()
+	f.results[resultKey] = ExecutionResultRecord{
+		JobID: request.Commit.JobID, ExecutionID: request.Commit.ExecutionID,
+		TenantID: request.Commit.TenantID, SessionID: request.Commit.SessionID,
+		OwnerID: request.Commit.OwnerID, Epoch: request.Commit.Epoch,
+		FenceToken: request.Commit.FenceToken, Status: "succeeded", ResultVersion: 1,
+		ResultJSON: append([]byte(nil), request.Commit.ResultJSON...), CommittedAt: now,
+	}
+	f.deliveries[resultKey] = request.Delivery.DeliveryID
+	if request.Outbox != nil {
+		value := *request.Outbox
+		value.Payload = append([]byte(nil), value.Payload...)
+		value.Status, value.Attempt, value.CreatedAt, value.UpdatedAt = OutboxPending, 1, now, now
+		if value.NextAttempt.IsZero() {
+			value.NextAttempt = now
+		}
+		f.outbox[outboxKeyValue] = value
+	}
+	return nil
+}
+
+func validateFakeAtomicRequest(request AtomicCompletionRequest) error {
+	commit, delivery := request.Commit, request.Delivery
+	if commit.TenantID == "" || commit.SessionID == "" || commit.JobID == "" || commit.ExecutionID == "" ||
+		commit.OwnerID == "" || commit.Epoch == 0 || commit.FenceToken == 0 || !json.Valid(commit.ResultJSON) ||
+		delivery.TenantID == "" || delivery.SessionID == "" || delivery.JobID == "" ||
+		delivery.ExecutionID == "" || delivery.DeliveryID == "" {
+		return ErrInvalidArgument
+	}
+	if commit.TenantID != delivery.TenantID {
+		return ErrTenantMismatch
+	}
+	if commit.JobID != delivery.JobID || commit.ExecutionID != delivery.ExecutionID || commit.SessionID != delivery.SessionID {
+		return ErrInvalidDelivery
+	}
+	if request.Outbox == nil {
+		return nil
+	}
+	if err := ValidateOutboxMessage(*request.Outbox); err != nil {
+		return err
+	}
+	if request.Outbox.TenantID != commit.TenantID {
+		return ErrTenantMismatch
+	}
+	if request.Outbox.AggregateID != commit.ExecutionID || request.Outbox.DedupKey == "" {
+		return ErrConflict
+	}
+	var identity struct {
+		TenantID    string `json:"tenant_id"`
+		SessionID   string `json:"session_id"`
+		JobID       string `json:"job_id"`
+		ExecutionID string `json:"execution_id"`
+	}
+	if err := json.Unmarshal(request.Outbox.Payload, &identity); err != nil ||
+		identity.TenantID != commit.TenantID || identity.SessionID != commit.SessionID ||
+		identity.JobID != commit.JobID || identity.ExecutionID != commit.ExecutionID {
+		return ErrConflict
+	}
+	return nil
+}
+
+func cloneFakeAtomicRequest(request AtomicCompletionRequest) AtomicCompletionRequest {
+	request.Commit.ResultJSON = append([]byte(nil), request.Commit.ResultJSON...)
+	if request.Outbox != nil {
+		value := *request.Outbox
+		value.Payload = append([]byte(nil), value.Payload...)
+		request.Outbox = &value
+	}
+	return request
+}
+
+func sameFakeResult(existing ExecutionResultRecord, request AtomicCompletionRequest) bool {
+	return existing.JobID == request.Commit.JobID && existing.ExecutionID == request.Commit.ExecutionID &&
+		existing.TenantID == request.Commit.TenantID && existing.SessionID == request.Commit.SessionID &&
+		existing.Status == "succeeded" && equalFakeJSON(existing.ResultJSON, request.Commit.ResultJSON)
+}
+
+func sameFakeOutbox(existing, request OutboxMessage) bool {
+	return existing.TenantID == request.TenantID && existing.ID == request.ID && existing.Kind == request.Kind &&
+		existing.AggregateID == request.AggregateID && existing.DedupKey == request.DedupKey && equalFakeJSON(existing.Payload, request.Payload)
+}
+
+func equalFakeJSON(left, right []byte) bool {
+	var leftValue, rightValue any
+	if err := json.Unmarshal(left, &leftValue); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(right, &rightValue); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftValue, rightValue)
+}
+
 var _ ArtifactRepository = (*FakeArtifactRepository)(nil)
+var _ AtomicCompletionCoordinator = (*FakeAtomicCompletionCoordinator)(nil)
 
 var _ SessionRepository = (*FakeRepository)(nil)

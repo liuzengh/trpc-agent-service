@@ -2,8 +2,10 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -103,6 +105,45 @@ func atomicCompletionRequest(delivery queue.Delivery, lease storage.Lease, resul
 	}
 }
 
+func atomicCompletionRequestWithOutbox(delivery queue.Delivery, lease storage.Lease, resultJSON string) storage.AtomicCompletionRequest {
+	request := atomicCompletionRequest(delivery, lease, resultJSON)
+	payload, err := json.Marshal(struct {
+		SchemaVersion int    `json:"schema_version"`
+		Kind          string `json:"kind"`
+		TenantID      string `json:"tenant_id"`
+		SessionID     string `json:"session_id"`
+		JobID         string `json:"job_id"`
+		ExecutionID   string `json:"execution_id"`
+		RequestID     string `json:"request_id"`
+		MessageID     string `json:"message_id"`
+		TraceID       string `json:"trace_id"`
+		ReplyText     string `json:"reply_text"`
+	}{1, "agent.reply", request.Commit.TenantID, request.Commit.SessionID, request.Commit.JobID, request.Commit.ExecutionID, "request", "message", "trace", resultJSON})
+	if err != nil {
+		panic(err)
+	}
+	request.Outbox = &storage.OutboxMessage{
+		TenantID: request.Commit.TenantID, ID: "reply-" + request.Commit.ExecutionID,
+		Kind: "agent.reply", AggregateID: request.Commit.ExecutionID,
+		DedupKey: request.Commit.TenantID + "|" + request.Commit.ExecutionID + "|agent.reply", Payload: payload,
+	}
+	return request
+}
+
+func completionOutboxState(t *testing.T, f *atomicCompletionFixture) (status string, attempt int, lockedBy string, payload []byte) {
+	t.Helper()
+	var locked *string
+	if err := f.store.pool.QueryRow(f.ctx, `
+SELECT status, attempt, locked_by, payload
+FROM outbox_message WHERE tenant_id=$1 AND outbox_id=$2`, f.tenant.TenantID, "reply-"+f.job.ExecutionID).Scan(&status, &attempt, &locked, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if locked != nil {
+		lockedBy = *locked
+	}
+	return
+}
+
 func completionQueueStatus(t *testing.T, f *atomicCompletionFixture) (status, deliveryID, lastDeliveryID string) {
 	t.Helper()
 	if err := f.store.pool.QueryRow(f.ctx, `
@@ -197,6 +238,18 @@ FOR EACH ROW WHEN (NEW.status = 'acked') EXECUTE FUNCTION completion_ack_failure
 	}
 }
 
+func installCompletionOutboxFailure(t *testing.T, f *atomicCompletionFixture) {
+	t.Helper()
+	_, err := f.store.pool.Exec(f.ctx, `
+CREATE OR REPLACE FUNCTION completion_outbox_failure() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected outbox write failure'; END; $$;
+CREATE TRIGGER completion_outbox_failure_trigger BEFORE INSERT ON outbox_message
+FOR EACH ROW WHEN (NEW.kind = 'agent.reply') EXECUTE FUNCTION completion_outbox_failure()`)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPostgresAtomicCompletionCommitsResultAndAckTogether(t *testing.T) {
 	f := newAtomicCompletionFixture(t, time.Second, 2*time.Second)
 	if err := f.coordinator.CommitResultAndAck(f.ctx, f.request); err != nil {
@@ -212,6 +265,101 @@ func TestPostgresAtomicCompletionCommitsResultAndAckTogether(t *testing.T) {
 	status, activeDelivery, lastDelivery := completionQueueStatus(t, f)
 	if status != "acked" || activeDelivery != "" || lastDelivery != f.delivery.DeliveryID {
 		t.Fatalf("unexpected queue status=%s active=%s last=%s", status, activeDelivery, lastDelivery)
+	}
+}
+
+func TestPostgresAtomicCompletionWithOutboxCommitsAllFacts(t *testing.T) {
+	f := newAtomicCompletionFixture(t, time.Second, 2*time.Second)
+	f.request = atomicCompletionRequestWithOutbox(f.delivery, f.lease, `{"text":"atomic reply"}`)
+	if err := f.coordinator.CommitResultAndAck(f.ctx, f.request); err != nil {
+		t.Fatal(err)
+	}
+	status, attempt, lockedBy, payload := completionOutboxState(t, f)
+	if status != string(storage.OutboxPending) || attempt != 1 || lockedBy != "" || !equalJSON(payload, f.request.Outbox.Payload) {
+		t.Fatalf("unexpected reply outbox status=%s attempt=%d locked_by=%q payload=%s", status, attempt, lockedBy, payload)
+	}
+	queueStatus, activeDelivery, lastDelivery := completionQueueStatus(t, f)
+	if queueStatus != "acked" || activeDelivery != "" || lastDelivery != f.delivery.DeliveryID {
+		t.Fatalf("unexpected queue status=%s active=%s last=%s", queueStatus, activeDelivery, lastDelivery)
+	}
+	if err := f.coordinator.CommitResultAndAck(f.ctx, f.request); err != nil {
+		t.Fatalf("duplicate three-fact completion=%v", err)
+	}
+	if completionResultCount(t, f) != 1 {
+		t.Fatal("duplicate completion created another execution result")
+	}
+	var outboxCount int
+	if err := f.store.pool.QueryRow(f.ctx, `SELECT count(*) FROM outbox_message WHERE tenant_id=$1 AND aggregate_id=$2`, f.tenant.TenantID, f.job.ExecutionID).Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if outboxCount != 1 {
+		t.Fatalf("duplicate completion created %d reply outbox rows", outboxCount)
+	}
+}
+
+func TestPostgresAtomicCompletionOutboxIdentityAndDedupConflicts(t *testing.T) {
+	f := newAtomicCompletionFixture(t, time.Second, 2*time.Second)
+	f.request = atomicCompletionRequestWithOutbox(f.delivery, f.lease, `{"text":"reply"}`)
+	if err := f.coordinator.CommitResultAndAck(f.ctx, f.request); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := atomicCompletionRequestWithOutbox(f.delivery, f.lease, `{"text":"reply"}`)
+	conflicting.Outbox.ID = "reply-other-id"
+	if err := f.coordinator.CommitResultAndAck(f.ctx, conflicting); !errors.Is(err, storage.ErrConflict) {
+		t.Fatalf("dedup conflict=%v", err)
+	}
+	conflicting = atomicCompletionRequestWithOutbox(f.delivery, f.lease, `{"text":"reply"}`)
+	conflicting.Outbox.Payload = []byte(`{"schema_version":1,"kind":"agent.reply","tenant_id":"` + f.tenant.TenantID + `","session_id":"` + f.sessionID + `","job_id":"` + f.job.JobID + `","execution_id":"` + f.job.ExecutionID + `","reply_text":"different"}`)
+	if err := f.coordinator.CommitResultAndAck(f.ctx, conflicting); !errors.Is(err, storage.ErrConflict) {
+		t.Fatalf("payload conflict=%v", err)
+	}
+	conflicting = atomicCompletionRequestWithOutbox(f.delivery, f.lease, `{"text":"reply"}`)
+	conflicting.Outbox.AggregateID = "other-execution"
+	if err := f.coordinator.CommitResultAndAck(f.ctx, conflicting); !errors.Is(err, storage.ErrConflict) {
+		t.Fatalf("aggregate identity conflict=%v", err)
+	}
+	conflicting = atomicCompletionRequestWithOutbox(f.delivery, f.lease, `{"text":"reply"}`)
+	conflicting.Outbox.TenantID = "tenant-other"
+	if err := f.coordinator.CommitResultAndAck(f.ctx, conflicting); !errors.Is(err, storage.ErrTenantMismatch) {
+		t.Fatalf("tenant identity conflict=%v", err)
+	}
+}
+
+func TestPostgresAtomicCompletionWithOutboxRollsBackAllFacts(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T, *atomicCompletionFixture)
+		want  string
+	}{
+		{name: "result failure", setup: installCompletionResultFailure, want: "injected result write failure"},
+		{name: "outbox failure", setup: installCompletionOutboxFailure, want: "injected outbox write failure"},
+		{name: "ack failure", setup: installCompletionAckFailure, want: "injected ack update failure"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newAtomicCompletionFixture(t, 2*time.Second, 2*time.Second)
+			f.request = atomicCompletionRequestWithOutbox(f.delivery, f.lease, `{"text":"rollback"}`)
+			test.setup(t, f)
+			err := f.coordinator.CommitResultAndAck(f.ctx, f.request)
+			var pgErr *pgconn.PgError
+			if err == nil || !errors.As(err, &pgErr) || pgErr.Message != test.want {
+				t.Fatalf("failure=%v pg=%v", err, pgErr)
+			}
+			if completionResultCount(t, f) != 0 {
+				t.Fatal("result fact survived failed three-fact transaction")
+			}
+			var outboxCount int
+			if err := f.store.pool.QueryRow(f.ctx, `SELECT count(*) FROM outbox_message WHERE tenant_id=$1 AND outbox_id=$2`, f.tenant.TenantID, f.request.Outbox.ID).Scan(&outboxCount); err != nil {
+				t.Fatal(err)
+			}
+			if outboxCount != 0 {
+				t.Fatal("outbox fact survived failed three-fact transaction")
+			}
+			status, _, _ := completionQueueStatus(t, f)
+			if status != "in_flight" {
+				t.Fatalf("queue status after rollback=%s", status)
+			}
+		})
 	}
 }
 
@@ -258,6 +406,87 @@ func TestPostgresAtomicCompletionDuplicateAndResultOnlyReconciliation(t *testing
 			t.Fatalf("ack-only created result rows=%d", count)
 		}
 	})
+}
+
+func TestPostgresAtomicCompletionRejectsLegacyPartialForThreeFactRequest(t *testing.T) {
+	f := newAtomicCompletionFixture(t, time.Second, 2*time.Second)
+	if err := f.coordinator.CommitResultAndAck(f.ctx, f.request); err != nil {
+		t.Fatal(err)
+	}
+	f.request = atomicCompletionRequestWithOutbox(f.delivery, f.lease, `{"text":"atomic"}`)
+	if err := f.coordinator.CommitResultAndAck(f.ctx, f.request); !errors.Is(err, storage.ErrCompletionPartial) || !errors.Is(err, storage.ErrConflict) {
+		t.Fatalf("legacy result+ack without outbox error=%v", err)
+	}
+	if completionResultCount(t, f) != 1 {
+		t.Fatal("partial compatibility check changed the existing result")
+	}
+	status, _, _ := completionQueueStatus(t, f)
+	if status != "acked" {
+		t.Fatalf("partial compatibility queue status=%s", status)
+	}
+}
+
+func TestPostgresAtomicCompletionIndependentPoolsHaveOneDurableCompletion(t *testing.T) {
+	f := newAtomicCompletionFixture(t, time.Second, 2*time.Second)
+	f.request = atomicCompletionRequestWithOutbox(f.delivery, f.lease, `{"text":"competing"}`)
+	schema := f.store.pool.Config().ConnConfig.RuntimeParams["search_path"]
+	secondPool, err := NewPool(f.ctx, PostgresConfig{URL: os.Getenv("TEST_DATABASE_URL"), SearchPath: schema, MaxConns: 2, MinConns: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondPool.Close()
+	secondCoordinator, err := NewAtomicCompletionCoordinator(secondPool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	go func() {
+		<-start
+		errs <- f.coordinator.CommitResultAndAck(f.ctx, f.request)
+	}()
+	go func() {
+		<-start
+		errs <- secondCoordinator.CommitResultAndAck(f.ctx, f.request)
+	}()
+	close(start)
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("competing completion=%v", err)
+		}
+	}
+	if completionResultCount(t, f) != 1 {
+		t.Fatal("competing pools created duplicate execution results")
+	}
+	var outboxCount int
+	if err := f.store.pool.QueryRow(f.ctx, `SELECT count(*) FROM outbox_message WHERE tenant_id=$1 AND aggregate_id=$2`, f.tenant.TenantID, f.job.ExecutionID).Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if outboxCount != 1 {
+		t.Fatalf("competing pools created %d reply outbox rows", outboxCount)
+	}
+}
+
+func TestPostgresAtomicCompletionUnknownOutcomeReconcilesThreeFacts(t *testing.T) {
+	f := newAtomicCompletionFixture(t, time.Second, 2*time.Second)
+	f.request = atomicCompletionRequestWithOutbox(f.delivery, f.lease, `{"text":"unknown"}`)
+	f.coordinator.beforeCommit = func(conn *pgxpool.Conn) {
+		_ = conn.Conn().PgConn().Close(context.Background())
+	}
+	err := f.coordinator.CommitResultAndAck(f.ctx, f.request)
+	var outcomeErr *CompletionOutcomeError
+	if err == nil || !errors.Is(err, storage.ErrCompletionOutcomeUnknown) || !errors.As(err, &outcomeErr) {
+		t.Fatalf("unknown three-fact error=%v typed=%v", err, outcomeErr)
+	}
+	if outcomeErr.Outcome != CompletionAllCommitted && outcomeErr.Outcome != CompletionNeitherCommitted {
+		t.Fatalf("unexpected three-fact reconciliation outcome=%s", outcomeErr.Outcome)
+	}
+	if outcomeErr.Outcome == CompletionAllCommitted {
+		f.coordinator.beforeCommit = nil
+		if err := f.coordinator.CommitResultAndAck(f.ctx, f.request); err != nil {
+			t.Fatalf("idempotent retry after all committed=%v", err)
+		}
+	}
 }
 
 func TestPostgresAtomicCompletionRejectsFencingAndDeliveryBoundaries(t *testing.T) {

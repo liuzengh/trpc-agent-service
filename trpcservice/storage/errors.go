@@ -20,6 +20,7 @@ var (
 	ErrBackendUnavailable        = errors.New("coordination backend unavailable")
 	ErrOperationAmbiguous        = errors.New("coordination operation result is ambiguous")
 	ErrCompletionOutcomeUnknown  = errors.New("completion transaction outcome is unknown")
+	ErrCompletionPartial         = errors.New("completion facts are partially committed")
 	ErrEpochRejected             = errors.New("coordination epoch rejected")
 	ErrInvalidOwner              = errors.New("invalid coordination owner")
 	ErrRateLimited               = errors.New("rate limited")
@@ -82,17 +83,20 @@ type DeliveryAckRecord struct {
 	DeliveryID  string
 }
 
-// AtomicCompletionRequest joins the fenced result identity and the queue
-// delivery identity without making the storage package depend on either
-// execution or queue runtime types.
+// AtomicCompletionRequest joins the fenced result, queue delivery, and (when
+// non-nil) durable reply identity without making storage depend on execution,
+// queue, or worker runtime types. A nil Outbox is the explicitly retained
+// P0-09C two-fact contract; durable Worker paths must always provide it.
 type AtomicCompletionRequest struct {
 	Commit   ExecutionCommitRecord
 	Delivery DeliveryAckRecord
+	Outbox   *OutboxMessage
 }
 
-// AtomicCompletionCoordinator commits an execution result and acknowledges its
-// delivery in one durable transaction. Implementations must not fall back to
-// independent repository and queue operations.
+// AtomicCompletionCoordinator commits an execution result, acknowledges its
+// delivery, and optionally enqueues the durable reply in one transaction.
+// Implementations must not fall back to independent repository, queue, or
+// outbox operations.
 type AtomicCompletionCoordinator interface {
 	CommitResultAndAck(context.Context, AtomicCompletionRequest) error
 }

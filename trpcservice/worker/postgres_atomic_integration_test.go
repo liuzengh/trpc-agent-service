@@ -196,6 +196,30 @@ func TestPostgresWorkerUsesAtomicCompletionWithoutIndependentCommitOrAck(t *test
 	if result.OwnerID != "worker-pg-atomic" || result.TenantID != f.tenant.TenantID || result.SessionID != f.tenant.SessionID {
 		t.Fatalf("worker result=%+v", result)
 	}
+	var status string
+	var attempt int
+	var lockedBy *string
+	var aggregateID, dedupKey string
+	var payload []byte
+	if err := f.pool.QueryRow(f.ctx, `
+SELECT status, attempt, locked_by, aggregate_id, dedup_key, payload
+FROM outbox_message WHERE tenant_id=$1 AND outbox_id=$2`, f.tenant.TenantID, "reply-"+job.ExecutionID).Scan(&status, &attempt, &lockedBy, &aggregateID, &dedupKey, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || attempt != 1 || lockedBy != nil || aggregateID != job.ExecutionID || dedupKey != f.tenant.TenantID+"|"+job.ExecutionID+"|agent.reply" || len(payload) == 0 {
+		t.Fatalf("worker reply outbox status=%s attempt=%d locked_by=%v aggregate=%s dedup=%s payload=%s", status, attempt, lockedBy, aggregateID, dedupKey, payload)
+	}
+	outboxRepository, err := postgres.NewOutboxRepository(f.pool, postgres.OutboxRepositoryConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := outboxRepository.ClaimBatch(f.ctx, f.tenant, "dispatcher-worker", 1)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != "reply-"+job.ExecutionID {
+		t.Fatalf("dispatcher could not claim committed reply: %v %+v", err, claimed)
+	}
+	if err := outboxRepository.MarkCompleted(f.ctx, f.tenant, "dispatcher-worker", claimed[0].ID); err != nil {
+		t.Fatal(err)
+	}
 	stopPostgresAtomicWorker(t, w)
 }
 
@@ -224,6 +248,9 @@ func TestPostgresWorkerAtomicCompletionFailureDoesNotAckOrCommit(t *testing.T) {
 	if count := completionResultCountForWorker(t, f, job); count != 0 {
 		t.Fatalf("failure path result rows=%d", count)
 	}
+	if count := completionOutboxCountForWorker(t, f, job); count != 0 {
+		t.Fatalf("failure path outbox rows=%d", count)
+	}
 	stopPostgresAtomicWorker(t, w)
 }
 
@@ -231,6 +258,15 @@ func completionResultCountForWorker(t *testing.T, f *postgresAtomicWorkerFixture
 	t.Helper()
 	var count int
 	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM execution_result WHERE tenant_id=$1 AND job_id=$2`, job.Tenant.TenantID, job.JobID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func completionOutboxCountForWorker(t *testing.T, f *postgresAtomicWorkerFixture, job queue.AgentJob) int {
+	t.Helper()
+	var count int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM outbox_message WHERE tenant_id=$1 AND aggregate_id=$2`, job.Tenant.TenantID, job.ExecutionID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	return count
@@ -267,8 +303,8 @@ func TestPostgresWorkerFenceLossPreventsAtomicCompletion(t *testing.T) {
 	}
 	close(releaseRuntime)
 	waitForWorkerQueueState(t, f, job.JobID, "queued")
-	if sink.Count() != 0 || completionResultCountForWorker(t, f, job) != 0 {
-		t.Fatalf("fence loss committed result=%d legacy=%d", completionResultCountForWorker(t, f, job), sink.Count())
+	if sink.Count() != 0 || completionResultCountForWorker(t, f, job) != 0 || completionOutboxCountForWorker(t, f, job) != 0 {
+		t.Fatalf("fence loss committed result=%d outbox=%d legacy=%d", completionResultCountForWorker(t, f, job), completionOutboxCountForWorker(t, f, job), sink.Count())
 	}
 	stopPostgresAtomicWorker(t, w)
 }

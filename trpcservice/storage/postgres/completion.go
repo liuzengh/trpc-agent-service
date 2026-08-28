@@ -42,6 +42,24 @@ INSERT INTO execution_result (
 VALUES ($1, $2, $3, $4, $5, $6, $7, 'succeeded', 1, $8::jsonb, clock_timestamp())
 ON CONFLICT DO NOTHING`
 
+	completionOutboxSelect = `
+SELECT tenant_id, outbox_id, kind, aggregate_id, dedup_key, payload, status,
+       attempt, next_attempt_at, locked_by, locked_until, last_error,
+       created_at, updated_at
+FROM outbox_message
+WHERE tenant_id = $1 AND (outbox_id = $2 OR dedup_key = $3)
+ORDER BY (outbox_id = $2) DESC
+LIMIT 1
+FOR UPDATE`
+
+	completionOutboxInsert = `
+INSERT INTO outbox_message (
+    tenant_id, outbox_id, kind, aggregate_id, dedup_key, payload,
+    status, attempt, next_attempt_at, created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'pending', 1,
+          clock_timestamp(), clock_timestamp(), clock_timestamp())
+ON CONFLICT DO NOTHING`
+
 	completionQueueAck = `
 UPDATE job_queue
 SET status = 'acked', delivery_id = NULL, leased_until = NULL,
@@ -55,12 +73,17 @@ WHERE tenant_id = $1 AND job_id = $2 AND status = 'in_flight'
 type CompletionOutcome string
 
 const (
-	CompletionOutcomeUnknown   CompletionOutcome = "unknown"
-	CompletionNeitherCommitted CompletionOutcome = "neither_committed"
-	CompletionBothCommitted    CompletionOutcome = "both_committed"
-	CompletionResultOnly       CompletionOutcome = "result_only"
-	CompletionAckOnly          CompletionOutcome = "ack_only"
-	CompletionTokenTakenOver   CompletionOutcome = "delivery_token_taken_over"
+	CompletionOutcomeUnknown            CompletionOutcome = "unknown"
+	CompletionNeitherCommitted          CompletionOutcome = "none_committed"
+	CompletionAllCommitted              CompletionOutcome = "all_committed"
+	CompletionBothCommitted             CompletionOutcome = CompletionAllCommitted
+	CompletionResultOnly                CompletionOutcome = "result_only"
+	CompletionResultAndAckWithoutOutbox CompletionOutcome = "result_and_ack_without_outbox"
+	CompletionOutboxOnly                CompletionOutcome = "outbox_only"
+	CompletionResultAndOutboxOnly       CompletionOutcome = "result_and_outbox_only"
+	CompletionAckOnly                   CompletionOutcome = "ack_only"
+	CompletionPartialConflict           CompletionOutcome = "partial_conflict"
+	CompletionTokenTakenOver            CompletionOutcome = "delivery_token_taken_over"
 )
 
 // CompletionOutcomeError never reports an unknown commit as success. Outcome
@@ -111,6 +134,7 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 	if err := validateAtomicCompletionRequest(ctx, request); err != nil {
 		return err
 	}
+	request = cloneCompletionRequest(request)
 	conn, err := c.pool.Acquire(ctx)
 	if err != nil {
 		return completionDBError("acquire transaction connection", err)
@@ -135,6 +159,8 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 		return completionDBError("configure transaction", err)
 	}
 
+	// Queue is locked first, followed by the session lease. This is the same
+	// order for every completion and prevents a completion/takeover deadlock.
 	queueState, err := lockCompletionQueue(ctx, tx, request)
 	if err != nil {
 		return err
@@ -143,10 +169,19 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 	if err != nil {
 		return err
 	}
+	var existingOutbox storage.OutboxMessage
+	var outboxFound bool
+	if request.Outbox != nil {
+		loadedOutbox, foundOutbox, readErr := readCompletionOutbox(ctx, tx, request)
+		if readErr != nil {
+			return readErr
+		}
+		existingOutbox, outboxFound = loadedOutbox, foundOutbox
+	}
 
-	// A completed request may be retried after the worker releases its lease.
-	// The durable result plus the matching last delivery token is sufficient for
-	// this idempotent read-only success; no new state is written.
+	// A retry after the worker released its lease is idempotent only when every
+	// requested fact is present and matches. Legacy P0-09C requests deliberately
+	// omit the Outbox check and retain their two-fact behavior.
 	if queueState.status == "acked" {
 		if queueState.lastDeliveryID != request.Delivery.DeliveryID {
 			return storage.ErrDeliveryFinished
@@ -156,6 +191,14 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 		}
 		if !sameCompletionFence(existing, request) {
 			return storage.ErrFenceRejected
+		}
+		if request.Outbox != nil {
+			if !outboxFound {
+				return completionPartial("result and ack are committed without the requested outbox")
+			}
+			if !sameCompletionOutbox(existingOutbox, *request.Outbox) {
+				return completionConflict("committed outbox identity or payload conflicts")
+			}
 		}
 		return c.commitCompletionTx(ctx, conn, tx, request, &transactionFinished, &released)
 	}
@@ -173,9 +216,18 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 		return err
 	}
 
+	if request.Outbox != nil && outboxFound {
+		if !sameCompletionOutbox(existingOutbox, *request.Outbox) {
+			return completionConflict("outbox identity or payload conflicts")
+		}
+		return completionPartial("outbox is committed before queue acknowledgement")
+	}
 	if found {
 		if !sameCompletionResult(existing, request) {
 			return completionConflict("execution result identity or payload conflicts")
+		}
+		if request.Outbox != nil {
+			return completionPartial("execution result is committed without the requested outbox")
 		}
 	} else {
 		result, err := tx.Exec(ctx, completionResultInsert,
@@ -201,6 +253,17 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 			}
 		}
 	}
+	if request.Outbox != nil {
+		result, err := tx.Exec(ctx, completionOutboxInsert,
+			request.Outbox.TenantID, request.Outbox.ID, request.Outbox.Kind,
+			request.Outbox.AggregateID, request.Outbox.DedupKey, string(request.Outbox.Payload))
+		if err != nil {
+			return completionDBError("insert reply outbox", err)
+		}
+		if result.RowsAffected() != 1 {
+			return completionConflict("reply outbox insert did not produce the requested outbox")
+		}
+	}
 
 	result, err := tx.Exec(ctx, completionQueueAck,
 		request.Delivery.TenantID,
@@ -214,6 +277,57 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 		return storage.ErrDeliveryExpired
 	}
 	return c.commitCompletionTx(ctx, conn, tx, request, &transactionFinished, &released)
+}
+
+func cloneCompletionRequest(request storage.AtomicCompletionRequest) storage.AtomicCompletionRequest {
+	request.Commit.ResultJSON = append([]byte(nil), request.Commit.ResultJSON...)
+	if request.Outbox != nil {
+		copy := *request.Outbox
+		copy.Payload = append([]byte(nil), copy.Payload...)
+		request.Outbox = &copy
+	}
+	return request
+}
+
+type completionQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func readCompletionOutbox(ctx context.Context, tx completionQueryer, request storage.AtomicCompletionRequest) (storage.OutboxMessage, bool, error) {
+	if request.Outbox == nil {
+		return storage.OutboxMessage{}, false, nil
+	}
+	var value storage.OutboxMessage
+	var status string
+	var dedupKey, lockedBy, lastError *string
+	var lockedUntil *time.Time
+	var payload []byte
+	err := tx.QueryRow(ctx, completionOutboxSelect,
+		request.Outbox.TenantID, request.Outbox.ID, request.Outbox.DedupKey).Scan(
+		&value.TenantID, &value.ID, &value.Kind, &value.AggregateID, &dedupKey, &payload, &status,
+		&value.Attempt, &value.NextAttempt, &lockedBy, &lockedUntil, &lastError,
+		&value.CreatedAt, &value.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storage.OutboxMessage{}, false, nil
+	}
+	if err != nil {
+		return storage.OutboxMessage{}, false, completionDBError("read reply outbox", err)
+	}
+	value.DedupKey = optionalString(dedupKey)
+	value.Payload = append([]byte(nil), payload...)
+	value.Status = storage.OutboxStatus(status)
+	value.LockedBy = optionalString(lockedBy)
+	if lockedUntil != nil {
+		value.LockedUntil = *lockedUntil
+	}
+	value.LastError = optionalString(lastError)
+	return value, true, nil
+}
+
+func sameCompletionOutbox(existing, requested storage.OutboxMessage) bool {
+	return existing.TenantID == requested.TenantID && existing.ID == requested.ID &&
+		existing.Kind == requested.Kind && existing.AggregateID == requested.AggregateID &&
+		existing.DedupKey == requested.DedupKey && equalJSON(existing.Payload, requested.Payload)
 }
 
 type completionLeaseState struct {
@@ -369,6 +483,15 @@ SELECT EXISTS(
 )`, request.Commit.TenantID, request.Commit.ExecutionID, request.Commit.JobID, request.Commit.SessionID).Scan(&resultExists); err != nil {
 		return CompletionOutcomeUnknown, completionDBError("reconcile execution result", err)
 	}
+	var outboxExists, outboxMatches bool
+	if request.Outbox != nil {
+		outbox, found, err := readCompletionOutbox(ctx, c.pool, request)
+		if err != nil {
+			return CompletionOutcomeUnknown, err
+		}
+		outboxExists = found
+		outboxMatches = found && sameCompletionOutbox(outbox, *request.Outbox)
+	}
 	var status, deliveryID, lastDeliveryID string
 	err := c.pool.QueryRow(ctx, `
 SELECT status, COALESCE(delivery_id, ''), COALESCE(last_delivery_id, '')
@@ -380,16 +503,37 @@ FROM job_queue WHERE tenant_id = $1 AND job_id = $2`, request.Delivery.TenantID,
 		return CompletionOutcomeUnknown, completionDBError("reconcile queue delivery", err)
 	}
 	if status == "acked" && lastDeliveryID == request.Delivery.DeliveryID {
-		if resultExists {
-			return CompletionBothCommitted, nil
+		if !resultExists {
+			if outboxExists {
+				return CompletionPartialConflict, nil
+			}
+			return CompletionAckOnly, nil
 		}
-		return CompletionAckOnly, nil
+		if request.Outbox == nil {
+			return CompletionAllCommitted, nil
+		}
+		if outboxMatches {
+			return CompletionAllCommitted, nil
+		}
+		if !outboxExists {
+			return CompletionResultAndAckWithoutOutbox, nil
+		}
+		return CompletionPartialConflict, nil
 	}
 	if status == "in_flight" && deliveryID != request.Delivery.DeliveryID {
 		return CompletionTokenTakenOver, nil
 	}
+	if resultExists && outboxExists {
+		if outboxMatches {
+			return CompletionResultAndOutboxOnly, nil
+		}
+		return CompletionPartialConflict, nil
+	}
 	if resultExists {
 		return CompletionResultOnly, nil
+	}
+	if outboxExists {
+		return CompletionOutboxOnly, nil
 	}
 	return CompletionNeitherCommitted, nil
 }
@@ -417,11 +561,39 @@ func validateAtomicCompletionRequest(ctx context.Context, request storage.Atomic
 	if commit.JobID != delivery.JobID || commit.ExecutionID != delivery.ExecutionID || commit.SessionID != delivery.SessionID {
 		return storage.ErrInvalidDelivery
 	}
+	if request.Outbox == nil {
+		return nil
+	}
+	if err := storage.ValidateOutboxMessage(*request.Outbox); err != nil {
+		return err
+	}
+	outbox := request.Outbox
+	if outbox.TenantID != commit.TenantID {
+		return storage.ErrTenantMismatch
+	}
+	if outbox.AggregateID != commit.ExecutionID || outbox.DedupKey == "" {
+		return completionConflict("reply outbox aggregate or dedup identity does not match execution")
+	}
+	var identity struct {
+		TenantID    string `json:"tenant_id"`
+		SessionID   string `json:"session_id"`
+		JobID       string `json:"job_id"`
+		ExecutionID string `json:"execution_id"`
+	}
+	if err := json.Unmarshal(outbox.Payload, &identity); err != nil ||
+		identity.TenantID != commit.TenantID || identity.SessionID != commit.SessionID ||
+		identity.JobID != commit.JobID || identity.ExecutionID != commit.ExecutionID {
+		return completionConflict("reply outbox payload identity does not match execution")
+	}
 	return nil
 }
 
 func completionConflict(message string) error {
 	return fmt.Errorf("postgres: atomic completion conflict (%s): %w", message, storage.ErrConflict)
+}
+
+func completionPartial(message string) error {
+	return fmt.Errorf("postgres: atomic completion partial state (%s): %w", message, errors.Join(storage.ErrCompletionPartial, storage.ErrConflict))
 }
 
 func completionDBError(operation string, err error) error {

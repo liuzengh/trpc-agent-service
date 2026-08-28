@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -145,6 +146,74 @@ func TestFakeOutboxReclaimsExpiredLockAndRejectsStaleOwner(t *testing.T) {
 	}
 	if err := repo.MarkCompleted(ctx, tc, "worker-a", "outbox-expired"); !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrOutboxLockLost) {
 		t.Fatalf("expected stale owner rejection, got %v", err)
+	}
+}
+
+func fakeAtomicCompletionRequest() AtomicCompletionRequest {
+	return AtomicCompletionRequest{
+		Commit: ExecutionCommitRecord{
+			JobID: "job-atomic", ExecutionID: "execution-atomic", TenantID: "tenant-a", SessionID: "session-a",
+			OwnerID: "owner-a", Epoch: 1, FenceToken: 1, ResultJSON: []byte(`{"text":"reply"}`),
+		},
+		Delivery: DeliveryAckRecord{TenantID: "tenant-a", JobID: "job-atomic", ExecutionID: "execution-atomic", SessionID: "session-a", DeliveryID: "delivery-a"},
+		Outbox: &OutboxMessage{
+			TenantID: "tenant-a", ID: "reply-execution-atomic", Kind: "agent.reply", AggregateID: "execution-atomic",
+			DedupKey: "tenant-a|execution-atomic|agent.reply",
+			Payload:  []byte(`{"schema_version":1,"tenant_id":"tenant-a","session_id":"session-a","job_id":"job-atomic","execution_id":"execution-atomic","reply_text":"reply"}`),
+		},
+	}
+}
+
+func TestFakeAtomicCompletionIsAllOrNothing(t *testing.T) {
+	request := fakeAtomicCompletionRequest()
+	coordinator := NewFakeAtomicCompletionCoordinator()
+	if err := coordinator.CommitResultAndAck(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if len(coordinator.results) != 1 || len(coordinator.outbox) != 1 || len(coordinator.deliveries) != 1 {
+		t.Fatalf("successful completion state results=%d outbox=%d deliveries=%d", len(coordinator.results), len(coordinator.outbox), len(coordinator.deliveries))
+	}
+	if err := coordinator.CommitResultAndAck(context.Background(), request); err != nil {
+		t.Fatalf("duplicate completion=%v", err)
+	}
+
+	faults := []FakeAtomicCompletionFault{
+		{Result: ErrBackendUnavailable}, {Outbox: ErrBackendUnavailable}, {Ack: ErrBackendUnavailable}, {Unknown: ErrBackendUnavailable},
+	}
+	for i, fault := range faults {
+		t.Run(fmt.Sprintf("fault-%d", i), func(t *testing.T) {
+			failed := NewFakeAtomicCompletionCoordinator()
+			failed.SetFault(fault)
+			if err := failed.CommitResultAndAck(context.Background(), request); err == nil {
+				t.Fatal("faulted completion unexpectedly succeeded")
+			}
+			if len(failed.results) != 0 || len(failed.outbox) != 0 || len(failed.deliveries) != 0 {
+				t.Fatalf("fault left partial state results=%d outbox=%d deliveries=%d", len(failed.results), len(failed.outbox), len(failed.deliveries))
+			}
+		})
+	}
+}
+
+func TestFakeAtomicCompletionRejectsConflictsAndTenantMismatch(t *testing.T) {
+	request := fakeAtomicCompletionRequest()
+	coordinator := NewFakeAtomicCompletionCoordinator()
+	if err := coordinator.CommitResultAndAck(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := fakeAtomicCompletionRequest()
+	conflicting.Commit.ResultJSON = []byte(`{"text":"different"}`)
+	if err := coordinator.CommitResultAndAck(context.Background(), conflicting); !errors.Is(err, ErrConflict) {
+		t.Fatalf("result conflict=%v", err)
+	}
+	conflicting = fakeAtomicCompletionRequest()
+	conflicting.Outbox.DedupKey = "tenant-a|different|agent.reply"
+	if err := coordinator.CommitResultAndAck(context.Background(), conflicting); !errors.Is(err, ErrConflict) {
+		t.Fatalf("outbox conflict=%v", err)
+	}
+	conflicting = fakeAtomicCompletionRequest()
+	conflicting.Outbox.TenantID = "tenant-b"
+	if err := coordinator.CommitResultAndAck(context.Background(), conflicting); !errors.Is(err, ErrTenantMismatch) {
+		t.Fatalf("tenant conflict=%v", err)
 	}
 }
 

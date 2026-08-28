@@ -2,12 +2,83 @@ package execution
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/queue"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 )
+
+const (
+	ReplyOutboxSchemaVersion = 1
+	ReplyOutboxKind          = "agent.reply"
+)
+
+// ReplyOutboxPayload is the bounded, stable payload sent to a later delivery
+// adapter. It intentionally contains no prompt, history, provider response,
+// token accounting, authorization material, or arbitrary event metadata.
+type ReplyOutboxPayload struct {
+	SchemaVersion int    `json:"schema_version"`
+	Kind          string `json:"kind"`
+	TenantID      string `json:"tenant_id"`
+	SessionID     string `json:"session_id"`
+	JobID         string `json:"job_id"`
+	ExecutionID   string `json:"execution_id"`
+	RequestID     string `json:"request_id"`
+	MessageID     string `json:"message_id"`
+	TraceID       string `json:"trace_id"`
+	ReplyText     string `json:"reply_text"`
+	FinishType    string `json:"finish_type,omitempty"`
+}
+
+// BuildReplyOutboxMessage deterministically maps one successful execution to
+// a durable reply fact. The execution result remains a separate complete fact;
+// this payload is the intentionally smaller sender-facing projection.
+func BuildReplyOutboxMessage(commit ExecutionCommit) (storage.OutboxMessage, error) {
+	if err := validateRepositoryCommit(commit); err != nil {
+		return storage.OutboxMessage{}, err
+	}
+	payload := ReplyOutboxPayload{
+		SchemaVersion: ReplyOutboxSchemaVersion,
+		Kind:          ReplyOutboxKind,
+		TenantID:      commit.TenantID,
+		SessionID:     commit.SessionID,
+		JobID:         commit.JobID,
+		ExecutionID:   commit.ExecutionID,
+		RequestID:     commit.TenantContext.RequestID,
+		MessageID:     commit.TenantContext.MessageID,
+		TraceID:       commit.TenantContext.TraceID,
+		ReplyText:     commit.Result.Text,
+		FinishType:    commit.Result.FinishType,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return storage.OutboxMessage{}, fmt.Errorf("execution: marshal reply outbox: %w", err)
+	}
+	message := storage.OutboxMessage{
+		TenantID:    commit.TenantID,
+		ID:          "reply-" + commit.ExecutionID,
+		Kind:        ReplyOutboxKind,
+		AggregateID: commit.ExecutionID,
+		DedupKey:    replyDedupKey(commit.TenantID, commit.ExecutionID),
+		Payload:     encoded,
+	}
+	if err := storage.ValidateOutboxMessage(message); err != nil {
+		return storage.OutboxMessage{}, err
+	}
+	return message, nil
+}
+
+func replyDedupKey(tenantID, executionID string) string {
+	canonical := tenantID + "|" + executionID + "|" + ReplyOutboxKind
+	if len(canonical) <= 256 {
+		return canonical
+	}
+	digest := sha256.Sum256([]byte(canonical))
+	return "reply-sha256-" + hex.EncodeToString(digest[:])
+}
 
 // RepositorySink adapts the R3 FencedExecutionSink contract to the storage
 // repository without importing execution types into the storage package.
@@ -70,6 +141,10 @@ func AtomicCompletionRequestFor(commit ExecutionCommit, delivery queue.Delivery)
 		// pi-lens-ignore: UndeclaredImportedName
 		return storage.AtomicCompletionRequest{}, fmt.Errorf("execution: marshal result: %w", err)
 	}
+	outbox, err := BuildReplyOutboxMessage(commit)
+	if err != nil {
+		return storage.AtomicCompletionRequest{}, err
+	}
 	// pi-lens-ignore: UndeclaredImportedName
 	return storage.AtomicCompletionRequest{
 		Commit: storage.ExecutionCommitRecord{
@@ -90,6 +165,8 @@ func AtomicCompletionRequestFor(commit ExecutionCommit, delivery queue.Delivery)
 			SessionID:   delivery.Job.Tenant.SessionID,
 			DeliveryID:  delivery.DeliveryID,
 		},
+		// Durable Worker completion must carry the reply fact explicitly.
+		Outbox: &outbox,
 	}, nil
 }
 

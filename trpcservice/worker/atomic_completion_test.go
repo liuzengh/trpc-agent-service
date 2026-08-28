@@ -81,7 +81,8 @@ func TestWorkerAtomicCompletionDoesNotCallIndependentAck(t *testing.T) {
 		t.Fatal("worker did not call atomic completion")
 	}
 	calls, request := completion.snapshot()
-	if calls != 1 || request.Commit.JobID != job.JobID || request.Delivery.DeliveryID != q.delivery.DeliveryID {
+	if calls != 1 || request.Commit.JobID != job.JobID || request.Delivery.DeliveryID != q.delivery.DeliveryID ||
+		request.Outbox == nil || request.Outbox.AggregateID != job.ExecutionID || request.Outbox.DedupKey == "" {
 		t.Fatalf("atomic completion calls=%d request=%+v", calls, request)
 	}
 	q.mu.Lock()
