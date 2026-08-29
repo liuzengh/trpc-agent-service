@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/liuzengh/trpc-agent-service/internal/testinfra"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	larkchannel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/lark"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	postgresstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -194,6 +195,50 @@ func TestPostgresDispatcherClaimsCommittedChannelReply(t *testing.T) {
 	doer.mu.Unlock()
 	if len(keys) != 1 {
 		t.Fatalf("channel-aware PostgreSQL claim sent %d times", len(keys))
+	}
+}
+
+func TestPostgresDispatcherClaimsCommittedLarkReply(t *testing.T) {
+	fixture := newPostgresDispatcherFixture(t, 2*time.Second)
+	payload := channels.ReplyOutboxPayload{
+		SchemaVersion: channels.ReplyOutboxSchemaVersion, Kind: channels.ReplyOutboxKind,
+		TenantID: fixture.tc.TenantID, SessionID: "session-lark-pg", JobID: "job-lark-pg", ExecutionID: "execution-lark-pg",
+		RequestID: "request-lark-pg", MessageID: "message-lark-pg", TraceID: "trace-lark-pg", BindingID: fixture.tc.BindingID,
+		Channel: larkchannel.Channel, DestinationType: channels.DestinationTypeUser, DestinationID: "ou_lark_pg",
+		ReplyText: "reply text", SenderRoutingVersion: channels.SenderRoutingVersion,
+	}
+	encoded, err := channels.EncodeReplyOutboxPayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := storage.OutboxMessage{
+		TenantID: fixture.tc.TenantID, ID: "reply-" + payload.ExecutionID, Kind: channels.ReplyOutboxKind,
+		AggregateID: payload.ExecutionID, DedupKey: fixture.tc.TenantID + "|" + payload.ExecutionID + "|" + channels.ReplyOutboxKind, Payload: encoded,
+	}
+	if err := fixture.repo.Enqueue(fixture.ctx, fixture.tc, message); err != nil {
+		t.Fatal(err)
+	}
+	doer := &sequenceHTTPDoer{responses: []sequenceHTTPResponse{{status: http.StatusOK, body: `{"code":0,"data":{"message_id":"om_lark_pg"}}`}}}
+	larkSender, err := larkchannel.NewSender(larkchannel.SenderConfig{
+		Bindings: []larkchannel.Binding{{TenantID: fixture.tc.TenantID, BindingID: fixture.tc.BindingID, Channel: larkchannel.Channel, AppID: "cli_test", SecretRef: "secret-ref", ReceiverIDType: larkchannel.ReceiverIDTypeOpenID, Enabled: true}},
+		Tokens:   larkchannel.TokenResolverFunc(func(context.Context, larkchannel.Binding) (string, error) { return "tenant-token", nil }),
+		Client:   doer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender, err := NewChannelSender(larkSender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, runDone := runPostgresDispatcher(t, fixture, "dispatcher-lark-pg", sender)
+	waitForPostgresStatus(t, fixture, message.ID, storage.OutboxCompleted)
+	stopPostgresDispatcher(t, dispatcher, runDone)
+	doer.mu.Lock()
+	calls := len(doer.keys)
+	doer.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("Lark PostgreSQL claim sent %d times", calls)
 	}
 }
 

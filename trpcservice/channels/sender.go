@@ -22,7 +22,7 @@ import (
 const (
 	// ReplyOutboxSchemaVersion is bumped from the P0-09F payload because
 	// routing identity is now mandatory for channel delivery.
-	ReplyOutboxSchemaVersion = 2
+	ReplyOutboxSchemaVersion = 3
 	ReplyOutboxKind          = "agent.reply"
 	SenderRoutingVersion     = 1
 
@@ -47,6 +47,17 @@ const (
 	SenderRejectedCode           = "sender_rejected"
 	SenderNotConfiguredCode      = "sender_not_configured"
 	DeliveryOutcomeUnknownCode   = "delivery_outcome_unknown"
+
+	LarkSenderTimeoutCode            = "lark_sender_timeout"
+	LarkSenderRateLimitedCode        = "lark_sender_rate_limited"
+	LarkSenderUnavailableCode        = "lark_sender_unavailable"
+	LarkSenderInvalidDestinationCode = "lark_sender_invalid_destination"
+	LarkSenderAuthFailedCode         = "lark_sender_auth_failed"
+	LarkSenderForbiddenCode          = "lark_sender_forbidden"
+	LarkSenderRejectedCode           = "lark_sender_rejected"
+	LarkSenderNotConfiguredCode      = "lark_sender_not_configured"
+	LarkSenderMalformedResponseCode  = "lark_sender_malformed_response"
+	LarkDeliveryOutcomeUnknownCode   = "lark_delivery_outcome_unknown"
 )
 
 var (
@@ -91,6 +102,7 @@ type ReplyOutboxPayload struct {
 	RequestID            string `json:"request_id"`
 	MessageID            string `json:"message_id"`
 	TraceID              string `json:"trace_id"`
+	BindingID            string `json:"binding_id"`
 	Channel              string `json:"channel"`
 	DestinationType      string `json:"destination_type"`
 	DestinationID        string `json:"destination_id"`
@@ -103,6 +115,7 @@ type ReplyOutboxPayload struct {
 // execution boundary. ExternalChat and ExternalUser are already resolved by
 // the tenant binding; a sender never invents a fallback destination.
 type ReplyRouting struct {
+	BindingID       string
 	Channel         string
 	DestinationType string
 	DestinationID   string
@@ -155,10 +168,13 @@ func RoutingFromTenantContext(tc tenant.TenantContext) (ReplyRouting, error) {
 	if err := validateRoutingIdentity(tc.TenantID); err != nil {
 		return ReplyRouting{}, err
 	}
+	if err := validateRoutingIdentity(tc.BindingID); err != nil {
+		return ReplyRouting{}, err
+	}
 	if err := validateChannelName(tc.Channel); err != nil {
 		return ReplyRouting{}, err
 	}
-	routing := ReplyRouting{Channel: tc.Channel}
+	routing := ReplyRouting{BindingID: tc.BindingID, Channel: tc.Channel}
 	switch tc.Channel {
 	case "telegram":
 		if tc.ExternalChat == "" {
@@ -166,7 +182,7 @@ func RoutingFromTenantContext(tc tenant.TenantContext) (ReplyRouting, error) {
 		}
 		routing.DestinationType = DestinationTypeChat
 		routing.DestinationID = tc.ExternalChat
-	case "web", "wecom":
+	case "web", "wecom", "lark":
 		switch {
 		case tc.ExternalChat != "":
 			routing.DestinationType = DestinationTypeChat
@@ -220,7 +236,7 @@ func (p ReplyOutboxPayload) Validate() error {
 		{p.TenantID, MaxRoutingIdentityBytes}, {p.SessionID, MaxRoutingIdentityBytes},
 		{p.JobID, MaxRoutingIdentityBytes}, {p.ExecutionID, MaxRoutingIdentityBytes},
 		{p.RequestID, MaxRoutingIdentityBytes}, {p.MessageID, MaxRoutingIdentityBytes},
-		{p.TraceID, MaxRoutingIdentityBytes}, {p.Channel, MaxRoutingIdentityBytes},
+		{p.TraceID, MaxRoutingIdentityBytes}, {p.BindingID, MaxRoutingIdentityBytes}, {p.Channel, MaxRoutingIdentityBytes},
 	} {
 		if err := validateBoundedText(value.value, value.limit, false); err != nil {
 			return ErrInvalidReplyPayload
@@ -370,11 +386,12 @@ func newRegistry(adapters []SenderAdapter, policies map[string][]string) (*Regis
 }
 
 func DefaultRegistry() *Registry {
-	registry, err := NewRegistry(WebAdapter{}, TelegramAdapter{}, WeComAdapter{})
-	if err != nil {
-		panic(err)
-	}
-	return registry
+	return &Registry{adapters: map[string]SenderAdapter{
+		"web":      WebAdapter{},
+		"telegram": TelegramAdapter{},
+		"wecom":    WeComAdapter{},
+		"lark":     larkPlaceholderAdapter{},
+	}}
 }
 
 func (r *Registry) Lookup(channel string) (SenderAdapter, error) {
@@ -536,6 +553,8 @@ func (s *HTTPSender) Send(ctx context.Context, message storage.OutboxMessage) Se
 
 func classifyPayloadError(err error) string {
 	switch {
+	case errors.Is(err, ErrAdapterNotConfigured):
+		return SenderNotConfiguredCode
 	case errors.Is(err, ErrInvalidDestination):
 		return SenderInvalidDestinationCode
 	case errors.Is(err, ErrUnsupportedDestination):
@@ -601,7 +620,7 @@ func joinEndpoint(endpoint, requestPath string) (string, error) {
 
 func validateChannelName(channel string) error {
 	switch channel {
-	case "web", "telegram", "wecom":
+	case "web", "telegram", "wecom", "lark":
 		return nil
 	default:
 		return ErrUnknownChannel
@@ -769,6 +788,16 @@ func (WeComAdapter) ValidateSuccess(body []byte) error {
 	}
 	return ErrMalformedResponse
 }
+
+var ErrAdapterNotConfigured = errors.New("channels: adapter is not configured")
+
+type larkPlaceholderAdapter struct{}
+
+func (larkPlaceholderAdapter) Name() string { return "lark" }
+func (larkPlaceholderAdapter) BuildOutbound(OutboundMessage) (OutboundRequest, error) {
+	return OutboundRequest{}, ErrAdapterNotConfigured
+}
+func (larkPlaceholderAdapter) ValidateSuccess([]byte) error { return ErrAdapterNotConfigured }
 
 func outboundRequest(path string, body []byte) OutboundRequest {
 	return OutboundRequest{

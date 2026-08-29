@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	larkchannel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/lark"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 )
 
@@ -63,7 +64,7 @@ func channelOutboxMessage(t *testing.T, tcTenant string) storage.OutboxMessage {
 	payload := channels.ReplyOutboxPayload{
 		SchemaVersion: channels.ReplyOutboxSchemaVersion, Kind: channels.ReplyOutboxKind,
 		TenantID: tcTenant, SessionID: "session-channel", JobID: "job-channel", ExecutionID: "execution-channel",
-		RequestID: "request-channel", MessageID: "message-channel", TraceID: "trace-channel",
+		RequestID: "request-channel", MessageID: "message-channel", TraceID: "trace-channel", BindingID: "binding-channel",
 		Channel: "web", DestinationType: channels.DestinationTypeUser, DestinationID: "user-channel",
 		ReplyText: "reply text", SenderRoutingVersion: channels.SenderRoutingVersion,
 	}
@@ -100,6 +101,57 @@ func TestChannelSenderAdaptsOutcomeWithoutDurableMutation(t *testing.T) {
 	outcome := sender.Send(context.Background(), storage.OutboxMessage{})
 	if outcome.Class != OutcomePermanentFailure || outcome.Code != SenderInvalidDestinationCode {
 		t.Fatalf("adapted outcome=%+v", outcome)
+	}
+}
+
+func TestDispatcherLarkPermanentOutcomeMovesToDLQ(t *testing.T) {
+	tc := testTenant("tenant-lark-dlq")
+	repository := &observingRepository{inner: storage.NewFakeRepository(), transitionCalls: make(chan observedTransition, 2)}
+	payload := channels.ReplyOutboxPayload{
+		SchemaVersion: channels.ReplyOutboxSchemaVersion, Kind: channels.ReplyOutboxKind,
+		TenantID: tc.TenantID, SessionID: "session-lark-dlq", JobID: "job-lark-dlq", ExecutionID: "execution-lark-dlq",
+		RequestID: "request-lark-dlq", MessageID: "message-lark-dlq", TraceID: "trace-lark-dlq", BindingID: "missing-lark-binding",
+		Channel: larkchannel.Channel, DestinationType: channels.DestinationTypeUser, DestinationID: "ou_lark_dlq",
+		ReplyText: "reply text", SenderRoutingVersion: channels.SenderRoutingVersion,
+	}
+	encoded, err := channels.EncodeReplyOutboxPayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := storage.OutboxMessage{TenantID: tc.TenantID, ID: "reply-" + payload.ExecutionID, Kind: channels.ReplyOutboxKind, AggregateID: payload.ExecutionID, DedupKey: tc.TenantID + "|" + payload.ExecutionID + "|" + channels.ReplyOutboxKind, Payload: encoded}
+	if err := repository.Enqueue(context.Background(), tc, message); err != nil {
+		t.Fatal(err)
+	}
+	larkSender, err := larkchannel.NewSender(larkchannel.SenderConfig{
+		Tokens: larkchannel.TokenResolverFunc(func(context.Context, larkchannel.Binding) (string, error) { return "unused", nil }),
+		Client: &sequenceHTTPDoer{responses: []sequenceHTTPResponse{{status: http.StatusOK, body: `{}`}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender, err := NewChannelSender(larkSender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(tc, "dispatcher-lark-dlq")
+	config.RetryPolicy = RetryPolicy{MaxAttempts: 1, BaseDelay: 0, MaxDelay: 0}
+	dispatcher, err := NewDispatcher(repository, sender, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDone := make(chan error, 1)
+	go func() { runDone <- dispatcher.Run(context.Background()) }()
+	transition := waitForTransition(t, repository, "dead-letter")
+	if transition.code != channels.LarkSenderNotConfiguredCode {
+		t.Fatalf("Lark DLQ transition=%+v", transition)
+	}
+	stopCleanly(t, dispatcher)
+	if err := <-runDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error=%v", err)
+	}
+	stats := dispatcher.Stats()
+	if stats.Completed != 0 || stats.DeadLettered != 1 {
+		t.Fatalf("Lark DLQ stats=%+v", stats)
 	}
 }
 

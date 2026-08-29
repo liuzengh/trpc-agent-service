@@ -41,7 +41,7 @@ func validReplyPayload(channel, destinationType, destinationID string) ReplyOutb
 	return ReplyOutboxPayload{
 		SchemaVersion: ReplyOutboxSchemaVersion, Kind: ReplyOutboxKind,
 		TenantID: "tenant-channel", SessionID: "session-channel", JobID: "job-channel", ExecutionID: "execution-channel",
-		RequestID: "request-channel", MessageID: "message-channel", TraceID: "trace-channel",
+		RequestID: "request-channel", MessageID: "message-channel", TraceID: "trace-channel", BindingID: "binding-channel",
 		Channel: channel, DestinationType: destinationType, DestinationID: destinationID,
 		ReplyText: "reply text", FinishType: "stop", SenderRoutingVersion: SenderRoutingVersion,
 	}
@@ -108,7 +108,7 @@ func TestReplyPayloadRejectsOversizeAndUnknownFields(t *testing.T) {
 	}()); !errors.Is(err, ErrInvalidReplyPayload) {
 		t.Fatalf("oversize payload error=%v", err)
 	}
-	encoded := []byte(`{"schema_version":2,"kind":"agent.reply","tenant_id":"tenant-channel","session_id":"session-channel","job_id":"job-channel","execution_id":"execution-channel","request_id":"request-channel","message_id":"message-channel","trace_id":"trace-channel","channel":"web","destination_type":"user","destination_id":"user-channel","reply_text":"reply text","sender_routing_version":1,"authorization":"must reject"}`)
+	encoded := []byte(`{"schema_version":3,"kind":"agent.reply","tenant_id":"tenant-channel","session_id":"session-channel","job_id":"job-channel","execution_id":"execution-channel","request_id":"request-channel","message_id":"message-channel","trace_id":"trace-channel","binding_id":"binding-channel","channel":"web","destination_type":"user","destination_id":"user-channel","reply_text":"reply text","sender_routing_version":1,"authorization":"must reject"}`)
 	if _, err := DecodeReplyOutboxPayload(encoded); !errors.Is(err, ErrInvalidReplyPayload) {
 		t.Fatalf("unknown field error=%v", err)
 	}
@@ -125,13 +125,15 @@ func TestRoutingFromTenantContextRequiresExplicitDestination(t *testing.T) {
 		wantID   string
 		wantErr  error
 	}{
-		{name: "web user", context: tenant.TenantContext{TenantID: "tenant-a", Channel: "web", ExternalUser: "user-a"}, wantType: DestinationTypeUser, wantID: "user-a"},
-		{name: "web chat", context: tenant.TenantContext{TenantID: "tenant-a", Channel: "web", ExternalChat: "chat-a", ExternalUser: "user-a"}, wantType: DestinationTypeChat, wantID: "chat-a"},
-		{name: "telegram chat", context: tenant.TenantContext{TenantID: "tenant-a", Channel: "telegram", ExternalChat: "-100123"}, wantType: DestinationTypeChat, wantID: "-100123"},
-		{name: "wecom user", context: tenant.TenantContext{TenantID: "tenant-a", Channel: "wecom", ExternalUser: "user-a"}, wantType: DestinationTypeUser, wantID: "user-a"},
-		{name: "missing channel", context: tenant.TenantContext{TenantID: "tenant-a"}, wantErr: ErrUnknownChannel},
-		{name: "missing destination", context: tenant.TenantContext{TenantID: "tenant-a", Channel: "web"}, wantErr: ErrInvalidDestination},
-		{name: "telegram user is unsupported", context: tenant.TenantContext{TenantID: "tenant-a", Channel: "telegram", ExternalUser: "user-a"}, wantErr: ErrInvalidDestination},
+		{name: "web user", context: tenant.TenantContext{TenantID: "tenant-a", BindingID: "binding-a", Channel: "web", ExternalUser: "user-a"}, wantType: DestinationTypeUser, wantID: "user-a"},
+		{name: "web chat", context: tenant.TenantContext{TenantID: "tenant-a", BindingID: "binding-a", Channel: "web", ExternalChat: "chat-a", ExternalUser: "user-a"}, wantType: DestinationTypeChat, wantID: "chat-a"},
+		{name: "telegram chat", context: tenant.TenantContext{TenantID: "tenant-a", BindingID: "binding-a", Channel: "telegram", ExternalChat: "-100123"}, wantType: DestinationTypeChat, wantID: "-100123"},
+		{name: "lark user", context: tenant.TenantContext{TenantID: "tenant-a", BindingID: "binding-a", Channel: "lark", ExternalUser: "ou_a"}, wantType: DestinationTypeUser, wantID: "ou_a"},
+		{name: "lark chat", context: tenant.TenantContext{TenantID: "tenant-a", BindingID: "binding-a", Channel: "lark", ExternalChat: "oc_a"}, wantType: DestinationTypeChat, wantID: "oc_a"},
+		{name: "wecom user", context: tenant.TenantContext{TenantID: "tenant-a", BindingID: "binding-a", Channel: "wecom", ExternalUser: "user-a"}, wantType: DestinationTypeUser, wantID: "user-a"},
+		{name: "missing channel", context: tenant.TenantContext{TenantID: "tenant-a", BindingID: "binding-a"}, wantErr: ErrUnknownChannel},
+		{name: "missing destination", context: tenant.TenantContext{TenantID: "tenant-a", BindingID: "binding-a", Channel: "web"}, wantErr: ErrInvalidDestination},
+		{name: "telegram user is unsupported", context: tenant.TenantContext{TenantID: "tenant-a", BindingID: "binding-a", Channel: "telegram", ExternalUser: "user-a"}, wantErr: ErrInvalidDestination},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -162,9 +164,12 @@ func TestRegistryRejectsDuplicatesAndConcurrentLookup(t *testing.T) {
 	if _, err := NewRegistry(WebAdapter{}, WebAdapter{}); !errors.Is(err, ErrDuplicateChannel) {
 		t.Fatalf("duplicate registry error=%v", err)
 	}
-	registry, err := NewRegistry(WebAdapter{}, TelegramAdapter{}, WeComAdapter{})
+	registry, err := NewRegistry(WebAdapter{}, TelegramAdapter{}, WeComAdapter{}, larkPlaceholderAdapter{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := registry.Lookup("lark"); err != nil {
+		t.Fatalf("default registry did not include lark: %v", err)
 	}
 	if _, err := registry.Lookup("unknown"); !errors.Is(err, ErrUnknownChannel) {
 		t.Fatalf("unknown lookup error=%v", err)

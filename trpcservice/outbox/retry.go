@@ -181,7 +181,8 @@ func normalizeOutcome(outcome SenderOutcome) SenderOutcome {
 		return SenderOutcome{Class: OutcomeUnknown, Code: DeliveryOutcomeUnknownCode}
 	case OutcomeRetryableFailure:
 		switch outcome.Code {
-		case SenderUnavailableCode, SenderTimeoutCode, SenderRateLimitedCode, RepositoryUnavailableCode:
+		case SenderUnavailableCode, SenderTimeoutCode, SenderRateLimitedCode, RepositoryUnavailableCode,
+			"lark_sender_timeout", "lark_sender_rate_limited", "lark_sender_unavailable":
 			return SenderOutcome{Class: outcome.Class, Code: outcome.Code}
 		default:
 			return SenderOutcome{Class: outcome.Class, Code: SenderUnavailableCode}
@@ -189,7 +190,9 @@ func normalizeOutcome(outcome SenderOutcome) SenderOutcome {
 	case OutcomePermanentFailure:
 		switch outcome.Code {
 		case SenderInvalidPayloadCode, SenderInvalidDestinationCode, SenderUnknownChannelCode,
-			SenderMalformedResponseCode, SenderNotConfiguredCode, SenderRejectedCode:
+			SenderMalformedResponseCode, SenderNotConfiguredCode, SenderRejectedCode,
+			"lark_sender_invalid_destination", "lark_sender_auth_failed", "lark_sender_forbidden",
+			"lark_sender_rejected", "lark_sender_not_configured", "lark_sender_malformed_response":
 			return SenderOutcome{Class: outcome.Class, Code: outcome.Code}
 		default:
 			return SenderOutcome{Class: outcome.Class, Code: SenderRejectedCode}
