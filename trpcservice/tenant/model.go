@@ -69,20 +69,21 @@ func (p BackendPolicy) Validate() error {
 }
 
 type TenantContext struct {
-	TenantID      string
-	AgentAppID    string
-	BindingID     string
-	Channel       string
-	ExternalUser  string
-	ExternalChat  string
-	InternalUser  string
-	SessionID     string
-	RequestID     string
-	MessageID     string
-	TraceID       string
-	ConfigVersion int64
-	Permissions   []string
-	BackendPolicy BackendPolicy
+	TenantID         string
+	AgentAppID       string
+	BindingID        string
+	Channel          string
+	ExternalUser     string
+	ExternalChat     string
+	ExternalThreadID string
+	InternalUser     string
+	SessionID        string
+	RequestID        string
+	MessageID        string
+	TraceID          string
+	ConfigVersion    int64
+	Permissions      []string
+	BackendPolicy    BackendPolicy
 }
 
 func (t Tenant) Validate() error {

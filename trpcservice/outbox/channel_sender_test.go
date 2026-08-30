@@ -11,6 +11,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	larkchannel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/lark"
+	telegramchannel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 )
 
@@ -90,6 +91,35 @@ func channelHTTPSender(t *testing.T, doer *sequenceHTTPDoer) *channels.HTTPSende
 	return sender
 }
 
+func telegramOutboxMessage(t *testing.T, tcTenant string, bindingID string) storage.OutboxMessage {
+	t.Helper()
+	payload := channels.ReplyOutboxPayload{
+		SchemaVersion: channels.ReplyOutboxSchemaVersion, Kind: channels.ReplyOutboxKind,
+		TenantID: tcTenant, SessionID: "session-telegram", JobID: "job-telegram", ExecutionID: "execution-telegram",
+		RequestID: "request-telegram", MessageID: "message-telegram", TraceID: "trace-telegram", BindingID: bindingID,
+		Channel: telegramchannel.Channel, DestinationType: channels.DestinationTypeChat, DestinationID: "-100123456789",
+		ReplyText: "reply text", SenderRoutingVersion: channels.SenderRoutingVersion,
+	}
+	encoded, err := channels.EncodeReplyOutboxPayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return storage.OutboxMessage{TenantID: tcTenant, ID: "reply-" + payload.ExecutionID, Kind: channels.ReplyOutboxKind, AggregateID: payload.ExecutionID, DedupKey: tcTenant + "|" + payload.ExecutionID + "|" + channels.ReplyOutboxKind, Payload: encoded}
+}
+
+func telegramSender(t *testing.T, doer *sequenceHTTPDoer, tcTenant, bindingID string) *telegramchannel.Sender {
+	t.Helper()
+	sender, err := telegramchannel.NewSender(telegramchannel.SenderConfig{
+		Bindings: []telegramchannel.Binding{{TenantID: tcTenant, BindingID: bindingID, Channel: telegramchannel.Channel, BotTokenSecretRef: "token-ref", Enabled: true}},
+		Tokens:   telegramchannel.TokenResolverFunc(func(context.Context, telegramchannel.Binding) (string, error) { return "123456:token_for_test", nil }),
+		Client:   doer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sender
+}
+
 func TestChannelSenderAdaptsOutcomeWithoutDurableMutation(t *testing.T) {
 	delegate := channels.SenderFunc(func(context.Context, storage.OutboxMessage) channels.SenderOutcome {
 		return channels.SenderOutcome{Class: channels.OutcomePermanentFailure, Code: channels.SenderInvalidDestinationCode}
@@ -101,6 +131,88 @@ func TestChannelSenderAdaptsOutcomeWithoutDurableMutation(t *testing.T) {
 	outcome := sender.Send(context.Background(), storage.OutboxMessage{})
 	if outcome.Class != OutcomePermanentFailure || outcome.Code != SenderInvalidDestinationCode {
 		t.Fatalf("adapted outcome=%+v", outcome)
+	}
+}
+
+func TestDispatcherTelegramDeliveredCompletesOutbox(t *testing.T) {
+	tc := testTenant("tenant-telegram-dispatch")
+	repository := &observingRepository{inner: storage.NewFakeRepository(), transitionCalls: make(chan observedTransition, 2)}
+	message := telegramOutboxMessage(t, tc.TenantID, tc.BindingID)
+	if err := repository.Enqueue(context.Background(), tc, message); err != nil {
+		t.Fatal(err)
+	}
+	doer := &sequenceHTTPDoer{responses: []sequenceHTTPResponse{{status: http.StatusOK, body: `{"ok":true,"result":{"message_id":9}}`}}}
+	sender, err := NewChannelSender(telegramSender(t, doer, tc.TenantID, tc.BindingID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := NewDispatcher(repository, sender, testConfig(tc, "telegram-dispatcher"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDone := make(chan error, 1)
+	go func() { runDone <- dispatcher.Run(context.Background()) }()
+	transition := waitForTransition(t, repository, "complete")
+	if transition.id != message.ID || dispatcher.Stats().Completed != 1 {
+		t.Fatalf("Telegram completion transition=%+v stats=%+v", transition, dispatcher.Stats())
+	}
+	stopCleanly(t, dispatcher)
+	if err := <-runDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error=%v", err)
+	}
+}
+
+func TestDispatcherTelegramFailureUsesRetryAndUnknownPolicy(t *testing.T) {
+	tc := testTenant("tenant-telegram-failure")
+	repository := &observingRepository{inner: storage.NewFakeRepository(), transitionCalls: make(chan observedTransition, 2)}
+	message := telegramOutboxMessage(t, tc.TenantID, tc.BindingID)
+	if err := repository.Enqueue(context.Background(), tc, message); err != nil {
+		t.Fatal(err)
+	}
+	doer := &sequenceHTTPDoer{responses: []sequenceHTTPResponse{{status: http.StatusTooManyRequests, body: `{"ok":false,"error_code":429,"parameters":{"retry_after":1}}`}}}
+	sender, err := NewChannelSender(telegramSender(t, doer, tc.TenantID, tc.BindingID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(tc, "telegram-failure-dispatcher")
+	config.RetryPolicy = RetryPolicy{MaxAttempts: 2, BaseDelay: time.Hour, MaxDelay: time.Hour}
+	dispatcher, err := NewDispatcher(repository, sender, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDone := make(chan error, 1)
+	go func() { runDone <- dispatcher.Run(context.Background()) }()
+	transition := waitForTransition(t, repository, "retry")
+	if transition.code != channels.TelegramSenderRateLimitedCode || dispatcher.Stats().Completed != 0 || dispatcher.Stats().DeadLettered != 0 {
+		t.Fatalf("Telegram retry transition=%+v stats=%+v", transition, dispatcher.Stats())
+	}
+	stopCleanly(t, dispatcher)
+	if err := <-runDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error=%v", err)
+	}
+
+	repository = &observingRepository{inner: storage.NewFakeRepository(), transitionCalls: make(chan observedTransition, 2)}
+	if err := repository.Enqueue(context.Background(), tc, message); err != nil {
+		t.Fatal(err)
+	}
+	unknownDoer := &sequenceHTTPDoer{responses: []sequenceHTTPResponse{{err: errors.New("response may have been accepted")}}}
+	unknownSender, err := NewChannelSender(telegramSender(t, unknownDoer, tc.TenantID, tc.BindingID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownDispatcher, err := NewDispatcher(repository, unknownSender, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownRunDone := make(chan error, 1)
+	go func() { unknownRunDone <- unknownDispatcher.Run(context.Background()) }()
+	unknownTransition := waitForTransition(t, repository, "retry")
+	if unknownTransition.code != DeliveryOutcomeUnknownCode || unknownDispatcher.Stats().Completed != 0 || unknownDispatcher.Stats().DeadLettered != 0 {
+		t.Fatalf("Telegram unknown transition=%+v stats=%+v", unknownTransition, unknownDispatcher.Stats())
+	}
+	stopCleanly(t, unknownDispatcher)
+	if err := <-unknownRunDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("unknown Run error=%v", err)
 	}
 }
 

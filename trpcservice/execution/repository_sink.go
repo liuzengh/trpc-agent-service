@@ -46,6 +46,7 @@ func BuildReplyOutboxMessage(commit ExecutionCommit) (storage.OutboxMessage, err
 		Channel:              routing.Channel,
 		DestinationType:      routing.DestinationType,
 		DestinationID:        routing.DestinationID,
+		MessageThreadID:      routing.MessageThreadID,
 		ReplyText:            commit.Result.Text,
 		FinishType:           commit.Result.FinishType,
 		SenderRoutingVersion: channels.SenderRoutingVersion,

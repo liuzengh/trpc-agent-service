@@ -11,23 +11,20 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 )
 
 const (
-	realLarkGateEnv       = "LARK_B1_REAL"
-	realLarkAppIDEnv      = "LARK_B1_APP_ID"
-	realLarkSecretEnv     = "LARK_B1_APP_SECRET"
-	realLarkReceiverEnv   = "LARK_B1_RECEIVER_ID"
-	realLarkSecretRef     = "env://LARK_B1_APP_SECRET"
-	realLarkReceiverRef   = "env://LARK_B1_RECEIVER_ID"
-	realLarkTenantID      = "tenant-lark-b1"
-	realLarkBindingID     = "binding-lark-b1"
-	realLarkTestText      = "P0-09G-B1 Lark sender test"
-	realLarkProviderToken = ""
+	realLarkGateEnv     = "LARK_B1_REAL"
+	realLarkAppIDEnv    = "LARK_B1_APP_ID"
+	realLarkSecretEnv   = "LARK_B1_APP_SECRET"
+	realLarkReceiverEnv = "LARK_B1_RECEIVER_ID"
+	realLarkSecretRef   = "env://LARK_B1_APP_SECRET"
+	realLarkTenantID    = "tenant-lark-b1"
+	realLarkBindingID   = "binding-lark-b1"
+	realLarkTestText    = "P0-09G-B1 Lark sender test"
 )
 
 // TestRealLarkSender is deliberately opt-in. It sends at most one initial
@@ -61,7 +58,13 @@ func TestRealLarkSender(t *testing.T) {
 	}
 	t.Log("real Lark config: present")
 
-	transport := &realLarkRecordingTransport{base: http.DefaultTransport, appID: appID, receiverID: receiverID}
+	transport := &realLarkRecordingTransport{
+		base:                  http.DefaultTransport,
+		appID:                 appID,
+		receiver:              receiverID,
+		tokenContractsValid:   true,
+		messageContractsValid: true,
+	}
 	client := &http.Client{Transport: transport, Timeout: DefaultRequestTimeout}
 	resolver, err := NewHTTPAccessTokenResolver(TokenResolverConfig{
 		Secrets: SecretResolverFunc(resolveRealLarkSecret),
@@ -74,7 +77,8 @@ func TestRealLarkSender(t *testing.T) {
 	tokenContext, cancel := context.WithTimeout(context.Background(), DefaultRequestTimeout)
 	token, tokenErr := resolver.Resolve(tokenContext, binding)
 	cancel()
-	if tokenErr != nil || token == "" {
+	snapshot := transport.snapshot()
+	if tokenErr != nil || token == "" || !snapshot.tokenContractsValid || snapshot.tokenCount < 1 {
 		t.Fatalf("real Lark tenant access token failed; token-present=%t", token != "")
 	}
 	t.Log("Lark tenant access token: PASS")
@@ -95,8 +99,8 @@ func TestRealLarkSender(t *testing.T) {
 	if first.Class != channels.OutcomeDelivered {
 		t.Fatalf("real Lark message send failed; class=%s code=%q", first.Class, first.Code)
 	}
-	snapshot := transport.snapshot()
-	if snapshot.messageCount != 1 || !snapshot.messageContractsValid || len(snapshot.messageUUIDs) != 1 || snapshot.messageUUIDs[0] == "" || !snapshot.tokenContractsValid {
+	snapshot = transport.snapshot()
+	if snapshot.messageCount != 1 || !snapshot.messageContractsValid || len(snapshot.messageUUIDs) != 1 || snapshot.messageUUIDs[0] == "" {
 		t.Fatal("real Lark message request contract validation failed")
 	}
 	if snapshot.messageStatuses[0] < 200 || snapshot.messageStatuses[0] >= 300 {
@@ -181,6 +185,7 @@ func logRealLarkReplay(t *testing.T, outcome channels.SenderOutcome, status int)
 
 type realLarkTransportSnapshot struct {
 	tokenContractsValid   bool
+	tokenCount            int
 	messageContractsValid bool
 	messageCount          int
 	messageUUIDs          []string
@@ -194,6 +199,7 @@ type realLarkRecordingTransport struct {
 
 	mu                    sync.Mutex
 	tokenContractsValid   bool
+	tokenCount            int
 	messageContractsValid bool
 	messageCount          int
 	messageUUIDs          []string
@@ -204,7 +210,8 @@ func (t *realLarkRecordingTransport) RoundTrip(request *http.Request) (*http.Res
 	if request == nil || request.URL == nil || request.URL.Host != "open.feishu.cn" || request.URL.Scheme != "https" {
 		return nil, errors.New("real Lark request target validation failed")
 	}
-	if request.URL.Path == tenantAccessTokenPath {
+	switch request.URL.Path {
+	case tenantAccessTokenPath:
 		valid := request.Method == http.MethodPost && request.URL.RawQuery == "" && request.Header.Get("Authorization") == ""
 		body, err := readAndRestoreRequestBody(request)
 		if err != nil {
@@ -218,22 +225,15 @@ func (t *realLarkRecordingTransport) RoundTrip(request *http.Request) (*http.Res
 			valid = false
 		}
 		t.mu.Lock()
+		t.tokenCount++
 		t.tokenContractsValid = t.tokenContractsValid && valid
-		if t.tokenContractsValid == false && t.messageCount == 0 && len(t.messageUUIDs) == 0 {
-			// Keep the initial false value meaningful until the first valid token request.
-		}
-		if len(t.messageUUIDs) == 0 && t.tokenContractsValid == false {
-			t.tokenContractsValid = valid
-		}
 		t.mu.Unlock()
-	} else if request.URL.Path == messageCreatePath {
+		return t.base.RoundTrip(request)
+	case messageCreatePath:
 		valid, uuid := validateRealLarkMessageRequest(request, t.receiver)
 		t.mu.Lock()
-		t.messageContractsValid = t.messageContractsValid && valid
-		if t.messageCount == 0 {
-			t.messageContractsValid = valid
-		}
 		t.messageCount++
+		t.messageContractsValid = t.messageContractsValid && valid
 		t.messageUUIDs = append(t.messageUUIDs, uuid)
 		base := t.base
 		t.mu.Unlock()
@@ -244,8 +244,9 @@ func (t *realLarkRecordingTransport) RoundTrip(request *http.Request) (*http.Res
 			t.mu.Unlock()
 		}
 		return response, err
+	default:
+		return nil, errors.New("real Lark endpoint contract validation failed")
 	}
-	return nil, errors.New("real Lark endpoint contract validation failed")
 }
 
 func (t *realLarkRecordingTransport) snapshot() realLarkTransportSnapshot {
@@ -253,6 +254,7 @@ func (t *realLarkRecordingTransport) snapshot() realLarkTransportSnapshot {
 	defer t.mu.Unlock()
 	return realLarkTransportSnapshot{
 		tokenContractsValid:   t.tokenContractsValid,
+		tokenCount:            t.tokenCount,
 		messageContractsValid: t.messageContractsValid,
 		messageCount:          t.messageCount,
 		messageUUIDs:          append([]string(nil), t.messageUUIDs...),

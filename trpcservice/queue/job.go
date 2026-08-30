@@ -34,26 +34,27 @@ var (
 // TenantContextDTO is the transport-safe projection of tenant.TenantContext.
 // It intentionally contains no context.Context or runtime-owned values.
 type TenantContextDTO struct {
-	TenantID      string               `json:"tenant_id"`
-	AgentAppID    string               `json:"agent_app_id"`
-	BindingID     string               `json:"binding_id"`
-	Channel       string               `json:"channel"`
-	ExternalUser  string               `json:"external_user,omitempty"`
-	ExternalChat  string               `json:"external_chat,omitempty"`
-	InternalUser  string               `json:"internal_user,omitempty"`
-	SessionID     string               `json:"session_id"`
-	RequestID     string               `json:"request_id"`
-	MessageID     string               `json:"message_id"`
-	TraceID       string               `json:"trace_id"`
-	ConfigVersion int64                `json:"config_version"`
-	Permissions   []string             `json:"permissions,omitempty"`
-	BackendPolicy tenant.BackendPolicy `json:"backend_policy"`
+	TenantID         string               `json:"tenant_id"`
+	AgentAppID       string               `json:"agent_app_id"`
+	BindingID        string               `json:"binding_id"`
+	Channel          string               `json:"channel"`
+	ExternalUser     string               `json:"external_user,omitempty"`
+	ExternalChat     string               `json:"external_chat,omitempty"`
+	ExternalThreadID string               `json:"external_thread_id,omitempty"`
+	InternalUser     string               `json:"internal_user,omitempty"`
+	SessionID        string               `json:"session_id"`
+	RequestID        string               `json:"request_id"`
+	MessageID        string               `json:"message_id"`
+	TraceID          string               `json:"trace_id"`
+	ConfigVersion    int64                `json:"config_version"`
+	Permissions      []string             `json:"permissions,omitempty"`
+	BackendPolicy    tenant.BackendPolicy `json:"backend_policy"`
 }
 
 func TenantContextDTOFromContext(tc tenant.TenantContext) TenantContextDTO {
 	return TenantContextDTO{
 		TenantID: tc.TenantID, AgentAppID: tc.AgentAppID, BindingID: tc.BindingID,
-		Channel: tc.Channel, ExternalUser: tc.ExternalUser, ExternalChat: tc.ExternalChat,
+		Channel: tc.Channel, ExternalUser: tc.ExternalUser, ExternalChat: tc.ExternalChat, ExternalThreadID: tc.ExternalThreadID,
 		InternalUser: tc.InternalUser, SessionID: tc.SessionID, RequestID: tc.RequestID,
 		MessageID: tc.MessageID, TraceID: tc.TraceID, ConfigVersion: tc.ConfigVersion,
 		Permissions: append([]string(nil), tc.Permissions...), BackendPolicy: tc.BackendPolicy,
@@ -63,7 +64,7 @@ func TenantContextDTOFromContext(tc tenant.TenantContext) TenantContextDTO {
 func (dto TenantContextDTO) Restore() (tenant.TenantContext, error) {
 	tc := tenant.TenantContext{
 		TenantID: dto.TenantID, AgentAppID: dto.AgentAppID, BindingID: dto.BindingID,
-		Channel: dto.Channel, ExternalUser: dto.ExternalUser, ExternalChat: dto.ExternalChat,
+		Channel: dto.Channel, ExternalUser: dto.ExternalUser, ExternalChat: dto.ExternalChat, ExternalThreadID: dto.ExternalThreadID,
 		InternalUser: dto.InternalUser, SessionID: dto.SessionID, RequestID: dto.RequestID,
 		MessageID: dto.MessageID, TraceID: dto.TraceID, ConfigVersion: dto.ConfigVersion,
 		Permissions: append([]string(nil), dto.Permissions...), BackendPolicy: dto.BackendPolicy,
@@ -241,7 +242,11 @@ func (e JobEnvelope) Validate() error {
 }
 
 func DecodeJob(e JobEnvelope) (AgentJob, error) {
-	return DecodeJobAt(e, time.Now().UTC(), defaultJobMaxAge)
+	job, err := DecodeJobAt(e, time.Now().UTC(), defaultJobMaxAge)
+	if err != nil {
+		return AgentJob{}, err
+	}
+	return job, nil
 }
 
 func DecodeJobAt(e JobEnvelope, now time.Time, maxAge time.Duration) (AgentJob, error) {

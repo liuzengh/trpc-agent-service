@@ -15,13 +15,14 @@ var (
 )
 
 type ResolveRequest struct {
-	Channel       string
-	ExternalAppID string
-	ExternalUser  string
-	ExternalChat  string
-	RequestID     string
-	MessageID     string
-	TraceID       string
+	Channel          string
+	ExternalAppID    string
+	ExternalUser     string
+	ExternalChat     string
+	ExternalThreadID string
+	RequestID        string
+	MessageID        string
+	TraceID          string
 }
 
 type TenantResolver interface {
@@ -73,7 +74,7 @@ func (r RegistryResolver) Resolve(ctx context.Context, req ResolveRequest) (Tena
 	if agent.TenantID != t.ID {
 		return TenantContext{}, ErrTenantMismatch
 	}
-	tc := TenantContext{TenantID: t.ID, AgentAppID: agent.ID, BindingID: binding.ID, Channel: binding.Channel, ExternalUser: req.ExternalUser, ExternalChat: req.ExternalChat, RequestID: req.RequestID, MessageID: req.MessageID, TraceID: req.TraceID, ConfigVersion: t.ConfigVersion, BackendPolicy: t.Backend}
+	tc := TenantContext{TenantID: t.ID, AgentAppID: agent.ID, BindingID: binding.ID, Channel: binding.Channel, ExternalUser: req.ExternalUser, ExternalChat: req.ExternalChat, ExternalThreadID: req.ExternalThreadID, RequestID: req.RequestID, MessageID: req.MessageID, TraceID: req.TraceID, ConfigVersion: t.ConfigVersion, BackendPolicy: t.Backend}
 	if err := tc.Validate(); err != nil {
 		return TenantContext{}, err
 	}

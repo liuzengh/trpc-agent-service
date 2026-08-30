@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	// ReplyOutboxSchemaVersion is bumped from the P0-09F payload because
-	// routing identity is now mandatory for channel delivery.
-	ReplyOutboxSchemaVersion = 3
-	ReplyOutboxKind          = "agent.reply"
-	SenderRoutingVersion     = 1
+	// ReplyOutboxSchemaVersion adds the explicit Telegram topic projection.
+	// Decode still accepts the previous schema for old Web/Lark payloads.
+	ReplyOutboxSchemaVersion         = 4
+	PreviousReplyOutboxSchemaVersion = 3
+	ReplyOutboxKind                  = "agent.reply"
+	SenderRoutingVersion             = 1
 
 	DestinationTypeUser = "user"
 	DestinationTypeChat = "chat"
@@ -58,6 +59,18 @@ const (
 	LarkSenderNotConfiguredCode      = "lark_sender_not_configured"
 	LarkSenderMalformedResponseCode  = "lark_sender_malformed_response"
 	LarkDeliveryOutcomeUnknownCode   = "lark_delivery_outcome_unknown"
+
+	TelegramSenderTimeoutCode            = "telegram_sender_timeout"
+	TelegramSenderRateLimitedCode        = "telegram_sender_rate_limited"
+	TelegramSenderUnavailableCode        = "telegram_sender_unavailable"
+	TelegramSenderInvalidDestinationCode = "telegram_sender_invalid_destination"
+	TelegramSenderAuthFailedCode         = "telegram_sender_auth_failed"
+	TelegramSenderForbiddenCode          = "telegram_sender_forbidden"
+	TelegramSenderRejectedCode           = "telegram_sender_rejected"
+	TelegramSenderMessageTooLongCode     = "telegram_sender_message_too_long"
+	TelegramSenderNotConfiguredCode      = "telegram_sender_not_configured"
+	TelegramSenderMalformedResponseCode  = "telegram_sender_malformed_response"
+	TelegramDeliveryOutcomeUnknownCode   = "telegram_delivery_outcome_unknown"
 )
 
 var (
@@ -106,6 +119,7 @@ type ReplyOutboxPayload struct {
 	Channel              string `json:"channel"`
 	DestinationType      string `json:"destination_type"`
 	DestinationID        string `json:"destination_id"`
+	MessageThreadID      *int64 `json:"message_thread_id,omitempty"`
 	ReplyText            string `json:"reply_text"`
 	FinishType           string `json:"finish_type,omitempty"`
 	SenderRoutingVersion int    `json:"sender_routing_version"`
@@ -119,6 +133,7 @@ type ReplyRouting struct {
 	Channel         string
 	DestinationType string
 	DestinationID   string
+	MessageThreadID *int64
 }
 
 // OutboundMessage is the in-memory sender input after a committed Outbox
@@ -182,7 +197,17 @@ func RoutingFromTenantContext(tc tenant.TenantContext) (ReplyRouting, error) {
 		}
 		routing.DestinationType = DestinationTypeChat
 		routing.DestinationID = tc.ExternalChat
+		if tc.ExternalThreadID != "" {
+			threadID, err := parseCanonicalPositiveInt64(tc.ExternalThreadID)
+			if err != nil {
+				return ReplyRouting{}, ErrInvalidDestination
+			}
+			routing.MessageThreadID = &threadID
+		}
 	case "web", "wecom", "lark":
+		if tc.ExternalThreadID != "" {
+			return ReplyRouting{}, ErrInvalidDestination
+		}
 		switch {
 		case tc.ExternalChat != "":
 			routing.DestinationType = DestinationTypeChat
@@ -195,6 +220,9 @@ func RoutingFromTenantContext(tc tenant.TenantContext) (ReplyRouting, error) {
 		}
 	}
 	if err := ValidateDestination(routing.Channel, routing.DestinationType, routing.DestinationID); err != nil {
+		return ReplyRouting{}, err
+	}
+	if err := ValidateMessageThread(routing.Channel, routing.MessageThreadID); err != nil {
 		return ReplyRouting{}, err
 	}
 	return routing, nil
@@ -217,16 +245,41 @@ func ValidateDestination(channel, destinationType, destinationID string) error {
 		if destinationType != DestinationTypeChat {
 			return ErrUnsupportedDestination
 		}
-		value, err := strconv.ParseInt(destinationID, 10, 64)
-		if err != nil || value == 0 || strconv.FormatInt(value, 10) != destinationID {
+		if _, err := parseCanonicalNonZeroInt64(destinationID); err != nil {
 			return ErrInvalidDestination
 		}
 	}
 	return nil
 }
 
+func ValidateMessageThread(channel string, threadID *int64) error {
+	if threadID == nil {
+		return nil
+	}
+	if channel != "telegram" || *threadID <= 0 {
+		return ErrInvalidDestination
+	}
+	return nil
+}
+
+func parseCanonicalPositiveInt64(value string) (int64, error) {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 || strconv.FormatInt(parsed, 10) != value {
+		return 0, ErrInvalidDestination
+	}
+	return parsed, nil
+}
+
+func parseCanonicalNonZeroInt64(value string) (int64, error) {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed == 0 || strconv.FormatInt(parsed, 10) != value {
+		return 0, ErrInvalidDestination
+	}
+	return parsed, nil
+}
+
 func (p ReplyOutboxPayload) Validate() error {
-	if p.SchemaVersion != ReplyOutboxSchemaVersion || p.Kind != ReplyOutboxKind || p.SenderRoutingVersion != SenderRoutingVersion {
+	if (p.SchemaVersion != ReplyOutboxSchemaVersion && p.SchemaVersion != PreviousReplyOutboxSchemaVersion) || p.Kind != ReplyOutboxKind || p.SenderRoutingVersion != SenderRoutingVersion {
 		return ErrInvalidReplyPayload
 	}
 	for _, value := range []struct {
@@ -243,6 +296,12 @@ func (p ReplyOutboxPayload) Validate() error {
 		}
 	}
 	if err := ValidateDestination(p.Channel, p.DestinationType, p.DestinationID); err != nil {
+		return err
+	}
+	if p.SchemaVersion == PreviousReplyOutboxSchemaVersion && p.MessageThreadID != nil {
+		return ErrInvalidReplyPayload
+	}
+	if err := ValidateMessageThread(p.Channel, p.MessageThreadID); err != nil {
 		return err
 	}
 	if err := validateBoundedText(p.ReplyText, MaxReplyTextBytes, true); err != nil {

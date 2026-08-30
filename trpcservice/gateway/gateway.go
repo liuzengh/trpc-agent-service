@@ -25,6 +25,7 @@ type GatewayRequest struct {
 	Agent         agent.AgentSpec
 	History       []agent.Message
 	Input         agent.Message
+	CreatedAt     time.Time
 	Deadline      time.Time
 }
 
@@ -49,6 +50,20 @@ func New(q queue.JobQueue) (*Gateway, error) {
 }
 
 func (g *Gateway) Submit(ctx context.Context, request GatewayRequest) (Accepted, error) {
+	return g.submit(ctx, request, uuid.NewString(), uuid.NewString())
+}
+
+// SubmitWithIdentity reuses a caller-owned durable identity. Ingress uses this
+// to reconcile a replay after enqueue succeeded but claim completion was lost.
+// The queue remains the idempotency authority and rejects a conflicting job.
+func (g *Gateway) SubmitWithIdentity(ctx context.Context, request GatewayRequest, jobID, executionID string) (Accepted, error) {
+	if strings.TrimSpace(jobID) == "" || strings.TrimSpace(executionID) == "" {
+		return Accepted{}, ErrInvalidRequest
+	}
+	return g.submit(ctx, request, jobID, executionID)
+}
+
+func (g *Gateway) submit(ctx context.Context, request GatewayRequest, jobID, executionID string) (Accepted, error) {
 	if ctx == nil {
 		return Accepted{}, ErrInvalidRequest
 	}
@@ -59,8 +74,9 @@ func (g *Gateway) Submit(ctx context.Context, request GatewayRequest) (Accepted,
 		return Accepted{}, err
 	}
 	now := time.Now().UTC()
-	jobID := uuid.NewString()
-	executionID := uuid.NewString()
+	if !request.CreatedAt.IsZero() {
+		now = request.CreatedAt
+	}
 	tc := request.TenantContext
 	history := make([]queue.MessageDTO, len(request.History))
 	for i, message := range request.History {

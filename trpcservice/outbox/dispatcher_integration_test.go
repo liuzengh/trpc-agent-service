@@ -16,6 +16,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/internal/testinfra"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	larkchannel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/lark"
+	telegramchannel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	postgresstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -195,6 +196,43 @@ func TestPostgresDispatcherClaimsCommittedChannelReply(t *testing.T) {
 	doer.mu.Unlock()
 	if len(keys) != 1 {
 		t.Fatalf("channel-aware PostgreSQL claim sent %d times", len(keys))
+	}
+}
+
+func TestPostgresDispatcherClaimsCommittedTelegramReply(t *testing.T) {
+	fixture := newPostgresDispatcherFixture(t, 2*time.Second)
+	payload := channels.ReplyOutboxPayload{
+		SchemaVersion: channels.ReplyOutboxSchemaVersion, Kind: channels.ReplyOutboxKind,
+		TenantID: fixture.tc.TenantID, SessionID: "session-telegram-pg", JobID: "job-telegram-pg", ExecutionID: "execution-telegram-pg",
+		RequestID: "request-telegram-pg", MessageID: "message-telegram-pg", TraceID: "trace-telegram-pg", BindingID: fixture.tc.BindingID,
+		Channel: telegramchannel.Channel, DestinationType: channels.DestinationTypeChat, DestinationID: "-100123456789",
+		ReplyText: "reply text", SenderRoutingVersion: channels.SenderRoutingVersion,
+	}
+	encoded, err := channels.EncodeReplyOutboxPayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := storage.OutboxMessage{
+		TenantID: fixture.tc.TenantID, ID: "reply-" + payload.ExecutionID, Kind: channels.ReplyOutboxKind,
+		AggregateID: payload.ExecutionID, DedupKey: fixture.tc.TenantID + "|" + payload.ExecutionID + "|" + channels.ReplyOutboxKind, Payload: encoded,
+	}
+	if err := fixture.repo.Enqueue(fixture.ctx, fixture.tc, message); err != nil {
+		t.Fatal(err)
+	}
+	doer := &sequenceHTTPDoer{responses: []sequenceHTTPResponse{{status: http.StatusOK, body: `{"ok":true,"result":{"message_id":9}}`}}}
+	telegramSenderValue := telegramSender(t, doer, fixture.tc.TenantID, fixture.tc.BindingID)
+	sender, err := NewChannelSender(telegramSenderValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, runDone := runPostgresDispatcher(t, fixture, "dispatcher-telegram-pg", sender)
+	waitForPostgresStatus(t, fixture, message.ID, storage.OutboxCompleted)
+	stopPostgresDispatcher(t, dispatcher, runDone)
+	doer.mu.Lock()
+	calls := len(doer.keys)
+	doer.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("Telegram PostgreSQL claim sent %d times", calls)
 	}
 }
 

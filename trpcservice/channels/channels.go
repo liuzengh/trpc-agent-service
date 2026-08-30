@@ -8,7 +8,7 @@ import (
 	"net/http"
 )
 
-type Incoming struct{ ID, TenantID, Channel, UserID, ChatID, Text string }
+type Incoming struct{ ID, TenantID, Channel, UserID, ChatID, ThreadID, Text string }
 type Adapter interface {
 	Name() string
 	Verify(*http.Request, []byte) error

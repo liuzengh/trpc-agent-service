@@ -8,40 +8,115 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/platform"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
 // ReadinessGate controls whether the serving health endpoint may report ready.
+// It is consulted without exposing dependency details to HTTP clients.
 type ReadinessGate interface {
 	Ready(context.Context) error
 }
 
 type Server struct {
-	Runner    platform.Runner
-	Store     platform.Store
-	Resolver  tenant.TenantResolver
-	Readiness ReadinessGate
-	adapters  map[string]channels.Adapter
+	Runner       platform.Runner
+	Store        platform.Store
+	Resolver     tenant.TenantResolver
+	Readiness    ReadinessGate
+	AsyncIngress gateway.WebhookIngress
+	adapters     map[string]channels.Adapter
+	accepting    atomic.Bool
+	draining     atomic.Bool
+	readinessMu  sync.RWMutex
 }
 
 func NewServer(store platform.Store, runner platform.Runner) *Server {
-	return &Server{Store: store, Runner: runner, adapters: map[string]channels.Adapter{"web": channels.WebAdapter{}, "telegram": channels.TelegramAdapter{}, "wecom": channels.WeComAdapter{}}}
+	server := &Server{Store: store, Runner: runner, adapters: map[string]channels.Adapter{"web": channels.WebAdapter{}, "telegram": channels.TelegramAdapter{}, "wecom": channels.WeComAdapter{}}}
+	server.accepting.Store(true)
+	return server
 }
+
+// SetReadiness changes the dependency gate used by healthz. The lock keeps
+// readiness replacement safe while probes are in flight.
+func (s *Server) SetReadiness(gate ReadinessGate) {
+	if s == nil {
+		return
+	}
+	s.readinessMu.Lock()
+	s.Readiness = gate
+	s.readinessMu.Unlock()
+}
+
+// SetAccepting controls whether new application requests may enter a handler.
+// Health and liveness probes remain available while the server drains.
+func (s *Server) SetAccepting(accepting bool) {
+	if s == nil {
+		return
+	}
+	s.accepting.Store(accepting)
+}
+
+// BeginDraining closes the application ingress gate before HTTP shutdown.
+func (s *Server) BeginDraining() {
+	if s == nil {
+		return
+	}
+	s.draining.Store(true)
+	s.accepting.Store(false)
+}
+
+func (s *Server) isAccepting() bool {
+	return s != nil && s.accepting.Load() && !s.draining.Load()
+}
+
+func (s *Server) isDraining() bool {
+	return s != nil && s.draining.Load()
+}
+
+func (s *Server) readinessGate() ReadinessGate {
+	if s == nil {
+		return nil
+	}
+	s.readinessMu.RLock()
+	defer s.readinessMu.RUnlock()
+	return s.Readiness
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/livez", s.live)
 	mux.HandleFunc("/healthz", s.health)
 	mux.HandleFunc("/api/tenants", s.tenants)
 	mux.HandleFunc("/api/chat", s.chat)
 	mux.HandleFunc("/webhook/", s.webhook)
 	return requestLog(mux)
 }
+func (s *Server) live(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	if s.Readiness != nil {
-		if err := s.Readiness.Ready(r.Context()); err != nil {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if s.isDraining() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
+		return
+	}
+	readiness := s.readinessGate()
+	if readiness != nil {
+		if err := readiness.Ready(r.Context()); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
 			return
 		}
@@ -111,6 +186,20 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]string{"error": "use /webhook/{channel}/{external_app_id}"})
 		return
 	}
+	if !s.isAccepting() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "webhook request rejected"})
+		return
+	}
+	if s.AsyncIngress != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot read body"})
+			return
+		}
+		result := s.AsyncIngress.Handle(r.Context(), parts[1], parts[2], r, body)
+		writeRaw(w, result.Status, result.ContentType, result.Body)
+		return
+	}
 	adapter, ok := s.adapters[parts[1]]
 	if !ok {
 		writeJSON(w, 404, map[string]string{"error": "unsupported channel"})
@@ -171,6 +260,18 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 		_ = json.NewEncoder(w).Encode(v)
 	}
 }
+
+func writeRaw(w http.ResponseWriter, status int, contentType string, body []byte) {
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(status)
+	if len(body) > 0 {
+		_, _ = w.Write(body)
+	}
+}
+
 func requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { next.ServeHTTP(w, r) })
 }
