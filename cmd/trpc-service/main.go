@@ -15,6 +15,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 )
@@ -61,18 +62,31 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load session config: %w", err)
 	}
+	coordinatorConfig, err := config.LoadCoordinatorConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("load coordinator config: %w", err)
+	}
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
 	sessionService, err := platformstorage.NewSessionService(startupCtx, sessionConfig)
 	cancelStartup()
 	if err != nil {
 		return fmt.Errorf("build session service: %w", err)
 	}
-	runtime, err := agentservice.NewRuntimeWithSession(
+	startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
+	sessionCoordinator, err := coordination.New(startupCtx, coordinatorConfig)
+	cancelStartup()
+	if err != nil {
+		_ = sessionService.Close()
+		return fmt.Errorf("build session coordinator: %w", err)
+	}
+	runtime, err := agentservice.NewRuntimeWithServices(
 		selectedModel,
 		sessionService,
+		sessionCoordinator,
 		modelConfig.Stream,
 	)
 	if err != nil {
+		_ = sessionCoordinator.Close()
 		_ = sessionService.Close()
 		return fmt.Errorf("create agent runtime: %w", err)
 	}
@@ -86,6 +100,12 @@ func run() error {
 		"session backend=%s ttl=%s\n",
 		sessionConfig.Backend,
 		sessionConfig.TTL,
+	)
+	fmt.Printf(
+		"coordinator backend=%s lease_ttl=%s renew_interval=%s\n",
+		coordinatorConfig.Backend,
+		coordinatorConfig.LeaseTTL,
+		coordinatorConfig.RenewInterval,
 	)
 	fmt.Printf("tutorial chat server listening on %s\n", listenAddr)
 	defer func() {

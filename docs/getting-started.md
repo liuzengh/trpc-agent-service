@@ -33,6 +33,8 @@ go run ./cmd/trpc-service
 ```text
 trpc-agent-service 0.1.0
 model provider=mock name=tutorial-mock-model stream=false
+session backend=inmemory ttl=0s
+coordinator backend=local lease_ttl=30s renew_interval=10s
 tutorial chat server listening on :8080
 ```
 
@@ -236,13 +238,14 @@ SessionID = HTTP 请求中的 session_id
 - `.env` 是在哪里读取的？
 - Mock Model 和真实模型在哪里切换？
 - `LLMAgent`、`Runner` 和 `Session` 是在哪里创建的？
+- 同一个 Session 的并发请求在哪里协调？
 - `/chat` 收到 JSON 后，怎样进入 `runner.Run`？
 - 为什么 Runner 返回 Event channel，而不是直接返回字符串？
 - 第二轮对话为什么能够看到第一轮内容？
 
 ### 6.1 先看整体分层
 
-当前实现分成五层：
+当前实现分成六层：
 
 ```text
 cmd/trpc-service
@@ -253,6 +256,9 @@ trpcservice/config
 
 trpcservice/storage
   负责创建和探测 InMemory / Redis Session Service
+
+trpcservice/coordination
+  负责本地 Session 锁和 Redis 分布式租约
 
 trpcservice/web
   负责 HTTP、JSON 和参数校验
@@ -272,6 +278,8 @@ agent.Runtime.Chat
   ↓
 model.NewUserMessage
   ↓
+SessionCoordinator.Acquire
+  ↓
 runner.Run
   ↓
 LLMAgent
@@ -281,6 +289,8 @@ TutorialModel 或 model/openai
 Runner Event channel
   ↓
 collectChatResult
+  ↓
+SessionLease.Release
   ↓
 chatResponse JSON
 ```
@@ -312,6 +322,8 @@ func main() {
 → 创建 Model
 → 读取 Session 配置
 → 创建并探测 Session Service
+→ 读取 Coordinator 配置
+→ 创建并探测 Session Coordinator
 → 创建 Runtime
 → 创建 HTTP Handler
 → 启动 HTTP Server
@@ -502,7 +514,7 @@ WithEnableAsyncPersist(false)
 
 ### 6.8 Runtime 如何创建 Agent 和 Runner
 
-核心装配在 [`trpcservice/agent/runtime.go`](../trpcservice/agent/runtime.go) 的 `NewRuntimeWithSession`：
+核心装配在 [`trpcservice/agent/runtime.go`](../trpcservice/agent/runtime.go) 的 `NewRuntimeWithServices`：
 
 ```go
 agentInstance := llmagent.New(
@@ -526,12 +538,13 @@ runnerInstance := runner.NewRunner(
 | 对象 | 当前职责 |
 | --- | --- |
 | `session.Service` | 保存用户消息、assistant 消息和会话状态 |
+| `coordination.Coordinator` | 保证同一个 Session 的完整 Agent turn 不会并发推进 |
 | `LLMAgent` | 组织提示词、模型调用和将来的 Tool 循环 |
 | `runner.Runner` | 管理一次运行、Session 读写、request ID 和 Event 流 |
 
 这些类型都来自 tRPC-Agent-Go。我们写的 `Runtime` 是一层很薄的应用封装，把框架对象组合成 HTTP 层容易调用的 `Chat` 方法。
 
-`sessionService` 由外部 Factory 注入，可以是 InMemory，也可以是 Redis。LLMAgent、Runner 调用和 HTTP Handler 不需要为 Redis 写另一套逻辑。
+`sessionService` 和 `coordinator` 都由外部 Factory 注入。Session Service 可以是 InMemory 或 Redis；Coordinator 可以是本地按键锁或 Redis 分布式租约。LLMAgent、Runner 和 HTTP Handler 不需要为这些组合写不同业务逻辑。
 
 `tutorialAppName` 固定为 `tutorial-app`。完整 Session Key 是：
 
@@ -544,18 +557,29 @@ tutorial-app + user_id + session_id
 ```text
 BuildModel
 + NewSessionService
-+ NewRuntimeWithSession
++ NewCoordinator
++ NewRuntimeWithServices
 ```
 
-因此 `.env` 可以分别选择真实模型和 Redis Session。
+因此 `.env` 可以分别选择真实模型、Session 后端和协调后端。
 
 ### 6.9 一次 `Chat` 调用发生了什么
 
 HTTP 层最终调用 `Runtime.Chat`：
 
 ```go
+lease, err := r.coordinator.Acquire(ctx, coordination.Key{
+    AppName:   tutorialAppName,
+    UserID:    userID,
+    SessionID: sessionID,
+})
+leaseCtx := coordination.ContextWithFencingToken(
+    lease.Context(),
+    lease.FencingToken(),
+)
+
 events, err := r.runner.Run(
-    ctx,
+    leaseCtx,
     userID,
     sessionID,
     model.NewUserMessage(text),
@@ -586,9 +610,15 @@ model.Message{
 10. 关闭 Event channel
 ```
 
-这些步骤主要由 tRPC-Agent-Go 完成。我们的 `Runtime.Chat` 没有手工查询 Session，也没有自己拼历史 messages。
+这些步骤主要由 tRPC-Agent-Go 完成。我们的 `Runtime.Chat` 没有手工查询 Session，也没有自己拼历史 messages，但会在调用 Runner 前获得 Session Lease，并在 Event channel 完全排空后释放。
 
-当前 Runtime 用一个全局 `sync.Mutex` 包住 `runner.Run` 和 Event 消费。它是教学阶段的保护措施，避免两个请求同时更新 InMemory Session。它也意味着所有会话暂时串行执行，所以不适合生产。后续会先改成按 Session 加锁，再升级为跨节点租约。
+锁的 Key 与 Session Key 一致：
+
+```text
+tutorial-app + user_id + session_id
+```
+
+同一 Session 必须串行，不同 Session 可以并行。Coordinator 的保护范围覆盖 `runner.Run` 和整个 Event 消费过程，不会在 `runner.Run` 刚返回 channel 时就提前释放。第 11 节会继续拆解这条链路。
 
 ### 6.10 为什么返回 Event channel
 
@@ -720,12 +750,12 @@ GET /healthz
   只说明 HTTP 进程仍然存活
 
 GET /readyz
-  还会读取 Session Service
+  会检查 Session Service 和 Session Coordinator
 ```
 
-使用 Redis 时，`/healthz` 可能仍返回正常，但 Redis 故障会让 `/readyz` 返回 `503`。部署平台应该根据 `/readyz` 决定是否继续把新请求发给该节点。
+使用 Redis Session 或 Redis Coordinator 时，`/healthz` 可能仍返回正常，但 Redis 故障会让 `/readyz` 返回 `503`。部署平台应该根据 `/readyz` 决定是否继续把新请求发给该节点。
 
-readiness 检查使用两秒超时，并执行只读的 `ListAppStates`。它不会创建聊天 Session，也不会修改用户数据。
+readiness 检查使用两秒超时：Session Service 执行只读的 `ListAppStates`，Coordinator 执行本地状态检查或 Redis `PING`。它不会创建聊天 Session，也不会获取业务 Session Lease。
 
 ### 6.14 服务如何关闭
 
@@ -738,12 +768,13 @@ readiness 检查使用两秒超时，并执行只读的 `ListAppStates`。它不
 → ListenAndServe 返回
 → Runtime.Close
 → Runner.Close
+→ Session Coordinator.Close
 → Session Service.Close
 ```
 
 HTTP Shutdown 最多等待 10 秒。`Runtime.Close` 使用 `sync.Once`，重复调用不会重复关闭资源。
 
-正式启动路径由 `main.go` 调用 Session Factory 创建 Service；`NewRuntimeWithSession` 成功后，Runtime 接管它的生命周期并负责关闭。默认的 `NewRuntime` 便捷函数则会自己创建 InMemory Service。后续引入数据库和消息队列时，也应明确每个连接由谁创建、何时转移所有权、最终由谁关闭。
+正式启动路径由 `main.go` 创建 Session Service 和 Coordinator；`NewRuntimeWithServices` 成功后，Runtime 接管两者的生命周期并负责关闭。默认的 `NewRuntime` 便捷函数会创建 InMemory Session 和 Local Coordinator。后续引入数据库和消息队列时，也应明确每个连接由谁创建、何时转移所有权、最终由谁关闭。
 
 ### 6.15 哪些代码是我们写的，哪些是框架提供的
 
@@ -761,6 +792,8 @@ HTTP Shutdown 最多等待 10 秒。`Runtime.Close` 使用 `sync.Once`，重复�
 | InMemory Session | tRPC-Agent-Go |
 | Redis Session | tRPC-Agent-Go `session/redis` 子模块 |
 | Session 配置、Factory 和 readiness | 本项目 |
+| Local / Redis Session Coordinator | 本项目 |
+| Redis 租约 Lua、续租、安全释放和 fencing token | 本项目 |
 | Runtime 和 Event 聚合 | 本项目对框架的应用封装 |
 
 这就是目前阶段的主要成果：我们没有重写 Agent 框架，而是把 tRPC-Agent-Go 的 Model、LLMAgent、Runner、Session 和 Event 组织成了一条能通过 HTTP 实际调用、能切换真实模型、能验证多轮会话的最小链路。
@@ -771,13 +804,15 @@ HTTP Shutdown 最多等待 10 秒。`Runtime.Close` 使用 `sync.Once`，重复�
 
 1. [`trpcservice/web/handler.go`](../trpcservice/web/handler.go)：先看请求从哪里进入；
 2. [`trpcservice/agent/runtime.go`](../trpcservice/agent/runtime.go)：看 Runner 怎样被调用；
-3. [`trpcservice/storage/session.go`](../trpcservice/storage/session.go)：看 Session 后端怎样切换；
-4. [`trpcservice/agent/mock_model.go`](../trpcservice/agent/mock_model.go)：看 Model 接口如何实现；
-5. [`trpcservice/agent/model_factory.go`](../trpcservice/agent/model_factory.go)：看真实模型怎样替换 Mock；
-6. [`trpcservice/config/model.go`](../trpcservice/config/model.go) 和 [`session.go`](../trpcservice/config/session.go)：看环境变量如何变成配置；
-7. [`cmd/trpc-service/main.go`](../cmd/trpc-service/main.go)：最后看所有组件如何装配和关闭。
+3. [`trpcservice/coordination/coordinator.go`](../trpcservice/coordination/coordinator.go)：看 Coordinator 和 Lease 接口；
+4. [`trpcservice/coordination/local.go`](../trpcservice/coordination/local.go) 和 [`redis.go`](../trpcservice/coordination/redis.go)：看本地锁和 Redis 租约；
+5. [`trpcservice/storage/session.go`](../trpcservice/storage/session.go)：看 Session 后端怎样切换；
+6. [`trpcservice/agent/mock_model.go`](../trpcservice/agent/mock_model.go)：看 Model 接口如何实现；
+7. [`trpcservice/agent/model_factory.go`](../trpcservice/agent/model_factory.go)：看真实模型怎样替换 Mock；
+8. [`trpcservice/config/model.go`](../trpcservice/config/model.go)、[`session.go`](../trpcservice/config/session.go) 和 [`coordinator.go`](../trpcservice/config/coordinator.go)：看环境变量如何变成配置；
+9. [`cmd/trpc-service/main.go`](../cmd/trpc-service/main.go)：最后看所有组件如何装配和关闭。
 
-不要一开始深入 tRPC-Agent-Go 的所有内部实现。先沿着上面六个文件跟完一条请求，再根据兴趣进入框架源码。
+不要一开始深入 tRPC-Agent-Go 的所有内部实现。先沿着上面的文件跟完一条请求，再根据兴趣进入框架源码。
 
 ## 7. 运行测试
 
@@ -794,6 +829,8 @@ go test ./...
 
 HTTP 参数和响应测试在 [`trpcservice/web/handler_test.go`](../trpcservice/web/handler_test.go)。
 
+Session 协调测试在 [`trpcservice/coordination`](../trpcservice/coordination) 和 [`runtime_coordinator_test.go`](../trpcservice/agent/runtime_coordinator_test.go)，覆盖同 Session 串行、不同 Session 并行、跨 Runtime 互斥、租约续期、租约丢失、TTL 恢复和请求取消后的锁释放。
+
 也可以运行 race test：
 
 ```bash
@@ -806,7 +843,7 @@ go test -race ./...
 
 - InMemory Session 重启后仍会丢失；Redis Session 已支持重启持久化和跨实例共享；
 - 默认 Mock Model 只识别几种固定句式，真实模型需要自行配置凭据；
-- 每个 Runtime 内的 Chat 请求使用一个全局锁串行执行；不同进程之间还没有分布式租约；
+- 已支持本地按 Session 并行和 Redis 分布式租约，但 fencing token 还没有在 Session 存储写入边界强制校验；
 - 已有 Redis Session，但没有 PostgreSQL、消息队列或运行 journal；
 - 没有租户和 Agent revision；
 - 没有企业微信或 Telegram 回调；
@@ -898,7 +935,7 @@ trpc-agent-go/session/redis.NewService
   ↓
 ProbeSessionService
   ↓
-agent.NewRuntimeWithSession
+agent.NewRuntimeWithServices
   ↓
 runner.NewRunner(..., runner.WithSessionService(redisService))
 ```
@@ -932,7 +969,7 @@ case config.SessionBackendRedis:
 
 第三步，Factory 调用一次只读的 `ListAppStates`。这会强制发生 Redis 网络访问。如果 Redis 不可达，错误在 HTTP Server 启动前返回。
 
-第四步，[`NewRuntimeWithSession`](../trpcservice/agent/runtime.go) 把已经创建好的 Redis Service 注入 Runner：
+第四步，[`NewRuntimeWithServices`](../trpcservice/agent/runtime.go) 把已经创建好的 Redis Service 和 Coordinator 交给 Runtime，其中 Session Service 会注入 Runner：
 
 ```go
 runner.NewRunner(
@@ -1179,7 +1216,7 @@ GET /readyz
 
 ### 10.10 当前 Redis 链路还没有解决什么
 
-Redis Session 已经解决：
+单独使用 Redis Session 可以解决：
 
 ```text
 会话不再绑定单个进程
@@ -1196,9 +1233,9 @@ Agent 重启后可以恢复 Session
 节点 B 调用模型并追加 Event
 ```
 
-这可能造成同一个 Session 的两轮消息交错。当前 `sync.Mutex` 只能串行化单个 Runtime 内的请求，不能约束另一个进程。
+如果没有额外协调，这仍可能造成同一个 Session 的两轮消息交错。Redis Session 的职责是保存数据，不负责持有一次完整 Agent Run 的执行权。
 
-因此下一阶段的 Session Coordinator 要保护的范围不是某一次 Redis `AppendEvent`，而是完整的一轮执行：
+当前项目已经增加 Session Coordinator。它保护的范围不是某一次 Redis `AppendEvent`，而是完整的一轮执行：
 
 ```text
 读取 Session
@@ -1207,27 +1244,291 @@ Agent 重启后可以恢复 Session
 → 写入最终 Event
 ```
 
-理解这个边界后，就能看清为什么“接入 Redis”是无状态 Worker 的第一步，但还不是多节点一致性的终点。
+理解这个边界后，就能看清为什么 Redis Session 和 Redis Coordinator 是两个不同组件：前者保存会话，后者决定当前由哪个 Worker 推进会话。
 
-## 11. 下一步
+## 11. Session Coordinator 接入后的运行链路
+
+加入 Coordinator 后，一次请求的最外层链路变成：
+
+```text
+HTTP / IM 请求
+  → 计算 Session Key
+  → SessionCoordinator.Acquire
+  → 获得 Lease 和 fencing token
+  → runner.Run
+  → 持续消费 Event channel
+  → SessionLease.Release
+  → 返回响应
+```
+
+关键点是 Lease 必须覆盖整个 Runner 生命周期，而不只是 `runner.Run` 这个函数调用。`runner.Run` 返回的是 channel，此时 Agent、Model 或 Tool 可能仍在后台执行。
+
+### 11.1 Coordinator 接口表达什么
+
+接口位于 [`trpcservice/coordination/coordinator.go`](../trpcservice/coordination/coordinator.go)：
+
+```go
+type Coordinator interface {
+    Acquire(ctx context.Context, key Key) (Lease, error)
+    Ready(ctx context.Context) error
+    Close() error
+}
+
+type Lease interface {
+    Context() context.Context
+    FencingToken() int64
+    Release(ctx context.Context) error
+}
+```
+
+`Coordinator` 负责等待和授予执行权，`Lease` 表示本轮请求当前拥有的执行权。
+
+`Lease.Context()` 不只是原始 HTTP context 的别名。Redis Coordinator 无法继续证明租约所有权时，会主动取消这个 context，使取消信号沿下面的方向传播：
+
+```text
+Lease Context
+  → runner.Run
+  → LLMAgent
+  → Model
+  → Tool
+  → Event Loop
+```
+
+`FencingToken()` 是每次成功获取租约时递增的编号。Token 已经放入 Runner 使用的 context，后续 Session 写入包装器、Tool 或 Plugin 可以读取它。
+
+### 11.2 Local Coordinator 怎样做到同 Session 串行
+
+默认配置是：
+
+```dotenv
+TRPC_AGENT_COORDINATOR_BACKEND=local
+```
+
+Local Coordinator 在进程内维护一个按 Session Key 分组的 semaphore：
+
+```text
+tutorial-app/alice/session-a → semaphore A
+tutorial-app/alice/session-b → semaphore B
+```
+
+如果两个请求属于同一个 Session：
+
+```text
+请求 1 → 获得 semaphore A → 执行
+请求 2 → 等待 semaphore A
+请求 1 → Release
+请求 2 → 获得 semaphore A → 执行
+```
+
+如果两个请求属于不同 Session：
+
+```text
+请求 1 → semaphore A → 并行执行
+请求 2 → semaphore B → 并行执行
+```
+
+每个条目记录持有者和等待者的引用数。最后一个引用释放后，条目从 map 删除，避免服务运行时间越长，已经结束的 Session 锁对象越积越多。
+
+Local Coordinator 解决了原来全局 `sync.Mutex` 的吞吐问题，但它只能看到当前进程，不能协调另一个 Worker。
+
+### 11.3 Redis Coordinator 怎样抢占租约
+
+多 Worker 部署时配置：
+
+```dotenv
+TRPC_AGENT_COORDINATOR_BACKEND=redis
+TRPC_AGENT_COORDINATOR_LEASE_TTL=30s
+TRPC_AGENT_COORDINATOR_RENEW_INTERVAL=10s
+TRPC_AGENT_COORDINATOR_RETRY_INTERVAL=50ms
+```
+
+Coordinator 复用 `REDIS_URL` 和 `REDIS_KEY_PREFIX`，但使用独立的 `coord:session` Key 命名空间。
+
+Session Key 不会以明文直接拼进 Redis Key。代码先对 `AppName + UserID + SessionID` 做 SHA-256，再生成带 Redis Cluster hash tag 的两个 Key：
+
+```text
+<prefix>:coord:session:{hash}:lock
+<prefix>:coord:session:{hash}:fence
+```
+
+`lock` 保存随机 owner ID，`fence` 保存单调递增 token。两个 Key 使用相同 `{hash}`，为将来放入 Redis Cluster 同一 slot 做准备。
+
+获取租约通过一个 Lua 脚本原子完成，逻辑相当于：
+
+```text
+如果 lock 不存在：
+  token = INCR fence
+  PSETEX lock lease_ttl owner_id
+  返回 token
+否则：
+  返回 0
+```
+
+返回 `0` 表示其他节点仍持有租约，当前请求按 `RetryInterval` 等待后重试。等待过程中会同时监听请求 context 和 Coordinator close context，所以客户端取消或服务关闭时不会永久阻塞。
+
+### 11.4 为什么需要随机 owner 和 fencing token
+
+随机 owner 用于安全续租和释放。假设节点 A 的租约已经过期，节点 B 获得了同一个 lock；这时节点 A 的延迟释放请求不能删除节点 B 的锁。
+
+因此续租和释放都必须比较 owner：
+
+```text
+GET lock == my_owner
+  → 可以 PEXPIRE 或 DEL
+
+GET lock != my_owner
+  → 当前节点已经不是持有者
+```
+
+fencing token 处理的是更深一层的问题：旧节点可能在租约过期后仍短暂运行。新节点拿到更大的 token 后，下游存储如果只接受比已记录 token 更大的写入，就能拒绝旧节点的迟到写入。
+
+当前实现已经做到：
+
+- Redis 原子生成递增 token；
+- `Lease.FencingToken()` 暴露 token；
+- token 注入 Runner context。
+
+当前还没有做到：
+
+- tRPC-Agent-Go Redis Session 的 `AppendEvent` 尚未校验 token；
+- 所以 token 目前是“已经传播但尚未在存储边界强制执行”。
+
+这也是为什么文档不能直接宣称已经获得严格 fencing 保证。
+
+### 11.5 续租怎样覆盖长时间模型调用
+
+Agent 调用可能超过初始 Lease TTL，例如模型响应较慢或 Tool 执行时间较长。Redis Lease 创建后会启动一个续租 goroutine：
+
+```text
+每隔 RenewInterval
+  → Lua 检查 lock owner
+  → owner 相同：PEXPIRE 刷新 TTL
+  → owner 不同：取消 Lease Context
+  → Redis 请求失败：取消 Lease Context
+```
+
+当前策略偏向一致性：一次续租错误就认为无法继续证明所有权，立即取消本轮 Agent 执行。这样会牺牲短暂 Redis 抖动时的可用性，但能降低旧 Worker 在未知租约状态下继续写入的风险。
+
+续租 goroutine 会在下面任一条件发生时退出：
+
+- Lease 正常释放；
+- HTTP 请求 context 取消；
+- Coordinator 关闭；
+- 续租失败或 owner 不匹配。
+
+`Release` 会先停止续租并等待 goroutine 退出，再执行删除脚本，避免出现“刚删除 lock，续租 goroutine 又把它延长”的竞态。
+
+### 11.6 Runtime 为什么要排空 Event 后再释放
+
+[`Runtime.Chat`](../trpcservice/agent/runtime.go) 的实际结构是：
+
+```text
+Acquire Lease
+  → runner.Run(lease.Context())
+  → collectChatResult
+      → 一直读取 Event channel
+      → 直到 Runner 关闭 channel
+  → Release Lease
+```
+
+如果写成下面这样就是错误的：
+
+```text
+Acquire
+→ runner.Run 返回 channel
+→ 立即 Release
+→ 后台 Agent 仍在产生和写入 Event
+```
+
+第二个请求会在第一轮真正结束前进入同一个 Session，锁就失去了意义。
+
+当前 Runtime 使用 `defer` 保证成功、模型错误、context 取消等路径都会尝试释放 Lease。释放时使用一个脱离原请求取消信号的两秒 context：即使客户端已经断开，服务仍有机会执行 compare-and-delete；如果 Redis 仍不可达，lock 最终由 TTL 回收。
+
+### 11.7 节点崩溃后为什么不会永久死锁
+
+正常路径会主动 `Release`，节点崩溃时则无法执行清理。Redis lock 自带 Lease TTL，因此：
+
+```text
+节点 A 获得 lock
+→ 节点 A 崩溃，续租停止
+→ TTL 到期，Redis 自动删除 lock
+→ 节点 B 下一次重试成功
+```
+
+TTL 太短会增加正常请求中途失租的风险；TTL 太长会延长故障节点退出后的恢复时间。当前默认值是：
+
+```text
+Lease TTL      = 30s
+Renew Interval = 10s
+Retry Interval = 50ms
+```
+
+配置校验要求续租间隔不超过 TTL 的一半，至少留出一次额外续租机会。
+
+### 11.8 readiness 和关闭链路
+
+使用 Local Coordinator 时，`Ready` 检查组件是否已经关闭；使用 Redis Coordinator 时，`Ready` 会执行 Redis `PING`。
+
+```text
+GET /readyz
+  → Session Service readiness
+  → Coordinator readiness
+  → 两者都成功才返回 200
+```
+
+服务关闭顺序是：
+
+```text
+HTTP Server 停止接收请求
+→ 等待 Handler 返回
+→ Runtime.Close
+→ Runner.Close
+→ Coordinator.Close
+→ Session Service.Close
+```
+
+Coordinator Close 会拒绝新的 Acquire，并取消仍存活的 Lease Context。正常的 HTTP shutdown 会先等待请求结束，因此关闭 Coordinator 时通常已经没有活跃 turn。
+
+### 11.9 当前阶段获得了什么
+
+当前并发语义已经从：
+
+```text
+所有 Session 全局串行
+```
+
+推进到：
+
+```text
+同一 Session 串行
+不同 Session 并行
+多个 Runtime 对同一 Session 互斥
+节点崩溃后依靠 TTL 恢复
+租约丢失时取消 Runner 链路
+```
+
+这使 Worker 水平扩展具备了基本的会话执行边界。但在 fencing token 真正接入 Session 写入校验之前，极端暂停恢复场景仍不能视为严格解决。
+
+## 12. 下一步
 
 当前路径已经推进到：
 
 ```text
 InMemory Session
 → Redis Session
-→ 重启持久化
-→ 两个实例共享 Session
+→ Local Session Coordinator
+→ Redis 分布式租约
+→ fencing token 生成和传播
 ```
 
-下一阶段是 Session Coordinator：
+下一阶段是请求幂等，先为 HTTP 请求定义 `message_id` / `idempotency_key`，再复用于企业微信等 IM 平台的消息 ID：
 
 ```text
-移除进程内全局锁
-→ 按 Session 的本地锁
-→ Redis 分布式租约
-→ fencing token
-→ 防止两个节点同时推进同一 Session
+收到 message_id
+→ Redis 幂等记录不存在：标记 processing
+→ 执行 Session Coordinator + Runner
+→ 保存 completed 结果
+→ 重复 message_id：返回已有结果，不重复调用模型
 ```
 
-Redis Session 解决“多个节点能看到同一份数据”，还没有解决“多个节点能否同时修改同一份会话”。后者是接下来必须补齐的一致性边界。
+Coordinator 解决“同一 Session 同时只能执行一轮”，幂等层解决“同一条外部消息只能执行一次”。这两者组合后，才适合开始接入会重复投递 webhook 的企业微信 Channel Adapter。

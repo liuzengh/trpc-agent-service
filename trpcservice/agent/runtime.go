@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -16,8 +18,9 @@ import (
 )
 
 const (
-	tutorialAppName   = "tutorial-app"
-	tutorialAgentName = "tutorial-agent"
+	tutorialAppName     = "tutorial-app"
+	tutorialAgentName   = "tutorial-agent"
+	leaseReleaseTimeout = 2 * time.Second
 )
 
 // ChatResult is the transport-neutral result of one tutorial chat turn.
@@ -27,29 +30,28 @@ type ChatResult struct {
 	EventCount int
 }
 
-// Runtime owns the Agent Runner and its configured Session service.
+// Runtime owns the Agent Runner, Session service and Session coordinator.
 type Runtime struct {
 	runner         runner.Runner
 	sessionService session.Service
+	coordinator    coordination.Coordinator
 	closeOnce      sync.Once
 	closeErr       error
-
-	// The tutorial uses one process and favors clarity over throughput. The
-	// production design replaces this lock with per-session distributed
-	// coordination and shared storage.
-	chatMu sync.Mutex
 }
 
-// NewRuntime creates an LLMAgent with the selected model and a default
-// in-memory Session service.
+// NewRuntime creates an LLMAgent with an in-memory Session service and a local
+// per-Session coordinator.
 func NewRuntime(selectedModel model.Model, stream bool) (*Runtime, error) {
 	sessionService := inmemory.NewSessionService()
-	runtime, err := NewRuntimeWithSession(
+	coordinator := coordination.NewLocalCoordinator()
+	runtime, err := NewRuntimeWithServices(
 		selectedModel,
 		sessionService,
+		coordinator,
 		stream,
 	)
 	if err != nil {
+		_ = coordinator.Close()
 		_ = sessionService.Close()
 		return nil, err
 	}
@@ -57,10 +59,33 @@ func NewRuntime(selectedModel model.Model, stream bool) (*Runtime, error) {
 }
 
 // NewRuntimeWithSession creates an LLMAgent with a caller-provided Session
-// service. Runtime takes ownership of sessionService after a successful call.
+// service and a local coordinator. Runtime takes ownership of sessionService
+// after a successful call.
 func NewRuntimeWithSession(
 	selectedModel model.Model,
 	sessionService session.Service,
+	stream bool,
+) (*Runtime, error) {
+	coordinator := coordination.NewLocalCoordinator()
+	runtime, err := NewRuntimeWithServices(
+		selectedModel,
+		sessionService,
+		coordinator,
+		stream,
+	)
+	if err != nil {
+		_ = coordinator.Close()
+		return nil, err
+	}
+	return runtime, nil
+}
+
+// NewRuntimeWithServices creates an LLMAgent with caller-provided Session and
+// coordination services. Runtime owns both services after a successful call.
+func NewRuntimeWithServices(
+	selectedModel model.Model,
+	sessionService session.Service,
+	coordinator coordination.Coordinator,
 	stream bool,
 ) (*Runtime, error) {
 	if selectedModel == nil {
@@ -68,6 +93,9 @@ func NewRuntimeWithSession(
 	}
 	if sessionService == nil {
 		return nil, errors.New("session service is required")
+	}
+	if coordinator == nil {
+		return nil, errors.New("session coordinator is required")
 	}
 	agentInstance := llmagent.New(
 		tutorialAgentName,
@@ -87,6 +115,7 @@ func NewRuntimeWithSession(
 			runner.WithSessionService(sessionService),
 		),
 		sessionService: sessionService,
+		coordinator:    coordinator,
 	}, nil
 }
 
@@ -105,9 +134,15 @@ func (r *Runtime) Chat(
 	userID string,
 	sessionID string,
 	text string,
-) (ChatResult, error) {
+) (result ChatResult, err error) {
 	if r == nil || r.runner == nil {
 		return ChatResult{}, errors.New("agent runtime is not initialized")
+	}
+	if r.coordinator == nil {
+		return ChatResult{}, errors.New("session coordinator is not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	userID = strings.TrimSpace(userID)
 	sessionID = strings.TrimSpace(sessionID)
@@ -122,11 +157,35 @@ func (r *Runtime) Chat(
 		return ChatResult{}, errors.New("message is required")
 	}
 
-	r.chatMu.Lock()
-	defer r.chatMu.Unlock()
+	lease, err := r.coordinator.Acquire(ctx, coordination.Key{
+		AppName:   tutorialAppName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		return ChatResult{}, fmt.Errorf("coordinate tutorial session: %w", err)
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			leaseReleaseTimeout,
+		)
+		defer cancel()
+		if releaseErr := lease.Release(releaseCtx); releaseErr != nil {
+			result = ChatResult{}
+			err = errors.Join(
+				err,
+				fmt.Errorf("release tutorial session lease: %w", releaseErr),
+			)
+		}
+	}()
+	leaseCtx := coordination.ContextWithFencingToken(
+		lease.Context(),
+		lease.FencingToken(),
+	)
 
 	events, err := r.runner.Run(
-		ctx,
+		leaseCtx,
 		userID,
 		sessionID,
 		model.NewUserMessage(text),
@@ -135,20 +194,26 @@ func (r *Runtime) Chat(
 		return ChatResult{}, fmt.Errorf("run tutorial agent: %w", err)
 	}
 
-	result, runErr := collectChatResult(ctx, events)
+	result, runErr := collectChatResult(leaseCtx, events)
 	if runErr != nil {
 		return ChatResult{}, runErr
 	}
 	return result, nil
 }
 
-// Ready checks whether the configured Session service is reachable.
+// Ready checks whether the Session service and coordinator are available.
 func (r *Runtime) Ready(ctx context.Context) error {
 	if r == nil || r.sessionService == nil {
 		return errors.New("session service is not initialized")
 	}
 	if _, err := r.sessionService.ListAppStates(ctx, tutorialAppName); err != nil {
 		return fmt.Errorf("session service is not ready: %w", err)
+	}
+	if r.coordinator == nil {
+		return errors.New("session coordinator is not initialized")
+	}
+	if err := r.coordinator.Ready(ctx); err != nil {
+		return fmt.Errorf("session coordinator is not ready: %w", err)
 	}
 	return nil
 }
@@ -193,8 +258,8 @@ func collectChatResult(
 	if runErr != nil {
 		return ChatResult{}, runErr
 	}
-	if err := ctx.Err(); err != nil {
-		return ChatResult{}, err
+	if cause := context.Cause(ctx); cause != nil {
+		return ChatResult{}, cause
 	}
 	if strings.TrimSpace(result.Reply) == "" {
 		result.Reply = partial.String()
@@ -215,11 +280,15 @@ func (r *Runtime) Close() error {
 		if r.runner != nil {
 			runnerErr = r.runner.Close()
 		}
+		var coordinatorErr error
+		if r.coordinator != nil {
+			coordinatorErr = r.coordinator.Close()
+		}
 		var sessionErr error
 		if r.sessionService != nil {
 			sessionErr = r.sessionService.Close()
 		}
-		r.closeErr = errors.Join(runnerErr, sessionErr)
+		r.closeErr = errors.Join(runnerErr, coordinatorErr, sessionErr)
 	})
 	return r.closeErr
 }
