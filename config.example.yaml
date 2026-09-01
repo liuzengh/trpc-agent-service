@@ -1,0 +1,23 @@
+# Tenant & model configuration template.
+# Copy to config.yaml and fill in real values:  cp config.example.yaml config.yaml
+# config.yaml is gitignored — never commit real API keys.
+#
+# MODEL_API_KEY / MODEL_NAME / MODEL_BASE_URL environment variables, if set,
+# override the default tenant's model settings (dev convenience).
+
+default_tenant: demo
+
+tenants:
+  - id: demo
+    name: Demo Tenant
+    model:
+      name: deepseek-v4-flash        # model name of an OpenAI-compatible service
+      api_key: REPLACE_WITH_YOUR_KEY # secret, keep out of git
+      base_url: https://api.deepseek.com  # optional; omit for official OpenAI
+
+  - id: demo-alt
+    name: Demo Tenant Alt
+    model:
+      name: deepseek-chat
+      api_key: REPLACE_WITH_YOUR_KEY
+      base_url: https://api.deepseek.com

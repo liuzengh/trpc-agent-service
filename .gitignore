@@ -13,6 +13,9 @@ coverage.html
 
 vendor/
 
+# local secrets: commit config.example.yaml only
+config.yaml
+
 data/*
 !data/README.md
 

@@ -4,22 +4,16 @@ package agent
 
 import (
 	"fmt"
-	"os"
+	"sort"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
-)
 
-// Model config selects the LLM backing the agent. At this stage it is read
-// from environment variables; it will be moved into per-tenant model config
-// (trpcservice/config + trpcservice/tenant) once the tenant base lands.
-const (
-	envAPIKey  = "MODEL_API_KEY"  // required, key of the OpenAI-compatible service
-	envModel   = "MODEL_NAME"     // optional, e.g. "gpt-4o-mini", "deepseek-chat"
-	envBaseURL = "MODEL_BASE_URL" // optional, OpenAI-compatible endpoint
+	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
 const (
@@ -28,25 +22,23 @@ const (
 	defaultModel = "gpt-4o-mini"
 )
 
-// NewRunner builds the minimal walking-skeleton runner: one LLMAgent backed
-// by an OpenAI-compatible model, streaming output, in-memory session backend.
-// The session service is intentionally in-memory here and will be replaced by
-// tenant-selected shared backends (redis/mysql/postgres) via the Storage
-// Adapter later.
-func NewRunner() (runner.Runner, error) {
-	apiKey := os.Getenv(envAPIKey)
-	if apiKey == "" {
-		return nil, fmt.Errorf("environment %s is required", envAPIKey)
+// NewRunner builds one tenant's walking-skeleton runner: an LLMAgent backed
+// by the tenant's OpenAI-compatible model, streaming output, in-memory
+// session backend. The session service is intentionally in-memory here and
+// will be replaced by tenant-selected shared backends (redis/mysql/postgres)
+// via the Storage Adapter later.
+func NewRunner(t *tenant.Context) (runner.Runner, error) {
+	if t.Model.APIKey == "" {
+		return nil, fmt.Errorf("tenant %s: model api key is required", t.ID)
 	}
 
-	modelName := os.Getenv(envModel)
+	modelName := t.Model.Name
 	if modelName == "" {
 		modelName = defaultModel
 	}
-
-	modelOpts := []openai.Option{openai.WithAPIKey(apiKey)}
-	if baseURL := os.Getenv(envBaseURL); baseURL != "" {
-		modelOpts = append(modelOpts, openai.WithBaseURL(baseURL))
+	modelOpts := []openai.Option{openai.WithAPIKey(t.Model.APIKey)}
+	if t.Model.BaseURL != "" {
+		modelOpts = append(modelOpts, openai.WithBaseURL(t.Model.BaseURL))
 	}
 	llm := openai.New(modelName, modelOpts...)
 
@@ -59,4 +51,47 @@ func NewRunner() (runner.Runner, error) {
 	return runner.NewRunner(appName, a,
 		runner.WithSessionService(inmemory.NewSessionService()),
 	), nil
+}
+
+// Registry holds one Runner per tenant, built once at startup. Tenant
+// isolation at this stage is by separate Runner instances; per-tenant tool
+// whitelists and guardrails will hang off the same lookup later.
+type Registry struct {
+	runners map[string]runner.Runner
+	def     string
+}
+
+// NewRegistry builds a Runner for every tenant in the loaded config.
+func NewRegistry(cfg *config.Config) (*Registry, error) {
+	r := &Registry{
+		runners: make(map[string]runner.Runner, len(cfg.Tenants)),
+		def:     cfg.DefaultTenant,
+	}
+	for id, t := range cfg.Tenants {
+		rr, err := NewRunner(t)
+		if err != nil {
+			return nil, err
+		}
+		r.runners[id] = rr
+	}
+	return r, nil
+}
+
+// Default returns the default tenant id.
+func (r *Registry) Default() string { return r.def }
+
+// IDs returns the sorted tenant ids, for listing in the CLI.
+func (r *Registry) IDs() []string {
+	ids := make([]string, 0, len(r.runners))
+	for id := range r.runners {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// Runner returns the Runner of tenant id, or false if unknown.
+func (r *Registry) Runner(id string) (runner.Runner, bool) {
+	rr, ok := r.runners[id]
+	return rr, ok
 }
