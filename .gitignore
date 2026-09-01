@@ -15,3 +15,5 @@ vendor/
 
 data/*
 !data/README.md
+
+/.qoder
