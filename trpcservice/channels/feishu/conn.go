@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -82,8 +84,13 @@ func (c *Conn) Recv(ctx context.Context) ([]byte, error) {
 	}
 }
 
-// Send delivers a text message to a chat over the Lark OpenAPI.
-func (c *Conn) Send(ctx context.Context, target, text string) error {
+// Send delivers a text message to a chat over the Lark OpenAPI. Single chats
+// target the sender's open_id; group chats target the chat_id.
+func (c *Conn) Send(ctx context.Context, target, chatType, text string) error {
+	receiveIDType := "chat_id"
+	if chatType == channels.ChatTypeSingle {
+		receiveIDType = "open_id"
+	}
 	content, _ := json.Marshal(map[string]string{"text": text})
 	body := larkim.NewCreateMessageReqBodyBuilder().
 		ReceiveId(target).
@@ -91,7 +98,7 @@ func (c *Conn) Send(ctx context.Context, target, text string) error {
 		Content(string(content)).
 		Build()
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType("chat_id").
+		ReceiveIdType(receiveIDType).
 		Body(body).
 		Build()
 	resp, err := c.api.Im.Message.Create(ctx, req)

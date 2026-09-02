@@ -52,8 +52,10 @@ type Conn interface {
 	// Recv blocks until the next plaintext event arrives, or returns an error
 	// when the connection closes.
 	Recv(ctx context.Context) ([]byte, error)
-	// Send delivers a text reply to the given target (chat/user id).
-	Send(ctx context.Context, target, text string) error
+	// Send delivers a text reply to target (group chat id for group chats,
+	// user id for single chats). chatType is ChatTypeSingle / ChatTypeGroup
+	// and lets the conn pick the right receive-id type.
+	Send(ctx context.Context, target, chatType, text string) error
 	// Close releases the underlying connection.
 	Close() error
 }

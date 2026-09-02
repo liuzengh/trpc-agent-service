@@ -214,7 +214,7 @@ func (a *Adapter) Send(ctx context.Context, msg *channels.OutboundMessage) error
 	if msg == nil || msg.Inbound == nil {
 		return fmt.Errorf("feishu: outbound requires inbound context")
 	}
-	return a.conn.Send(ctx, msg.Inbound.ChatID, msg.Text())
+	return a.conn.Send(ctx, msg.Inbound.ChatID, msg.Inbound.ChatType, msg.Text())
 }
 
 // Stop closes the underlying connection.

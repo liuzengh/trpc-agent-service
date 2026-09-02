@@ -103,10 +103,12 @@ func (c *Conn) Recv(ctx context.Context) ([]byte, error) {
 }
 
 // Send delivers a text reply to the target (single-chat userid or group
-// chatid) over the same long connection.
-func (c *Conn) Send(_ context.Context, target, text string) error {
-	body := aibot.CreateTextReplyBody(text)
-	if _, err := c.client.SendMessage(target, body); err != nil {
+// chatid) over the same long connection. The aibot active-push channel
+// (aibot_send_msg) does not accept msgtype=text (40008); it accepts markdown,
+// so we send the plain text as a markdown message. chatType is unused (WeCom
+// addresses both single and group by their id).
+func (c *Conn) Send(_ context.Context, target, _ string, text string) error {
+	if _, err := c.client.SendMarkdown(target, text); err != nil {
 		return fmt.Errorf("wecom: send: %w", err)
 	}
 	return nil

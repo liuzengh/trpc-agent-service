@@ -28,7 +28,7 @@ func (m *mockConn) Recv(_ context.Context) ([]byte, error) {
 	return b, nil
 }
 
-func (m *mockConn) Send(_ context.Context, target, text string) error {
+func (m *mockConn) Send(_ context.Context, target, chatType, text string) error {
 	m.sent = append(m.sent, target+":"+text)
 	return nil
 }
