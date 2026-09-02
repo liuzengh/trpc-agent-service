@@ -18,6 +18,7 @@ type Config struct {
 	Milvus    MilvusConfig    `yaml:"milvus"`
 	MinIO     MinIOConfig     `yaml:"minio"`
 	Secret    SecretConfig    `yaml:"secret"`
+	IM        IMConfig        `yaml:"im"`
 	Telemetry TelemetryConfig `yaml:"telemetry"`
 }
 
@@ -62,6 +63,29 @@ type MinIOConfig struct {
 // plaintext is never written at rest.
 type SecretConfig struct {
 	MasterKey string `yaml:"master_key"`
+}
+
+// IMConfig configures the IM gateway adapters. Credential values live in the
+// secret store; only account identity and the credential reference are kept
+// here.
+type IMConfig struct {
+	WeCom  WeComConfig  `yaml:"wecom"`
+	Feishu FeishuConfig `yaml:"feishu"`
+}
+
+// WeComConfig configures the WeCom smart-bot long connection.
+type WeComConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	BotID         string `yaml:"bot_id"`
+	CredentialRef string `yaml:"credential_ref"` // secret key holding the long-connection secret
+}
+
+// FeishuConfig configures the Feishu (Lark) long connection.
+type FeishuConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	AppID         string `yaml:"app_id"`
+	BotOpenID     string `yaml:"bot_open_id"`     // bot's own open_id, for @-mention gating
+	CredentialRef string `yaml:"credential_ref"` // secret key holding the app secret
 }
 
 // TelemetryConfig configures OpenTelemetry trace + metrics export. An empty

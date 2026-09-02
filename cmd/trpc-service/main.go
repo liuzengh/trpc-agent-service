@@ -210,6 +210,12 @@ func main() {
 					logger.Error("outbox dispatcher stopped", "err", err)
 				}
 			}()
+			// IM gateway bridges real WSS adapters (WeCom aibot / Feishu Lark)
+			// to the same bus the worker consumes. Wired after the worker so a
+			// misconfigured platform never blocks the core message pipeline.
+			if err := wireIMGateway(context.Background(), rb, bindStore, secretStore, cfg.IM); err != nil {
+				logger.Error("IM gateway setup failed", "err", err)
+			}
 			logger.Info("worker started", "group", worker.Group)
 		}
 	}

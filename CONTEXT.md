@@ -8,13 +8,13 @@
 
 - **Inbound 消息**：IM 用户发往平台的原始消息，归一化后进入 `stream:inbound`。
 - **Outbound 消息**：平台发给 IM 用户的回复，经 MySQL Outbox → `stream:outbound` → IM 通道。
-- **IM 桥接（Gateway）**：把 IM 适配器接入总线的双向桥——**入向**：消费每个 adapter 的 `Inbound()`、按绑定/默认解析 agent、`PublishInbound`（`Message.ID = channel:platformMsgID` 保幂等），并记住 `session → (adapter, chatID)` 路由；**出向**：`Run()` 无消费组跟随 `stream:outbound`，按 session 路由分发到发起会话的 adapter 的 `Send`。真实 WSS 连接（Conn 实现）由 main 注入，桥接层用 mock 可全测。
+- **IM 桥接（Gateway）**：把 IM 适配器接入总线的双向桥——**入向**：消费每个 adapter 的 `Inbound()`、按绑定/默认解析 agent、`PublishInbound`（`Message.ID = channel:platformMsgID` 保幂等），并记住 `session → (adapter, chatID)` 路由；**出向**：`Run()` 无消费组跟随 `stream:outbound`，按 session 路由分发到发起会话的 adapter 的 `Send`。真实 WSS Conn 已实现（企业微信 aibot SDK / 飞书 lark SDK），由 main 的 `wireIMGateway` 装配（config 声明连接 + binding 路由 tenant + secret 读凭据）；桥接层用 mock 可全测。
 - **会话（Session）**：`{tenant}:{channel}:{user|group}:{id}` 维度；串行处理由会话锁保证。
 - **Agent 发布**：把不可变 RuntimeProfile 冻结为版本号并切换 current 指针；可原子回滚。
 - **RuntimeProfile**：Agent 一个版本的运行时配置快照（system_prompt / endpoint / tools / kbs / skills / 需审批工具）。
 - **挂载**：发布 Agent 时把资产（工具、知识库、Skill、审批工具）勾选进 RuntimeProfile。
 - **Admin 对话（/chat）**：管理台经 `channel=admin` 与 Agent 会话，走**与 IM 相同的 worker 链路**（幂等/锁/审批/技能/工具/RBAC）；回复经 outbox→outbound 流，前端用 **SSE**（按 session 过滤、无消费组 XREAD）转发，不影响真实 IM 的 group 消费。非完整账本——chat_messages 表仍为预留（会话历史/成本页启用）。
-- **IM 通道绑定（ChannelBinding）**：`channel_bindings` 记录把外部 IM 账号（channel+account）绑到租户+Agent；`credential_ref` 存**密钥引用**（非明文，secret manager 后续）。真实 SDK 收发仍需本地手测。
+- **IM 通道绑定（ChannelBinding）**：`channel_bindings` 记录把外部 IM 账号（channel+account）绑到租户+Agent；`credential_ref` 存**密钥引用**（非明文，指向 secret store）。真实 SDK 收发已接线（conn 实现），需本地账号手测联调。
 - **会话账本（Conversation Ledger）**：`chat` 域写 `chat_sessions`/`chat_messages` 业务账本——每轮 **USER + ASSISTANT** 两行共享 `turn_id`/`turn_timestamp`（turn 分页游标），工具调用细节留在框架 session_events/审计不重复；worker 收尾**同步 best-effort** 写入（失败不阻断对话），重复投递靠 `message_id` 唯一键幂等。区别于框架 session 滑动窗口：账本不受 prompt 截断影响，服务会话列表/历史/成本页。
 
 ## 审批治理（阶段 13 确立）

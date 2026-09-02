@@ -3,8 +3,10 @@ module github.com/liuzengh/trpc-agent-service
 go 1.25.0
 
 require (
+	github.com/go-sphere/wecom-aibot-go-sdk v1.0.4
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/google/uuid v1.6.0
+	github.com/larksuite/oapi-sdk-go/v3 v3.11.0
 	github.com/minio/minio-go/v7 v7.0.73
 	github.com/redis/go-redis/v9 v9.11.0
 	github.com/testcontainers/testcontainers-go v0.44.0

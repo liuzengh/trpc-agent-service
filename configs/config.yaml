@@ -33,6 +33,22 @@ log:
 # secret:
 #   master_key: "change-me-to-a-strong-passphrase"
 
+# IM gateway (real WSS adapters: WeCom aibot long connection + Feishu Lark).
+# enabled + account identity live here; the credential VALUE lives in the
+# secret store and is referenced by credential_ref key. The account must also
+# be bound to a tenant+agent via the admin channel page (account_id = bot_id /
+# app_id); an enabled but unbound bot is skipped on start with a warning.
+# im:
+#   wecom:
+#     enabled: false
+#     bot_id: "your-wecom-bot-id"
+#     credential_ref: "wecom:bot:secret"
+#   feishu:
+#     enabled: false
+#     app_id: "cli_xxxx"
+#     bot_open_id: "ou_xxxx"   # bot's own open_id, for group @-mention gating
+#     credential_ref: "feishu:app:secret"
+
 # Observability. Leave otlp_endpoint empty to keep the noop provider (all
 # recording becomes a no-op). Point it at an OTLP collector (see
 # configs/otel-collector.yaml) to export traces + metrics to Jaeger/Prometheus.
