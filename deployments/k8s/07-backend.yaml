@@ -1,0 +1,86 @@
+# Agent backend (stateless, horizontally scalable).
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: trpc-agent
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: trpc-agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: trpc-agent-service:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/trpc-service/config.yaml", "--role", "all"]
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/trpc-service
+      volumes:
+        - name: config
+          secret:
+            secretName: platform-secrets
+            # config.yaml holds MySQL DSN etc.; other secret keys stay unused.
+            items:
+              - key: config.yaml
+                path: config.yaml
+---
+# Horizontal autoscaling (optional): scale backend by CPU.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend
+  namespace: trpc-agent
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

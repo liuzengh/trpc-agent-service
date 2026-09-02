@@ -1,0 +1,35 @@
+server:
+  http_addr: ":8080"
+log:
+  level: "info"
+
+# Backends. Leave mysql.dsn empty to keep all management domains in memory.
+# mysql:
+#   dsn: "root:root@tcp(127.0.0.1:3306)/agentplatform?parseTime=true"
+# redis:
+#   url: "redis://127.0.0.1:6379/0"
+
+# Vector backend for knowledge bases. Leave address empty to keep KB vectors
+# in memory (dev mode; data is lost on restart).
+# milvus:
+#   address: "127.0.0.1:19530"
+#   username: ""
+#   password: ""
+
+# S3-compatible object store for agent artifacts (bytes; version metadata is
+# encoded in the object keys). Leave endpoint empty to disable artifact
+# persistence (runner runs without an artifact service).
+# minio:
+#   endpoint: "127.0.0.1:9000"
+#   access_key: "minioadmin"
+#   secret_key: "minioadmin"
+#   bucket: "artifacts"
+#   use_ssl: false
+
+# Observability. Leave otlp_endpoint empty to keep the noop provider (all
+# recording becomes a no-op). Point it at an OTLP collector (see
+# configs/otel-collector.yaml) to export traces + metrics to Jaeger/Prometheus.
+# telemetry:
+#   otlp_endpoint: "127.0.0.1:4317"
+#   service_name: "trpc-agent-service"
+

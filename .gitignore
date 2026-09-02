@@ -1,0 +1,27 @@
+.idea
+.vscode
+.DS_Store
+*.log
+*.swp
+
+bin/
+dist/
+coverage.out
+coverage.html
+*.test
+*.exe
+
+vendor/
+
+# Go 模块缓存 / 构建缓存（沙箱工作区本地缓存，禁止提交）
+.mc*/
+.gc*/
+.gomodcache/
+.gocache/
+go.mod.gen
+
+data/*
+!data/README.md
+
+# Agent 工作记忆（不入库）
+.workbuddy/
