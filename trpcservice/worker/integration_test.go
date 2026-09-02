@@ -22,6 +22,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/bus"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/chat"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledge"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/llm"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
@@ -143,7 +144,7 @@ func TestWorkerHandleDirect(t *testing.T) {
 		storage.SessionConfig{Backend: storage.BackendInMemory},
 		storage.MemoryConfig{Backend: storage.BackendInMemory},
 	)
-	w := New(rb, agents, tools, nil, outbox, router, nil, nil, nil, nil)
+	w := New(rb, agents, tools, nil, outbox, router, nil, nil, nil, nil, nil)
 
 	_ = reg.Create(ctx, llm.Endpoint{
 		ID: "e-direct", Scope: llm.ScopeTenant, TenantID: "t-direct", Name: "main",
@@ -221,7 +222,7 @@ func TestWorkerFullChain(t *testing.T) {
 		func(_ context.Context, _ *knowledge.KnowledgeBase) (embedder.Embedder, error) {
 			return &bagEmbedder{dim: 64}, nil
 		})
-	w := New(rb, agents, tools, nil, outbox, router, kbs, nil, nil, nil)
+	w := New(rb, agents, tools, nil, outbox, router, kbs, nil, nil, nil, nil)
 
 	// Seed one endpoint + one KB + one published agent mounting the KB.
 	if err := reg.Create(ctx, llm.Endpoint{
@@ -372,7 +373,7 @@ func TestWorkerApprovalFullCycle(t *testing.T) {
 	memReg := llm.NewRegistry(func(_ context.Context, _ llm.Endpoint) (model.Model, error) {
 		return nil, nil
 	})
-	w := New(rb, agent.NewManager(memReg), tool.NewRegistry(), nil, outbox, nil, nil, nil, nil, nil)
+	w := New(rb, agent.NewManager(memReg), tool.NewRegistry(), nil, outbox, nil, nil, nil, nil, nil, nil)
 
 	// Serialize the session as the worker would before running a turn.
 	lockTok := "lock-approve"
@@ -474,7 +475,7 @@ func TestWorkerApprovalDenyByReply(t *testing.T) {
 	memReg := llm.NewRegistry(func(_ context.Context, _ llm.Endpoint) (model.Model, error) {
 		return nil, nil
 	})
-	w := New(rb, agent.NewManager(memReg), tool.NewRegistry(), nil, outbox, nil, nil, nil, nil, nil)
+	w := New(rb, agent.NewManager(memReg), tool.NewRegistry(), nil, outbox, nil, nil, nil, nil, nil, nil)
 
 	userMsg := model.NewUserMessage("deploy")
 	in := &bus.Message{
@@ -520,5 +521,96 @@ func TestWorkerApprovalDenyByReply(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("review never woke up after denial")
+	}
+}
+
+// TestWorkerLedgerWritesTurn: after a full worker turn, the business
+// conversation ledger holds the session plus USER + ASSISTANT rows sharing one
+// turn_id.
+func TestWorkerLedgerWritesTurn(t *testing.T) {
+	once.Do(startContainers)
+	if platform.err != nil {
+		t.Skip(platform.err)
+	}
+	ctx := context.Background()
+
+	db, err := storage.OpenMySQL(platform.dsn)
+	if err != nil {
+		t.Fatalf("open mysql: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	rb, err := bus.NewRedisFromURL(platform.redisURL)
+	if err != nil {
+		t.Fatalf("redis bus: %v", err)
+	}
+	t.Cleanup(func() { _ = rb.Client().Close() })
+
+	factory := func(_ context.Context, _ llm.Endpoint) (model.Model, error) {
+		return &cannedModel{text: "ledger reply"}, nil
+	}
+	reg := llm.NewRegistry(factory)
+	_ = reg.Create(ctx, llm.Endpoint{
+		ID: "e-ledger", Scope: llm.ScopeTenant, TenantID: "t-ledger", Name: "m",
+		Provider: "openai", BaseURL: "http://localhost", ModelName: "m", APIKey: "k",
+	})
+	agents := agent.NewManager(reg)
+	_ = agents.Create(ctx, agent.Agent{ID: "a-ledger", TenantID: "t-ledger", Name: "h"})
+	_, _ = agents.Publish(ctx, "a-ledger", agent.RuntimeProfile{
+		SystemPrompt: "help", EndpointID: "e-ledger",
+	})
+	outbox := bus.NewOutbox(db)
+	router := storage.NewRouter(tenant.NewManager(),
+		storage.SessionConfig{Backend: storage.BackendInMemory},
+		storage.MemoryConfig{Backend: storage.BackendInMemory},
+	)
+	ledger := chat.NewMySQLLedger(db)
+	w := New(rb, agents, tool.NewRegistry(), nil, outbox, router, nil, nil, nil, nil, ledger)
+
+	userMsg := model.NewUserMessage("hello ledger")
+	in := &bus.Message{
+		ID: "in-ledger-1", TenantID: "t-ledger", AgentID: "a-ledger",
+		SessionID: "s-ledger", Channel: "admin", UserID: "u-ledger", Content: &userMsg,
+	}
+	if err := w.handle(ctx, in); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	var sessions int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM chat_sessions WHERE session_id = 's-ledger'`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 {
+		t.Errorf("ledger sessions = %d, want 1", sessions)
+	}
+	var role, content, turnUser, turnAssistant string
+	rows, err := db.Query(`SELECT role, content FROM chat_messages WHERE session_id = 's-ledger' ORDER BY role`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := rows.Scan(&role, &content); err != nil {
+			t.Fatal(err)
+		}
+		if role == "USER" {
+			turnUser = content
+		} else if role == "ASSISTANT" {
+			turnAssistant = content
+		}
+	}
+	if turnUser != "hello ledger" {
+		t.Errorf("ledger USER content = %q", turnUser)
+	}
+	if turnAssistant != "ledger reply" {
+		t.Errorf("ledger ASSISTANT content = %q", turnAssistant)
+	}
+
+	// turn grouping: both rows share one turn id
+	var distinctTurns int
+	if err := db.QueryRow(`SELECT COUNT(DISTINCT turn_id) FROM chat_messages WHERE session_id = 's-ledger'`).Scan(&distinctTurns); err != nil {
+		t.Fatal(err)
+	}
+	if distinctTurns != 1 {
+		t.Errorf("distinct turns = %d, want 1", distinctTurns)
 	}
 }

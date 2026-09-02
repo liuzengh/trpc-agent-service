@@ -19,6 +19,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/bus"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/chat"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledge"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/skill"
@@ -73,18 +74,19 @@ type Worker struct {
 	tools     *tool.Registry
 	toolSrc   ToolSource
 	outbox    *bus.Outbox
-	sessions  *storage.Router     // optional: per-tenant session backend
-	knowledge *knowledge.Manager  // optional: KB search tools
-	skills    *skill.Manager      // optional: mounted skills -> instruction splice
-	auditor   audit.Recorder      // optional: audit log
-	artifacts artifact.Service    // optional: code-execution artifacts (MinIO)
+	sessions  *storage.Router    // optional: per-tenant session backend
+	knowledge *knowledge.Manager // optional: KB search tools
+	skills    *skill.Manager     // optional: mounted skills -> instruction splice
+	auditor   audit.Recorder     // optional: audit log
+	artifacts artifact.Service   // optional: code-execution artifacts (MinIO)
+	ledger    chat.Ledger        // optional: business conversation ledger
 }
 
-// New assembles a worker. sessions, kbs, skills, auditor and artifacts may be
-// nil (no multi-turn persistence / no knowledge bases / no skills / no audit
-// / no artifact persistence).
-func New(b StateBus, agents *agent.Manager, tools *tool.Registry, toolSrc ToolSource, outbox *bus.Outbox, sessions *storage.Router, kbs *knowledge.Manager, skills *skill.Manager, auditor audit.Recorder, artifacts artifact.Service) *Worker {
-	return &Worker{bus: b, agents: agents, tools: tools, toolSrc: toolSrc, outbox: outbox, sessions: sessions, knowledge: kbs, skills: skills, auditor: auditor, artifacts: artifacts}
+// New assembles a worker. sessions, kbs, skills, auditor, artifacts and
+// ledger may be nil (no multi-turn persistence / no knowledge bases / no
+// skills / no audit / no artifact persistence / no chat ledger).
+func New(b StateBus, agents *agent.Manager, tools *tool.Registry, toolSrc ToolSource, outbox *bus.Outbox, sessions *storage.Router, kbs *knowledge.Manager, skills *skill.Manager, auditor audit.Recorder, artifacts artifact.Service, ledger chat.Ledger) *Worker {
+	return &Worker{bus: b, agents: agents, tools: tools, toolSrc: toolSrc, outbox: outbox, sessions: sessions, knowledge: kbs, skills: skills, auditor: auditor, artifacts: artifacts, ledger: ledger}
 }
 
 // Run joins the consumer group and blocks until ctx is done. The consumer name
@@ -175,7 +177,33 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 	if err := w.bus.MarkIdem(ctx, m.ID); err != nil {
 		slog.Warn("worker: mark idem failed", "msg", m.ID, "err", err) // MySQL marker still guards
 	}
+	w.recordLedger(ctx, m, agentID, reply)
 	return nil
+}
+
+// recordLedger writes the USER + ASSISTANT rows of the finished turn into the
+// business conversation ledger, best-effort: a ledger failure must never fail
+// or retry the reply flow (redelivery is idempotent by message_id).
+func (w *Worker) recordLedger(ctx context.Context, m *bus.Message, agentID string, reply *bus.Message) {
+	if w.ledger == nil || m == nil || m.Content == nil || reply == nil || reply.Content == nil {
+		return
+	}
+	turn := chat.Turn{
+		TenantID:   m.TenantID,
+		AgentID:    agentID,
+		SessionID:  m.SessionID,
+		MemberID:   m.UserID,
+		Channel:    m.Channel,
+		UserMsgID:  m.ID,
+		UserText:   m.Content.Content,
+		ReplyMsgID: reply.ID,
+		ReplyText:  reply.Content.Content,
+		TurnID:     uuid.NewString(),
+		TurnTS:     time.Now().UnixMilli(),
+	}
+	if err := w.ledger.RecordTurn(ctx, turn); err != nil {
+		slog.Warn("worker: chat ledger write failed (best-effort)", "session", m.SessionID, "err", err)
+	}
 }
 
 // recordAudit writes one audit entry for an agent run, when an auditor is

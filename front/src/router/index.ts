@@ -37,6 +37,11 @@ const routes = [
     component: () => import('../views/ChatView.vue'),
   },
   {
+    path: '/history',
+    name: 'history',
+    component: () => import('../views/SessionHistoryView.vue'),
+  },
+  {
     path: '/channels',
     name: 'channels',
     component: () => import('../views/ChannelListView.vue'),

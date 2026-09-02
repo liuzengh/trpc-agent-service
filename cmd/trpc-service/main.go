@@ -16,6 +16,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/bus"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/chat"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledge"
@@ -165,7 +166,11 @@ func main() {
 			// Admin chat rides the same worker pipeline: POST /chat publishes
 			// inbound, replies come back over outbound and are SSE-forwarded.
 			web.NewChatAPI(rb).Register(mux)
-			w := worker.New(rb, agentMgr, toolReg, builtinToolSource, outbox, dss.Router, dss.Knowledge, skillMgr, dss.Auditor, dss.Artifacts)
+			// Business conversation ledger writes every turn (USER+ASSISTANT)
+			// for the session-history API; it shares the worker's MySQL.
+			ledger := chat.NewMySQLLedger(db)
+			web.NewChatHistoryAPI(ledger).Register(mux)
+			w := worker.New(rb, agentMgr, toolReg, builtinToolSource, outbox, dss.Router, dss.Knowledge, skillMgr, dss.Auditor, dss.Artifacts, ledger)
 			go func() {
 				if err := w.Run(context.Background()); err != nil {
 					logger.Error("worker stopped", "err", err)

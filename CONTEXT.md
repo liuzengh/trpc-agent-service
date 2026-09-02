@@ -14,6 +14,7 @@
 - **挂载**：发布 Agent 时把资产（工具、知识库、Skill、审批工具）勾选进 RuntimeProfile。
 - **Admin 对话（/chat）**：管理台经 `channel=admin` 与 Agent 会话，走**与 IM 相同的 worker 链路**（幂等/锁/审批/技能/工具/RBAC）；回复经 outbox→outbound 流，前端用 **SSE**（按 session 过滤、无消费组 XREAD）转发，不影响真实 IM 的 group 消费。非完整账本——chat_messages 表仍为预留（会话历史/成本页启用）。
 - **IM 通道绑定（ChannelBinding）**：`channel_bindings` 记录把外部 IM 账号（channel+account）绑到租户+Agent；`credential_ref` 存**密钥引用**（非明文，secret manager 后续）。真实 SDK 收发仍需本地手测。
+- **会话账本（Conversation Ledger）**：`chat` 域写 `chat_sessions`/`chat_messages` 业务账本——每轮 **USER + ASSISTANT** 两行共享 `turn_id`/`turn_timestamp`（turn 分页游标），工具调用细节留在框架 session_events/审计不重复；worker 收尾**同步 best-effort** 写入（失败不阻断对话），重复投递靠 `message_id` 唯一键幂等。区别于框架 session 滑动窗口：账本不受 prompt 截断影响，服务会话列表/历史/成本页。
 
 ## 审批治理（阶段 13 确立）
 
