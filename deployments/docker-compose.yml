@@ -121,9 +121,11 @@ services:
       context: ..
       dockerfile: Dockerfile
     restart: unless-stopped
-    # The platform reads a YAML config file only (no env wiring); this mounts
-    # the compose-ready config (MySQL/Redis/Milvus/OTLP endpoints) over the
-    # image default, which stays in dev in-memory mode.
+    # The platform reads a single YAML config file; the credential-store
+    # master key is injected via env (TRPC_SECRET_MASTER_KEY) so it never
+    # lands in the mounted config in plaintext.
+    environment:
+      TRPC_SECRET_MASTER_KEY: ${TRPC_SECRET_MASTER_KEY:-dev-master-key-change-me}
     volumes:
       - ./backend-compose.config.yaml:/etc/trpc-service/config.yaml:ro
     ports:
