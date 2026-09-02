@@ -19,8 +19,14 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/bus"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
+
+// tracer names the IM bridge's spans (im.callback / im.reply).
+var tracer = otel.Tracer("trpc-agent-service/channels")
 
 // Bus is the slice of the message bus the gateway needs (bus.RedisBus
 // satisfies it).
@@ -96,12 +102,22 @@ func (g *Gateway) Run(ctx context.Context) error {
 			if route.adapter.Name() != m.Channel {
 				continue
 			}
-			if err := route.adapter.Send(ctx, &OutboundMessage{
+			// im.reply span shares the trace id carried from the originating
+			// im.callback, so Jaeger shows one end-to-end trace.
+			replyCtx, replySpan := tracer.Start(spanContextFor(m.TraceID), "im.reply",
+				trace.WithAttributes(
+					attribute.String("channel", m.Channel),
+					attribute.String("session_id", m.SessionID),
+				),
+			)
+			sendErr := route.adapter.Send(replyCtx, &OutboundMessage{
 				Inbound: &InboundMessage{SessionID: m.SessionID, ChatID: route.chatID},
 				Kind:    KindText,
 				Segments: []Segment{{Type: "text", Text: text}},
-			}); err != nil {
-				slog.Warn("channels: adapter send failed", "channel", m.Channel, "err", err)
+			})
+			replySpan.End()
+			if sendErr != nil {
+				slog.Warn("channels: adapter send failed", "channel", m.Channel, "err", sendErr)
 			}
 		}
 	}
@@ -130,6 +146,21 @@ func (g *Gateway) pumpInbound(ctx context.Context, a Adapter, opt Attach) {
 				continue
 			}
 			content := model.NewUserMessage(in.Content)
+
+			// The IM callback is the trace root: emit an im.callback span and
+			// carry its trace id on the bus message so the worker's agent.run
+			// and the im.reply spans all share one trace in Jaeger.
+			cbCtx, cbSpan := tracer.Start(context.Background(), "im.callback",
+				trace.WithAttributes(
+					attribute.String("channel", a.Name()),
+					attribute.String("session_id", in.SessionID),
+					attribute.String("platform_msg_id", in.PlatformMsgID),
+				),
+			)
+			traceID := cbSpan.SpanContext().TraceID().String()
+			cbSpan.End()
+			_ = cbCtx
+
 			msg := &bus.Message{
 				ID:        a.Name() + ":" + in.PlatformMsgID, // idempotent across redeliveries
 				TenantID:  in.TenantID,
@@ -137,6 +168,7 @@ func (g *Gateway) pumpInbound(ctx context.Context, a Adapter, opt Attach) {
 				SessionID: in.SessionID,
 				Channel:   a.Name(),
 				UserID:    in.UserID,
+				TraceID:   traceID,
 				Content:   &content,
 			}
 			if err := g.bus.PublishInbound(ctx, msg); err != nil {
@@ -164,4 +196,22 @@ func (g *Gateway) resolveAgent(ctx context.Context, channel string, opt Attach) 
 		}
 	}
 	return opt.AgentID
+}
+
+// spanContextFor returns a context carrying the given trace id, so a span
+// started on it shares the trace with the originating im.callback span.
+func spanContextFor(traceID string) context.Context {
+	ctx := context.Background()
+	if traceID == "" {
+		return ctx
+	}
+	tid, err := trace.TraceIDFromHex(traceID)
+	if err != nil {
+		return ctx
+	}
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    tid,
+		TraceFlags: trace.FlagsSampled,
+	})
+	return trace.ContextWithSpanContext(ctx, sc)
 }

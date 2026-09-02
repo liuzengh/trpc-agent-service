@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 
 	fwtool "trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -211,5 +212,23 @@ func EchoTool() fwtool.Tool {
 		},
 		function.WithName("echo"),
 		function.WithDescription("Returns the input text unchanged."),
+	)
+}
+
+// CurrentTimeTool returns a built-in FunctionTool that reports the current
+// time, following the exact same FunctionTool pattern as every other tool. It
+// lets an agent answer "what time is it" from IM, exercising the full
+// IM -> Runner -> Tool -> reply trace.
+func CurrentTimeTool() fwtool.Tool {
+	return function.NewFunctionTool(
+		func(_ context.Context, _ struct{}) (struct {
+			Time string `json:"time"`
+		}, error) {
+			return struct {
+				Time string `json:"time"`
+			}{Time: time.Now().Format(time.RFC3339)}, nil
+		},
+		function.WithName("get_current_time"),
+		function.WithDescription("Returns the current date and time."),
 	)
 }

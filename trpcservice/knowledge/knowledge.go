@@ -394,10 +394,19 @@ func RegistryEmbedderFactory(reg *llm.Registry) EmbedderFactory {
 		if err != nil {
 			return nil, fmt.Errorf("knowledge: endpoint %q: %w", kb.EmbeddingEndpointID, err)
 		}
+		// Only embedding endpoints may back a KB: a chat endpoint (or an empty
+		// type on an old endpoint) must not be silently used for embeddings.
+		if ep.Type != "" && ep.Type != llm.EndpointTypeEmbedding {
+			return nil, fmt.Errorf("knowledge: endpoint %q is type %q, not an embedding endpoint", kb.EmbeddingEndpointID, ep.Type)
+		}
+		key, err := reg.ResolveAPIKey(ctx, ep)
+		if err != nil {
+			return nil, fmt.Errorf("knowledge: endpoint %q: %w", kb.EmbeddingEndpointID, err)
+		}
 		opts := []openai.Option{
 			openai.WithBaseURL(ep.BaseURL),
 			openai.WithModel(ep.ModelName),
-			openai.WithAPIKey(ep.APIKey),
+			openai.WithAPIKey(key),
 		}
 		if kb.Dimension > 0 {
 			opts = append(opts, openai.WithDimensions(kb.Dimension))

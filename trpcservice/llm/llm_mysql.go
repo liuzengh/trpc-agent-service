@@ -15,13 +15,21 @@ type mysqlStore struct {
 	db *sql.DB
 }
 
-const endpointCols = "endpoint_id, scope, tenant_id, name, provider, base_url, model_name, api_key_ref"
+const endpointCols = "endpoint_id, scope, tenant_id, name, provider, endpoint_type, base_url, model_name, api_key_ref"
+
+// normalizeType maps an empty endpoint type to chat (backward compatible).
+func normalizeType(t string) string {
+	if t == "" {
+		return EndpointTypeChat
+	}
+	return t
+}
 
 func (s *mysqlStore) Create(ctx context.Context, ep Endpoint) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO model_endpoints (endpoint_id, scope, tenant_id, name, provider, base_url, model_name, api_key_ref)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		ep.ID, ep.Scope, nullString(ep.TenantID), ep.Name, NormalizeProvider(ep.Provider), ep.BaseURL, ep.ModelName, ep.APIKey)
+		`INSERT INTO model_endpoints (endpoint_id, scope, tenant_id, name, provider, endpoint_type, base_url, model_name, api_key_ref)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ep.ID, ep.Scope, nullString(ep.TenantID), ep.Name, NormalizeProvider(ep.Provider), normalizeType(ep.Type), ep.BaseURL, ep.ModelName, ep.APIKey)
 	if isDuplicate(err) {
 		return fmt.Errorf("llm: endpoint %q already exists", ep.ID)
 	}
@@ -31,9 +39,9 @@ func (s *mysqlStore) Create(ctx context.Context, ep Endpoint) error {
 func (s *mysqlStore) Update(ctx context.Context, ep Endpoint) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE model_endpoints
-		 SET scope = ?, tenant_id = ?, name = ?, provider = ?, base_url = ?, model_name = ?, api_key_ref = ?
+		 SET scope = ?, tenant_id = ?, name = ?, provider = ?, endpoint_type = ?, base_url = ?, model_name = ?, api_key_ref = ?
 		 WHERE endpoint_id = ? AND is_deleted = 0`,
-		ep.Scope, nullString(ep.TenantID), ep.Name, NormalizeProvider(ep.Provider), ep.BaseURL, ep.ModelName, ep.APIKey, ep.ID)
+		ep.Scope, nullString(ep.TenantID), ep.Name, NormalizeProvider(ep.Provider), normalizeType(ep.Type), ep.BaseURL, ep.ModelName, ep.APIKey, ep.ID)
 	if err != nil {
 		return err
 	}
@@ -76,13 +84,14 @@ func (s *mysqlStore) List(ctx context.Context) ([]Endpoint, error) {
 
 func (s *mysqlStore) Upsert(ctx context.Context, ep Endpoint) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO model_endpoints (endpoint_id, scope, tenant_id, name, provider, base_url, model_name, api_key_ref)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO model_endpoints (endpoint_id, scope, tenant_id, name, provider, endpoint_type, base_url, model_name, api_key_ref)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE
 		   scope = VALUES(scope), tenant_id = VALUES(tenant_id), name = VALUES(name),
-		   provider = VALUES(provider), base_url = VALUES(base_url), model_name = VALUES(model_name),
+		   provider = VALUES(provider), endpoint_type = VALUES(endpoint_type),
+		   base_url = VALUES(base_url), model_name = VALUES(model_name),
 		   api_key_ref = VALUES(api_key_ref), is_deleted = 0`,
-		ep.ID, ep.Scope, nullString(ep.TenantID), ep.Name, NormalizeProvider(ep.Provider), ep.BaseURL, ep.ModelName, ep.APIKey)
+		ep.ID, ep.Scope, nullString(ep.TenantID), ep.Name, NormalizeProvider(ep.Provider), normalizeType(ep.Type), ep.BaseURL, ep.ModelName, ep.APIKey)
 	return err
 }
 
@@ -96,7 +105,7 @@ func scanEndpoint(sc scanner) (Endpoint, error) {
 		ep       Endpoint
 		tenantID sql.NullString
 	)
-	if err := sc.Scan(&ep.ID, &ep.Scope, &tenantID, &ep.Name, &ep.Provider, &ep.BaseURL, &ep.ModelName, &ep.APIKey); err != nil {
+	if err := sc.Scan(&ep.ID, &ep.Scope, &tenantID, &ep.Name, &ep.Provider, &ep.Type, &ep.BaseURL, &ep.ModelName, &ep.APIKey); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Endpoint{}, ErrEndpointNotFound
 		}

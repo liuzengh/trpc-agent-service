@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useKBStore } from '../stores/kb'
 import { useEndpointStore } from '../stores/endpoint'
@@ -7,6 +7,9 @@ import type { Document, KBInput, SearchHit } from '../api/kb'
 
 const store = useKBStore()
 const endpoints = useEndpointStore()
+
+// Only embedding endpoints can back a knowledge base.
+const embeddingEndpoints = computed(() => endpoints.endpoints.filter((e) => e.type === 'embedding'))
 
 // ---- KB create dialog ----
 const dialogVisible = ref(false)
@@ -158,9 +161,9 @@ async function doSearch() {
           <el-input v-model="form.name" placeholder="KB 名称" />
         </el-form-item>
         <el-form-item label="嵌入端点">
-          <el-select v-model="form.embedding_endpoint_id" placeholder="选择模型端点" style="width: 100%">
+          <el-select v-model="form.embedding_endpoint_id" placeholder="选择 embedding 端点" style="width: 100%">
             <el-option
-              v-for="e in endpoints.endpoints"
+              v-for="e in embeddingEndpoints"
               :key="e.id"
               :label="`${e.name} (${e.model_name})`"
               :value="e.id"

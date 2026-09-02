@@ -38,15 +38,24 @@ const (
 	ProviderGemini       = "gemini"
 )
 
+// EndpointType values for an endpoint's purpose: chat models serve the agent
+// loop, embedding models produce knowledge-base vectors.
+const (
+	EndpointTypeChat      = "chat"
+	EndpointTypeEmbedding = "embedding"
+)
+
 // Endpoint normalizes any supported LLM backend into an infrastructure
 // resource. The Provider field selects the wire protocol; empty defaults to
-// OpenAI-compatible so existing callers keep working.
+// OpenAI-compatible so existing callers keep working. Type defaults to chat
+// when empty (backward compatibility).
 type Endpoint struct {
 	ID        string `json:"id"`
 	Scope     string `json:"scope"`
 	TenantID  string `json:"tenant_id,omitempty"`
 	Name      string `json:"name"`
 	Provider  string `json:"provider"`
+	Type      string `json:"type,omitempty"` // chat | embedding
 	BaseURL   string `json:"base_url"`
 	ModelName string `json:"model_name"`
 	// APIKey is a plaintext key (legacy). Prefer APIKeyRef: a credential-store
@@ -206,19 +215,11 @@ func (r *Registry) Resolve(ctx context.Context, endpointID string) (model.Model,
 	// Resolve a credential-store reference into the in-memory key used to
 	// build the model. A missing reference is a hard error (misconfiguration
 	// must not silently build a keyless model).
-	if ep.APIKeyRef != "" {
-		r.mu.RLock()
-		ks := r.keys
-		r.mu.RUnlock()
-		if ks == nil {
-			return nil, fmt.Errorf("llm: endpoint %q uses api_key_ref %q but no key source is configured", endpointID, ep.APIKeyRef)
-		}
-		key, err := ks.Get(ctx, ep.APIKeyRef)
-		if err != nil {
-			return nil, fmt.Errorf("llm: resolve api_key_ref %q: %w", ep.APIKeyRef, err)
-		}
-		ep.APIKey = key
+	key, err := r.ResolveAPIKey(ctx, ep)
+	if err != nil {
+		return nil, err
 	}
+	ep.APIKey = key
 
 	m, err := r.factory(ctx, ep)
 	if err != nil {
@@ -229,6 +230,26 @@ func (r *Registry) Resolve(ctx context.Context, endpointID string) (model.Model,
 	r.cache[endpointID] = m
 	r.mu.Unlock()
 	return m, nil
+}
+
+// ResolveAPIKey resolves an endpoint's API key: a credential-store reference
+// (APIKeyRef) wins, falling back to the legacy plaintext APIKey. Exported so
+// the knowledge embedder can reuse the same credential resolution as chat.
+func (r *Registry) ResolveAPIKey(ctx context.Context, ep Endpoint) (string, error) {
+	if ep.APIKeyRef == "" {
+		return ep.APIKey, nil
+	}
+	r.mu.RLock()
+	ks := r.keys
+	r.mu.RUnlock()
+	if ks == nil {
+		return "", fmt.Errorf("llm: endpoint %q uses api_key_ref %q but no key source is configured", ep.ID, ep.APIKeyRef)
+	}
+	key, err := ks.Get(ctx, ep.APIKeyRef)
+	if err != nil {
+		return "", fmt.Errorf("llm: resolve api_key_ref %q: %w", ep.APIKeyRef, err)
+	}
+	return key, nil
 }
 
 // Invalidate drops the cached model for an endpoint.

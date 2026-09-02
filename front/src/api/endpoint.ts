@@ -6,6 +6,7 @@ export interface Endpoint {
   tenant_id?: string
   name: string
   provider: string
+  type?: 'chat' | 'embedding'
   base_url: string
   model_name: string
   api_key?: string

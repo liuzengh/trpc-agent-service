@@ -14,6 +14,7 @@ const form = reactive<Endpoint>({
   tenant_id: '',
   name: '',
   provider: 'openai',
+  type: 'chat',
   base_url: '',
   model_name: '',
   api_key: '',
@@ -29,6 +30,7 @@ function openCreate() {
     tenant_id: '',
     name: '',
     provider: 'openai',
+    type: 'chat',
     base_url: '',
     model_name: '',
     api_key: '',
@@ -102,6 +104,12 @@ async function remove(row: Endpoint) {
             <el-option label="OpenAI 兼容" value="openai" />
             <el-option label="Anthropic" value="anthropic" />
             <el-option label="Gemini" value="gemini" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="类型">
+          <el-select v-model="form.type">
+            <el-option label="chat（对话）" value="chat" />
+            <el-option label="embedding（向量化）" value="embedding" />
           </el-select>
         </el-form-item>
         <el-form-item label="Base URL">

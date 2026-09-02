@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS model_endpoints (
     name        VARCHAR(128)  NOT NULL               COMMENT 'endpoint name within scope (admin label)',
     provider    VARCHAR(32)   NOT NULL DEFAULT 'openai-compatible'
                                                         COMMENT 'openai | openai-compatible | anthropic | gemini',
+    endpoint_type VARCHAR(16) NOT NULL DEFAULT 'chat'
+                                                        COMMENT 'chat | embedding (embedding endpoints back knowledge bases)',
     base_url    VARCHAR(512)  NOT NULL               COMMENT 'LLM HTTP endpoint baseUrl',
     model_name  VARCHAR(128)  NOT NULL               COMMENT 'default model; fallback when agent does not specify',
     model_list  JSON          NULL                   COMMENT 'optional model array; NULL means [model_name]',

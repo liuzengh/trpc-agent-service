@@ -40,6 +40,23 @@ import (
 // tracer names the platform's worker spans.
 var tracer = otel.Tracer("trpc-agent-service/worker")
 
+// withTraceID attaches the given trace id to ctx, so spans started on it join
+// the trace the IM gateway stamped on the message.
+func withTraceID(ctx context.Context, traceID string) context.Context {
+	if traceID == "" {
+		return ctx
+	}
+	tid, err := trace.TraceIDFromHex(traceID)
+	if err != nil {
+		return ctx
+	}
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    tid,
+		TraceFlags: trace.FlagsSampled,
+	})
+	return trace.ContextWithSpanContext(ctx, sc)
+}
+
 // Consumer group on stream:inbound shared by all worker nodes.
 const Group = "workers"
 
@@ -252,6 +269,10 @@ func (w *Worker) recordAudit(m *bus.Message, agentID, decision string, dur time.
 // lockToken is the session lock the worker holds; a pending human approval
 // refreshes it while waiting.
 func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockToken string) (*bus.Message, error) {
+	// Share the trace id the IM gateway stamped on the message, so the
+	// agent.run span (and its Runner/Tool/Session children) join the same
+	// trace as im.callback / im.reply in Jaeger.
+	ctx = withTraceID(ctx, m.TraceID)
 	ctx, span := tracer.Start(ctx, "agent.run",
 		trace.WithAttributes(
 			attribute.String("tenant_id", m.TenantID),

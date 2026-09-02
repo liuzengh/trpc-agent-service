@@ -294,6 +294,9 @@ func builtinToolSource(id string) (fwtool.Tool, bool) {
 	if id == "echo" {
 		return tool.EchoTool(), true
 	}
+	if id == "get-current-time" {
+		return tool.CurrentTimeTool(), true
+	}
 	if id == "code-exec" {
 		return fwtoolcodeexec.NewTool(dockerExec), true
 	}
@@ -307,6 +310,15 @@ func registerBuiltinTools(reg *tool.Registry) {
 		ID:          "echo",
 		Name:        "echo",
 		Description: "Returns the input text unchanged.",
+		RiskLevel:   tool.RiskLow,
+	})
+	if err != nil {
+		slog.Error("register builtin tool failed", "err", err)
+	}
+	err = reg.Register(context.Background(), tool.Definition{
+		ID:          "get-current-time",
+		Name:        "get_current_time",
+		Description: "Returns the current date and time.",
 		RiskLevel:   tool.RiskLow,
 	})
 	if err != nil {
