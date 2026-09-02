@@ -15,6 +15,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/bus"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledge"
@@ -107,12 +108,23 @@ func main() {
 		defer func() { _ = auditRec.Close() }()
 	}
 
+	// IM channel bindings (wecom/feishu account -> tenant + agent). The store
+	// is MySQL when available, in-memory otherwise; this is pure admin config,
+	// independent of the worker.
+	var bindStore channels.BindingStore
+	if db != nil {
+		bindStore = channels.NewMySQLBindingStore(db)
+	} else {
+		bindStore = channels.NewMemBindingStore()
+	}
+
 	web.NewTenantAPI(tenantMgr).Register(mux)
 	web.NewAgentAPI(agentMgr).Register(mux)
 	web.NewEndpointAPI(reg).Register(mux)
 	web.NewToolAPI(toolReg).Register(mux)
 	web.NewKnowledgeAPI(kbMgr).Register(mux)
 	web.NewSkillAPI(skillMgr).Register(mux)
+	web.NewChannelAPI(bindStore).Register(mux)
 	if auditRec != nil {
 		web.NewAuditAPI(auditRec).Register(mux)
 	}
@@ -150,6 +162,9 @@ func main() {
 			// knowledge/artifact/audit as their single production backends.
 			// Summary has no standalone domain (lives in the session backend).
 			dss := storage.NewDataStores(router, kbMgr, artSvc, auditor)
+			// Admin chat rides the same worker pipeline: POST /chat publishes
+			// inbound, replies come back over outbound and are SSE-forwarded.
+			web.NewChatAPI(rb).Register(mux)
 			w := worker.New(rb, agentMgr, toolReg, builtinToolSource, outbox, dss.Router, dss.Knowledge, skillMgr, dss.Auditor, dss.Artifacts)
 			go func() {
 				if err := w.Run(context.Background()); err != nil {

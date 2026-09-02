@@ -12,6 +12,8 @@
 - **Agent 发布**：把不可变 RuntimeProfile 冻结为版本号并切换 current 指针；可原子回滚。
 - **RuntimeProfile**：Agent 一个版本的运行时配置快照（system_prompt / endpoint / tools / kbs / skills / 需审批工具）。
 - **挂载**：发布 Agent 时把资产（工具、知识库、Skill、审批工具）勾选进 RuntimeProfile。
+- **Admin 对话（/chat）**：管理台经 `channel=admin` 与 Agent 会话，走**与 IM 相同的 worker 链路**（幂等/锁/审批/技能/工具/RBAC）；回复经 outbox→outbound 流，前端用 **SSE**（按 session 过滤、无消费组 XREAD）转发，不影响真实 IM 的 group 消费。非完整账本——chat_messages 表仍为预留（会话历史/成本页启用）。
+- **IM 通道绑定（ChannelBinding）**：`channel_bindings` 记录把外部 IM 账号（channel+account）绑到租户+Agent；`credential_ref` 存**密钥引用**（非明文，secret manager 后续）。真实 SDK 收发仍需本地手测。
 
 ## 审批治理（阶段 13 确立）
 

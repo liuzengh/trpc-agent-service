@@ -143,7 +143,7 @@
     `-- workspace          # Docker 代码执行（code-exec：隔离容器 + 无网络 + 高风险审批）
 ```
 
-> 未运行时落地的能力：`trpcservice/workspace` 已承载 Docker 代码执行（code-exec 工具，隔离容器+无网络+高风险自动审批）；K8s Pod exec 后端与 `/chat` `/channels` 路由仍未实现（见 AGENTS.md 阶段 11 遗留清单）。Skill 资产已全链路落地：创建/版本发布 → Agent 发布挂载（skill_ids）→ worker 注入 SKILL.md 到系统提示词。
+> 能力边界：`workspace` 承载 Docker 代码执行（code-exec，隔离容器+无网络+高风险自动审批；K8s Pod 后端已决策不需要——生产部署为 Docker Compose）；Admin 对话（/chat，SSE）与 IM 通道绑定（/channels CRUD）已实现；`chat_messages` 账本表与 secret manager 为预留；企业微信/飞书真实 SDK 收发需本地账号手测接线（适配器与单测已就绪，main 未启动监听）。
 
 ## 快速开始
 

@@ -14,6 +14,8 @@ const route = useRoute()
       <router-link to="/tools" class="nav" :class="{ active: route.path === '/tools' }">工具目录</router-link>
       <router-link to="/kbs" class="nav" :class="{ active: route.path === '/kbs' }">知识库</router-link>
       <router-link to="/skills" class="nav" :class="{ active: route.path === '/skills' }">Skill 资产</router-link>
+      <router-link to="/chat" class="nav" :class="{ active: route.path === '/chat' }">Agent 对话</router-link>
+      <router-link to="/channels" class="nav" :class="{ active: route.path === '/channels' }">IM 通道</router-link>
       <router-link to="/audit" class="nav" :class="{ active: route.path === '/audit' }">审计日志</router-link>
     </aside>
     <section class="content">

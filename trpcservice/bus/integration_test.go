@@ -371,3 +371,59 @@ func TestBusConsumeIsConcurrentWhileBlocked(t *testing.T) {
 		t.Fatal("slow message never finished")
 	}
 }
+
+func TestBusReadOutboundCursor(t *testing.T) {
+	ctx := context.Background()
+	b := newBusForTest(t)
+
+	mk := func(id, tenant, session string) *Message {
+		content := model.NewUserMessage("hi")
+		return &Message{ID: id, TenantID: tenant, SessionID: session, Channel: "admin", Content: &content}
+	}
+	if err := b.PublishOutbound(ctx, mk("o1", "t1", "s1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.PublishOutbound(ctx, mk("o2", "t1", "s1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.PublishOutbound(ctx, mk("o3", "t2", "s9")); err != nil {
+		t.Fatal(err)
+	}
+
+	// from the start: everything, cursor = last stream id
+	msgs, cursor, err := b.ReadOutbound(ctx, "0")
+	if err != nil {
+		t.Fatalf("read from 0: %v", err)
+	}
+	if len(msgs) != 3 || cursor == "" || cursor == "0" {
+		t.Fatalf("from 0: msgs=%d cursor=%q, want 3 and an advancing cursor", len(msgs), cursor)
+	}
+	if msgs[0].ID != "o1" || msgs[2].ID != "o3" {
+		t.Errorf("order corrupted: %v %v %v", msgs[0].ID, msgs[1].ID, msgs[2].ID)
+	}
+
+	// from the cursor: only the new message
+	if err := b.PublishOutbound(ctx, mk("o4", "t1", "s1")); err != nil {
+		t.Fatal(err)
+	}
+	msgs, cursor2, err := b.ReadOutbound(ctx, cursor)
+	if err != nil {
+		t.Fatalf("read after cursor: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "o4" {
+		t.Fatalf("after cursor: msgs=%+v, want only o4", msgs)
+	}
+
+	// "$" = only new messages
+	if err := b.PublishOutbound(ctx, mk("o5", "t1", "s1")); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _, err = b.ReadOutbound(ctx, "$")
+	if err != nil {
+		t.Fatalf("read $: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "o5" {
+		t.Fatalf("dollar read: msgs=%+v, want only o5", msgs)
+	}
+	_ = cursor2
+}

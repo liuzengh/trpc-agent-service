@@ -32,6 +32,16 @@ const routes = [
     component: () => import('../views/SkillListView.vue'),
   },
   {
+    path: '/chat',
+    name: 'chat',
+    component: () => import('../views/ChatView.vue'),
+  },
+  {
+    path: '/channels',
+    name: 'channels',
+    component: () => import('../views/ChannelListView.vue'),
+  },
+  {
     path: '/audit',
     name: 'audit',
     component: () => import('../views/AuditListView.vue'),

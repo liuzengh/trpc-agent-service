@@ -1,0 +1,98 @@
+package web
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+)
+
+// ChannelAPI manages IM channel bindings (wecom/feishu account -> tenant +
+// agent). credential_ref is a secret-store reference, never a plaintext
+// credential.
+type ChannelAPI struct {
+	store channels.BindingStore
+}
+
+// NewChannelAPI returns a channel-binding management API.
+func NewChannelAPI(store channels.BindingStore) *ChannelAPI {
+	return &ChannelAPI{store: store}
+}
+
+// Register mounts channel routes.
+func (a *ChannelAPI) Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET /channels", a.list)
+	mux.HandleFunc("POST /channels", a.create)
+	mux.HandleFunc("DELETE /channels/{id}", a.delete)
+}
+
+func (a *ChannelAPI) list(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	items, err := a.store.List(r.Context(), q.Get("tenant_id"), q.Get("channel"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// channelInput is the POST /channels body (binding id assigned server-side).
+type channelInput struct {
+	TenantID      string `json:"tenant_id"`
+	AgentID       string `json:"agent_id"`
+	Channel       string `json:"channel"`
+	AccountID     string `json:"account_id"`
+	CredentialRef string `json:"credential_ref,omitempty"`
+}
+
+func (a *ChannelAPI) create(w http.ResponseWriter, r *http.Request) {
+	var in channelInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if in.TenantID == "" || in.AgentID == "" || in.AccountID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("tenant_id, agent_id and account_id are required"))
+		return
+	}
+	in.Channel = strings.ToLower(strings.TrimSpace(in.Channel))
+	if in.Channel != channels.ChannelWeCom && in.Channel != channels.ChannelFeishu {
+		writeError(w, http.StatusBadRequest, errors.New("channel must be wecom or feishu"))
+		return
+	}
+	err := a.store.Create(r.Context(), channels.ChannelBinding{
+		BindingID:     uuid.NewString(),
+		TenantID:      in.TenantID,
+		AgentID:       in.AgentID,
+		Channel:       in.Channel,
+		AccountID:     in.AccountID,
+		CredentialRef: in.CredentialRef,
+		CreatedAt:     time.Now().UTC(),
+	})
+	if err != nil {
+		if errors.Is(err, channels.ErrBindingDuplicate) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (a *ChannelAPI) delete(w http.ResponseWriter, r *http.Request) {
+	if err := a.store.Delete(r.Context(), r.PathValue("id")); err != nil {
+		if errors.Is(err, channels.ErrBindingNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

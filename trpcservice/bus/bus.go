@@ -185,6 +185,43 @@ func (b *RedisBus) PublishOutbound(ctx context.Context, m *Message) error {
 	return b.publish(ctx, StreamOutbound, m)
 }
 
+// ReadOutbound reads outbound messages newer than fromID without touching a
+// consumer group, so admin SSE consumers can follow the stream independently
+// of IM adapters (reads never ack group-delivered messages). fromID accepts
+// "0" (from the beginning), "$" (only new messages), or an explicit stream id.
+// An empty fromID means "$" (only new messages). The returned cursor is the
+// last read stream position to pass back on the next call. Returns nil when
+// nothing is available within a short bounded wait.
+func (b *RedisBus) ReadOutbound(ctx context.Context, fromID string) ([]*Message, string, error) {
+	if fromID == "" {
+		fromID = "$"
+	}
+	cursor := fromID
+	streams, err := b.client.XRead(ctx, &redis.XReadArgs{
+		Streams: []string{StreamOutbound, fromID},
+		Count:   32,
+		Block:   time.Second, // bounded: SSE loops call this repeatedly
+	}).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) || ctx.Err() != nil {
+			return nil, cursor, nil // block window expired / caller cancelled
+		}
+		return nil, cursor, fmt.Errorf("bus: xread outbound: %w", err)
+	}
+	var out []*Message
+	for _, stream := range streams {
+		for _, msg := range stream.Messages {
+			m, err := decode(msg.Values)
+			if err != nil {
+				continue // never let one bad envelope stall the stream
+			}
+			out = append(out, m)
+			cursor = msg.ID
+		}
+	}
+	return out, cursor, nil
+}
+
 func (b *RedisBus) publish(ctx context.Context, stream string, m *Message) error {
 	if m == nil || m.ID == "" {
 		return errors.New("bus: message id is required for idempotency")
