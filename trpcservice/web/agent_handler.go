@@ -1,21 +1,35 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/skill"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 )
 
 // AgentAPI exposes agent CRUD + version publish/rollback over HTTP.
 type AgentAPI struct {
-	mgr *agent.Manager
+	mgr    *agent.Manager
+	tools  *tool.Registry  // optional: tool grants reconciled on publish
+	skills *skill.Manager  // optional: skill bindings reconciled on publish
 }
 
 // NewAgentAPI returns an agent API backed by the given manager.
 func NewAgentAPI(mgr *agent.Manager) *AgentAPI {
 	return &AgentAPI{mgr: mgr}
+}
+
+// SetGrants wires the tool + skill managers so publishing an agent persists
+// its tool grants (agent_tool_grants) and skill bindings (agent_skills). May
+// be nil — publish then only writes the frozen profile.
+func (a *AgentAPI) SetGrants(tools *tool.Registry, skills *skill.Manager) {
+	a.tools = tools
+	a.skills = skills
 }
 
 // Register mounts agent routes on the mux.
@@ -111,12 +125,41 @@ func (a *AgentAPI) publish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	v, err := a.mgr.Publish(r.Context(), r.PathValue("id"), p)
+	agentID := r.PathValue("id")
+	v, err := a.mgr.Publish(r.Context(), agentID, p)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
+	a.syncGrants(r.Context(), agentID, p)
 	writeJSON(w, http.StatusOK, map[string]int{"version": v})
+}
+
+// syncGrants persists the profile's tool grants and skill bindings after a
+// successful publish, so the worker's RBAC check (agent_tool_grants) and the
+// skill version lock (agent_skills) reflect the frozen profile. Best-effort:
+// a grant failure is logged, not fatal, since the profile itself is already
+// the source of truth for resolution.
+func (a *AgentAPI) syncGrants(ctx context.Context, agentID string, p agent.RuntimeProfile) {
+	if a.tools != nil {
+		for _, tid := range p.ToolIDs {
+			if err := a.tools.Grant(ctx, agentID, tid); err != nil {
+				slog.Warn("agent: grant tool failed", "agent", agentID, "tool", tid, "err", err)
+			}
+		}
+	}
+	if a.skills != nil {
+		for i, sid := range p.SkillIDs {
+			sk, err := a.skills.Get(ctx, sid)
+			if err != nil {
+				slog.Warn("agent: bind skill failed (lookup)", "skill", sid, "err", err)
+				continue
+			}
+			if err := a.skills.BindAgentSkill(ctx, agentID, sid, sk.CurrentVersion, i); err != nil {
+				slog.Warn("agent: bind skill failed", "agent", agentID, "skill", sid, "err", err)
+			}
+		}
+	}
 }
 
 func (a *AgentAPI) rollback(w http.ResponseWriter, r *http.Request) {

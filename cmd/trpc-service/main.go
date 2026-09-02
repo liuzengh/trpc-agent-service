@@ -145,7 +145,9 @@ func main() {
 	reg.SetKeySource(secretStore)
 
 	web.NewTenantAPI(tenantMgr).Register(mux)
-	web.NewAgentAPI(agentMgr).Register(mux)
+	agentAPI := web.NewAgentAPI(agentMgr)
+	agentAPI.SetGrants(toolReg, skillMgr)
+	agentAPI.Register(mux)
 	web.NewEndpointAPI(reg).Register(mux)
 	web.NewToolAPI(toolReg).Register(mux)
 	web.NewKnowledgeAPI(kbMgr).Register(mux)
