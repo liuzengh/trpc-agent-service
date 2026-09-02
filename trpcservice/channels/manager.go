@@ -126,6 +126,15 @@ func (m *Manager) start(ctx context.Context, b ChannelBinding) (connHandle, erro
 	// The connection outlives the Reload request: give it its own context so
 	// a short-lived HTTP request cancel does not tear the adapter down.
 	actx, cancel := context.WithCancel(context.Background())
+	// Start pumps raw events from the Conn into the adapter's inbound channel;
+	// Attach then pumps inbound into the bus. Both are required — without
+	// Start the Conn's events are never consumed and nothing reaches the
+	// worker (the IM-no-reply bug).
+	go func() {
+		if err := adapter.Start(actx); err != nil && actx.Err() == nil {
+			slog.Warn("channels: adapter start failed", "channel", b.Channel, "err", err)
+		}
+	}()
 	m.gw.Attach(actx, adapter, Attach{AccountID: b.AccountID, AgentID: b.AgentID})
 	return connHandle{adapter: adapter, cancel: cancel}, nil
 }
