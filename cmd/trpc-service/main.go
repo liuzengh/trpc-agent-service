@@ -156,6 +156,7 @@ func main() {
 	}
 	if auditRec != nil {
 		web.NewAuditAPI(auditRec).Register(mux)
+		web.NewUsageAPI(auditRec).Register(mux)
 	}
 
 	// Worker + outbox dispatcher: run when the role includes worker and both

@@ -51,6 +51,11 @@ const routes = [
     name: 'audit',
     component: () => import('../views/AuditListView.vue'),
   },
+  {
+    path: '/usage',
+    name: 'usage',
+    component: () => import('../views/UsageView.vue'),
+  },
 ]
 
 export default createRouter({

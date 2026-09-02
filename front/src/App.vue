@@ -18,6 +18,7 @@ const route = useRoute()
       <router-link to="/history" class="nav" :class="{ active: route.path === '/history' }">会话历史</router-link>
       <router-link to="/channels" class="nav" :class="{ active: route.path === '/channels' }">IM 通道</router-link>
       <router-link to="/audit" class="nav" :class="{ active: route.path === '/audit' }">审计日志</router-link>
+      <router-link to="/usage" class="nav" :class="{ active: route.path === '/usage' }">用量计量</router-link>
     </aside>
     <section class="content">
       <router-view />

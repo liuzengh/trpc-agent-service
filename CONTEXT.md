@@ -41,6 +41,13 @@
 - **KeySource**：llm 侧的凭据解析接口（`Get(ctx,key)`），由 secret.Store 满足——避免 llm 反向依赖 secret 包；`Endpoint.APIKeyRef` 在 Resolve 时经它取用，取代明文 `APIKey`。
 - **AES-256-GCM**：密文 `base64(nonce‖ciphertext)`，随机 nonce；不同主密钥无法解密（GCM tag 校验失败）。
 
+## 用量计量（阶段 22 确立）
+
+- **Usage 计量（Metering）**：按租户/Agent/维度记录平台消耗量，用于成本归属；**只计量、不折价**（无单价价目，金额口径未定）。
+- **维度（Dimension）**：`token | tool | sandbox | artifact | skill`；当前仅 token 维度由 worker 每回合自动写入。
+- **幂等计量**：record_id = 入站消息 id + ":" + 维度；`INSERT IGNORE` 保证重放不重复计。
+- **UsageRow / UsageSummary**：明细行与按维度聚合（SUM(amount), COUNT）两类读视图；`GET /usage` 返回二者。
+
 ## 制品与对象存储（阶段 14 确立）
 
 - **Artifact（制品）**：Agent 执行中产生的命名、带版本二进制文件（代码产物/报告/图片等）。不是日志；日志走 audit/usage。

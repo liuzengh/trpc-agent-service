@@ -40,9 +40,11 @@ type Entry struct {
 	TraceID   string
 }
 
-// Recorder accepts audit entries without blocking the caller.
+// Recorder accepts audit entries without blocking the caller, plus
+// synchronous best-effort usage metering.
 type Recorder interface {
 	Record(e Entry)
+	RecordUsage(ctx context.Context, e UsageEntry) error
 	Close() error
 }
 

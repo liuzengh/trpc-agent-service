@@ -4,12 +4,12 @@ package audit
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/testcontainers/testcontainers-go/modules/mysql"
-
-	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 )
 
 const auditSchema = `CREATE TABLE IF NOT EXISTS audit_logs (
@@ -47,7 +47,7 @@ func TestMySQLRecorderAsyncFlush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mysql dsn: %v", err)
 	}
-	db, err := storage.OpenMySQL(dsn)
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("open mysql: %v", err)
 	}

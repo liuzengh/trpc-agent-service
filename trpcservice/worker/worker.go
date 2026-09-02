@@ -181,6 +181,25 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 	return nil
 }
 
+// recordUsage meters the turn's token consumption into usage_records,
+// best-effort and idempotent: record_id is derived from the inbound message id
+// + dimension, so a redelivered turn never double-counts.
+func (w *Worker) recordUsage(ctx context.Context, m *bus.Message, agentID string, tokens int64) {
+	if w.auditor == nil || m == nil || tokens <= 0 {
+		return
+	}
+	err := w.auditor.RecordUsage(ctx, audit.UsageEntry{
+		RecordID:  m.ID + ":" + audit.UsageDimensionToken,
+		TenantID:  m.TenantID,
+		AgentID:   agentID,
+		Dimension: audit.UsageDimensionToken,
+		Amount:    float64(tokens),
+	})
+	if err != nil {
+		slog.Warn("worker: usage metering skipped (best-effort)", "session", m.SessionID, "err", err)
+	}
+}
+
 // recordLedger writes the USER + ASSISTANT rows of the finished turn into the
 // business conversation ledger, best-effort: a ledger failure must never fail
 // or retry the reply flow (redelivery is idempotent by message_id).
@@ -291,6 +310,7 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 		return nil, err
 	}
 	metrics.TokenUsage(ctx, m.TenantID, tokens)
+	w.recordUsage(ctx, m, agentID, tokens)
 	if text == "" {
 		return nil, nil
 	}
