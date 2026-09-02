@@ -199,7 +199,7 @@ func (w *Worker) tryResolveApproval(ctx context.Context, m *bus.Message) (bool, 
 	if decision == "approve" {
 		auditDecision = audit.DecisionApprove
 	}
-	w.recordAudit(m, p.AgentID, auditDecision, 0, nil)
+	w.recordAudit(m, p.AgentID, auditDecision, 0, nil, nil, 0)
 	return true, nil
 }
 

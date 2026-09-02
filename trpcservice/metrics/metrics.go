@@ -22,6 +22,7 @@ var (
 	outboundMessages otelmetric.Int64Counter
 	agentRunDuration otelmetric.Float64Histogram
 	agentRunErrors   otelmetric.Int64Counter
+	toolCallDuration otelmetric.Float64Histogram
 	tokenUsage       otelmetric.Int64Counter
 	imDelivery       otelmetric.Int64Counter
 	tenantCost       otelmetric.Float64Counter
@@ -63,6 +64,11 @@ func Init() {
 		"platform.agent_run_errors",
 		otelmetric.WithDescription("Number of failed agent runs"),
 	)
+	toolCallDuration, _ = meter.Float64Histogram(
+		"platform.tool_call_duration",
+		otelmetric.WithDescription("Tool call latency"),
+		otelmetric.WithUnit("s"),
+	)
 	tokenUsage, _ = meter.Int64Counter(
 		"platform.token_usage",
 		otelmetric.WithDescription("Total tokens consumed"),
@@ -101,6 +107,11 @@ func AgentRun(ctx context.Context, tenantID, agentID string, dur time.Duration) 
 // AgentError counts one failed agent run.
 func AgentError(ctx context.Context, tenantID, agentID string) {
 	agentRunErrors.Add(ctx, 1, otelmetric.WithAttributes(attrTenant.String(tenantID), attrAgent.String(agentID)))
+}
+
+// ToolCallDuration records the latency of tool invocation during a run.
+func ToolCallDuration(ctx context.Context, tenantID, agentID string, dur time.Duration) {
+	toolCallDuration.Record(ctx, dur.Seconds(), otelmetric.WithAttributes(attrTenant.String(tenantID), attrAgent.String(agentID)))
 }
 
 // TokenUsage accumulates consumed tokens for a tenant.

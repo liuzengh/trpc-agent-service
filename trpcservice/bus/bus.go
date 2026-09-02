@@ -425,6 +425,15 @@ func (b *RedisBus) MarkIdem(ctx context.Context, msgKey string) error {
 	return nil
 }
 
+// ClearIdem removes a msgKey marker so a failed attempt can be retried on
+// redelivery (paired with Idempotent's SetNX atomic claim).
+func (b *RedisBus) ClearIdem(ctx context.Context, msgKey string) error {
+	if err := b.client.Del(ctx, IdemKey(msgKey)).Err(); err != nil {
+		return fmt.Errorf("bus: del idem: %w", err)
+	}
+	return nil
+}
+
 // LockSession serializes concurrent handling of one session across nodes.
 // token must be unique per attempt so UnlockSession can verify ownership.
 func (b *RedisBus) LockSession(ctx context.Context, tenantID, sessionID, token string) (bool, error) {

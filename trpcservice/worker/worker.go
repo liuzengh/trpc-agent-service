@@ -20,6 +20,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/bus"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/chat"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledge"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/skill"
@@ -64,6 +65,11 @@ const Group = "workers"
 // bus.RedisBus satisfies it.
 type StateBus interface {
 	bus.Bus
+	// Idempotent atomically claims msgKey (SetNX): true = first claim, false =
+	// already processed. ClearIdem releases the claim so a failed attempt can
+	// be retried on redelivery.
+	Idempotent(ctx context.Context, msgKey string) (bool, error)
+	ClearIdem(ctx context.Context, msgKey string) error
 	SeenIdem(ctx context.Context, msgKey string) (bool, error)
 	MarkIdem(ctx context.Context, msgKey string) error
 	Route(ctx context.Context, tenantID, sessionID string) (string, error)
@@ -97,6 +103,9 @@ type Worker struct {
 	auditor   audit.Recorder     // optional: audit log
 	artifacts artifact.Service   // optional: code-execution artifacts (MinIO)
 	ledger    chat.Ledger        // optional: business conversation ledger
+
+	budget     *governance.Budget     // optional: tenant token quota
+	permission *governance.Permission // optional: IM user allow-list
 }
 
 // New assembles a worker. sessions, kbs, skills, auditor, artifacts and
@@ -104,6 +113,13 @@ type Worker struct {
 // skills / no audit / no artifact persistence / no chat ledger).
 func New(b StateBus, agents *agent.Manager, tools *tool.Registry, toolSrc ToolSource, outbox *bus.Outbox, sessions *storage.Router, kbs *knowledge.Manager, skills *skill.Manager, auditor audit.Recorder, artifacts artifact.Service, ledger chat.Ledger) *Worker {
 	return &Worker{bus: b, agents: agents, tools: tools, toolSrc: toolSrc, outbox: outbox, sessions: sessions, knowledge: kbs, skills: skills, auditor: auditor, artifacts: artifacts, ledger: ledger}
+}
+
+// SetGovernance wires the tenant-level budget and IM-user permission checks.
+// May be nil (checks disabled).
+func (w *Worker) SetGovernance(budget *governance.Budget, permission *governance.Permission) {
+	w.budget = budget
+	w.permission = permission
 }
 
 // Run joins the consumer group and blocks until ctx is done. The consumer name
@@ -122,19 +138,29 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 	}
 	metrics.InboundMessage(ctx, m.TenantID, m.Channel)
 
-	// Fast-path dedup (Redis). The durable marker is written with the outbox
-	// event in one transaction below; MarkIdem only after that commit.
-	if seen, err := w.bus.SeenIdem(ctx, m.ID); err != nil {
+	// Atomic dedup (Redis SetNX): the first claim wins, so concurrent
+	// redeliveries of the same message are dropped before any work. The old
+	// SeenIdem-check + MarkIdem-commit left a window where redeliveries passed
+	// the check and each wrote an audit row.
+	first, err := w.bus.Idempotent(ctx, m.ID)
+	if err != nil {
 		return err // transient Redis error: retry later
-	} else if seen {
-		return nil
+	}
+	if !first {
+		return nil // duplicate redelivery
+	}
+	// fail releases the idempotency claim so a transient failure is retried on
+	// redelivery, rather than being silently dropped.
+	fail := func(err error) error {
+		_ = w.bus.ClearIdem(ctx, m.ID)
+		return err
 	}
 
 	// A human approval reply resolves the pending approval of the session.
 	// This runs BEFORE the session lock is taken: while an agent turn is
 	// blocked waiting for the decision, its own reply must still get through.
 	if handled, err := w.tryResolveApproval(ctx, m); err != nil {
-		return err
+		return fail(err)
 	} else if handled {
 		return nil // consumed as an approval decision, not an agent turn
 	}
@@ -144,7 +170,7 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 		var err error
 		agentID, err = w.bus.Route(ctx, m.TenantID, m.SessionID)
 		if err != nil {
-			return err
+			return fail(err)
 		}
 		if agentID == "" {
 			// No agent bound for this session and none on the message: a
@@ -154,33 +180,40 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 		}
 	} else {
 		if err := w.bus.SetRoute(ctx, m.TenantID, m.SessionID, agentID); err != nil {
-			return err
+			return fail(err)
 		}
+	}
+
+	// IM user permission gate: deny unauthorized users before any work. A
+	// denial is a policy outcome (drop), not a transient failure (no retry).
+	if w.permission != nil && !w.permission.Check(ctx, m.TenantID, m.UserID) {
+		slog.Warn("worker: IM user not allowed, dropping message", "tenant", m.TenantID, "user", m.UserID)
+		return nil
 	}
 
 	// Serialize handling of one session across nodes.
 	token := uuid.NewString()
 	ok, err := w.bus.LockSession(ctx, m.TenantID, m.SessionID, token)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	if !ok {
-		return fmt.Errorf("worker: session %s busy", m.SessionID) // stays pending, retried
+		return fail(fmt.Errorf("worker: session %s busy", m.SessionID)) // stays pending, retried
 	}
 	defer func() {
 		_ = w.bus.UnlockSession(ctx, m.TenantID, m.SessionID, token)
 	}()
 
 	start := time.Now()
-	reply, err := w.run(ctx, agentID, m, token)
+	reply, toolNames, tokens, err := w.run(ctx, agentID, m, token)
 	dur := time.Since(start)
 	if err != nil {
 		metrics.AgentError(ctx, m.TenantID, agentID)
-		w.recordAudit(m, agentID, audit.DecisionFailed, dur, err)
-		return err // transient (LLM/tool failure): redeliver and retry
+		w.recordAudit(m, agentID, audit.DecisionFailed, dur, err, nil, 0)
+		return fail(err) // transient (LLM/tool failure): redeliver and retry
 	}
 	metrics.AgentRun(ctx, m.TenantID, agentID, dur)
-	w.recordAudit(m, agentID, audit.DecisionExecuted, dur, nil)
+	w.recordAudit(m, agentID, audit.DecisionExecuted, dur, nil, toolNames, tokens)
 	if reply == nil {
 		return nil // nothing to send back
 	}
@@ -189,10 +222,7 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 		if errors.Is(err, bus.ErrDuplicateIdem) {
 			return nil // already processed before a crash: ack
 		}
-		return err
-	}
-	if err := w.bus.MarkIdem(ctx, m.ID); err != nil {
-		slog.Warn("worker: mark idem failed", "msg", m.ID, "err", err) // MySQL marker still guards
+		return fail(err)
 	}
 	w.recordLedger(ctx, m, agentID, reply)
 	return nil
@@ -244,8 +274,10 @@ func (w *Worker) recordLedger(ctx context.Context, m *bus.Message, agentID strin
 
 // recordAudit writes one audit entry for an agent run, when an auditor is
 // wired. AgentName carries the agent id (the worker resolves only the id; the
-// durable agent name lives in the management domain).
-func (w *Worker) recordAudit(m *bus.Message, agentID, decision string, dur time.Duration, runErr error) {
+// durable agent name lives in the management domain). ToolName lists the tools
+// the turn actually invoked (comma-joined); Cost carries the turn's token
+// consumption (token count, not currency — no price table).
+func (w *Worker) recordAudit(m *bus.Message, agentID, decision string, dur time.Duration, runErr error, toolNames []string, tokens int64) {
 	if w.auditor == nil {
 		return
 	}
@@ -255,8 +287,10 @@ func (w *Worker) recordAudit(m *bus.Message, agentID, decision string, dur time.
 		UserID:    m.UserID,
 		SessionID: m.SessionID,
 		AgentName: agentID,
+		ToolName:  strings.Join(toolNames, ","),
 		Decision:  decision,
 		Latency:   dur,
+		Cost:      float64(tokens),
 		TraceID:   m.TraceID,
 	}
 	if runErr != nil {
@@ -268,7 +302,7 @@ func (w *Worker) recordAudit(m *bus.Message, agentID, decision string, dur time.
 // run builds the agent from its current runtime profile and executes one turn.
 // lockToken is the session lock the worker holds; a pending human approval
 // refreshes it while waiting.
-func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockToken string) (*bus.Message, error) {
+func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockToken string) (*bus.Message, []string, int64, error) {
 	// Share the trace id the IM gateway stamped on the message, so the
 	// agent.run span (and its Runner/Tool/Session children) join the same
 	// trace as im.callback / im.reply in Jaeger.
@@ -288,14 +322,25 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 	// off it, so the worker avoids re-reading the store per concern.
 	profile, err := w.agents.Resolve(ctx, agentID)
 	if err != nil {
-		return nil, err
+		return nil, nil, 0, err
 	}
+
+	// Tenant token budget: reject the turn before spending any model/tool cost.
+	if w.budget != nil {
+		exceeded, err := w.budget.Exceeded(ctx, m.TenantID)
+		if err != nil {
+			slog.Warn("worker: budget check failed", "tenant", m.TenantID, "err", err)
+		} else if exceeded {
+			return nil, nil, 0, fmt.Errorf("worker: tenant %s token budget exceeded", m.TenantID)
+		}
+	}
+
 	tools, approvalToolNames := w.toolsFromProfile(ctx, agentID, profile)
 	tools = append(tools, w.resolveKnowledgeTools(ctx, agentID)...)
 	instruction := w.skillInstruction(ctx, profile)
 	ag, err := w.agents.BuildFromProfile(ctx, agentID, profile, tools, instruction)
 	if err != nil {
-		return nil, err
+		return nil, nil, 0, err
 	}
 
 	// A human approval plugin pauses tool calls that the profile marked for
@@ -306,6 +351,8 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 	if plugin != nil {
 		opts = append(opts, runner.WithPlugins(plugin))
 	}
+	// Redaction always runs so sensitive data never reaches the model verbatim.
+	opts = append(opts, runner.WithPlugins(governance.NewRedactionFilter()))
 	if w.artifacts != nil {
 		opts = append(opts, runner.WithArtifactService(w.artifacts))
 	}
@@ -324,16 +371,19 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 
 	events, err := r.Run(ctx, m.UserID, m.SessionID, *m.Content)
 	if err != nil {
-		return nil, fmt.Errorf("worker: run agent %q: %w", agentID, err)
+		return nil, nil, 0, fmt.Errorf("worker: run agent %q: %w", agentID, err)
 	}
-	text, tokens, err := finalTextWithUsage(events)
+	text, tokens, toolNames, toolDur, err := finalTextWithUsage(events)
 	if err != nil {
-		return nil, err
+		return nil, nil, 0, err
 	}
 	metrics.TokenUsage(ctx, m.TenantID, tokens)
+	if toolDur > 0 {
+		metrics.ToolCallDuration(ctx, m.TenantID, agentID, toolDur)
+	}
 	w.recordUsage(ctx, m, agentID, tokens)
 	if text == "" {
-		return nil, nil
+		return nil, nil, 0, nil
 	}
 	reply := model.NewAssistantMessage(text)
 
@@ -347,7 +397,7 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 		UserID:    m.UserID,
 		Content:   &reply,
 		ReplyTo:   m.ID,
-	}, nil
+	}, toolNames, tokens, nil
 }
 
 // toolsFromProfile returns the tool implementations the agent may use (the
@@ -445,21 +495,44 @@ func (w *Worker) skillInstruction(ctx context.Context, profile agent.RuntimeProf
 	return b.String()
 }
 
-// finalTextWithUsage extracts the last non-partial assistant text and the
-// summed token usage from the event stream. A nil *event.Event is skipped (the
-// channel may close early).
-func finalTextWithUsage(events <-chan *event.Event) (string, int64, error) {
+// finalTextWithUsage extracts the last non-partial assistant text, the summed
+// token usage, the distinct tool names invoked and the total tool-call latency
+// (first tool call to last tool response), from the event stream. A nil
+// *event.Event is skipped (the channel may close early).
+func finalTextWithUsage(events <-chan *event.Event) (string, int64, []string, time.Duration, error) {
 	var last string
 	var tokens int64
+	var toolNames []string
+	var toolStart, toolEnd time.Time
+	seen := make(map[string]struct{})
 	for evt := range events {
 		if evt == nil {
 			continue
 		}
 		if evt.Error != nil {
-			return "", tokens, fmt.Errorf("worker: agent error: %s", evt.Error.Message)
+			return "", tokens, toolNames, 0, fmt.Errorf("worker: agent error: %s", evt.Error.Message)
 		}
 		if evt.Usage != nil {
 			tokens += int64(evt.Usage.PromptTokens + evt.Usage.CompletionTokens)
+		}
+		// Collect tool-call names (present on the assistant message that
+		// requests the call), deduplicated in order.
+		for _, c := range evt.Choices {
+			for _, tc := range c.Message.ToolCalls {
+				if tc.Function.Name == "" {
+					continue
+				}
+				if _, ok := seen[tc.Function.Name]; !ok {
+					seen[tc.Function.Name] = struct{}{}
+					toolNames = append(toolNames, tc.Function.Name)
+				}
+				if toolStart.IsZero() {
+					toolStart = evt.Timestamp
+				}
+			}
+		}
+		if evt.IsToolCallResponse() && toolEnd.IsZero() {
+			toolEnd = evt.Timestamp
 		}
 		if evt.IsPartial || evt.IsToolCallResponse() {
 			continue
@@ -470,5 +543,9 @@ func finalTextWithUsage(events <-chan *event.Event) (string, int64, error) {
 			}
 		}
 	}
-	return last, tokens, nil
+	var toolDur time.Duration
+	if !toolStart.IsZero() && toolEnd.After(toolStart) {
+		toolDur = toolEnd.Sub(toolStart)
+	}
+	return last, tokens, toolNames, toolDur, nil
 }

@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { listMessages, listSessions, type LedgerMessage, type LedgerSession } from '../api/history'
+import { formatBeijingTime } from '../utils/time'
 
 const tenantId = ref('')
 const sessions = ref<LedgerSession[]>([])
@@ -51,7 +52,7 @@ function roleTag(r: string) {
 }
 
 function fmtTime(v?: string) {
-  return v ? new Date(v).toLocaleString() : '—'
+  return formatBeijingTime(v)
 }
 </script>
 

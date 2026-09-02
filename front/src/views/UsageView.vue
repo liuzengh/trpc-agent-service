@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { getUsage, type UsageResponse, type UsageSummary } from '../api/usage'
 import { listTenants, type Tenant } from '../api/tenant'
 import { listAgents, type Agent } from '../api/agent'
+import { formatBeijingTime } from '../utils/time'
 
 const loading = ref(false)
 const tenants = ref<Tenant[]>([])
@@ -61,7 +62,7 @@ function fmt(n: number) {
 }
 
 function formatAt(s: string) {
-  return new Date(s).toLocaleString('zh-CN')
+  return formatBeijingTime(s)
 }
 </script>
 

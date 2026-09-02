@@ -18,6 +18,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/chat"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledge"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/llm"
@@ -203,6 +204,27 @@ func main() {
 			ledger := chat.NewMySQLLedger(db)
 			web.NewChatHistoryAPI(ledger).Register(mux)
 			w := worker.New(rb, agentMgr, toolReg, builtinToolSource, outbox, dss.Router, dss.Knowledge, skillMgr, dss.Auditor, dss.Artifacts, ledger)
+			// Tenant governance: token budget (default 1M tokens, metered from
+			// usage_records) + IM user permission (default-open; wire an
+			// allow-list here when required).
+			var budget *governance.Budget
+			if auditRec != nil {
+				budget = &governance.Budget{
+					QuotaTokens: 1_000_000,
+					Usage: func(ctx context.Context, tenantID string) (int64, error) {
+						sums, err := auditRec.UsageSummary(ctx, audit.UsageQuery{TenantID: tenantID, Dimension: audit.UsageDimensionToken})
+						if err != nil {
+							return 0, err
+						}
+						var total int64
+						for _, s := range sums {
+							total += int64(s.Total)
+						}
+						return total, nil
+					},
+				}
+			}
+			w.SetGovernance(budget, nil)
 			go func() {
 				if err := w.Run(context.Background()); err != nil {
 					logger.Error("worker stopped", "err", err)

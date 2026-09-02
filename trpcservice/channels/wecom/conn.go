@@ -54,6 +54,14 @@ func NewConn(botID, secret string) *Conn {
 		if err != nil || raw == nil {
 			return // non-text or malformed: nothing to surface
 		}
+		// Ack immediately with an empty stream reply so WeCom stops redelivering
+		// this callback (the SDK does not auto-ack). The real reply is pushed
+		// later via the active-push channel (SendMarkdown). Done in a goroutine
+		// because ReplyStream blocks waiting for the ack of our own reply.
+		go func() {
+			streamID := fmt.Sprintf("ack_%s", frame.Headers.ReqID)
+			_, _ = c.client.ReplyStream(frame, streamID, "", true, nil, nil)
+		}()
 		select {
 		case c.events <- raw:
 		case <-c.done:

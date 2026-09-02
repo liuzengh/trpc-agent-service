@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { listAudit, type AuditLog } from '../api/audit'
+import { formatBeijingTime } from '../utils/time'
 
 const logs = ref<AuditLog[]>([])
 const loading = ref(false)
@@ -29,7 +30,7 @@ onMounted(() => {
 })
 
 function fmtTime(iso: string) {
-  return new Date(iso).toLocaleString()
+  return formatBeijingTime(iso)
 }
 
 function decisionTag(d?: string) {
@@ -76,8 +77,8 @@ function decisionTag(d?: string) {
           {{ row.latency_ms != null ? `${row.latency_ms}ms` : '-' }}
         </template>
       </el-table-column>
-      <el-table-column label="成本" width="100">
-        <template #default="{ row }">{{ row.cost != null ? row.cost.toFixed(6) : '-' }}</template>
+      <el-table-column label="成本" width="110">
+        <template #default="{ row }">{{ row.cost != null ? `${row.cost} tokens` : '-' }}</template>
       </el-table-column>
       <el-table-column prop="error_type" label="错误" show-overflow-tooltip />
       <el-table-column prop="trace_id" label="Trace" width="180" show-overflow-tooltip />

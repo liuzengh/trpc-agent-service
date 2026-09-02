@@ -215,9 +215,19 @@ func EchoTool() fwtool.Tool {
 	)
 }
 
+// beijingLocation returns the Asia/Shanghai location, falling back to a fixed
+// UTC+8 zone when the tzdata database is unavailable (common in slim
+// containers).
+func beijingLocation() *time.Location {
+	if loc, err := time.LoadLocation("Asia/Shanghai"); err == nil {
+		return loc
+	}
+	return time.FixedZone("CST", 8*3600)
+}
+
 // CurrentTimeTool returns a built-in FunctionTool that reports the current
-// time, following the exact same FunctionTool pattern as every other tool. It
-// lets an agent answer "what time is it" from IM, exercising the full
+// Beijing time, following the exact same FunctionTool pattern as every other
+// tool. It lets an agent answer "what time is it" from IM, exercising the full
 // IM -> Runner -> Tool -> reply trace.
 func CurrentTimeTool() fwtool.Tool {
 	return function.NewFunctionTool(
@@ -226,9 +236,9 @@ func CurrentTimeTool() fwtool.Tool {
 		}, error) {
 			return struct {
 				Time string `json:"time"`
-			}{Time: time.Now().Format(time.RFC3339)}, nil
+			}{Time: time.Now().In(beijingLocation()).Format("2006-01-02 15:04:05 MST")}, nil
 		},
 		function.WithName("get_current_time"),
-		function.WithDescription("Returns the current date and time."),
+		function.WithDescription("Returns the current date and time in Beijing (Asia/Shanghai)."),
 	)
 }
