@@ -26,6 +26,7 @@
 - **同步挂起（Blocking Review）**：工具执行前 agent 轮次真实暂停；reviewer 阻塞轮询 Redis 决策键；批准后**原工具调用原参数继续执行**。选择它而非"异步重放"（后者需模型多跑一轮）。
 - **审批通知（Approval Notice）**：待审批时发给用户的外发消息，说明待批工具与"回复 批准/拒绝"。
 - **锁外审批回复**：批准/拒绝回复在取会话锁**之前**被识别处理（无锁分支），否则会与会话锁互等形成死锁。
+- **治理 Filter（Governance Filter）**：租户级治理策略，挂载在 worker 上（`governance` 包）。三类：**脱敏（Redaction）**——正则屏蔽工具参数/结果中的身份证/银行卡/手机号/邮箱（框架 BeforeTool/AfterTool plugin）；**预算（Budget）**——按租户 token 配额在模型调用前拦截（从 usage_records 累计，默认 100 万 token）；**权限（Permission）**——IM 用户白名单校验（默认开放）。与审批互补：审批管"高风险调用是否放行"，治理管"谁能用、花多少、数据怎么脱敏"。
 
 ## 基础设施（Redis key 维度，租户/会话级隔离）
 
