@@ -55,7 +55,7 @@ docker compose up -d --build
 | --- | --- | --- |
 | frontend | 5173 | nginx 托管 SPA，`/api/*` 反代到后端 |
 | backend | 8080 | 多租户 Agent 服务（挂载 `backend-compose.config.yaml`：MySQL/Redis/Milvus/OTLP 全接） |
-| mysql | 3306 | 首次启动自动执行 `mysql/init/*.sql` |
+| mysql | 3307 | 首次启动自动执行 `mysql/init/*.sql`（主机端口，避开本地 3306，经 `MYSQL_PORT` 配置） |
 | redis | 6379 | Streams 消息总线 + session/memory 后端 |
 | etcd + minio | — | Milvus standalone 依赖（内部） |
 | milvus | 19530/9091 | 向量库 standalone（v2.5.6，BM25 全文检索） |

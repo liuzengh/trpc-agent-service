@@ -1,6 +1,6 @@
 # Multi-tenant Agent platform — full local stack.
 # Usage: cp .env.example .env && docker compose up -d --build
-# Ports: frontend :5173, backend :8080, mysql :3306, redis :6379,
+# Ports: frontend :5173, backend :8080, mysql :3307, redis :6379,
 #        minio :9000/:9001, artifact-minio :9002/:9003, milvus :19530/:9091.
 
 services:
@@ -13,7 +13,7 @@ services:
       TZ: Asia/Shanghai
     command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     ports:
-      - "3306:3306"
+      - "${MYSQL_PORT:-3307}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
       # Numbered init scripts run in order on first boot.
@@ -28,7 +28,7 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
