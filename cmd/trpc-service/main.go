@@ -146,7 +146,11 @@ func main() {
 					logger.Info("artifact persistence enabled", "endpoint", cfg.MinIO.Endpoint, "bucket", bucket)
 				}
 			}
-			w := worker.New(rb, agentMgr, toolReg, builtinToolSource, outbox, router, kbMgr, skillMgr, auditor, artSvc)
+			// Data-domain assembly point: session/memory via the Router,
+			// knowledge/artifact/audit as their single production backends.
+			// Summary has no standalone domain (lives in the session backend).
+			dss := storage.NewDataStores(router, kbMgr, artSvc, auditor)
+			w := worker.New(rb, agentMgr, toolReg, builtinToolSource, outbox, dss.Router, dss.Knowledge, skillMgr, dss.Auditor, dss.Artifacts)
 			go func() {
 				if err := w.Run(context.Background()); err != nil {
 					logger.Error("worker stopped", "err", err)

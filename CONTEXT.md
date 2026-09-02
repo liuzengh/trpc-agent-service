@@ -39,8 +39,13 @@
 - **MinIO**：S3 兼容对象存储，承载 artifact 字节；部署资产已含独立 `artifact-minio` 服务（compose/K8s）。
 - **metadata 表 vs 对象**：artifact 版本信息编码在对象键内（无额外索引）；MySQL `artifacts` 表（009）预留为审计/管理读视图，待消费侧（代码执行沙箱）落地后回填。
 
-## 代码执行（阶段 15 确立）
+## 数据访问与存储域（阶段 18 对齐）
 
+- **数据域（Data Domain）**：平台的存储划分单位 = **session / memory / summary / artifact / knowledge（向量库）/ audit**。各自承载一类状态或产物，各有其一致性与生命周期特征。
+- **DataBackend**：租户级 `data_backend` map（domain → backend 值）；operator 改租户数据即可换某域后端。**storage.Router** 按租户解析并缓存实例（现注册 session/memory 两域）。
+- **统一数据访问抽象**：一个聚合入口，让上层（web / worker / main）以一致方式取得各数据域的实现并统一初始化——目标是**说清楚"每域如何存储"并收敛初始化点**，不是强制每个域都有多个后端实现（只有实际出现第二实现才纳入逐租户可选）。
+
+## 代码执行（阶段 15 确立）
 - **code-exec 工具**：平台内置工具（目录 id `code-exec`，工具名 `execute_code`），让 Agent 在隔离容器里运行 Python/Bash 并取回输出。
 - **DockerExecutor**：平台自实现 `codeexecutor.CodeExecutor`（框架窄接口 ExecuteCode+Delimiter），经 **docker CLI** 执行 `docker run --rm -i --network none <python|alpine 镜像>`，代码走 stdin；120s 超时；**网络隔离**内建。无 Go docker SDK 依赖。
 - **运行时错误语义**：非零退出（语法错误/异常）作为**输出**回给模型（可自修复）；传输错误（docker 缺失/镜像拉取失败/超时）才作为工具 error。
