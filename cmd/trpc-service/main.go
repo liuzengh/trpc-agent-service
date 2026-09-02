@@ -23,6 +23,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/llm"
 	srvlog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/skill"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -119,6 +120,30 @@ func main() {
 		bindStore = channels.NewMemBindingStore()
 	}
 
+	// Unified credential store. Master key comes from env (wins) or config.
+	// With MySQL the store is disabled when no master key is present, so
+	// plaintext credentials are never written at rest; without MySQL a
+	// plaintext in-memory store serves dev.
+	var secretStore secret.Store
+	masterKey := os.Getenv("TRPC_SECRET_MASTER_KEY")
+	if masterKey == "" {
+		masterKey = cfg.Secret.MasterKey
+	}
+	if db != nil {
+		if masterKey == "" {
+			logger.Warn("secret master key missing, credential store disabled")
+		} else if s, err := secret.NewMySQLStore(db, masterKey); err != nil {
+			logger.Error("secret store unavailable", "err", err)
+		} else {
+			secretStore = s
+		}
+	} else {
+		secretStore = secret.NewMemStore()
+	}
+	// Models resolve APIKeyRef via the credential store (nil store keeps the
+	// legacy plaintext APIKey path).
+	reg.SetKeySource(secretStore)
+
 	web.NewTenantAPI(tenantMgr).Register(mux)
 	web.NewAgentAPI(agentMgr).Register(mux)
 	web.NewEndpointAPI(reg).Register(mux)
@@ -126,6 +151,9 @@ func main() {
 	web.NewKnowledgeAPI(kbMgr).Register(mux)
 	web.NewSkillAPI(skillMgr).Register(mux)
 	web.NewChannelAPI(bindStore).Register(mux)
+	if secretStore != nil {
+		web.NewSecretAPI(secretStore).Register(mux)
+	}
 	if auditRec != nil {
 		web.NewAuditAPI(auditRec).Register(mux)
 	}

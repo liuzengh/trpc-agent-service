@@ -17,6 +17,7 @@ type Config struct {
 	Redis     RedisConfig     `yaml:"redis"`
 	Milvus    MilvusConfig    `yaml:"milvus"`
 	MinIO     MinIOConfig     `yaml:"minio"`
+	Secret    SecretConfig    `yaml:"secret"`
 	Telemetry TelemetryConfig `yaml:"telemetry"`
 }
 
@@ -53,6 +54,14 @@ type MinIOConfig struct {
 	SecretKey string `yaml:"secret_key"`
 	Bucket    string `yaml:"bucket"` // default "artifacts"
 	UseSSL    bool   `yaml:"use_ssl"`
+}
+
+// SecretConfig configures the credential store. MasterKey is the encryption
+// master key (also settable via env TRPC_SECRET_MASTER_KEY, which wins). With
+// MySQL the credential store is disabled when no master key is present, so
+// plaintext is never written at rest.
+type SecretConfig struct {
+	MasterKey string `yaml:"master_key"`
 }
 
 // TelemetryConfig configures OpenTelemetry trace + metrics export. An empty

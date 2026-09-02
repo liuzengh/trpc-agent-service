@@ -49,7 +49,17 @@ type Endpoint struct {
 	Provider  string `json:"provider"`
 	BaseURL   string `json:"base_url"`
 	ModelName string `json:"model_name"`
-	APIKey    string `json:"api_key,omitempty"` // TODO: move to secret store (Phase 8), keep only a ref here.
+	// APIKey is a plaintext key (legacy). Prefer APIKeyRef: a credential-store
+	// reference resolved at build time via Registry.SetKeySource.
+	APIKey    string `json:"api_key,omitempty"`
+	APIKeyRef string `json:"api_key_ref,omitempty"`
+}
+
+// KeySource resolves a credential value by reference (the secret store
+// satisfies it). Kept as an interface so llm does not depend on the secret
+// package.
+type KeySource interface {
+	Get(ctx context.Context, key string) (string, error)
 }
 
 // ModelFactory builds a model.Model for an endpoint.
@@ -144,6 +154,15 @@ type Registry struct {
 	cache   map[string]model.Model
 	factory ModelFactory
 	store   store
+	keys    KeySource
+}
+
+// SetKeySource attaches a credential source used to resolve APIKeyRef at
+// build time. nil leaves plaintext APIKey as the only path (dev/test).
+func (r *Registry) SetKeySource(ks KeySource) {
+	r.mu.Lock()
+	r.keys = ks
+	r.mu.Unlock()
 }
 
 // NewRegistry returns an in-memory registry using the given factory,
@@ -182,6 +201,23 @@ func (r *Registry) Resolve(ctx context.Context, endpointID string) (model.Model,
 	ep, err := r.store.Get(ctx, endpointID)
 	if err != nil {
 		return nil, err
+	}
+
+	// Resolve a credential-store reference into the in-memory key used to
+	// build the model. A missing reference is a hard error (misconfiguration
+	// must not silently build a keyless model).
+	if ep.APIKeyRef != "" {
+		r.mu.RLock()
+		ks := r.keys
+		r.mu.RUnlock()
+		if ks == nil {
+			return nil, fmt.Errorf("llm: endpoint %q uses api_key_ref %q but no key source is configured", endpointID, ep.APIKeyRef)
+		}
+		key, err := ks.Get(ctx, ep.APIKeyRef)
+		if err != nil {
+			return nil, fmt.Errorf("llm: resolve api_key_ref %q: %w", ep.APIKeyRef, err)
+		}
+		ep.APIKey = key
 	}
 
 	m, err := r.factory(ctx, ep)

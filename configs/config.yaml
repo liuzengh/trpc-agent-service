@@ -26,6 +26,13 @@ log:
 #   bucket: "artifacts"
 #   use_ssl: false
 
+# Unified credential store (model api keys + IM channel credentials), encrypted
+# at rest with AES-256-GCM. master_key is also settable via env
+# TRPC_SECRET_MASTER_KEY (env wins). With MySQL, a missing master key disables
+# the credential store (plaintext is never written at rest).
+# secret:
+#   master_key: "change-me-to-a-strong-passphrase"
+
 # Observability. Leave otlp_endpoint empty to keep the noop provider (all
 # recording becomes a no-op). Point it at an OTLP collector (see
 # configs/otel-collector.yaml) to export traces + metrics to Jaeger/Prometheus.

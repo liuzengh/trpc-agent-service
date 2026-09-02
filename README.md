@@ -143,7 +143,7 @@
     `-- workspace          # Docker 代码执行（code-exec：隔离容器 + 无网络 + 高风险审批）
 ```
 
-> 能力边界：`workspace` 承载 Docker 代码执行（code-exec，隔离容器+无网络+高风险自动审批；K8s Pod 后端已决策不需要——生产部署为 Docker Compose）；Admin 对话（/chat，SSE）与 IM 通道绑定（/channels CRUD）已实现；`chat_messages` 账本表与 secret manager 为预留；企业微信/飞书真实 SDK 收发需本地账号手测接线（适配器与单测已就绪，main 未启动监听）。
+> 能力边界：`workspace` 承载 Docker 代码执行（code-exec，隔离容器+无网络+高风险自动审批；K8s Pod 后端已决策不需要——生产部署为 Docker Compose）；Admin 对话（/chat，SSE）与 IM 通道绑定（/channels CRUD）已实现；`chat_messages` 账本表已启用（会话历史）；secret manager 已实现（统一凭据 AES-256-GCM，见 ADR-0002）；企业微信/飞书真实 SDK 收发需本地账号手测接线（适配器与单测已就绪，main 未启动监听）。
 
 ## 快速开始
 

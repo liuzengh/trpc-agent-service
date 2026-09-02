@@ -33,6 +33,14 @@
 - **审批结果键**：`approval:res:{tenant}:{session}` 存人工决策。
 - **有界并发消费**：worker 消息消费为每消息 goroutine + 信号量上限；保证审批回复不被阻塞中的 agent 轮次挡住；同会话正确性仍由会话锁串行 + 幂等双保险兜底。
 
+## 凭据管理（阶段 21 确立）
+
+- **Secret（凭据密文）**：统一凭据存储里的加密值，经 key 引用；模型 api_key 与 IM 通道凭据只存此处，域表（endpoints/channel_bindings）不存明文。
+- **Secret Key（凭据引用）**：opaque key；模型约定 `endpoint:{id}`，通道用 binding.credential_ref 指向。管理 API 只返回 key 与 updated_at，**永不返回明文**。
+- **主密钥（Master Key）**：AES-256-GCM 加密密钥来源（env `TRPC_SECRET_MASTER_KEY` 优先，否则 config `secret.master_key`）；经 sha256 派生 32 字节 AES 密钥、只在内存；**不落库**；MySQL 下无主密钥则凭据存储禁用（拒绝明文落盘）。
+- **KeySource**：llm 侧的凭据解析接口（`Get(ctx,key)`），由 secret.Store 满足——避免 llm 反向依赖 secret 包；`Endpoint.APIKeyRef` 在 Resolve 时经它取用，取代明文 `APIKey`。
+- **AES-256-GCM**：密文 `base64(nonce‖ciphertext)`，随机 nonce；不同主密钥无法解密（GCM tag 校验失败）。
+
 ## 制品与对象存储（阶段 14 确立）
 
 - **Artifact（制品）**：Agent 执行中产生的命名、带版本二进制文件（代码产物/报告/图片等）。不是日志；日志走 audit/usage。
