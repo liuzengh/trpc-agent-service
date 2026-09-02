@@ -1,13 +1,47 @@
 <script setup lang="ts">
+import { onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useTenantStore } from './stores/tenant'
+import { useSkillStore } from './stores/skill'
+import { useKBStore } from './stores/kb'
+import { useAgentStore } from './stores/agent'
 
 const route = useRoute()
+const tenantStore = useTenantStore()
+const skillStore = useSkillStore()
+const kbStore = useKBStore()
+const agentStore = useAgentStore()
+
+onMounted(() => tenantStore.fetch())
+
+// Switching tenants re-fetches tenant-scoped collections so skills, KBs and
+// agent mounts always reflect the current tenant.
+watch(
+  () => tenantStore.currentTenantId,
+  (id) => {
+    if (!id) return
+    skillStore.fetch()
+    kbStore.fetch()
+    agentStore.fetch()
+  },
+)
 </script>
 
 <template>
   <div class="layout">
     <aside class="sidebar">
       <div class="logo">Agent 平台</div>
+      <div class="tenant-picker">
+        <el-select
+          :model-value="tenantStore.currentTenantId"
+          placeholder="选择租户"
+          size="small"
+          style="width: 100%"
+          @change="tenantStore.setCurrentTenant"
+        >
+          <el-option v-for="t in tenantStore.tenants" :key="t.id" :label="t.name" :value="t.id" />
+        </el-select>
+      </div>
       <router-link to="/" class="nav" :class="{ active: route.path === '/' }">租户管理</router-link>
       <router-link to="/endpoints" class="nav" :class="{ active: route.path === '/endpoints' }">模型端点</router-link>
       <router-link to="/agents" class="nav" :class="{ active: route.path === '/agents' }">Agent 配置</router-link>
@@ -46,6 +80,9 @@ body {
   padding: 0 20px 16px;
   font-size: 16px;
   font-weight: 600;
+}
+.tenant-picker {
+  padding: 0 12px 12px;
 }
 .nav {
   display: block;

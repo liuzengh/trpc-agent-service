@@ -101,10 +101,14 @@ func (s *mysqlStore) Get(ctx context.Context, id string) (*Skill, error) {
 }
 
 func (s *mysqlStore) List(ctx context.Context, tenantID string) ([]*Skill, error) {
-	q := `SELECT ` + skillCols + ` FROM skills WHERE is_deleted = 0 AND scope = 'global'`
+	// Empty tenantID returns every skill (global + all tenants); a tenantID
+	// returns global skills plus that tenant's own. The parentheses keep
+	// is_deleted = 0 scoped to every branch (a bare OR would leak soft-deleted
+	// tenant skills).
+	q := `SELECT ` + skillCols + ` FROM skills WHERE is_deleted = 0`
 	args := []any{}
 	if tenantID != "" {
-		q += ` OR (scope = 'tenant' AND owner_tenant_id = ?)`
+		q += ` AND (scope = 'global' OR (scope = 'tenant' AND owner_tenant_id = ?))`
 		args = append(args, tenantID)
 	}
 	q += ` ORDER BY code`

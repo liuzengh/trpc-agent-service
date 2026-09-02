@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import * as api from '../api/skill'
 import type { Skill, SkillVersion, VersionInput } from '../api/skill'
+import { useTenantStore } from './tenant'
 
 export const useSkillStore = defineStore('skill', {
   state: () => ({
@@ -13,7 +14,8 @@ export const useSkillStore = defineStore('skill', {
       this.loading = true
       this.error = ''
       try {
-        this.skills = await api.listSkills()
+        const tenantStore = useTenantStore()
+        this.skills = await api.listSkills(tenantStore.currentTenantId)
       } catch (e) {
         this.error = String(e)
       } finally {

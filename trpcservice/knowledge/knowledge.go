@@ -129,6 +129,12 @@ func (m *Manager) Create(ctx context.Context, kb *KnowledgeBase) error {
 	// Milvus collection names allow only letters, digits and underscores, so
 	// UUID-style tenant/kb ids (with hyphens) are normalized to underscores.
 	kb.CollectionName = sanitizeName(kb.TenantID) + "_" + sanitizeName(kb.ID)
+	// Milvus also requires the first character to be an underscore or a
+	// letter; a numeric-leading tenant id (e.g. "1") would otherwise produce
+	// an invalid name like "1_xxx".
+	if len(kb.CollectionName) > 0 && kb.CollectionName[0] >= '0' && kb.CollectionName[0] <= '9' {
+		kb.CollectionName = "kb_" + kb.CollectionName
+	}
 	return m.store.CreateKB(ctx, kb)
 }
 

@@ -268,3 +268,21 @@ func TestSearchConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestKBNumericTenantCollectionName(t *testing.T) {
+	ctx := context.Background()
+	m := newTestManager(t, testEmbedderFactory(64))
+
+	// A numeric-leading tenant id must not produce a collection name that
+	// starts with a digit (Milvus rejects it).
+	kb := &KnowledgeBase{ID: "kb-num", TenantID: "1", Name: "docs", EmbeddingEndpointID: "e-1"}
+	if err := m.Create(ctx, kb); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if kb.CollectionName[0] >= '0' && kb.CollectionName[0] <= '9' {
+		t.Errorf("collection name %q must not start with a digit", kb.CollectionName)
+	}
+	if kb.CollectionName != "kb_1_kb_num" {
+		t.Errorf("collection name = %q, want kb_1_kb_num", kb.CollectionName)
+	}
+}

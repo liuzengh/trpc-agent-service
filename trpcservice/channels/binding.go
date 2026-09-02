@@ -20,16 +20,18 @@ var ErrBindingNotFound = errors.New("channels: binding not found")
 var ErrBindingDuplicate = errors.New("channels: channel account already bound")
 
 // ChannelBinding binds an IM account (a channel + account identity) to a
-// tenant + agent. credential_ref is a secret-store reference (never a
-// plaintext token). Deleting is soft (is_deleted) to keep the unique key.
+// tenant + agent. credential_ref and verification_token_ref are secret-store
+// references (never plaintext tokens). Deleting is soft (is_deleted) to keep
+// the unique key.
 type ChannelBinding struct {
-	BindingID     string    `json:"binding_id"`
-	TenantID      string    `json:"tenant_id"`
-	AgentID       string    `json:"agent_id"`
-	Channel       string    `json:"channel"` // wecom | feishu
-	AccountID     string    `json:"account_id"`
-	CredentialRef string    `json:"credential_ref,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
+	BindingID            string    `json:"binding_id"`
+	TenantID             string    `json:"tenant_id"`
+	AgentID              string    `json:"agent_id"`
+	Channel              string    `json:"channel"` // wecom | feishu
+	AccountID            string    `json:"account_id"`
+	CredentialRef        string    `json:"credential_ref,omitempty"`
+	VerificationTokenRef string    `json:"verification_token_ref,omitempty"` // feishu event-subscription verify token
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 // BindingStore persists IM channel bindings behind a swappable backend.

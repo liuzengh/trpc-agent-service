@@ -150,7 +150,8 @@ func main() {
 	web.NewToolAPI(toolReg).Register(mux)
 	web.NewKnowledgeAPI(kbMgr).Register(mux)
 	web.NewSkillAPI(skillMgr).Register(mux)
-	web.NewChannelAPI(bindStore).Register(mux)
+	channelAPI := web.NewChannelAPI(bindStore)
+	channelAPI.Register(mux)
 	if secretStore != nil {
 		web.NewSecretAPI(secretStore).Register(mux)
 	}
@@ -210,12 +211,19 @@ func main() {
 					logger.Error("outbox dispatcher stopped", "err", err)
 				}
 			}()
-			// IM gateway bridges real WSS adapters (WeCom aibot / Feishu Lark)
-			// to the same bus the worker consumes. Wired after the worker so a
-			// misconfigured platform never blocks the core message pipeline.
-			if err := wireIMGateway(context.Background(), rb, bindStore, secretStore, cfg.IM); err != nil {
-				logger.Error("IM gateway setup failed", "err", err)
+			// IM gateway: binding-driven connection manager. Reload connects
+			// each bound account at startup; ChannelAPI reconciles live
+			// adapters on every binding create/delete.
+			imMgr := channels.NewManager(rb, bindStore, secretStore, buildAdapter)
+			channelAPI.SetManager(imMgr)
+			if err := imMgr.Reload(context.Background()); err != nil {
+				logger.Error("IM gateway reload failed", "err", err)
 			}
+			go func() {
+				if err := imMgr.Run(context.Background()); err != nil {
+					logger.Error("IM gateway stopped", "err", err)
+				}
+			}()
 			logger.Info("worker started", "group", worker.Group)
 		}
 	}

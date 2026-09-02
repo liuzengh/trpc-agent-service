@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import * as api from '../api/agent'
 import type { Agent, RuntimeProfile } from '../api/agent'
+import { useTenantStore } from './tenant'
 
 export const useAgentStore = defineStore('agent', {
   state: () => ({
@@ -9,11 +10,12 @@ export const useAgentStore = defineStore('agent', {
     error: '',
   }),
   actions: {
-    async fetch(tenantId = '') {
+    async fetch(tenantId?: string) {
       this.loading = true
       this.error = ''
       try {
-        this.agents = await api.listAgents(tenantId)
+        const tenantStore = useTenantStore()
+        this.agents = await api.listAgents(tenantId ?? tenantStore.currentTenantId)
       } catch (e) {
         this.error = String(e)
       } finally {

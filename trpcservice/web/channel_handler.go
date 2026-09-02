@@ -13,16 +13,22 @@ import (
 )
 
 // ChannelAPI manages IM channel bindings (wecom/feishu account -> tenant +
-// agent). credential_ref is a secret-store reference, never a plaintext
-// credential.
+// agent). credential_ref and verification_token_ref are secret-store
+// references, never plaintext credentials.
 type ChannelAPI struct {
 	store channels.BindingStore
+	mgr   *channels.Manager // optional: reconciled on binding create/delete
 }
 
 // NewChannelAPI returns a channel-binding management API.
 func NewChannelAPI(store channels.BindingStore) *ChannelAPI {
 	return &ChannelAPI{store: store}
 }
+
+// SetManager wires a binding-driven connection manager so binding changes
+// immediately reconcile the live IM adapters. May be nil (bindings are then
+// only persisted, connections are reconciled on the next startup).
+func (a *ChannelAPI) SetManager(m *channels.Manager) { a.mgr = m }
 
 // Register mounts channel routes.
 func (a *ChannelAPI) Register(mux *http.ServeMux) {
@@ -43,11 +49,12 @@ func (a *ChannelAPI) list(w http.ResponseWriter, r *http.Request) {
 
 // channelInput is the POST /channels body (binding id assigned server-side).
 type channelInput struct {
-	TenantID      string `json:"tenant_id"`
-	AgentID       string `json:"agent_id"`
-	Channel       string `json:"channel"`
-	AccountID     string `json:"account_id"`
-	CredentialRef string `json:"credential_ref,omitempty"`
+	TenantID             string `json:"tenant_id"`
+	AgentID              string `json:"agent_id"`
+	Channel              string `json:"channel"`
+	AccountID            string `json:"account_id"`
+	CredentialRef        string `json:"credential_ref,omitempty"`
+	VerificationTokenRef string `json:"verification_token_ref,omitempty"`
 }
 
 func (a *ChannelAPI) create(w http.ResponseWriter, r *http.Request) {
@@ -66,13 +73,14 @@ func (a *ChannelAPI) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := a.store.Create(r.Context(), channels.ChannelBinding{
-		BindingID:     uuid.NewString(),
-		TenantID:      in.TenantID,
-		AgentID:       in.AgentID,
-		Channel:       in.Channel,
-		AccountID:     in.AccountID,
-		CredentialRef: in.CredentialRef,
-		CreatedAt:     time.Now().UTC(),
+		BindingID:            uuid.NewString(),
+		TenantID:             in.TenantID,
+		AgentID:              in.AgentID,
+		Channel:              in.Channel,
+		AccountID:            in.AccountID,
+		CredentialRef:        in.CredentialRef,
+		VerificationTokenRef: in.VerificationTokenRef,
+		CreatedAt:            time.Now().UTC(),
 	})
 	if err != nil {
 		if errors.Is(err, channels.ErrBindingDuplicate) {
@@ -81,6 +89,9 @@ func (a *ChannelAPI) create(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if a.mgr != nil {
+		_ = a.mgr.Reload(r.Context())
 	}
 	w.WriteHeader(http.StatusCreated)
 }
@@ -93,6 +104,9 @@ func (a *ChannelAPI) delete(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if a.mgr != nil {
+		_ = a.mgr.Reload(r.Context())
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

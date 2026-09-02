@@ -21,13 +21,13 @@ func NewMySQLBindingStore(db *sql.DB) BindingStore {
 	return &mysqlBindingStore{db: db}
 }
 
-const bindingCols = `binding_id, tenant_id, agent_id, channel, account_id, credential_ref, created_at`
+const bindingCols = `binding_id, tenant_id, agent_id, channel, account_id, credential_ref, verification_token_ref, created_at`
 
 func (s *mysqlBindingStore) Create(ctx context.Context, b ChannelBinding) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO channel_bindings (binding_id, tenant_id, agent_id, channel, account_id, credential_ref)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		b.BindingID, b.TenantID, b.AgentID, b.Channel, b.AccountID, b.CredentialRef)
+		`INSERT INTO channel_bindings (binding_id, tenant_id, agent_id, channel, account_id, credential_ref, verification_token_ref)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		b.BindingID, b.TenantID, b.AgentID, b.Channel, b.AccountID, b.CredentialRef, b.VerificationTokenRef)
 	if err != nil {
 		if strings.Contains(err.Error(), "Duplicate entry") {
 			return ErrBindingDuplicate
@@ -98,7 +98,7 @@ type rowScanner interface {
 func scanBinding(row rowScanner) (*ChannelBinding, error) {
 	var b ChannelBinding
 	err := row.Scan(&b.BindingID, &b.TenantID, &b.AgentID, &b.Channel, &b.AccountID,
-		&b.CredentialRef, &b.CreatedAt)
+		&b.CredentialRef, &b.VerificationTokenRef, &b.CreatedAt)
 	if err != nil {
 		return nil, err
 	}

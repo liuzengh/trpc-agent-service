@@ -7,6 +7,7 @@ export interface ChannelBinding {
   channel: 'wecom' | 'feishu'
   account_id: string
   credential_ref?: string
+  verification_token_ref?: string
   created_at: string
 }
 
@@ -16,6 +17,7 @@ export interface ChannelInput {
   channel: 'wecom' | 'feishu'
   account_id: string
   credential_ref?: string
+  verification_token_ref?: string
 }
 
 const baseURL = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'

@@ -138,6 +138,16 @@ func TestMySQLSkillLifecycle(t *testing.T) {
 		t.Errorf("acme sees %d skills, want 2 (own + global)", len(acmeList))
 	}
 
+	// Empty tenantID returns every skill (global + all tenants) — this is the
+	// regression guard for the SQL that used to only return scope='global'.
+	allList, err := m.List(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allList) != 2 {
+		t.Errorf("list(all) sees %d skills, want 2 (global + acme tenant)", len(allList))
+	}
+
 	// Delete unbinds agents and hides the skill.
 	if err := m.Delete(ctx, s.SkillID); err != nil {
 		t.Fatalf("delete: %v", err)

@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS channel_bindings (
     channel        VARCHAR(32)  NOT NULL             COMMENT 'wecom | feishu',
     account_id     VARCHAR(128) NOT NULL             COMMENT 'enterprise/app identity',
     credential_ref VARCHAR(128) NOT NULL             COMMENT 'secret-store ref for token/secret',
+    verification_token_ref VARCHAR(128) NOT NULL DEFAULT '' COMMENT 'feishu verify-token secret-store ref',
     created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     is_deleted     TINYINT      NOT NULL DEFAULT 0,
     PRIMARY KEY (binding_id),

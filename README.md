@@ -142,7 +142,7 @@
     `-- workspace          # Docker 代码执行（code-exec：隔离容器 + 无网络 + 高风险审批）
 ```
 
-> 能力边界：`workspace` 承载 Docker 代码执行（code-exec，隔离容器+无网络+高风险自动审批；K8s Pod 后端已决策不需要——生产部署为 Docker Compose）；Admin 对话（/chat，SSE）与 IM 通道绑定（/channels CRUD）已实现；`chat_messages` 账本表已启用（会话历史）；secret manager 已实现（统一凭据 AES-256-GCM，见 ADR-0002）；IM 桥接层（gateway，adapter↔总线双向）与真实 WSS Conn 已实现——企业微信走 `go-sphere/wecom-aibot-go-sdk`（长连接）、飞书走 lark-go SDK（ws.Client），main 已装配 `wireIMGateway`（config 声明连接 + binding 路由 tenant + secret 读凭据）；真实收发仍需本地账号手测联调。
+> 能力边界：`workspace` 承载 Docker 代码执行（code-exec，隔离容器+无网络+高风险自动审批；K8s Pod 后端已决策不需要——生产部署为 Docker Compose）；Admin 对话（/chat，SSE）与 IM 通道绑定（/channels CRUD）已实现；`chat_messages` 账本表已启用（会话历史）；secret manager 已实现（统一凭据 AES-256-GCM，见 ADR-0002）；IM 桥接层（gateway，adapter↔总线双向）与真实 WSS Conn 已实现——企业微信走 `go-sphere/wecom-aibot-go-sdk`（长连接）、飞书走 lark-go SDK（ws.Client），连接由 **binding 驱动**的 `channels.Manager` 管理（前端通道页填 Bot/App ID + Secret 保存即连接，无需改 config）；真实收发仍需本地账号手测联调。
 
 ## 快速开始
 

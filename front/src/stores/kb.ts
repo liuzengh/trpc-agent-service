@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import * as api from '../api/kb'
 import type { Document, KnowledgeBase, SearchHit } from '../api/kb'
+import { useTenantStore } from './tenant'
 
 export const useKBStore = defineStore('kb', {
   state: () => ({
@@ -9,11 +10,12 @@ export const useKBStore = defineStore('kb', {
     error: '',
   }),
   actions: {
-    async fetch(tenantId = '') {
+    async fetch(tenantId?: string) {
       this.loading = true
       this.error = ''
       try {
-        this.kbs = await api.listKBs(tenantId)
+        const tenantStore = useTenantStore()
+        this.kbs = await api.listKBs(tenantId ?? tenantStore.currentTenantId)
       } catch (e) {
         this.error = String(e)
       } finally {
