@@ -45,4 +45,5 @@
 - **DockerExecutor**：平台自实现 `codeexecutor.CodeExecutor`（框架窄接口 ExecuteCode+Delimiter），经 **docker CLI** 执行 `docker run --rm -i --network none <python|alpine 镜像>`，代码走 stdin；120s 超时；**网络隔离**内建。无 Go docker SDK 依赖。
 - **运行时错误语义**：非零退出（语法错误/异常）作为**输出**回给模型（可自修复）；传输错误（docker 缺失/镜像拉取失败/超时）才作为工具 error。
 - **高风险自动审批**：code-exec 定义 `risk_level=high` → 走审批 rail2，每次执行前自动人工审批（与阶段 13 打通）。
-- **执行隔离边界**：容器级隔离（镜像沙箱 + 无网络）；框架 sandbox（seccomp）仅 Linux/macOS，本机（Windows）由 Docker 后端承载；K8s Pod exec 后端仍未实现。
+- **容器隔离层 vs sandbox（易混术语）**：平台承担"沙箱"职责的实际后端是 **Docker 容器**（镜像沙箱 + `--network none`）；框架自带 `codeexecutor/sandbox` 是**进程级 OS 沙箱（seccomp）**，非容器、仅 Linux/macOS（Windows 为 stub），平台未接入。同名"沙箱"指两种不同隔离层，务必区分。
+- **K8s Pod 执行后端（已决策：不实现）**：把 `CodeExecutor` 后端实现为「在 Kubernetes 集群创建 Pod 执行代码」。与 Docker 后端的差别在**编排层**（调度/配额/网络策略/多节点），而非执行语义本身；平台若跑在 K8s 集群内，节点通常没有 docker socket/docker CLI（K8s 用 containerd，不经 docker），Docker 后端不可用 → Pod 后端是集群环境的执行通道。**阶段 17 grill 决策**：生产部署形态为 Docker Compose/单机，Docker 后端已覆盖 → 不实现；若未来交付到 K8s 环境，靠窄 CodeExecutor 接口后端替换补充（AGENTS.md §7 决策区）。
