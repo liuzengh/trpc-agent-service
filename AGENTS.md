@@ -15,7 +15,7 @@
 3. **多租户隔离**：会话、记忆、知识库、工具权限、审计日志必须隔离。
 4. **多后端**：必须支持 MySQL、Redis；其他后端（向量库/消息队列/对象存储等）须先与用户讨论同意。
 5. **IM**：企业微信 `wss://openws.work.weixin.qq.com`；飞书 v3.7.2 `ws.Client`+`EventDispatcher` 订阅 `im.message.receive_v1`；接入统一消息总线。
-6. **生产部署**：K8s 清单（Deployment/Service/HPA/ConfigMap/Secret/Ingress）。
+6. **生产部署**：Docker Compose 全栈编排（`deployments/docker-compose.yml`，MySQL/Redis/Milvus/MinIO/后端/前端/观测）。K8s 清单已移除（阶段 25 grill 决策：单机/Compose 已覆盖；未来上 K8s 集群时再按需补）。
 7. **可观测性**：Jaeger 分布式追踪 + OpenTelemetry + Prometheus 指标。
 8. **TDD**：先写测试（单元/集成/端到端）再实现，测试可重复执行。
 9. **注释英文，文档中文**。
@@ -33,7 +33,7 @@
 ## 4. 目录约定
 
 - 正式交付物 → `docs/`；中间文档 → `tempdocs/`。
-- 后端 Go 根目录；前端 Vue3 → `front/`；K8s → `deployments/`。
+- 后端 Go 根目录；前端 Vue3 → `front/`；部署 → `deployments/`（Docker Compose）。
 - **后端代码在原有 `trpcservice/` 包基础上开发**（不新建 `internal/`），设计结构按以下映射迁移进原包：
   - `config`/`log`/`tenant`/`agent`/`channels`/`tool`/`skill`/`metrics`/`web`/`workspace` 沿用原包名承载对应职责。
   - 新增子包（按需）：`health`（健康检查）、`bus`（消息总线）、`storage`（后端抽象）、`llm`（ModelEndpoint）、`audit`（审计）、`secret`（密钥）。
@@ -56,7 +56,7 @@
 | 执行入口 | 有（`runner.Runner`） | 复用 |
 | Session/Memory/Knowledge | 有（`session/*`、`memory/*`、`knowledge/*`） | 复用 |
 | Tool 封装 | 有（`tool/function.FunctionTool`、`tool/mcp`、`tool/codeexec`、`tool/workspaceexec`） | 复用 |
-| 沙箱/代码执行 | 有（`codeexecutor`：local/container[Docker]/sandbox[seccomp]/e2b/jupyter） | 复用接口；**缺 K8s 后端需补** |
+| 沙箱/代码执行 | 有（`codeexecutor`：local/container[Docker]/sandbox[seccomp]/e2b/jupyter） | 复用接口；自实现 `DockerExecutor`（K8s Pod 后端已决策不实现，阶段 17） |
 | 审批（Approval） | 有（`plugin/guardrail/approval`） | 复用 |
 | Guardrail | 有（`plugin/guardrail`：promptinjection/unsafeintent） | 复用 |
 | Artifact | 有（`codeexecutor/artifact`、`artifact/*`） | 复用 |

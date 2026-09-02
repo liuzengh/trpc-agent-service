@@ -114,13 +114,12 @@
 |   `-- trpc-service       # 入口 main.go（角色 gateway|worker|admin|all）
 |-- configs
 |   |-- config.yaml        # 本地 dev 默认配置（注释后端/redis/milvus/telemetry 段）
-|   `-- otel-collector.yaml  # OTel Collector 配置（compose/k8s 复用）
+|   `-- otel-collector.yaml  # OTel Collector 配置（compose 复用）
 |-- deployments
 |   |-- docker-compose.yml / .env.example    # 本地完整栈
 |   |-- backend-compose.config.yaml          # compose 后端挂载的完整运行配置
 |   |-- prometheus.yml                        # compose Prometheus 抓取
-|   |-- k8s/00~09.yaml                        # namespace/configmap/secret/mysql/redis/minio/milvus/backend/frontend/observability
-|   `-- mysql/init/001~009.sql                # 9 个建表脚本（按文件序号执行）
+|   `-- mysql/init/001~010.sql                # 10 个建表脚本（按文件序号执行）
 |-- docs                   # 架构/详细设计/多后端/风险清单/可复用性评估
 |-- front                  # Vue3 + Vite + TS + Pinia + Element Plus + Vitest + Playwright
 |   |-- e2e/               # Playwright E2E 核心链路

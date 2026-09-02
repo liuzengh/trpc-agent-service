@@ -55,7 +55,7 @@
 - **Artifact Service**：框架 `artifact.Service` 接口（Save/Load/List/Delete/ListVersions），经 `runner.WithArtifactService` 注入——**代码执行工具自动保存产物**，平台无需在工具内手动上传。
 - **版本（Revision）**：同一文件名的第 N 次保存；首个保存为 revision 0，逐次 +1；旧版本保留可回溯。
 - **对象键布局**：`{tenant}/{user}/{session}/{filename}/{revision}`；`user:` 前缀文件名走 `{tenant}/{user}/user/...`（跨会话持久）。tenant 段实现对象级隔离。
-- **MinIO**：S3 兼容对象存储，承载 artifact 字节；部署资产已含独立 `artifact-minio` 服务（compose/K8s）。
+- **MinIO**：S3 兼容对象存储，承载 artifact 字节；部署资产已含独立 `artifact-minio` 服务（compose）。
 - **metadata 表 vs 对象**：artifact 版本信息编码在对象键内（无额外索引）；MySQL `artifacts` 表（009）预留为审计/管理读视图，待消费侧（代码执行沙箱）落地后回填。
 
 ## 数据访问与存储域（阶段 18 对齐）

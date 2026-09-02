@@ -1,18 +1,17 @@
 # 部署与建表说明
 
-本目录承载三块交付物，用于提高项目的可移植性：
+本目录承载以下交付物，用于提高项目的可移植性：
 
 | 目录/文件 | 说明 |
 | --- | --- |
-| `mysql/init/*.sql` | MySQL 建表语句（9 个迁移文件，按文件名序号顺序执行） |
+| `mysql/init/*.sql` | MySQL 建表语句（10 个迁移文件，按文件名序号顺序执行） |
 | `docker-compose.yml` + `.env.example` | 本地完整栈编排（MySQL/Redis/Milvus/MinIO/后端/前端 + 观测栈） |
-| `k8s/*.yaml` | Kubernetes 部署清单（namespace/configmap/secret/各组件/后端/前端/观测/Ingress） |
 | `backend-compose.config.yaml` | compose 后端运行时配置（挂载覆盖镜像默认 dev 配置） |
 | `prometheus.yml` | compose Prometheus 抓取配置 |
 
 > **后端接线已就绪**：`main.go` 已接入 MySQL/Redis/Milvus/telemetry（不再是 dev InMemory）。
-> 运行配置通过单个 YAML 文件加载：compose 挂载 `backend-compose.config.yaml`，K8s 从
-> Secret 挂载（配置含 DSN 密码，不入 ConfigMap）。
+> 运行配置通过单个 YAML 文件加载：compose 挂载 `backend-compose.config.yaml`
+> （配置含 DSN 密码，不入镜像默认 dev 配置）。
 
 ---
 
@@ -68,42 +67,7 @@ docker compose up -d --build
 > 后端只读 YAML 配置，不支持环境变量注入；如需改连接串直接编辑
 > `backend-compose.config.yaml`（或利用 `.env` + compose 变量拼入——见该文件注释）。
 
-## 三、Kubernetes（生产推荐）
-
-```bash
-# 1) 建命名空间 + 观测配置 + 密钥（含后端 config.yaml 与 DSN）
-kubectl apply -f deployments/k8s/00-namespace.yaml
-kubectl apply -f deployments/k8s/01-configmap.yaml
-kubectl apply -f deployments/k8s/02-secret.yaml
-
-# 2) 建 MySQL 初始化 ConfigMap（从建表文件生成）
-kubectl -n trpc-agent create configmap mysql-init --from-file=deployments/mysql/init/
-
-# 3) 部署基础设施 + 应用 + 观测
-kubectl apply -f deployments/k8s/03-mysql.yaml
-kubectl apply -f deployments/k8s/04-redis.yaml
-kubectl apply -f deployments/k8s/05-minio.yaml
-kubectl apply -f deployments/k8s/06-milvus.yaml
-kubectl apply -f deployments/k8s/07-backend.yaml
-kubectl apply -f deployments/k8s/08-frontend.yaml
-kubectl apply -f deployments/k8s/09-observability.yaml
-```
-
-要点：
-
-- **后端配置**：`02-secret.yaml` 的 `stringData.config.yaml` 承载完整运行配置（含 MySQL DSN）；
-  `07-backend.yaml` 从该 Secret 挂载 `/etc/trpc-service/config.yaml`。改配置后需重启后端。
-  生产用 **External Secrets Operator + Vault/云 KMS** 替换 Secret；模型 API Key 绝不落日志/trace。
-- **观测栈**：`09-observability.yaml` 部署 otel-collector/jaeger/prometheus；
-  `01-configmap.yaml` 的 `observability-config` 承载其非敏感配置。
-- **Milvus**：清单为 standalone（dev/预览）。生产用官方 **milvus-helm** 或 **Milvus Operator**（HA、备份、滚动升级）。
-- **无状态 Worker**：`07-backend.yaml` 副本数可横向扩展（HPA 已配，CPU 70%→2~10 副本），
-  会话/记忆走共享后端（Redis/MySQL），无需 sticky session。
-- **Ingress**：`08-frontend.yaml` 中 `host: agent.example.com`，按需改域名 + 加 TLS。
-
----
-
-## 四、镜像构建
+## 三、镜像构建
 
 ```bash
 # 后端（仓库根）
@@ -113,4 +77,3 @@ docker build -t trpc-agent-service:latest .
 docker build -t trpc-agent-service-front:latest ./front
 ```
 
-K8s 清单中镜像 tag 为 `latest`，推送到你的镜像仓库后改为实际地址。
