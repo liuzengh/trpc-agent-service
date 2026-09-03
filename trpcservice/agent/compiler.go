@@ -198,10 +198,11 @@ func (c *RevisionCompiler) Invalidate(tenantID string, revisionID string) {
 }
 
 type revisionAgentConfig struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Instruction string `json:"instruction"`
-	Stream      *bool  `json:"stream,omitempty"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	Instruction   string `json:"instruction"`
+	Stream        *bool  `json:"stream,omitempty"`
+	PreloadMemory int    `json:"preload_memory,omitempty"`
 }
 
 type revisionModelConfig struct {
@@ -230,6 +231,9 @@ func (c *RevisionCompiler) compileRevision(
 	if agentConfig.Name == "" || agentConfig.Instruction == "" {
 		return nil, fmt.Errorf("Agent revision requires name and instruction")
 	}
+	if agentConfig.PreloadMemory < 0 {
+		return nil, fmt.Errorf("Agent revision preload_memory must not be negative")
+	}
 	selectedModel, err := c.buildRevisionModel(revision.ModelConfig)
 	if err != nil {
 		return nil, err
@@ -252,14 +256,17 @@ func (c *RevisionCompiler) compileRevision(
 			return nil, err
 		}
 	}
-	return llmagent.New(
-		agentConfig.Name,
+	agentOptions := []llmagent.Option{
 		llmagent.WithModel(selectedModel),
 		llmagent.WithDescription(agentConfig.Description),
 		llmagent.WithInstruction(agentConfig.Instruction),
 		llmagent.WithGenerationConfig(model.GenerationConfig{Stream: stream}),
 		llmagent.WithTools(tools),
-	), nil
+	}
+	if agentConfig.PreloadMemory > 0 {
+		agentOptions = append(agentOptions, llmagent.WithPreloadMemory(agentConfig.PreloadMemory))
+	}
+	return llmagent.New(agentConfig.Name, agentOptions...), nil
 }
 
 func (c *RevisionCompiler) RunPolicyOptions(

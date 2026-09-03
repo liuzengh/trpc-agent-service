@@ -6,9 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// ParseStorageScope validates the only AppName format accepted by tenant
+// storage routers. Arbitrary caller-controlled AppName values are rejected.
+func ParseStorageScope(value string) (tenantID string, appID string, err error) {
+	parts := strings.Split(value, "/")
+	if len(parts) != 4 || parts[0] != "t" || parts[2] != "a" ||
+		!identifierPattern.MatchString(parts[1]) || !identifierPattern.MatchString(parts[3]) {
+		return "", "", errors.New("invalid tenant storage scope")
+	}
+	return parts[1], parts[3], nil
+}
 
 // Scope is the tenant/application/channel boundary for one Agent turn.
 type Scope struct {

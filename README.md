@@ -320,6 +320,8 @@ HTTP、Gateway、持久化任务、Worker 的 trace 传播，运行/Admin/Tool �
 
 危险工具会创建可恢复的 `tool_approval`。企业微信或 Telegram 用户在原会话回复严格的 `批准 apr_xxx` / `拒绝 apr_xxx` 命令，平台会校验租户、Channel Binding、用户、有效期以及工具参数哈希，再生成幂等 continuation。详见 [可恢复的危险工具审批链路](docs/getting-started.md#24-可恢复的危险工具审批链路)。
 
+Memory 通过 tenant-scoped `AppName` 路由到每个租户选择的 InMemory、Redis 或 PostgreSQL 后端；Revision 可开放 tRPC-Agent-Go 原生 Memory Tool，并配置自动 preload。详见 [租户级 Memory Router](docs/getting-started.md#25-租户级-memory-router)。
+
 停止服务：
 
 ```bash

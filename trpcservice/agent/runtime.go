@@ -155,6 +155,7 @@ func NewRuntimeWithCompilerServices(
 	coordinator coordination.Coordinator,
 	idempotencyStore idempotency.Store,
 	stream bool,
+	runnerOptions ...runner.Option,
 ) (*Runtime, error) {
 	if selectedModel == nil {
 		return nil, errors.New("model is required")
@@ -168,6 +169,7 @@ func NewRuntimeWithCompilerServices(
 		sessionService,
 		coordinator,
 		idempotencyStore,
+		runnerOptions...,
 	)
 }
 
@@ -177,6 +179,7 @@ func newRuntimeWithCompiler(
 	sessionService session.Service,
 	coordinator coordination.Coordinator,
 	idempotencyStore idempotency.Store,
+	extraRunnerOptions ...runner.Option,
 ) (*Runtime, error) {
 	if sessionService == nil {
 		return nil, errors.New("session service is required")
@@ -194,12 +197,10 @@ func newRuntimeWithCompiler(
 		return nil, errors.New("default Agent is required")
 	}
 
+	runnerOptions := []runner.Option{runner.WithSessionService(sessionService)}
+	runnerOptions = append(runnerOptions, extraRunnerOptions...)
 	return &Runtime{
-		runner: runner.NewRunner(
-			defaultRunnerAppName,
-			defaultAgent,
-			runner.WithSessionService(sessionService),
-		),
+		runner:         runner.NewRunner(defaultRunnerAppName, defaultAgent, runnerOptions...),
 		sessionService: sessionService,
 		coordinator:    coordinator,
 		idempotency:    idempotencyStore,

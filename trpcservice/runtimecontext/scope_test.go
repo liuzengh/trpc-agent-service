@@ -25,3 +25,13 @@ func TestScopeRejectsInvalidOrForgedIdentifiers(t *testing.T) {
 		t.Fatal("expected forged storage scope error")
 	}
 }
+
+func TestParseStorageScope(t *testing.T) {
+	tenantID, appID, err := ParseStorageScope("t/tenant-a/a/app-a")
+	if err != nil || tenantID != "tenant-a" || appID != "app-a" {
+		t.Fatalf("tenant=%q app=%q err=%v", tenantID, appID, err)
+	}
+	if _, _, err := ParseStorageScope("tenant-a/app-a"); err == nil {
+		t.Fatal("expected forged scope error")
+	}
+}

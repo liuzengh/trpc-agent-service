@@ -41,9 +41,14 @@
 - approval decision 消息幂等、恢复任务和 resumed 水位；
 - 危险 Tool 批准绑定 `tool_name + arguments_hash`，参数变化重新审批；
 - 企业微信/Telegram 文本批准与拒绝命令；
+- PostgreSQL Session 后端和带前缀的 Session/State/Event/Summary 表；
+- tenant-scoped Memory Router 与 binding version service cache；
+- tRPC-Agent-Go InMemory/Redis/PostgreSQL Memory adapter；
+- Memory Secret 引用、跨租户 AppName 拒绝和 app/tenant binding 优先级；
+- 六个框架 Memory Tool 和 Revision `preload_memory`；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 Memory、Summary、Knowledge、Artifact、Storage Router 和后台持久化 Job。
+接下来的最近里程碑是 Artifact/S3、Knowledge/Vector Store、Summary/Memory durable job 和数据迁移。
 
 ## 1. 建议目录
 

@@ -2520,6 +2520,87 @@ pending → expired
 
 离线 `TutorialModel` 不会主动生成 Tool Call；要端到端观察审批，需要使用支持 function calling 的真实模型，并在 Revision 中把 `dangerous_demo` 同时放入 `allowed_tools` 和 `dangerous_tools`。`dangerous_demo` 没有真实副作用，只用于安全验证。
 
-## 25. 下一步
+## 25. 租户级 Memory Router
 
-下一阶段接入 Memory、Summary、Knowledge、Artifact 与租户级 Storage Router，并让这些后台写入任务具备持久化队列、水位和迁移能力。
+Runner 现在接入了 tRPC-Agent-Go `memory.Service`，但实际对象是平台的 `MemoryRouter`。它不固定指向一个 Redis 或一张 SQL 表，而是从框架传入的 `AppName` 解析可信 Storage Scope：
+
+```text
+t/{tenant_id}/a/{app_id}
+  → 严格解析 tenant_id / app_id
+  → 查询 backend_binding(resource_type=memory)
+  → app 级配置优先于 tenant 默认配置
+  → 按 binding_id + version 构建并缓存 Memory Service
+  → 转发 tRPC-Agent-Go memory.Service 调用
+```
+
+伪造的 `AppName`（例如只传 `tutorial-app`、路径穿越或另一个租户）会在访问后端前被拒绝。后端即使共享同一 Redis/SQL，Memory Key 中仍包含完整 tenant-scoped AppName。
+
+当前支持三种 Memory 后端：
+
+```json
+{
+  "resource_type": "memory",
+  "backend_type": "inmemory",
+  "config": {"memory_limit": 1000}
+}
+```
+
+```json
+{
+  "resource_type": "memory",
+  "backend_type": "redis",
+  "config": {"key_prefix": "tenant-memory"},
+  "secret_ref": "env://TENANT_MEMORY_REDIS_URL"
+}
+```
+
+```json
+{
+  "resource_type": "memory",
+  "backend_type": "postgres",
+  "config": {
+    "schema": "public",
+    "table_name": "tenant_memories",
+    "memory_limit": 10000
+  },
+  "secret_ref": "env://TENANT_MEMORY_POSTGRES_DSN"
+}
+```
+
+Redis URL 和 PostgreSQL DSN 优先从 Secret Store 解析，控制面只保存引用。服务首次访问一个 binding 时才建立连接并探测后端；同一版本被所有并发请求复用。发布新 binding version 后会创建新实例，旧实例保留到进程退出，避免关闭仍在执行中的请求。
+
+平台 Tool Catalog 已直接注册 tRPC-Agent-Go 提供的六个 Memory Tool：
+
+```text
+memory_add
+memory_update
+memory_delete
+memory_clear
+memory_search
+memory_load
+```
+
+Revision 仍需在 `tool_policy.allowed_tools` 中显式开放。建议把 `memory_delete` 和 `memory_clear` 同时加入 `dangerous_tools`，从而复用上一节的持久化审批。Memory Tool 从 tRPC-Agent-Go Invocation Context 获取当前 Memory Service、AppName 和 UserID，调用最终仍经过 `MemoryRouter`，普通模型参数无法指定另一个租户。
+
+如果希望每次模型调用自动带上最近 Memory，可以在 Agent Config 设置：
+
+```json
+{
+  "name": "support-agent",
+  "instruction": "Use durable memory when useful.",
+  "preload_memory": 10
+}
+```
+
+`preload_memory=0` 表示不自动注入，但 Agent 仍可显式调用 `memory_search` / `memory_load`。Memory 在 `AddMemory` 返回成功后已对其他 Worker 可见：InMemory 只保证单进程，Redis 和 PostgreSQL 提供跨节点可见性。真实 Redis 和 PostgreSQL adapter 均来自 tRPC-Agent-Go v1.11 系列，平台层只负责租户路由、Secret 注入和生命周期。
+
+测试覆盖 InMemory、miniredis、真实 PostgreSQL，以及伪造 Storage Scope 拒绝。PostgreSQL 集成测试可手工运行：
+
+```bash
+TEST_POSTGRES_URL='postgres://...' \
+  go test ./trpcservice/storage -run TestMemoryRouterPostgresIntegration -v
+```
+
+## 26. 下一步
+
+下一阶段实现 Artifact Router 与 S3/MinIO 对象存储，再实现带强制租户过滤的 Knowledge/Vector Store 和可恢复的数据迁移状态机。

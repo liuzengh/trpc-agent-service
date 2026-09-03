@@ -4,7 +4,7 @@ import "testing"
 
 func TestDefaultCatalogResolve(t *testing.T) {
 	catalog := DefaultCatalog()
-	if len(catalog.Names()) != 3 {
+	if len(catalog.Names()) != 9 {
 		t.Fatalf("tool names = %#v", catalog.Names())
 	}
 	resolved, err := catalog.Resolve([]string{"echo", "current_time", "echo"})

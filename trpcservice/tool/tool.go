@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	memorytool "trpc.group/trpc-go/trpc-agent-go/memory/tool"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
@@ -108,6 +109,12 @@ func DefaultCatalog() *Catalog {
 			function.WithName("dangerous_demo"),
 			function.WithDescription("Demonstrate an operation that requires explicit approval"),
 		),
+		memorytool.NewAddTool(),
+		memorytool.NewUpdateTool(),
+		memorytool.NewDeleteTool(),
+		memorytool.NewClearTool(),
+		memorytool.NewSearchTool(),
+		memorytool.NewLoadTool(),
 	)
 	if err != nil {
 		panic(err)

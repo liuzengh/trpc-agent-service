@@ -36,6 +36,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 	"golang.org/x/sync/errgroup"
+	agentrunner "trpc.group/trpc-go/trpc-agent-go/runner"
 )
 
 func main() {
@@ -182,6 +183,17 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build approval repository: %w", err)
 	}
+	secretStore := secret.EnvStore{}
+	memoryRouter, err := platformstorage.NewMemoryRouter(controlPlaneRepository, secretStore)
+	if err != nil {
+		_ = approvalRepository.Close()
+		_ = auditWriter.Close()
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build memory router: %w", err)
+	}
 	routeResolver, err := routing.NewControlPlaneResolver(controlPlaneRepository)
 	if err != nil {
 		_ = controlPlaneRepository.Close()
@@ -236,6 +248,7 @@ func run() error {
 		sessionCoordinator,
 		idempotencyStore,
 		modelConfig.Stream,
+		agentrunner.WithMemoryService(memoryRouter),
 	)
 	if err != nil {
 		_ = gatewayIntake.Close()
@@ -288,7 +301,6 @@ func run() error {
 		_ = controlPlaneRepository.Close()
 		return fmt.Errorf("build Agent Worker: %w", err)
 	}
-	secretStore := secret.EnvStore{}
 	wecomAdapter, err := wecom.New(secretStore, nil)
 	if err != nil {
 		_ = agentQueue.Close()
@@ -414,6 +426,11 @@ func run() error {
 		fmt.Printf("Gateway HTTP server listening on %s\n", listenAddr)
 	}
 	defer func() {
+		if err := memoryRouter.Close(); err != nil {
+			log.Printf("close memory router: %v", err)
+		}
+	}()
+	defer func() {
 		if err := approvalRepository.Close(); err != nil {
 			log.Printf("close approval repository: %v", err)
 		}
@@ -452,6 +469,7 @@ func run() error {
 		web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
 		web.WithReadinessCheck("audit", auditWriter.Ready),
 		web.WithReadinessCheck("approval", approvalRepository.Ready),
+		web.WithReadinessCheck("memory-router", memoryRouter.Ready),
 	}
 	if adminHandler != nil {
 		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))

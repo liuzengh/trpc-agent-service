@@ -179,6 +179,19 @@ func DefaultBootstrapData() BootstrapData {
 				CreatedAt:      now,
 				UpdatedAt:      now,
 			},
+			{
+				ID:             "tutorial-memory-backend",
+				TenantID:       "tutorial-tenant",
+				AppID:          "tutorial-app",
+				ResourceType:   "memory",
+				BackendType:    "inmemory",
+				Config:         json.RawMessage(`{"memory_limit":1000}`),
+				IsolationLevel: "shared",
+				MigrationState: "active",
+				Version:        1,
+				CreatedAt:      now,
+				UpdatedAt:      now,
+			},
 		},
 	}
 }
