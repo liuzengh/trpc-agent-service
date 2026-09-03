@@ -45,7 +45,10 @@ func New(secrets secret.Store, client *http.Client) (*Adapter, error) {
 func (a *Adapter) Type() string { return "telegram" }
 
 func (a *Adapter) Capabilities() channels.Capabilities {
-	return channels.Capabilities{MaxTextRunes: 4000, SupportsEdit: true, SupportsFile: true}
+	// Outbound delivery currently calls sendMessage only. Edited updates and
+	// inbound file IDs are decoded, but editMessageText/sendDocument/sendPhoto
+	// are intentionally not advertised until their send paths are implemented.
+	return channels.Capabilities{MaxTextRunes: 4000}
 }
 
 func (a *Adapter) Callback(

@@ -17,6 +17,7 @@
 | [deployment.md](deployment.md) | Docker、Kubernetes、可观测栈、灰度、备份与告警 |
 | [capacity.md](capacity.md) | Worker/Token/Redis/SQL 容量公式和压测工具 |
 | [acceptance.md](acceptance.md) | README 验收项到代码、测试和命令的最终映射 |
+| [feature-status.md](feature-status.md) | 区分已编码、自动测试、本地集成和真实外部联调 |
 
 ## 推荐阅读顺序
 

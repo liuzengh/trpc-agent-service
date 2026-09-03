@@ -68,7 +68,10 @@ func New(secrets secret.Store, client *http.Client) (*Adapter, error) {
 func (a *Adapter) Type() string { return "wecom" }
 
 func (a *Adapter) Capabilities() channels.Capabilities {
-	return channels.Capabilities{MaxTextRunes: 1900, SupportsCard: true, SupportsFile: true}
+	// Outbound delivery currently uses only the application text-message API.
+	// Inbound media IDs can be normalized, but that does not mean this adapter
+	// can upload or send files and cards.
+	return channels.Capabilities{MaxTextRunes: 1900}
 }
 
 func (a *Adapter) Callback(
@@ -162,6 +165,7 @@ func (a *Adapter) Callback(
 		ChatType:          chatType,
 		MessageType:       message.MsgType,
 		Text:              normalizedText,
+		ReplyTarget:       message.FromUserName,
 		OccurredAt:        time.Unix(message.CreateTime, 0).UTC(),
 	}}
 	return result, nil

@@ -2,7 +2,13 @@
 
 ## 1. 通道抽象
 
-当前代码已实现统一 `Adapter`、`CallbackAdapter`、Channel Registry、企业微信 Adapter、Telegram Adapter 和 HTTP Test Adapter。文本审批命令已接入 durable approval；图片/文件会规范化 provider media ID，但受控下载与病毒扫描仍应作为独立 Artifact Job 按需启用。
+当前代码已实现统一 `Adapter`、`CallbackAdapter`、Channel Registry、企业微信 Adapter、Telegram Adapter 和 HTTP Test Adapter。这里的“实现”指代码与模拟协议测试，不表示已经使用真实企业微信账号或 Telegram Bot 完成联调。当前出站只发送文本；图片和文件只会规范化 provider media ID，受控下载、病毒扫描、Artifact 转存和媒体回复尚未实现。
+
+| 通道 | 当前代码 | 验证层级 | 待完成 |
+| --- | --- | --- | --- |
+| 企业微信 | URL 验证、加密回调、文本解析、Token 缓存、应用文本发送 | `httptest` 模拟企业微信 API | 真实账号、公网回调、真实收发、媒体/卡片发送 |
+| Telegram | Webhook Secret、Update/Topic 解析、文本 `sendMessage` | `httptest` 模拟 Bot API | 真实 Bot、公网 Webhook、真实收发、编辑/媒体发送 |
+| 微信公众号/微信客服 | 接入设计 | 文档评审 | Adapter 实现与真实联调 |
 
 OpenClaw 的 `Channel` 只有 `ID()` 和 `Run(ctx)`，适合示例和进程内组合。平台需要更明确的入站、回复和能力模型：
 
@@ -41,7 +47,7 @@ type InboundEnvelope struct {
 
 ## 2. 与 Runner 的转换
 
-文本消息转换为 `model.Message{Role: model.RoleUser}`。图片、音频和文件先由 Adapter 下载或转存到受控对象存储，再构造模型支持的多模态内容。远程 URL 必须经过域名白名单、DNS 重绑定检查、大小限制和 MIME 校验。
+文本消息转换为 `model.Message{Role: model.RoleUser}`。当前图片、音频和文件只转换为包含 provider media ID 的占位文本。目标方案是在独立 Downloader/Artifact Job 中下载和转存媒体，再构造模型支持的多模态内容；远程 URL 必须经过域名白名单、DNS 重绑定检查、大小限制和 MIME 校验。
 
 运行时补充以下 `RuntimeState`：
 
@@ -67,7 +73,7 @@ Runner Event 转换规则：
 | final assistant text | 发送最终文本，按通道长度切分 |
 | tool call | 可显示“正在调用某工具”，但隐藏敏感参数 |
 | tool result | 默认不直接发给用户，由模型总结 |
-| `approval_required` | 生成确认卡片或带签名回调按钮 |
+| `approval_required` | 当前发送文本确认指令；卡片或带签名按钮是目标能力 |
 | artifact/file | 上传文件或发送短期下载链接 |
 | error | 映射为可读错误，不返回内部堆栈和密钥 |
 
@@ -117,7 +123,7 @@ Agent 通常无法在 callback 的短处理窗口内完成，因此不把长时�
 
 ### 消息类型
 
-文本直接进入 Runner。图片、语音和文件先下载到隔离临时目录，完成病毒扫描后转存 Artifact。位置、链接和引用消息转成结构化内容。无法解析的消息返回通道级提示，并记录 `unsupported_message_type`。
+文本直接进入 Runner。当前图片、语音和文件只记录受控的 media ID 占位信息，不会自动下载。隔离临时目录、病毒扫描、Artifact 转存，以及位置、链接和引用消息的结构化处理属于后续实现。无法解析的消息会被忽略或记录为不支持的消息类型。
 
 默认安全模式不自动下载：企业微信 image/file/voice/video 与 Telegram photo/document 会转换为包含 media/file ID、文件名、MIME/caption 的占位文本并可靠入库，不直接访问 callback 中的 URL。启用多模态处理时，必须由独立 downloader 使用 provider API 获取文件，完成大小/MIME/病毒扫描后再保存到 Artifact Router。
 
@@ -138,9 +144,9 @@ Agent 通常无法在 callback 的短处理窗口内完成，因此不把长时�
 
 ## 5. Telegram
 
-Telegram 支持 webhook 和 `getUpdates` 长轮询，两种方式不能同时使用。生产环境推荐 webhook，开发环境可以长轮询。
+当前 Telegram Adapter 实现 webhook；`getUpdates` 长轮询仅作为可选设计，尚未实现。生产环境联调需要使用真实 Bot 配置公网 webhook。
 
-Binding 保存 bot token Secret 引用、webhook secret token、允许用户/群、代理、最大文件大小和流式模式。Webhook 校验 `X-Telegram-Bot-Api-Secret-Token`；长轮询保存最大 `update_id + 1`，水位必须持久化，不能只放内存。
+当前 Binding 保存 bot token Secret 引用、webhook secret token 和可选 API Base URL。Webhook 校验 `X-Telegram-Bot-Api-Secret-Token`。允许用户/群、代理、最大文件大小、流式模式和长轮询水位仍是目标配置，尚未进入当前 `bindingConfig`。
 
 Telegram 的 `update_id` 可作为外部去重键。消息 ID 在 chat 内唯一，组合键为：
 
@@ -151,10 +157,12 @@ bot_id | chat_id | message_thread_id | message_id
 普通消息文本上限为 4096 字符。Reply Sender 建议按 4000 rune 切分，避免 HTML 转义后超过限制。格式化消息失败时降级为纯文本。流式模式可分为：
 
 - `off`：只发最终回复；
-- `block`：先发“处理中”，完成后编辑一次；
-- `progress`：按节流间隔编辑预览，最后替换为最终内容。
+- `block`：目标方案是先发“处理中”，完成后编辑一次；
+- `progress`：目标方案是按节流间隔编辑预览，最后替换为最终内容。
 
-群组话题使用 `message_thread_id` 生成独立 session。Bot 隐私模式、@ 提及和群白名单由 Adapter 在入队前检查，未命中时直接忽略，不调用模型。
+当前 Adapter 只实现 `off`，即聚合完成后调用 `sendMessage` 发送最终文本，不声明 `SupportsEdit` 或 `SupportsFile`。
+
+群组话题已使用 `message_thread_id` 生成独立 session。Bot 隐私模式由 Telegram 平台配置决定；@ 提及和群白名单过滤尚未实现，接入真实群聊前需要在 Adapter 入队前补上。
 
 ## 6. Session ID 规则
 

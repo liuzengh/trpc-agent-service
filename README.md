@@ -151,6 +151,9 @@
 - [治理、安全、监控、故障恢复和部署](docs/governance-operations.md)
 - [生产风险清单](docs/risks.md)
 - [代码实施路线和验收映射](docs/implementation-roadmap.md)
+- [功能实现与验证状态](docs/feature-status.md)
+
+仓库中的“已编码”“自动测试”“本地集成”和“真实联调”是不同状态。例如企业微信和 Telegram 已完成 Adapter 代码与模拟协议测试，但仍需要真实账号和公网回调才能视为完成实际接入。具体边界以[功能实现与验证状态](docs/feature-status.md)为准。
 
 ## 快速开始
 

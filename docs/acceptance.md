@@ -1,5 +1,7 @@
 # 最终验收映射
 
+本文映射的是题目要求、代码和可重复测试，不等同于所有外部系统已经完成生产联调。企业微信、Telegram、Kubernetes、云 Secret Manager 等能力的实际验证层级见[功能实现与验证状态](feature-status.md)。
+
 ## 1. 多租户与节点化
 
 - Tenant/App/Revision/Channel/Backend/Audit/Quota 模型：`controlplane`、migration 001；
@@ -22,10 +24,10 @@
 
 ## 3. IM 接入
 
-- 企业微信：SHA1 验签、时间窗、AES-CBC/PKCS7、CorpID、Token cache、应用消息、429/Token 刷新；
-- Telegram：Webhook Secret、private/group/topic Session、sendMessage、Retry-After；
+- 企业微信 Adapter：SHA1 验签、时间窗、AES-CBC/PKCS7、CorpID、Token cache、应用文本消息、429/Token 刷新；当前由模拟协议测试覆盖，真实企业账号联调待完成；
+- Telegram Adapter：Webhook Secret、private/group/topic Session、sendMessage、Retry-After；当前由模拟协议测试覆盖，真实 Bot 联调待完成；
 - 用户/群/线程经 binding-scoped hash 生成隔离身份；
-- 文本、图片和文件 ID 规范化；默认不自动下载 URL；
+- 文本、图片和文件 ID 可规范化；当前出站仅支持文本，默认不自动下载媒体；
 - 重复 callback 由 `(channel_binding_id, external_message_id)` 唯一约束处理；
 - Reply Sender 长度切分、重试、provider receipt；
 - 危险 Tool 使用原 IM 会话文本批准/拒绝。

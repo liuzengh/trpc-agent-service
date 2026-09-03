@@ -2247,6 +2247,8 @@ go run ./cmd/trpc-service -role jobs
 
 ## 20. 企业微信和 Telegram Channel Adapter
 
+本节描述已经落地的 Adapter 代码路径。企业微信和 Telegram 当前通过本地模拟服务验证协议处理，尚未使用真实企业账号、Bot 和公网回调完成端到端联调；具体状态见 [`feature-status.md`](feature-status.md)。当前两个 Adapter 的出站能力都是文本消息，媒体 ID 解析不等于支持媒体发送。
+
 统一回调地址：
 
 ```text
@@ -2307,9 +2309,9 @@ Telegram Binding Config：
 }
 ```
 
-原始 provider user/chat ID 不进入 Session Key。Callback Gateway 使用 binding-scoped SHA-256 生成 `runtime_user_id` 和 `session_id`；Reply Target 单独保存在加密受控的消息流水中，用于 Sender 回送。
+原始 provider user/chat ID 不进入 Session Key。Callback Gateway 使用 binding-scoped SHA-256 生成 `runtime_user_id` 和 `session_id`；Reply Target 单独保存在受访问控制的消息流水中，用于 Sender 回送。当前应用层没有对该字段单独加密，生产部署需要依赖数据库静态加密、最小权限和保留期策略。
 
-开发环境使用 `env://VARIABLE` Secret Store。Adapter、日志和 HTTP 错误不会打印 Secret 值；生产阶段会替换为 KMS/Secret Manager 实现。
+开发环境使用 `env://VARIABLE` Secret Store。Adapter、日志和 HTTP 错误不会打印 Secret 值；KMS、Vault 或云 Secret Manager Adapter 尚未实现，是生产接入前的后续工作。
 
 ## 21. Admin API 和 Revision 发布
 
@@ -2519,7 +2521,7 @@ pending → expired
 
 默认十五分钟过期。`decision_message_id` 在 Channel Binding 内唯一，用来处理 IM 重复投递；第一次决策成功后，同方向重复消息会复用第一次决策消息创建的 continuation，反向决策则冲突。`resumed_at` 表示 continuation 已经可靠写入 Inbox/Outbox 链路。即使进程在“更新审批状态”后崩溃，IM 平台重投同一消息时也会用稳定 ID 再次执行幂等入站，不会产生两个有效 Tool 调用。
 
-当前文本确认流程对企业微信和 Telegram 都可用，且不依赖平台特有卡片。后续可以利用 Adapter 的 `SupportsCard` 能力增加按钮卡片，但按钮回调最终仍必须进入同一审批状态机，不能绕过身份、过期时间和参数哈希校验。
+当前文本确认流程已经通过 Adapter 级自动测试，且不依赖平台特有卡片；真实 IM 账号上的审批仍待联调。后续实现按钮卡片发送后才能启用 `SupportsCard`，按钮回调最终仍必须进入同一审批状态机，不能绕过身份、过期时间和参数哈希校验。
 
 离线 `TutorialModel` 不会主动生成 Tool Call；要端到端观察审批，需要使用支持 function calling 的真实模型，并在 Revision 中把 `dangerous_demo` 同时放入 `allowed_tools` 和 `dangerous_tools`。`dangerous_demo` 没有真实副作用，只用于安全验证。
 

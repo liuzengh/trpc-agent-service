@@ -62,8 +62,21 @@ func TestCallbackDecryptsTextMessage(t *testing.T) {
 	}
 	message := result.Messages[0]
 	if message.ExternalMessageID != "10001" || message.ExternalUserID != "alice" ||
-		message.Text != "hello" || message.ChatType != "direct" {
+		message.Text != "hello" || message.ChatType != "direct" ||
+		message.ReplyTarget != "alice" {
 		t.Fatalf("decoded message = %+v", message)
+	}
+}
+
+func TestCapabilitiesMatchImplementedOutboundMethods(t *testing.T) {
+	adapter, err := New(secret.StaticStore{}, nil)
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	capabilities := adapter.Capabilities()
+	if capabilities.MaxTextRunes != 1900 || capabilities.SupportsEdit ||
+		capabilities.SupportsCard || capabilities.SupportsFile {
+		t.Fatalf("capabilities = %+v", capabilities)
 	}
 }
 

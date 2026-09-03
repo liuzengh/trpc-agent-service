@@ -42,6 +42,18 @@ func TestCallbackVerifiesAndDecodesUpdate(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesMatchImplementedOutboundMethods(t *testing.T) {
+	adapter, err := New(secret.StaticStore{}, nil)
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	capabilities := adapter.Capabilities()
+	if capabilities.MaxTextRunes != 4000 || capabilities.SupportsEdit ||
+		capabilities.SupportsCard || capabilities.SupportsFile {
+		t.Fatalf("capabilities = %+v", capabilities)
+	}
+}
+
 func TestNormalizedTelegramMediaMessage(t *testing.T) {
 	messageType, text := normalizedTelegramMessage(&telegramMessage{
 		Caption: "invoice",
