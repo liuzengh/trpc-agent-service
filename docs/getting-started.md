@@ -3111,6 +3111,14 @@ docker compose --profile observability up -d
 
 应用配置 `TRPC_AGENT_OTEL_ENDPOINT=127.0.0.1:4317`。Collector 将 metric 暴露到 9464 给 Prometheus，把 trace 发送到 Tempo；Grafana 已自动配置两个数据源。
 
+不需要手工拼请求时，可以直接运行端到端验收脚本：
+
+```bash
+./scripts/e2e-observability.sh
+```
+
+它会验证 Trace ID 传播、Tempo 中的 HTTP/Session spans、租户级平台指标以及 Prometheus/Grafana 健康状态，并在结束后停止测试进程和可观测容器。
+
 Kubernetes 清单位于 `deploy/kubernetes`：
 
 ```text

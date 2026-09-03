@@ -65,6 +65,7 @@ go vet ./...
 docker compose --profile observability config -q
 docker build -t trpc-agent-service:local .
 ./scripts/e2e-multiprocess.sh
+./scripts/e2e-observability.sh
 ```
 
 依赖型集成测试通过环境变量显式启用：

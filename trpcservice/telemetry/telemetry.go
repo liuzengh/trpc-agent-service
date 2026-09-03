@@ -43,13 +43,7 @@ func Setup(ctx context.Context, cfg config.TelemetryConfig) (Shutdown, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create OTLP metric exporter: %w", err)
 	}
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
-			semconv.ServiceName(cfg.ServiceName),
-		),
-	)
+	res, err := telemetryResource(cfg.ServiceName)
 	if err != nil {
 		return nil, fmt.Errorf("create telemetry resource: %w", err)
 	}
@@ -67,4 +61,14 @@ func Setup(ctx context.Context, cfg config.TelemetryConfig) (Shutdown, error) {
 	return func(ctx context.Context) error {
 		return errors.Join(meterProvider.Shutdown(ctx), provider.Shutdown(ctx))
 	}, nil
+}
+
+func telemetryResource(serviceName string) (*resource.Resource, error) {
+	// resource.Default may use a newer OpenTelemetry schema than the semconv
+	// package imported by this module. A schemaless service.name attribute can
+	// be merged without producing a conflicting-schema startup failure.
+	return resource.Merge(
+		resource.Default(),
+		resource.NewSchemaless(semconv.ServiceName(serviceName)),
+	)
 }
