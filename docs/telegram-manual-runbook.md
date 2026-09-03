@@ -24,6 +24,8 @@ docker compose up -d postgres redis
 ./start-real.sh
 ```
 
+`start-real.sh` 会等待当前 Compose 中的 PostgreSQL 和 Redis 进入 healthy，再启动 Agent。电脑重启后 Redis 可能需要先加载 RDB/AOF；如果跳过健康等待，Agent 会因 `LOADING Redis is loading the dataset in memory` 按 fail-fast 退出，随后 Tunnel 日志会出现 `dial tcp 127.0.0.1:8080: connect: connection refused`。
+
 检查本地服务：
 
 ```bash
@@ -157,6 +159,8 @@ curl -sS \
 第四步查询 PostgreSQL：
 
 - 没有 Inbox：Telegram 没有投递，或 Webhook/Secret/Tunnel 有问题；
+- Tunnel 报 `connect: connection refused`：本地 Agent 没有监听 `8080`，先检查 `./start-real.sh` 和服务日志；
+- 服务日志报 Redis `LOADING`：等待 Redis healthy 后重新执行 `./start-real.sh`；
 - Inbox 为 `queued`：检查 Redis、Relay 和 Worker；
 - Run 为 `failed`：检查模型和 Session 错误；
 - Outbound 为 `pending/failed/dead`：检查 Telegram Token、网络、限流和 Sender。

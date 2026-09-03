@@ -119,7 +119,7 @@ TRPC_AGENT_MODEL_STREAM=false
 tail -f data/trpc-service.log
 ```
 
-两个脚本都会先移除当前终端中可能覆盖 `.env` 的模型环境变量，再从 `.env` 重新加载配置。使用其他文件时设置 `TRPC_AGENT_ENV_FILE=/path/to/dev.env`。
+两个脚本都会先移除当前终端中可能覆盖 `.env` 的模型环境变量，再从 `.env` 重新加载配置。`start-real.sh` 还会等待已启动的本地 Compose PostgreSQL/Redis 进入 healthy，避免数据库恢复或 Redis 加载持久化数据期间启动失败。使用其他文件时设置 `TRPC_AGENT_ENV_FILE=/path/to/dev.env`。
 
 不要把真实 API Key 写进仓库、README 或启动参数。开发环境从环境变量读取，生产环境应由 Secret Manager 注入。OpenAI 官方文档也建议在服务端从环境变量或密钥管理服务加载 API Key。
 

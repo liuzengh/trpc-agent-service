@@ -21,6 +21,43 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   exit 0
 fi
 
+wait_for_compose_service() {
+  local service_name="$1"
+  local container_id
+  local container_status
+
+  container_id="$(docker compose ps -q "$service_name" 2>/dev/null || true)"
+  if [[ -z "$container_id" ]]; then
+    return 0
+  fi
+  for _ in $(seq 1 60); do
+    container_status="$(docker inspect --format \
+      '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+      "$container_id" 2>/dev/null || true)"
+    case "$container_status" in
+      healthy|running)
+        echo "dependency ready: $service_name"
+        return 0
+        ;;
+      exited|dead)
+        echo "dependency failed before startup: $service_name status=$container_status" >&2
+        return 1
+        ;;
+    esac
+    sleep 1
+  done
+  echo "timed out waiting for dependency: $service_name status=$container_status" >&2
+  return 1
+}
+
+# Local Compose containers may report running before PostgreSQL recovery or
+# Redis RDB/AOF loading has completed. Their health checks are the reliable
+# boundary for starting Session, Queue and Control Plane clients.
+if command -v docker >/dev/null 2>&1; then
+  wait_for_compose_service postgres
+  wait_for_compose_service redis
+fi
+
 nohup env \
   -u TRPC_AGENT_MODEL_PROVIDER \
   -u TRPC_AGENT_MODEL_NAME \
@@ -33,7 +70,9 @@ nohup env \
 pid=$!
 echo "$pid" >"$PID_FILE"
 
-sleep 0.2
+# Give late startup failures (for example port conflicts after dependency
+# initialization) enough time to surface before reporting success.
+sleep 1
 if ! kill -0 "$pid" 2>/dev/null; then
   rm -f "$PID_FILE"
   echo "real-model service failed to start; latest log:" >&2
