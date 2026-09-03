@@ -72,6 +72,14 @@ kubectl wait --for=condition=complete job/trpc-agent-migrate -n trpc-agent --tim
 
 ## 备份与恢复
 
+本地可以先运行不破坏现有应用数据的工具链演练：
+
+```bash
+./scripts/e2e-backup-restore.sh
+```
+
+脚本为 PostgreSQL 创建临时数据库，执行 `pg_dump`、删除、重建和 `pg_restore`；Redis RDB 会恢复到独立临时容器。它不会清空 `trpc_agent` 主数据库或现有 Redis 数据卷，结束后只清理本次演练资源。
+
 - PostgreSQL：每日全量 + WAL/PITR，季度恢复到独立集群；
 - Redis：AOF everysec + 副本，Session 的最终耐久事实可选 PostgreSQL；
 - S3：版本化、生命周期、跨区域复制和对象锁按合规要求开启；
