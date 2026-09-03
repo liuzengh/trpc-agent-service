@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
@@ -18,6 +20,22 @@ type memoryConversation struct {
 	lastTurn   int64
 }
 
+type memoryQueueOutbox struct {
+	id          string
+	task        workqueue.AgentTask
+	status      string
+	lockedBy    string
+	lockedUntil time.Time
+	nextAttempt time.Time
+}
+
+type memoryRun struct {
+	status   string
+	workerID string
+	result   RunResult
+	errType  string
+}
+
 // MemoryJournal is a process-local transactional model for tests and the
 // dependency-free tutorial.
 type MemoryJournal struct {
@@ -25,7 +43,8 @@ type MemoryJournal struct {
 	closed        bool
 	inbound       map[string]memoryInbound
 	conversations map[string]*memoryConversation
-	tasks         []workqueue.AgentTask
+	outbox        map[string]*memoryQueueOutbox
+	runs          map[string]*memoryRun
 }
 
 // NewMemoryJournal creates an empty journal.
@@ -33,6 +52,8 @@ func NewMemoryJournal() *MemoryJournal {
 	return &MemoryJournal{
 		inbound:       make(map[string]memoryInbound),
 		conversations: make(map[string]*memoryConversation),
+		outbox:        make(map[string]*memoryQueueOutbox),
+		runs:          make(map[string]*memoryRun),
 	}
 }
 
@@ -97,7 +118,7 @@ func (j *MemoryJournal) Accept(
 	}
 	scope := request.Scope
 	scope.RevisionID = conversation.revisionID
-	j.tasks = append(j.tasks, workqueue.AgentTask{
+	task := workqueue.AgentTask{
 		InboundID:      result.InboundID,
 		RequestID:      result.RequestID,
 		ConversationID: result.ConversationID,
@@ -107,8 +128,16 @@ func (j *MemoryJournal) Accept(
 		SessionID:      request.SessionID,
 		Text:           request.Text,
 		TurnSeq:        result.TurnSeq,
-	})
+	}
+	outboxID := stableID("qout_", result.RequestID)
+	j.outbox[outboxID] = &memoryQueueOutbox{
+		id:          outboxID,
+		task:        task,
+		status:      "pending",
+		nextAttempt: time.Now(),
+	}
 	j.inbound[inboundKey] = memoryInbound{result: result, payloadHash: payloadHash}
+	j.runs[result.RequestID] = &memoryRun{status: "queued"}
 	return result, nil
 }
 
@@ -116,7 +145,151 @@ func (j *MemoryJournal) Accept(
 func (j *MemoryJournal) Tasks() []workqueue.AgentTask {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return append([]workqueue.AgentTask(nil), j.tasks...)
+	result := make([]workqueue.AgentTask, 0, len(j.outbox))
+	for _, item := range j.outbox {
+		result = append(result, item.task)
+	}
+	return result
+}
+
+func (j *MemoryJournal) ClaimQueueOutbox(
+	ctx context.Context,
+	workerID string,
+	limit int,
+	lease time.Duration,
+) ([]QueueOutboxItem, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, context.Cause(ctx)
+	}
+	if workerID == "" || limit <= 0 || lease <= 0 {
+		return nil, fmt.Errorf("outbox worker, limit and lease are required")
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return nil, ErrJournalClosed
+	}
+	now := time.Now()
+	result := make([]QueueOutboxItem, 0, limit)
+	for _, item := range j.outbox {
+		if len(result) >= limit {
+			break
+		}
+		if item.status == "published" || item.nextAttempt.After(now) ||
+			(item.lockedBy != "" && item.lockedUntil.After(now)) {
+			continue
+		}
+		item.status = "publishing"
+		item.lockedBy = workerID
+		item.lockedUntil = now.Add(lease)
+		result = append(result, QueueOutboxItem{ID: item.id, Task: item.task})
+	}
+	return result, nil
+}
+
+func (j *MemoryJournal) MarkQueueOutboxPublished(
+	_ context.Context,
+	outboxID string,
+	workerID string,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	item := j.outbox[outboxID]
+	if item == nil || item.lockedBy != workerID {
+		return fmt.Errorf("queue outbox ownership mismatch")
+	}
+	item.status = "published"
+	item.lockedBy = ""
+	item.lockedUntil = time.Time{}
+	return nil
+}
+
+func (j *MemoryJournal) MarkQueueOutboxFailed(
+	_ context.Context,
+	outboxID string,
+	workerID string,
+	retryAt time.Time,
+	_ error,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	item := j.outbox[outboxID]
+	if item == nil || item.lockedBy != workerID {
+		return fmt.Errorf("queue outbox ownership mismatch")
+	}
+	item.status = "pending"
+	item.lockedBy = ""
+	item.lockedUntil = time.Time{}
+	item.nextAttempt = retryAt
+	return nil
+}
+
+func (j *MemoryJournal) MarkRunRunning(
+	_ context.Context,
+	requestID string,
+	workerID string,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	run := j.runs[requestID]
+	if run == nil {
+		return fmt.Errorf("Agent run not found")
+	}
+	if run.status == "completed" {
+		return nil
+	}
+	run.status = "running"
+	run.workerID = workerID
+	return nil
+}
+
+func (j *MemoryJournal) CompleteRun(
+	_ context.Context,
+	task workqueue.AgentTask,
+	result RunResult,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	run := j.runs[task.RequestID]
+	if run == nil {
+		return fmt.Errorf("Agent run not found")
+	}
+	if run.status == "completed" && run.result.FencingToken > result.FencingToken {
+		return fmt.Errorf("stale Agent run fencing token")
+	}
+	run.status = "completed"
+	run.result = result
+	return nil
+}
+
+func (j *MemoryJournal) FailRun(
+	_ context.Context,
+	requestID string,
+	errorType string,
+	_ error,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	run := j.runs[requestID]
+	if run == nil {
+		return fmt.Errorf("Agent run not found")
+	}
+	if run.status != "completed" {
+		run.status = "failed"
+		run.errType = errorType
+	}
+	return nil
+}
+
+// RunStatus exposes the in-memory journal state to tests and local status APIs.
+func (j *MemoryJournal) RunStatus(requestID string) (string, RunResult, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	run := j.runs[requestID]
+	if run == nil {
+		return "", RunResult{}, false
+	}
+	return run.status, run.result, true
 }
 
 func (j *MemoryJournal) Ready(ctx context.Context) error {

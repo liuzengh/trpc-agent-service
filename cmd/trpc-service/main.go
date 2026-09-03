@@ -22,6 +22,9 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
+	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -77,6 +80,10 @@ func run() error {
 	controlPlaneConfig, err := config.LoadControlPlaneConfigFromEnv()
 	if err != nil {
 		return fmt.Errorf("load control-plane config: %w", err)
+	}
+	queueConfig, err := config.LoadQueueConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("load queue config: %w", err)
 	}
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
 	sessionService, err := platformstorage.NewSessionService(startupCtx, sessionConfig)
@@ -155,11 +162,52 @@ func run() error {
 		modelConfig.Stream,
 	)
 	if err != nil {
+		_ = gatewayIntake.Close()
 		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
 		_ = sessionService.Close()
 		return fmt.Errorf("create agent runtime: %w", err)
+	}
+	startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
+	agentQueue, err := workqueue.New(startupCtx, queueConfig)
+	cancelStartup()
+	if err != nil {
+		_ = runtime.Close()
+		_ = gatewayIntake.Close()
+		_ = controlPlaneRepository.Close()
+		return fmt.Errorf("build Agent work queue: %w", err)
+	}
+	nodeID := queueConfig.Consumer
+	if nodeID == "" {
+		hostname, _ := os.Hostname()
+		nodeID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	}
+	outboxRelay, err := gateway.NewOutboxRelay(inboundJournal, agentQueue, gateway.RelayOptions{
+		WorkerID:     "relay-" + nodeID,
+		BatchSize:    100,
+		ClaimLease:   30 * time.Second,
+		PollInterval: 250 * time.Millisecond,
+		RetryDelay:   time.Second,
+	})
+	if err != nil {
+		_ = agentQueue.Close()
+		_ = runtime.Close()
+		_ = gatewayIntake.Close()
+		_ = controlPlaneRepository.Close()
+		return fmt.Errorf("build queue outbox relay: %w", err)
+	}
+	agentWorker, err := worker.New(agentQueue, inboundJournal, runtime, worker.Options{
+		WorkerID:    "worker-" + nodeID,
+		MaxAttempts: 3,
+		RetryDelay:  250 * time.Millisecond,
+	})
+	if err != nil {
+		_ = agentQueue.Close()
+		_ = runtime.Close()
+		_ = gatewayIntake.Close()
+		_ = controlPlaneRepository.Close()
+		return fmt.Errorf("build Agent Worker: %w", err)
 	}
 	fmt.Printf(
 		"model provider=%s name=%s stream=%t\n",
@@ -185,7 +233,13 @@ func run() error {
 		idempotencyConfig.CompletedTTL,
 	)
 	fmt.Printf("control-plane backend=%s\n", controlPlaneConfig.Backend)
+	fmt.Printf("queue backend=%s stream=%s group=%s\n", queueConfig.Backend, queueConfig.Stream, queueConfig.Group)
 	fmt.Printf("tutorial chat server listening on %s\n", listenAddr)
+	defer func() {
+		if err := agentQueue.Close(); err != nil {
+			log.Printf("close Agent work queue: %v", err)
+		}
+	}()
 	defer func() {
 		if err := gatewayIntake.Close(); err != nil {
 			log.Printf("close Gateway intake: %v", err)
@@ -210,6 +264,7 @@ func run() error {
 			web.WithGatewayIntake(gatewayIntake),
 			web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
 			web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
+			web.WithReadinessCheck("work-queue", agentQueue.Ready),
 		),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -224,19 +279,30 @@ func run() error {
 	)
 	defer stop()
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- server.ListenAndServe()
-	}()
-
-	select {
-	case err := <-errCh:
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		err := server.ListenAndServe()
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
-	case <-ctx.Done():
-	}
+	})
+	group.Go(func() error {
+		err := outboxRelay.Run(groupCtx)
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	})
+	group.Go(func() error {
+		err := agentWorker.Run(groupCtx)
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	})
+
+	<-groupCtx.Done()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -244,9 +310,8 @@ func run() error {
 		return fmt.Errorf("shutdown HTTP server: %w", err)
 	}
 
-	serveErr := <-errCh
-	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-		return serveErr
+	if err := group.Wait(); err != nil {
+		return err
 	}
 	return nil
 }

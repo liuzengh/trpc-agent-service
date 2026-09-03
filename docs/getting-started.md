@@ -2114,6 +2114,57 @@ POST /inbound
 
 内存控制面对应 `MemoryJournal`，方便无 PostgreSQL 测试；PostgreSQL 控制面自动复用同一个连接池创建 `PostgresJournal`。
 
-## 17. 下一步
+## 17. Outbox Relay、Redis Streams 和 Agent Worker
 
-下一阶段实现 Outbox Relay 和 Redis Streams Worker：relay 使用 PostgreSQL 行锁领取 pending outbox，发布到 Stream 后标记完成；Worker Consumer Group 消费任务，执行 Runtime 后写 outbound_message。
+服务现在会启动两个后台循环：Outbox Relay 和 Agent Worker。
+
+```text
+queue_outbox(pending)
+→ Relay 使用 FOR UPDATE SKIP LOCKED 领取一批
+→ 标记 publishing + locked_by + locked_until
+→ XADD Redis Stream
+→ 标记 queue_outbox=published
+→ Worker XREADGROUP
+→ agent_run=running
+→ Runtime.ChatWithScope(request_id)
+→ Idempotency + Coordinator + Revision Compiler + Runner
+→ agent_run=completed
+→ inbound_message=processed
+→ outbound_message=pending
+→ XACK
+```
+
+Redis Stream 使用 Consumer Group。Worker 每次接收新消息前执行 `XAUTOCLAIM`，可以接管超过 `ClaimMinIdle` 的 pending delivery。Worker 在完成 PostgreSQL 事务后才 `XACK`。
+
+Relay 的发布顺序是：
+
+```text
+先 XADD
+后把 PostgreSQL outbox 标成 published
+```
+
+因此 relay 在两步之间崩溃可能导致重复 Stream 消息，但不会丢消息。重复 delivery 会被 Runtime 的 Redis `message_id` 幂等层转换成结果重放。
+
+Worker 任务重试也采用 at-least-once：Retry 先重新 `XADD` 增加 attempt，再 ACK 旧 delivery。超过最大次数后保留 failed agent_run 并 ACK poison message。
+
+Queue 配置：
+
+```dotenv
+TRPC_AGENT_QUEUE_BACKEND=redis
+TRPC_AGENT_QUEUE_STREAM=agent-runs
+TRPC_AGENT_QUEUE_GROUP=agent-workers
+TRPC_AGENT_QUEUE_CONSUMER=worker-node-1
+TRPC_AGENT_QUEUE_BLOCK_TIMEOUT=1s
+TRPC_AGENT_QUEUE_CLAIM_MIN_IDLE=30s
+TRPC_AGENT_QUEUE_MAX_LEN=100000
+```
+
+开发默认使用 Memory Queue；Gateway、Relay 和 Worker 分进程部署时必须使用 Redis Queue。
+
+AgentTask 携带 Gateway 事务生成的稳定 `request_id`，Runtime 通过 tRPC-Agent-Go `agent.WithRequestID` 注入 Runner。因此数据库、Stream、Runner Event、outbound 和后续 trace 使用同一个请求 ID。
+
+`agent_run` 和 `outbound_message` 更新检查 fencing token。Worker 即使在完成后、ACK 前崩溃，接管 Worker 只会重放幂等结果并幂等写入同一个 outbound。
+
+## 18. 下一步
+
+下一阶段拆分进程角色并实现 Reply Sender：Gateway、Worker、Relay 和 Sender 可以独立启动；Sender 领取 `outbound_message`，按 Channel Adapter 发送、退避重试并记录 delivery receipt。

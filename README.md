@@ -262,6 +262,17 @@ curl -sS -X POST http://127.0.0.1:8080/inbound \
 
 该接口只在 conversation、inbound、agent run 和 queue outbox 同一事务提交后返回 `202`。详见 [持久化 Inbox 和 Transactional Outbox](docs/getting-started.md#16-持久化-inbox-和-transactional-outbox)。
 
+多进程异步队列配置：
+
+```dotenv
+TRPC_AGENT_QUEUE_BACKEND=redis
+TRPC_AGENT_QUEUE_STREAM=agent-runs
+TRPC_AGENT_QUEUE_GROUP=agent-workers
+TRPC_AGENT_QUEUE_CLAIM_MIN_IDLE=30s
+```
+
+Outbox Relay、Redis Streams pending reclaim 和 Worker 完成链路见 [异步执行链路](docs/getting-started.md#17-outbox-relayredis-streams-和-agent-worker)。
+
 停止服务：
 
 ```bash

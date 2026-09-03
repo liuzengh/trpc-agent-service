@@ -143,6 +143,7 @@ type chatResponse struct {
 	AppID      string `json:"app_id"`
 	RevisionID string `json:"revision_id"`
 	AgentName  string `json:"agent_name"`
+	FencingToken int64 `json:"fencing_token,omitempty"`
 }
 
 type errorResponse struct {
@@ -282,6 +283,7 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		AppID:      result.AppID,
 		RevisionID: result.RevisionID,
 		AgentName:  result.AgentName,
+		FencingToken: result.FencingToken,
 	})
 }
 

@@ -33,15 +33,16 @@ const (
 
 // ChatResult is the transport-neutral result of one tutorial chat turn.
 type ChatResult struct {
-	Reply      string
-	RequestID  string
-	EventCount int
-	MessageID  string
-	Replayed   bool
-	TenantID   string
-	AppID      string
-	RevisionID string
-	AgentName  string
+	Reply        string
+	RequestID    string
+	EventCount   int
+	MessageID    string
+	Replayed     bool
+	TenantID     string
+	AppID        string
+	RevisionID   string
+	AgentName    string
+	FencingToken int64
 }
 
 // ChatInput is the trusted, transport-neutral input for one Agent turn.
@@ -51,6 +52,7 @@ type ChatInput struct {
 	UserID    string
 	SessionID string
 	Text      string
+	RequestID string
 }
 
 // Runtime owns the Agent Runner and its platform state services.
@@ -369,10 +371,11 @@ func (r *Runtime) executeIdempotentChat(
 		return ChatResult{}, runErr
 	}
 	cached := idempotency.Result{
-		Reply:      result.Reply,
-		RequestID:  result.RequestID,
-		EventCount: result.EventCount,
-		AgentName:  result.AgentName,
+		Reply:        result.Reply,
+		RequestID:    result.RequestID,
+		EventCount:   result.EventCount,
+		AgentName:    result.AgentName,
+		FencingToken: result.FencingToken,
 	}
 	if err := attempt.Complete(finalizeCtx, cached); err != nil {
 		return ChatResult{}, fmt.Errorf("complete idempotent chat: %w", err)
@@ -416,13 +419,19 @@ func (r *Runtime) runChatTurn(
 		lease.FencingToken(),
 	)
 
+	runOptions := []agentcore.RunOption{
+		agentcore.WithAppName(input.Scope.StorageScope),
+		agentcore.WithAgent(compiledAgent),
+	}
+	if strings.TrimSpace(input.RequestID) != "" {
+		runOptions = append(runOptions, agentcore.WithRequestID(strings.TrimSpace(input.RequestID)))
+	}
 	events, err := r.runner.Run(
 		leaseCtx,
 		input.UserID,
 		input.SessionID,
 		model.NewUserMessage(input.Text),
-		agentcore.WithAppName(input.Scope.StorageScope),
-		agentcore.WithAgent(compiledAgent),
+		runOptions...,
 	)
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("run tutorial agent: %w", err)
@@ -432,6 +441,7 @@ func (r *Runtime) runChatTurn(
 	if runErr != nil {
 		return ChatResult{}, runErr
 	}
+	result.FencingToken = lease.FencingToken()
 	return result, nil
 }
 
@@ -442,15 +452,16 @@ func chatResultFromIdempotency(
 	replayed bool,
 ) ChatResult {
 	return ChatResult{
-		Reply:      result.Reply,
-		RequestID:  result.RequestID,
-		EventCount: result.EventCount,
-		MessageID:  messageID,
-		Replayed:   replayed,
-		TenantID:   scope.TenantID,
-		AppID:      scope.AppID,
-		RevisionID: scope.RevisionID,
-		AgentName:  result.AgentName,
+		Reply:        result.Reply,
+		RequestID:    result.RequestID,
+		EventCount:   result.EventCount,
+		MessageID:    messageID,
+		Replayed:     replayed,
+		TenantID:     scope.TenantID,
+		AppID:        scope.AppID,
+		RevisionID:   scope.RevisionID,
+		AgentName:    result.AgentName,
+		FencingToken: result.FencingToken,
 	}
 }
 

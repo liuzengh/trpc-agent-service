@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
 
 var (
@@ -35,9 +37,40 @@ type AcceptResult struct {
 	Duplicate      bool   `json:"duplicate"`
 }
 
+// QueueOutboxItem is one claimed task waiting to be published.
+type QueueOutboxItem struct {
+	ID   string
+	Task workqueue.AgentTask
+}
+
+// RunResult is the durable outcome written by an Agent Worker.
+type RunResult struct {
+	Reply        string
+	AgentName    string
+	FencingToken int64
+	EventCount   int
+}
+
 // Journal atomically creates inbound, run and queue-outbox records.
 type Journal interface {
 	Accept(ctx context.Context, request InboundRequest) (AcceptResult, error)
+	ClaimQueueOutbox(
+		ctx context.Context,
+		workerID string,
+		limit int,
+		lease time.Duration,
+	) ([]QueueOutboxItem, error)
+	MarkQueueOutboxPublished(ctx context.Context, outboxID string, workerID string) error
+	MarkQueueOutboxFailed(
+		ctx context.Context,
+		outboxID string,
+		workerID string,
+		retryAt time.Time,
+		cause error,
+	) error
+	MarkRunRunning(ctx context.Context, requestID string, workerID string) error
+	CompleteRun(ctx context.Context, task workqueue.AgentTask, result RunResult) error
+	FailRun(ctx context.Context, requestID string, errorType string, cause error) error
 	Ready(ctx context.Context) error
 	Close() error
 }

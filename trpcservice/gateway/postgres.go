@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
@@ -225,6 +226,231 @@ WHERE i.channel_binding_id = $1 AND i.external_message_id = $2`,
 	}
 	result.Duplicate = true
 	return result, nil
+}
+
+func (j *PostgresJournal) ClaimQueueOutbox(
+	ctx context.Context,
+	workerID string,
+	limit int,
+	lease time.Duration,
+) ([]QueueOutboxItem, error) {
+	if workerID == "" || limit <= 0 || lease <= 0 {
+		return nil, fmt.Errorf("outbox worker, limit and lease are required")
+	}
+	rows, err := j.db.QueryContext(ctx, `
+WITH candidates AS (
+    SELECT outbox_id
+    FROM queue_outbox
+    WHERE status IN ('pending', 'publishing')
+      AND next_attempt_at <= now()
+      AND (locked_until IS NULL OR locked_until < now())
+    ORDER BY created_at
+    FOR UPDATE SKIP LOCKED
+    LIMIT $1
+)
+UPDATE queue_outbox q
+SET status = 'publishing',
+    locked_by = $2,
+    locked_until = now() + $3::interval,
+    attempt_count = attempt_count + 1
+FROM candidates c
+WHERE q.outbox_id = c.outbox_id
+RETURNING q.outbox_id, q.payload`, limit, workerID, postgresInterval(lease))
+	if err != nil {
+		return nil, fmt.Errorf("claim queue outbox: %w", err)
+	}
+	defer rows.Close()
+	result := make([]QueueOutboxItem, 0, limit)
+	for rows.Next() {
+		var item QueueOutboxItem
+		var payload []byte
+		if err := rows.Scan(&item.ID, &payload); err != nil {
+			return nil, fmt.Errorf("scan queue outbox: %w", err)
+		}
+		if err := json.Unmarshal(payload, &item.Task); err != nil {
+			return nil, fmt.Errorf("decode queue outbox %q: %w", item.ID, err)
+		}
+		result = append(result, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate queue outbox: %w", err)
+	}
+	return result, nil
+}
+
+func (j *PostgresJournal) MarkQueueOutboxPublished(
+	ctx context.Context,
+	outboxID string,
+	workerID string,
+) error {
+	result, err := j.db.ExecContext(ctx, `
+UPDATE queue_outbox
+SET status = 'published', published_at = now(), locked_by = NULL,
+    locked_until = NULL, last_error = NULL
+WHERE outbox_id = $1 AND locked_by = $2 AND status = 'publishing'`, outboxID, workerID)
+	if err != nil {
+		return fmt.Errorf("mark queue outbox published: %w", err)
+	}
+	return requireOneRow(result, "queue outbox publish ownership mismatch")
+}
+
+func (j *PostgresJournal) MarkQueueOutboxFailed(
+	ctx context.Context,
+	outboxID string,
+	workerID string,
+	retryAt time.Time,
+	cause error,
+) error {
+	errorText := ""
+	if cause != nil {
+		errorText = cause.Error()
+		if len(errorText) > 2048 {
+			errorText = errorText[:2048]
+		}
+	}
+	result, err := j.db.ExecContext(ctx, `
+UPDATE queue_outbox
+SET status = 'pending', next_attempt_at = $3, locked_by = NULL,
+    locked_until = NULL, last_error = $4
+WHERE outbox_id = $1 AND locked_by = $2 AND status = 'publishing'`,
+		outboxID, workerID, retryAt, errorText)
+	if err != nil {
+		return fmt.Errorf("mark queue outbox failed: %w", err)
+	}
+	return requireOneRow(result, "queue outbox failure ownership mismatch")
+}
+
+func requireOneRow(result sql.Result, message string) error {
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read affected rows: %w", err)
+	}
+	if rows != 1 {
+		return errors.New(message)
+	}
+	return nil
+}
+
+func postgresInterval(value time.Duration) string {
+	return fmt.Sprintf("%f seconds", value.Seconds())
+}
+
+func (j *PostgresJournal) MarkRunRunning(
+	ctx context.Context,
+	requestID string,
+	workerID string,
+) error {
+	result, err := j.db.ExecContext(ctx, `
+UPDATE agent_run
+SET status = 'running', worker_id = $2, started_at = COALESCE(started_at, now()),
+    error_type = NULL, error_message = NULL
+WHERE request_id = $1 AND status <> 'completed'`, requestID, workerID)
+	if err != nil {
+		return fmt.Errorf("mark Agent run running: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read Agent run affected rows: %w", err)
+	}
+	if rows == 1 {
+		return nil
+	}
+	var status string
+	if err := j.db.QueryRowContext(
+		ctx,
+		`SELECT status FROM agent_run WHERE request_id = $1`,
+		requestID,
+	).Scan(&status); err != nil {
+		return fmt.Errorf("read Agent run status: %w", err)
+	}
+	if status == "completed" {
+		return nil
+	}
+	return fmt.Errorf("Agent run %q cannot start from status %q", requestID, status)
+}
+
+func (j *PostgresJournal) CompleteRun(
+	ctx context.Context,
+	task workqueue.AgentTask,
+	result RunResult,
+) error {
+	tx, err := j.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin Agent completion transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	updated, err := tx.ExecContext(ctx, `
+UPDATE agent_run
+SET status = 'completed', fencing_token = $2, agent_name = $3,
+    completed_at = now(), error_type = NULL, error_message = NULL
+WHERE request_id = $1 AND fencing_token <= $2`,
+		task.RequestID,
+		result.FencingToken,
+		result.AgentName,
+	)
+	if err != nil {
+		return fmt.Errorf("complete Agent run: %w", err)
+	}
+	if err := requireOneRow(updated, "stale or missing Agent run completion"); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"text":        result.Reply,
+		"agent_name":  result.AgentName,
+		"event_count": result.EventCount,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal outbound payload: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO outbound_message(
+    outbound_id, tenant_id, app_id, channel_binding_id, request_id,
+    conversation_id, payload, status
+) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending')
+ON CONFLICT (request_id) DO NOTHING`,
+		stableID("out_", task.RequestID),
+		task.Scope.TenantID,
+		task.Scope.AppID,
+		task.Scope.ChannelBindingID,
+		task.RequestID,
+		task.ConversationID,
+		string(payload),
+	); err != nil {
+		return fmt.Errorf("insert outbound message: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE inbound_message
+SET status = 'processed', processed_at = now()
+WHERE inbound_id = $1`, task.InboundID); err != nil {
+		return fmt.Errorf("mark inbound processed: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit Agent completion: %w", err)
+	}
+	return nil
+}
+
+func (j *PostgresJournal) FailRun(
+	ctx context.Context,
+	requestID string,
+	errorType string,
+	cause error,
+) error {
+	errorText := ""
+	if cause != nil {
+		errorText = cause.Error()
+		if len(errorText) > 2048 {
+			errorText = errorText[:2048]
+		}
+	}
+	_, err := j.db.ExecContext(ctx, `
+UPDATE agent_run
+SET status = 'failed', error_type = $2, error_message = $3, completed_at = now()
+WHERE request_id = $1 AND status <> 'completed'`, requestID, errorType, errorText)
+	if err != nil {
+		return fmt.Errorf("fail Agent run: %w", err)
+	}
+	return nil
 }
 
 func (j *PostgresJournal) Ready(ctx context.Context) error {

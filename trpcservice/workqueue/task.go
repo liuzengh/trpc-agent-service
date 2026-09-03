@@ -16,4 +16,5 @@ type AgentTask struct {
 	SessionID      string               `json:"session_id"`
 	Text           string               `json:"text"`
 	TurnSeq        int64                `json:"turn_seq"`
+	Attempt        int                  `json:"attempt"`
 }

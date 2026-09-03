@@ -16,9 +16,12 @@
 - Agent Revision Compiler、严格配置解析和不可变 Agent cache；
 - PostgreSQL conversation/inbound/agent_run/queue_outbox 原子事务；
 - `/inbound` 持久化 ACK 和重复消息唯一约束；
+- PostgreSQL Outbox Relay 和 `FOR UPDATE SKIP LOCKED` claim；
+- Memory / Redis Streams Queue、Consumer Group 和 pending reclaim；
+- 异步 Agent Worker、稳定 request ID、run/outbound 持久化；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 Transactional Outbox Relay、Redis Streams Consumer Group 和异步 Agent Worker。
+接下来的最近里程碑是进程角色拆分、Outbound Reply Sender 和 Channel Adapter 发送接口。
 
 ## 1. 建议目录
 
