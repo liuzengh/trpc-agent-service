@@ -117,7 +117,7 @@ func DefaultBootstrapData() BootstrapData {
             "instruction":"Reply clearly and use the conversation history supplied by the session."
         }`),
 		ModelConfig:     json.RawMessage(`{"source":"startup_env"}`),
-		ToolPolicy:      json.RawMessage(`{"allowed":[]}`),
+		ToolPolicy:      json.RawMessage(`{"allowed_tools":[]}`),
 		KnowledgeConfig: json.RawMessage(`{}`),
 		MemoryConfig:    json.RawMessage(`{}`),
 		GuardrailConfig: json.RawMessage(`{}`),

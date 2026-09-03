@@ -27,6 +27,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
@@ -166,10 +167,12 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build Gateway intake: %w", err)
 	}
+	toolCatalog := platformtool.DefaultCatalog()
 	revisionCompiler, err := agentservice.NewRevisionCompiler(
 		controlPlaneRepository,
 		selectedModel,
 		modelConfig.Stream,
+		agentservice.WithToolCatalog(toolCatalog),
 	)
 	if err != nil {
 		_ = gatewayIntake.Close()
@@ -278,7 +281,7 @@ func run() error {
 	}
 	var adminHandler http.Handler
 	if adminConfig.Enabled {
-		adminService, err := adminservice.New(controlPlaneRepository)
+		adminService, err := adminservice.New(controlPlaneRepository, toolCatalog)
 		if err != nil {
 			_ = agentQueue.Close()
 			_ = runtime.Close()

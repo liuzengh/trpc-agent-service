@@ -2350,6 +2350,53 @@ Revision 发布不会修改旧 Revision，只更新 `agent_app.stable_revision_i
 
 同一接口可以把 stable revision 指回历史 revision，实现配置回滚。后续审计阶段会为每次写操作记录操作者、旧值、新值、request ID 和 trace ID。
 
-## 22. 下一步
+## 22. 租户级 Tool 治理
 
-下一阶段实现租户级 Tool/MCP 治理、预算、危险工具审批和审计；随后接入 Memory、Knowledge、Artifact 与多后端 Storage Router。
+平台现在提供一个进程级 Tool Catalog：
+
+```text
+echo
+current_time
+dangerous_demo
+```
+
+Revision 不能注册任意 Go 代码，只能通过 `tool_policy.allowed_tools` 从 Catalog 中选择：
+
+```json
+{
+  "allowed_tools": ["echo", "current_time", "dangerous_demo"],
+  "dangerous_tools": ["dangerous_demo"],
+  "denied_users": ["blocked-user"],
+  "max_tool_calls": 4,
+  "max_run_duration": "60s"
+}
+```
+
+Revision Compiler 将 allowed tools 注入 `llmagent.WithTools`。每次 Run 又生成请求级治理选项：
+
+```text
+agent.WithToolFilter
+agent.WithToolPermissionPolicy
+agent.WithMaxRunDuration
+```
+
+执行顺序是：
+
+```text
+Catalog 中存在
+→ Revision allowlist 可见
+→ 用户没有被 deny
+→ tool call 次数没有超预算
+→ dangerous tool 已获得批准
+→ 执行 Tool
+```
+
+危险工具未批准时返回 tRPC-Agent-Go `PermissionActionAsk`，模型收到结构化 `approval_required`；未授权和超预算返回 `PermissionActionDeny`。批准列表只存在可信 `ChatInput.ApprovedTools` 中，不接受普通用户消息直接声明“我已批准”。
+
+Admin 创建 Revision 时会严格解析 Tool Policy，并拒绝 Catalog 中不存在的工具。这样错误配置不会等到真实用户触发 Tool 时才暴露。
+
+`dangerous_demo` 本身没有外部副作用，只用于验证审批链路。后续接入真实业务 Tool/MCP 时，每个危险 Tool 还必须实施自己的不可绕过授权和业务幂等。
+
+## 23. 下一步
+
+下一阶段补齐审批记录、审计日志和 OpenTelemetry，然后接入 Memory、Knowledge、Artifact 和租户级 Storage Router。

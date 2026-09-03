@@ -304,6 +304,8 @@ TRPC_AGENT_ADMIN_TOKEN="replace-with-a-random-token"
 
 Tenant、App、Revision、Channel/Backend Binding 和乐观锁发布说明见 [Admin API 和 Revision 发布](docs/getting-started.md#21-admin-api-和-revision-发布)。
 
+Tool Catalog、租户白名单、用户权限、调用预算和危险工具审批说明见 [租户级 Tool 治理](docs/getting-started.md#22-租户级-tool-治理)。
+
 停止服务：
 
 ```bash

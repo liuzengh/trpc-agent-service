@@ -12,11 +12,14 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"golang.org/x/sync/singleflight"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 var environmentNamePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,127}$`)
@@ -24,6 +27,16 @@ var environmentNamePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,127}$`)
 // Compiler turns an immutable control-plane revision into a runnable Agent.
 type Compiler interface {
 	Compile(ctx context.Context, scope runtimecontext.Scope) (agentcore.Agent, error)
+}
+
+// RunPolicyProvider supplies request-scoped governance options.
+type RunPolicyProvider interface {
+	RunPolicyOptions(
+		ctx context.Context,
+		scope runtimecontext.Scope,
+		userID string,
+		approvedTools []string,
+	) ([]agentcore.RunOption, error)
 }
 
 // StaticCompiler preserves the dependency-free tutorial and focused tests.
@@ -57,6 +70,15 @@ type RevisionCompiler struct {
 	mu            sync.RWMutex
 	cache         map[string]agentcore.Agent
 	group         singleflight.Group
+	toolCatalog   *platformtool.Catalog
+}
+
+type RevisionCompilerOption func(*RevisionCompiler)
+
+func WithToolCatalog(catalog *platformtool.Catalog) RevisionCompilerOption {
+	return func(compiler *RevisionCompiler) {
+		compiler.toolCatalog = catalog
+	}
 }
 
 // NewRevisionCompiler creates a compiler. Revisions with model source
@@ -65,6 +87,7 @@ func NewRevisionCompiler(
 	repository controlplane.Repository,
 	startupModel model.Model,
 	defaultStream bool,
+	opts ...RevisionCompilerOption,
 ) (*RevisionCompiler, error) {
 	if repository == nil {
 		return nil, fmt.Errorf("revision compiler repository is required")
@@ -72,12 +95,18 @@ func NewRevisionCompiler(
 	if startupModel == nil {
 		return nil, fmt.Errorf("revision compiler startup model is required")
 	}
-	return &RevisionCompiler{
+	compiler := &RevisionCompiler{
 		repository:    repository,
 		startupModel:  startupModel,
 		defaultStream: defaultStream,
 		cache:         make(map[string]agentcore.Agent),
-	}, nil
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(compiler)
+		}
+	}
+	return compiler, nil
 }
 
 // Compile validates revision scope, then returns a cached immutable Agent.
@@ -179,13 +208,45 @@ func (c *RevisionCompiler) compileRevision(
 	if agentConfig.Stream != nil {
 		stream = *agentConfig.Stream
 	}
+	policy, err := governance.ParseToolPolicy(revision.ToolPolicy)
+	if err != nil {
+		return nil, err
+	}
+	var tools []agenttool.Tool
+	if len(policy.AllowedTools) > 0 {
+		if c.toolCatalog == nil {
+			return nil, fmt.Errorf("Agent revision declares tools but no tool catalog is configured")
+		}
+		tools, err = c.toolCatalog.Resolve(policy.AllowedTools)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return llmagent.New(
 		agentConfig.Name,
 		llmagent.WithModel(selectedModel),
 		llmagent.WithDescription(agentConfig.Description),
 		llmagent.WithInstruction(agentConfig.Instruction),
 		llmagent.WithGenerationConfig(model.GenerationConfig{Stream: stream}),
+		llmagent.WithTools(tools),
 	), nil
+}
+
+func (c *RevisionCompiler) RunPolicyOptions(
+	ctx context.Context,
+	scope runtimecontext.Scope,
+	userID string,
+	approvedTools []string,
+) ([]agentcore.RunOption, error) {
+	revision, err := c.repository.GetRevision(ctx, scope.TenantID, scope.RevisionID)
+	if err != nil {
+		return nil, fmt.Errorf("load revision tool policy: %w", err)
+	}
+	policy, err := governance.ParseToolPolicy(revision.ToolPolicy)
+	if err != nil {
+		return nil, err
+	}
+	return governance.RunOptions(policy, userID, approvedTools), nil
 }
 
 func (c *RevisionCompiler) buildRevisionModel(raw json.RawMessage) (model.Model, error) {
@@ -229,3 +290,4 @@ func decodeStrictJSON(raw json.RawMessage, target any) error {
 
 var _ Compiler = (*StaticCompiler)(nil)
 var _ Compiler = (*RevisionCompiler)(nil)
+var _ RunPolicyProvider = (*RevisionCompiler)(nil)

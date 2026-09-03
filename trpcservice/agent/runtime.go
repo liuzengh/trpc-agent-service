@@ -47,12 +47,13 @@ type ChatResult struct {
 
 // ChatInput is the trusted, transport-neutral input for one Agent turn.
 type ChatInput struct {
-	Scope     runtimecontext.Scope
-	MessageID string
-	UserID    string
-	SessionID string
-	Text      string
-	RequestID string
+	Scope         runtimecontext.Scope
+	MessageID     string
+	UserID        string
+	SessionID     string
+	Text          string
+	RequestID     string
+	ApprovedTools []string
 }
 
 // Runtime owns the Agent Runner and its platform state services.
@@ -346,12 +347,21 @@ func (r *Runtime) executeIdempotentChat(
 	input ChatInput,
 ) (ChatResult, error) {
 	compiledAgent, runErr := r.compiler.Compile(attempt.Context(), input.Scope)
+	var policyOptions []agentcore.RunOption
+	if runErr == nil {
+		if provider, ok := r.compiler.(RunPolicyProvider); ok {
+			policyOptions, runErr = provider.RunPolicyOptions(
+				attempt.Context(), input.Scope, input.UserID, input.ApprovedTools,
+			)
+		}
+	}
 	var result ChatResult
 	if runErr == nil {
 		result, runErr = r.runChatTurn(
 			attempt.Context(),
 			input,
 			compiledAgent,
+			policyOptions,
 		)
 		result.AgentName = compiledAgent.Info().Name
 	}
@@ -391,6 +401,7 @@ func (r *Runtime) runChatTurn(
 	ctx context.Context,
 	input ChatInput,
 	compiledAgent agentcore.Agent,
+	policyOptions []agentcore.RunOption,
 ) (result ChatResult, err error) {
 	lease, err := r.coordinator.Acquire(ctx, coordination.Key{
 		AppName:   input.Scope.StorageScope,
@@ -423,6 +434,7 @@ func (r *Runtime) runChatTurn(
 		agentcore.WithAppName(input.Scope.StorageScope),
 		agentcore.WithAgent(compiledAgent),
 	}
+	runOptions = append(runOptions, policyOptions...)
 	if strings.TrimSpace(input.RequestID) != "" {
 		runOptions = append(runOptions, agentcore.WithRequestID(strings.TrimSpace(input.RequestID)))
 	}

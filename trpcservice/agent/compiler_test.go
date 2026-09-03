@@ -11,7 +11,9 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 func TestRevisionCompilerCompilesAndCachesAgent(t *testing.T) {
@@ -199,5 +201,37 @@ func TestRuntimeUsesCompiledRevisionAgent(t *testing.T) {
 	}
 	if result.AgentName != "tenant-specific-agent" {
 		t.Fatalf("Agent name = %q", result.AgentName)
+	}
+}
+
+func TestRevisionCompilerAddsOnlyRevisionTools(t *testing.T) {
+	data := controlplane.DefaultBootstrapData()
+	data.Revisions[0].ToolPolicy = json.RawMessage(`{
+        "allowed_tools":["echo"],
+        "dangerous_tools":[],
+        "max_tool_calls":1
+    }`)
+	repository := controlplane.NewMemoryRepository(data)
+	t.Cleanup(func() { _ = repository.Close() })
+	compiler, err := NewRevisionCompiler(
+		repository,
+		NewTutorialModel(),
+		false,
+		WithToolCatalog(platformtool.DefaultCatalog()),
+	)
+	if err != nil {
+		t.Fatalf("new compiler: %v", err)
+	}
+	compiled, err := compiler.Compile(context.Background(), runtimecontext.TutorialScope())
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	provider, ok := compiled.(interface{ Tools() []agenttool.Tool })
+	if !ok {
+		t.Fatalf("compiled Agent %T does not expose tools", compiled)
+	}
+	tools := provider.Tools()
+	if len(tools) != 1 || tools[0].Declaration().Name != "echo" {
+		t.Fatalf("tools=%+v", tools)
 	}
 }

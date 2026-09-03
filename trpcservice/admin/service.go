@@ -12,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 )
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -19,14 +21,19 @@ var ErrInvalid = errors.New("invalid Admin request")
 
 type Service struct {
 	repository controlplane.MutableRepository
+	tools      *platformtool.Catalog
 }
 
-func New(repository controlplane.Repository) (*Service, error) {
+func New(repository controlplane.Repository, catalogs ...*platformtool.Catalog) (*Service, error) {
 	mutable, ok := repository.(controlplane.MutableRepository)
 	if !ok {
 		return nil, fmt.Errorf("control-plane repository is not mutable")
 	}
-	return &Service{repository: mutable}, nil
+	catalog := platformtool.DefaultCatalog()
+	if len(catalogs) > 0 && catalogs[0] != nil {
+		catalog = catalogs[0]
+	}
+	return &Service{repository: mutable, tools: catalog}, nil
 }
 
 func (s *Service) CreateTenant(ctx context.Context, tenant controlplane.Tenant) (controlplane.Tenant, error) {
@@ -103,6 +110,13 @@ func (s *Service) CreateRevision(
 		if err := normalizeJSON(value); err != nil {
 			return controlplane.AgentRevision{}, invalidf("%s: %v", name, err)
 		}
+	}
+	toolPolicy, err := governance.ParseToolPolicy(revision.ToolPolicy)
+	if err != nil {
+		return controlplane.AgentRevision{}, invalidf("tool_policy: %v", err)
+	}
+	if _, err := s.tools.Resolve(toolPolicy.AllowedTools); err != nil {
+		return controlplane.AgentRevision{}, invalidf("tool_policy: %v", err)
 	}
 	revision.Checksum = controlplane.RevisionChecksum(revision)
 	revision.CreatedAt = time.Now().UTC()

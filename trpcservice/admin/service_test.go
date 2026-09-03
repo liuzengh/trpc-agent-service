@@ -47,3 +47,18 @@ func TestAdminCreatesAndPublishesRevision(t *testing.T) {
 		t.Fatalf("stale publish error=%v", err)
 	}
 }
+
+func TestAdminRejectsUnknownTool(t *testing.T) {
+	repository := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
+	service, _ := New(repository)
+	_, err := service.CreateRevision(context.Background(), controlplane.AgentRevision{
+		ID: "revision-unknown-tool", TenantID: "tutorial-tenant", AppID: "tutorial-app",
+		RevisionNo: 2, AgentType: "llm", CreatedBy: "admin",
+		AgentConfig: json.RawMessage(`{"name":"agent","instruction":"hello"}`),
+		ModelConfig: json.RawMessage(`{"source":"startup_env"}`),
+		ToolPolicy:  json.RawMessage(`{"allowed_tools":["not_registered"]}`),
+	})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("error=%v", err)
+	}
+}

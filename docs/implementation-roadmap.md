@@ -28,9 +28,12 @@
 - Bearer 鉴权 Admin API；
 - Tenant/App/Revision/Channel/Backend 写服务；
 - Revision checksum、乐观锁发布与回滚；
+- Tool Catalog、Revision allowlist 和未知工具发布校验；
+- tRPC-Agent-Go ToolFilter/PermissionPolicy/MaxRunDuration；
+- 用户 deny、调用次数预算和危险工具 approval_required；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 Tool/MCP 治理、预算、审批和审计。
+接下来的最近里程碑是审批记录、审计日志、OpenTelemetry 和成本指标。
 
 ## 1. 建议目录
 
