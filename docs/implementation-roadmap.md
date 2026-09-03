@@ -46,9 +46,12 @@
 - tRPC-Agent-Go InMemory/Redis/PostgreSQL Memory adapter；
 - Memory Secret 引用、跨租户 AppName 拒绝和 app/tenant binding 优先级；
 - 六个框架 Memory Tool 和 Revision `preload_memory`；
+- tenant-scoped Artifact Router 与 InMemory/S3-compatible 后端；
+- MinIO Compose、bucket 初始化和真实 S3 兼容性测试；
+- Artifact 同文件进程锁、PostgreSQL advisory lock 和多节点版本保护；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 Artifact/S3、Knowledge/Vector Store、Summary/Memory durable job 和数据迁移。
+接下来的最近里程碑是 Knowledge/Vector Store、Summary/Memory durable job 和数据迁移。
 
 ## 1. 建议目录
 

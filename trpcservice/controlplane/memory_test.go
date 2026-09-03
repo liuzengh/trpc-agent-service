@@ -29,7 +29,7 @@ func TestMemoryRepositoryDefaultBootstrap(t *testing.T) {
 		t.Fatalf("binding = %+v, err = %v", binding, err)
 	}
 	backends, err := repository.ListBackendBindings(context.Background(), tenant.ID, app.ID)
-	if err != nil || len(backends) != 2 {
+	if err != nil || len(backends) != 3 {
 		t.Fatalf("backends = %+v, err = %v", backends, err)
 	}
 }

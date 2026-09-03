@@ -194,6 +194,17 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build memory router: %w", err)
 	}
+	artifactRouter, err := platformstorage.NewArtifactRouter(controlPlaneRepository, secretStore)
+	if err != nil {
+		_ = memoryRouter.Close()
+		_ = approvalRepository.Close()
+		_ = auditWriter.Close()
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build artifact router: %w", err)
+	}
 	routeResolver, err := routing.NewControlPlaneResolver(controlPlaneRepository)
 	if err != nil {
 		_ = controlPlaneRepository.Close()
@@ -249,6 +260,7 @@ func run() error {
 		idempotencyStore,
 		modelConfig.Stream,
 		agentrunner.WithMemoryService(memoryRouter),
+		agentrunner.WithArtifactService(artifactRouter),
 	)
 	if err != nil {
 		_ = gatewayIntake.Close()
@@ -426,6 +438,11 @@ func run() error {
 		fmt.Printf("Gateway HTTP server listening on %s\n", listenAddr)
 	}
 	defer func() {
+		if err := artifactRouter.Close(); err != nil {
+			log.Printf("close artifact router: %v", err)
+		}
+	}()
+	defer func() {
 		if err := memoryRouter.Close(); err != nil {
 			log.Printf("close memory router: %v", err)
 		}
@@ -470,6 +487,7 @@ func run() error {
 		web.WithReadinessCheck("audit", auditWriter.Ready),
 		web.WithReadinessCheck("approval", approvalRepository.Ready),
 		web.WithReadinessCheck("memory-router", memoryRouter.Ready),
+		web.WithReadinessCheck("artifact-router", artifactRouter.Ready),
 	}
 	if adminHandler != nil {
 		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))

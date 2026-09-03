@@ -192,6 +192,19 @@ func DefaultBootstrapData() BootstrapData {
 				CreatedAt:      now,
 				UpdatedAt:      now,
 			},
+			{
+				ID:             "tutorial-artifact-backend",
+				TenantID:       "tutorial-tenant",
+				AppID:          "tutorial-app",
+				ResourceType:   "artifact",
+				BackendType:    "inmemory",
+				Config:         json.RawMessage(`{}`),
+				IsolationLevel: "shared",
+				MigrationState: "active",
+				Version:        1,
+				CreatedAt:      now,
+				UpdatedAt:      now,
+			},
 		},
 	}
 }

@@ -18,7 +18,7 @@ HTTP 请求
 
 环境要求：
 
-- Go 1.21 或更高版本；
+- Go 1.22.2 或更高版本；
 - `curl`；
 - 端口 8080 未被占用。
 
@@ -2601,6 +2601,67 @@ TEST_POSTGRES_URL='postgres://...' \
   go test ./trpcservice/storage -run TestMemoryRouterPostgresIntegration -v
 ```
 
-## 26. 下一步
+## 26. Artifact Router 与 S3 / MinIO
 
-下一阶段实现 Artifact Router 与 S3/MinIO 对象存储，再实现带强制租户过滤的 Knowledge/Vector Store 和可恢复的数据迁移状态机。
+Runner 同时接入了 tRPC-Agent-Go `artifact.Service`。Artifact Router 和 Memory Router 使用相同的租户解析、Backend Binding 优先级、binding version cache 与 Secret Store，但路由键增加到：
+
+```text
+AppName + UserID + SessionID + Filename + Version
+```
+
+当前后端：
+
+```json
+{
+  "resource_type": "artifact",
+  "backend_type": "inmemory",
+  "config": {}
+}
+```
+
+```json
+{
+  "resource_type": "artifact",
+  "backend_type": "s3",
+  "config": {
+    "bucket": "trpc-agent-artifacts",
+    "endpoint": "http://minio:9000",
+    "region": "us-east-1",
+    "path_style": true,
+    "retries": 3
+  },
+  "secret_ref": "env://TENANT_ARTIFACT_S3_CREDENTIALS"
+}
+```
+
+本地 Secret 的值是 JSON，不进入控制面和日志：
+
+```dotenv
+TENANT_ARTIFACT_S3_CREDENTIALS='{"access_key_id":"...","secret_access_key":"...","session_token":""}'
+```
+
+S3 adapter 使用 tRPC-Agent-Go 官方实现，兼容 AWS S3、MinIO、R2 和其他 S3-compatible 服务。对象键以 tenant-scoped AppName 开头，例如：
+
+```text
+t/tenant-a/a/app-a/user-a/session-a/report.pdf/0
+t/tenant-a/a/app-a/user-a/session-a/report.pdf/1
+```
+
+因此共享 bucket 中的租户对象天然分前缀，Router 又会拒绝非法 AppName。版本从 0 开始；Load 不指定版本时取最新版本，Delete 删除一个逻辑文件的全部版本。
+
+官方 S3 Artifact Service 使用“列举版本 → 计算下一个版本 → 上传”的方式。平台在进程内为同一逻辑文件加 mutex；当控制面使用 PostgreSQL 时，还会在专用数据库连接上获取 `pg_advisory_lock(hash(artifact key))`，覆盖多个 Worker 节点。锁一直持有到上传结束，取消后使用独立两秒 Context 释放，避免连接返回池时仍携带 session-level lock。正常 Agent Tool 路径还受到 Session Coordinator 的会话租约保护。
+
+本地 Compose 已加入 MinIO 和一次性 `minio-init`，会创建测试 bucket：
+
+```bash
+docker compose up -d minio minio-init
+
+TEST_S3_ENDPOINT=http://127.0.0.1:9000 \
+  go test ./trpcservice/storage -run TestArtifactRouterS3Integration -v
+```
+
+由于官方 S3 adapter 依赖 Go 1.22.2，项目最低 Go 版本同步提升到 1.22.2。生产环境应开启 bucket versioning、服务端加密、生命周期清理、恶意文件扫描和最小权限 IAM；公开下载应通过短期签名 URL 或受鉴权代理，不能直接暴露 bucket。
+
+## 27. 下一步
+
+下一阶段实现带强制租户过滤的 Knowledge/Vector Store、文档导入任务和可恢复的数据迁移状态机。

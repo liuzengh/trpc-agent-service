@@ -322,6 +322,8 @@ HTTP、Gateway、持久化任务、Worker 的 trace 传播，运行/Admin/Tool �
 
 Memory 通过 tenant-scoped `AppName` 路由到每个租户选择的 InMemory、Redis 或 PostgreSQL 后端；Revision 可开放 tRPC-Agent-Go 原生 Memory Tool，并配置自动 preload。详见 [租户级 Memory Router](docs/getting-started.md#25-租户级-memory-router)。
 
+Artifact 通过同一 Storage Scope 路由到 InMemory 或 S3-compatible 后端。Compose 提供 MinIO，PostgreSQL advisory lock 保护多节点对同一文件的版本分配。详见 [Artifact Router 与 S3 / MinIO](docs/getting-started.md#26-artifact-router-与-s3--minio)。
+
 停止服务：
 
 ```bash
