@@ -335,6 +335,8 @@ Session Router 实现完整 tRPC-Agent-Go `session.Service`，让不同 tenant/a
 
 Admin 支持多 Principal RBAC；Gateway/Worker 支持 Local/Redis 租户限流、并发和每日 token/cost 预算；标准日志和 Audit 分别执行 Secret 脱敏。详见 [RBAC、限流、预算与日志脱敏](docs/getting-started.md#31-rbac限流预算与日志脱敏)。
 
+生产交付包含非 root Docker 镜像、独立 migration/loadgen、完整本地可观测栈，以及 Kubernetes 六角色 Deployment/HPA/PDB/NetworkPolicy。详见 [生产部署与可观测栈](docs/getting-started.md#32-生产部署与可观测栈)、[部署文档](docs/deployment.md) 和 [容量评估](docs/capacity.md)。
+
 停止服务：
 
 ```bash

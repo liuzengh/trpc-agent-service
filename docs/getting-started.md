@@ -3065,6 +3065,57 @@ redis://user:password@host
 
 Writer 向标准 `log` 保持原始写入长度语义，避免破坏调用方；Audit details 仍使用独立的结构化 key 递归脱敏。生产还应在 Collector 和日志平台再做一层字段过滤，并禁止记录完整用户消息和 Tool 参数。
 
-## 32. 下一步
+## 32. 生产部署与可观测栈
 
-下一阶段补齐 Docker Compose 全栈、Kubernetes Deployment/HPA/PDB/NetworkPolicy、Prometheus/Grafana/OTel Collector，以及容量与故障演练脚本。
+仓库现在可以构建一个非 root 多阶段镜像，镜像同时包含服务进程和 migration 命令：
+
+```bash
+docker build -t trpc-agent-service:local .
+docker run --rm trpc-agent-service:local -role worker
+```
+
+本地完整依赖：
+
+```bash
+docker compose up -d postgres redis minio minio-init qdrant
+```
+
+可观测栈使用 Compose profile，包含 OTel Collector、Prometheus、Tempo 和 Grafana：
+
+```bash
+docker compose --profile observability up -d
+```
+
+应用配置 `TRPC_AGENT_OTEL_ENDPOINT=127.0.0.1:4317`。Collector 将 metric 暴露到 9464 给 Prometheus，把 trace 发送到 Tempo；Grafana 已自动配置两个数据源。
+
+Kubernetes 清单位于 `deploy/kubernetes`：
+
+```text
+platform.yaml          Namespace / ConfigMap / 6 Deployments / Services / HPA / PDB / NetworkPolicy
+secret.example.yaml    Secret 字段模板，不能直接用于生产
+migration-job.yaml     独立 trpc-migrate Job
+```
+
+生产必须先由 Secret Manager 生成 `trpc-agent-secrets`，再运行 migration Job，最后发布 Gateway/Admin/Relay/Worker/Sender/Jobs。Pod 全部 non-root、只读根文件系统、drop capabilities，并设置 requests/limits；Gateway/Worker 配有 PDB，Gateway/Worker/Jobs 配有 HPA。
+
+仓库还提供标准库实现的压测器：
+
+```bash
+./bin/trpc-loadgen -requests 10000 -concurrency 200 -sessions 1000
+```
+
+它输出 throughput、p50/p95/p99/max。入站 ACK 压测后还需等待 Redis Stream lag、background pending、outbound pending 回到 0，才能得到完整处理能力。
+
+故障演练脚本默认拒绝运行，必须显式确认：
+
+```bash
+TRPC_AGENT_DRILL_CONFIRM=yes ./scripts/fault-drill.sh
+```
+
+脚本只 stop/start Compose 的 Redis/PostgreSQL，不删除 volume。应观察 `/readyz` 退出就绪、依赖恢复后任务 reclaim、幂等结果、repair backlog 和审计记录。
+
+完整说明见 [deployment.md](deployment.md) 和 [capacity.md](capacity.md)。
+
+## 33. 下一步
+
+最后阶段进行验收差距审计：更新总架构、数据模型、时序、一致性、后端适配、风险清单，并运行真实多进程端到端与故障恢复测试。

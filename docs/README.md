@@ -14,6 +14,8 @@
 | [governance-operations.md](governance-operations.md) | Plugin/Guardrail、审计、监控、密钥、故障恢复、容量和部署方案 |
 | [risks.md](risks.md) | 生产风险、触发条件、监控信号和缓解措施 |
 | [implementation-roadmap.md](implementation-roadmap.md) | 代码模块、迭代顺序、测试策略和验收映射 |
+| [deployment.md](deployment.md) | Docker、Kubernetes、可观测栈、灰度、备份与告警 |
+| [capacity.md](capacity.md) | Worker/Token/Redis/SQL 容量公式和压测工具 |
 
 ## 推荐阅读顺序
 

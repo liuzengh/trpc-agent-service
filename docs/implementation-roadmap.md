@@ -70,9 +70,13 @@
 - tenant-scoped 配置、Job、Migration 和 Audit 查询接口；
 - Local/Redis 租户 rate limit、concurrency、daily token/cost budget；
 - request_id 幂等成本记账与统一日志 Secret redaction；
+- 非 root 多阶段 Docker 镜像和独立 migration/loadgen 命令；
+- PostgreSQL/Redis/MinIO/Qdrant/OTel/Prometheus/Tempo/Grafana Compose；
+- Kubernetes 六角色 Deployment、HPA、PDB、NetworkPolicy 和 Secret 模板；
+- 容量公式、入站压测器和安全确认的故障演练脚本；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是生产部署、容量/故障测试与最终验收。
+接下来的最近里程碑是最终文档/代码验收与真实多进程故障测试。
 
 ## 1. 建议目录
 
