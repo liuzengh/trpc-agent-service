@@ -681,6 +681,60 @@ func (s *Service) SubmitMemoryMigrationJob(
 	}, nil
 }
 
+func (s *Service) SubmitSessionMigrationJob(
+	ctx context.Context,
+	tenantID string,
+	migrationID string,
+	jobType string,
+	operationID string,
+	sessions []platformstorage.SessionMigrationItem,
+) (MigrationJobResult, error) {
+	if s.jobs == nil {
+		return MigrationJobResult{}, invalidf("background jobs are unavailable")
+	}
+	if jobType != background.JobSessionBackfill && jobType != background.JobSessionVerify {
+		return MigrationJobResult{}, invalidf("unsupported session migration job")
+	}
+	if !identifierPattern.MatchString(operationID) || len(sessions) == 0 {
+		return MigrationJobResult{}, invalidf("operation_id and sessions are required")
+	}
+	for _, item := range sessions {
+		if strings.TrimSpace(item.UserID) == "" || strings.TrimSpace(item.SessionID) == "" ||
+			len(item.UserID) > 512 || len(item.SessionID) > 512 {
+			return MigrationJobResult{}, invalidf("session migration identity is invalid")
+		}
+	}
+	migration, err := s.repository.GetBackendMigration(ctx, tenantID, migrationID)
+	if err != nil {
+		return MigrationJobResult{}, err
+	}
+	if migration.ResourceType != "session" || migration.State != controlplane.MigrationBackfill {
+		return MigrationJobResult{}, invalidf("session migration must be in backfill state")
+	}
+	app, err := s.repository.GetAgentApp(ctx, tenantID, migration.AppID)
+	if err != nil {
+		return MigrationJobResult{}, err
+	}
+	payload, err := json.Marshal(background.SessionMigrationPayload{
+		MigrationID: migration.ID, Sessions: sessions, ExpectedVersion: migration.Version,
+	})
+	if err != nil {
+		return MigrationJobResult{}, err
+	}
+	queued, err := s.jobs.Enqueue(ctx, background.EnqueueRequest{
+		TenantID: tenantID, AppID: migration.AppID, RevisionID: app.StableRevisionID,
+		Type: jobType, DedupeKey: migration.ID + ":" + operationID,
+		Payload: payload, TraceParent: background.TraceParent(ctx),
+	})
+	if err != nil {
+		return MigrationJobResult{}, err
+	}
+	return MigrationJobResult{
+		JobID: queued.Job.ID, MigrationID: migration.ID,
+		JobType: jobType, Duplicate: queued.Duplicate,
+	}, nil
+}
+
 func (s *Service) record(
 	ctx context.Context,
 	tenantID string,

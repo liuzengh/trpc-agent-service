@@ -22,3 +22,9 @@ type MemoryMigrationPayload struct {
 	UserIDs         []string `json:"user_ids"`
 	ExpectedVersion int64    `json:"expected_version"`
 }
+
+type SessionMigrationPayload struct {
+	MigrationID     string                         `json:"migration_id"`
+	Sessions        []storage.SessionMigrationItem `json:"sessions"`
+	ExpectedVersion int64                          `json:"expected_version"`
+}

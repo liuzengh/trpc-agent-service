@@ -2911,6 +2911,86 @@ Knowledge 迁移对新 Upsert/Delete 实施同样的源读双写和目标读反�
 
 状态机、active binding swap、Memory 双写/切读、repair backlog 和 PostgreSQL 索引均有单测与真实 PostgreSQL 集成测试。
 
-## 30. 下一步
+## 30. Tenant Session Router
 
-下一阶段把 Session 从全局启动配置升级为 tenant-scoped Session Router，使租户也能分别选择 Redis/PostgreSQL，并把相同迁移状态机应用到 Session Event/State/Summary。
+Runner 现在不再直接持有启动时选择的单一 Session Service，而是持有实现完整 `session.Service` 接口的 `SessionRouter`。启动 Session 仍作为 `startup_config` 后端保留，已有 `.env` 配置完全兼容；每个 tenant/app 可以用 Backend Binding 覆盖：
+
+```json
+{
+  "resource_type": "session",
+  "backend_type": "redis",
+  "config": {
+    "key_prefix": "tenant-a-session",
+    "ttl": "720h"
+  },
+  "secret_ref": "env://TENANT_A_REDIS_URL"
+}
+```
+
+```json
+{
+  "resource_type": "session",
+  "backend_type": "postgres",
+  "config": {
+    "table_prefix": "tenant_a_runtime",
+    "ttl": "0s"
+  },
+  "secret_ref": "env://TENANT_A_POSTGRES_DSN"
+}
+```
+
+Router 覆盖框架完整接口：Create/Get/List/Delete Session、App/User/Session State、AppendEvent、Summary 创建/读取。每次操作先从 AppName 解析 tenant/app，再选择 Backend Binding；非法 AppName 不会落到默认库。`/readyz` 的内部探测 AppName 是唯一例外，只用于探测 startup backend。
+
+这使 Worker 真正无状态：
+
+```text
+Worker A 收到 turn 1
+→ SessionRouter → tenant Redis/PostgreSQL
+→ Event/State 同步持久化
+
+Worker B 收到 turn 2
+→ 相同 Storage Scope
+→ 从共享后端恢复历史
+```
+
+不需要 HTTP sticky session。Session Coordinator 只负责同一 Session 的执行顺序，Session Router 负责状态存储；二者都使用 `t/{tenant}/a/{app} + user + session`。
+
+Session migration 使用与 Memory 相同的状态：
+
+```text
+dual_write/backfill/verify：source 读，source → target 写
+cutover：target 读，target → source 写
+completed：target active
+rollback：source 读写
+```
+
+双写覆盖 Session/Event、App State、User State、Session State 和 Summary。向一个尚不存在的 target Session AppendEvent 时，Router 会先用当前 State 创建 target Session，再追加 Event；secondary 失败会增加 migration repair backlog 并把本次操作作为可重试错误返回。
+
+历史回填接口：
+
+```text
+POST /admin/backend-migrations/backfill-session
+POST /admin/backend-migrations/verify-session
+```
+
+请求明确列出批次中的 Session：
+
+```json
+{
+  "tenant_id": "tenant-a",
+  "migration_id": "migration-session-01",
+  "operation_id": "batch-0001",
+  "sessions": [
+    {"user_id": "user-a", "session_id": "chat-01"},
+    {"user_id": "user-b", "session_id": "chat-02"}
+  ]
+}
+```
+
+Backfill Job 复制 Session State 和完整 Event 顺序，同时复制 App/User State；源存在 Summary 时在 target 上重新生成 Summary。Verify 比较 Event 数量、State 字节值和 Summary 是否同时存在。所有 Session 通过后，Job Processor 写入 `verification.passed=true` 并推进到 verify，才允许 cutover。
+
+当前正式支持 `startup_config`、InMemory、Redis 和 PostgreSQL 四种 Session binding。Redis 与 PostgreSQL 均关闭异步 Event persist，`AppendEvent` 成功意味着下一节点可见；Redis 的磁盘持久性仍取决于 AOF/RDB 策略，PostgreSQL 提供更强耐久性但写延迟和成本更高。
+
+## 31. 下一步
+
+下一阶段补齐租户 RBAC/限流/预算、管理查询、结构化日志脱敏和部署清单，然后进行容量、故障与最终验收审计。

@@ -19,6 +19,8 @@ const (
 	JobKnowledgeDelete = "knowledge_delete"
 	JobMemoryBackfill  = "memory_backfill"
 	JobMemoryVerify    = "memory_verify"
+	JobSessionBackfill = "session_backfill"
+	JobSessionVerify   = "session_verify"
 )
 
 var (

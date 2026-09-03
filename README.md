@@ -331,6 +331,8 @@ Summary、Memory Extraction、Knowledge Upsert/Delete 通过 PostgreSQL `backgro
 
 Backend Migration 通过 `planned → dual_write → backfill → verify → cutover → completed` 状态机执行，支持 Memory/Knowledge 在线双写、分批回填、强校验、repair backlog、乐观锁切换和回滚。详见 [Backend Migration 状态机](docs/getting-started.md#29-backend-migration-状态机)。
 
+Session Router 实现完整 tRPC-Agent-Go `session.Service`，让不同 tenant/app 选择 startup、InMemory、Redis 或 PostgreSQL，并支持 Event/State/Summary 双写迁移、批量回填和切读回滚。详见 [Tenant Session Router](docs/getting-started.md#30-tenant-session-router)。
+
 停止服务：
 
 ```bash

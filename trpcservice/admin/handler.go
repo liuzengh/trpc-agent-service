@@ -11,6 +11,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 )
 
 type Handler struct {
@@ -126,6 +127,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleMemoryMigrationJob(w, r, background.JobMemoryBackfill)
 	case "/admin/backend-migrations/verify-memory":
 		h.handleMemoryMigrationJob(w, r, background.JobMemoryVerify)
+	case "/admin/backend-migrations/backfill-session":
+		h.handleSessionMigrationJob(w, r, background.JobSessionBackfill)
+	case "/admin/backend-migrations/verify-session":
+		h.handleSessionMigrationJob(w, r, background.JobSessionVerify)
 	case "/admin/knowledge/documents":
 		var input KnowledgeDocumentInput
 		if !decodeAdmin(w, r, &input) {
@@ -180,6 +185,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		adminJSON(w, http.StatusNotFound, map[string]string{"error": "Admin route not found"})
 	}
+}
+
+func (h *Handler) handleSessionMigrationJob(
+	w http.ResponseWriter,
+	r *http.Request,
+	jobType string,
+) {
+	var input struct {
+		TenantID    string                                 `json:"tenant_id"`
+		MigrationID string                                 `json:"migration_id"`
+		OperationID string                                 `json:"operation_id"`
+		Sessions    []platformstorage.SessionMigrationItem `json:"sessions"`
+	}
+	if !decodeAdmin(w, r, &input) {
+		return
+	}
+	value, err := h.service.SubmitSessionMigrationJob(
+		r.Context(), input.TenantID, input.MigrationID,
+		jobType, input.OperationID, input.Sessions,
+	)
+	h.writeResult(w, http.StatusAccepted, value, err)
 }
 
 func (h *Handler) handleMemoryMigrationJob(

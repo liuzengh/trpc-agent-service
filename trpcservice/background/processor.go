@@ -29,15 +29,16 @@ type ProcessorOptions struct {
 }
 
 type Processor struct {
-	jobs           Repository
-	control        controlplane.Repository
-	sessions       session.Service
-	memories       memory.Service
-	memoryMigrator *platformstorage.MemoryRouter
-	knowledge      *platformstorage.KnowledgeRouter
-	extractor      extractor.MemoryExtractor
-	audit          audit.Writer
-	options        ProcessorOptions
+	jobs            Repository
+	control         controlplane.Repository
+	sessions        session.Service
+	memories        memory.Service
+	memoryMigrator  *platformstorage.MemoryRouter
+	sessionMigrator *platformstorage.SessionRouter
+	knowledge       *platformstorage.KnowledgeRouter
+	extractor       extractor.MemoryExtractor
+	audit           audit.Writer
+	options         ProcessorOptions
 }
 
 func NewProcessor(
@@ -70,9 +71,11 @@ func NewProcessor(
 	if !ok {
 		return nil, errors.New("background processor requires platform MemoryRouter")
 	}
+	sessionMigrator, _ := sessions.(*platformstorage.SessionRouter)
 	return &Processor{
 		jobs: jobs, control: control, sessions: sessions, memories: memories,
-		memoryMigrator: memoryMigrator, knowledge: knowledgeRouter,
+		memoryMigrator: memoryMigrator, sessionMigrator: sessionMigrator,
+		knowledge: knowledgeRouter,
 		extractor: memoryExtractor, audit: auditWriter,
 		options: options,
 	}, nil
@@ -194,6 +197,71 @@ func (p *Processor) process(ctx context.Context, job Job) error {
 		}
 		verification, err := json.Marshal(map[string]any{
 			"passed": true, "users": results,
+		})
+		if err != nil {
+			return err
+		}
+		mutable, ok := p.control.(controlplane.MutableRepository)
+		if !ok {
+			return errors.New("control plane cannot update migration verification")
+		}
+		if migration.RepairBacklog > 0 {
+			if err := p.control.AdjustBackendMigrationRepair(
+				ctx, job.TenantID, payload.MigrationID, -migration.RepairBacklog,
+			); err != nil {
+				return err
+			}
+		}
+		_, err = mutable.TransitionBackendMigration(
+			ctx, job.TenantID, payload.MigrationID, controlplane.MigrationVerify,
+			payload.ExpectedVersion, nil, verification,
+		)
+		return err
+	case JobSessionBackfill:
+		if p.sessionMigrator == nil {
+			return errors.New("session migration requires platform SessionRouter")
+		}
+		var payload SessionMigrationPayload
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return err
+		}
+		for _, item := range payload.Sessions {
+			if _, err := p.sessionMigrator.BackfillSession(
+				ctx, job.TenantID, payload.MigrationID, item,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	case JobSessionVerify:
+		if p.sessionMigrator == nil {
+			return errors.New("session migration requires platform SessionRouter")
+		}
+		var payload SessionMigrationPayload
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return err
+		}
+		results := make([]platformstorage.SessionMigrationVerification, 0, len(payload.Sessions))
+		passed := true
+		for _, item := range payload.Sessions {
+			result, err := p.sessionMigrator.VerifySession(
+				ctx, job.TenantID, payload.MigrationID, item,
+			)
+			if err != nil {
+				return err
+			}
+			results = append(results, result)
+			passed = passed && result.Passed
+		}
+		if !passed {
+			return errors.New("session migration verification did not pass")
+		}
+		migration, err := p.control.GetBackendMigration(ctx, job.TenantID, payload.MigrationID)
+		if err != nil {
+			return err
+		}
+		verification, err := json.Marshal(map[string]any{
+			"passed": true, "sessions": results,
 		})
 		if err != nil {
 			return err

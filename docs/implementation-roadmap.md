@@ -62,9 +62,13 @@
 - Memory 分用户 backfill/verify Job 与 canonical ID 校验；
 - Knowledge 在线双写与历史文档重新导入策略；
 - secondary failure repair backlog 与 verify 清零；
+- 完整 `session.Service` Tenant Session Router；
+- startup/InMemory/Redis/PostgreSQL 租户级 Session Binding；
+- Session/Event/State/Summary 在线双写、切读与回滚；
+- Session 批量 backfill/verify durable job；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 tenant-scoped Session Router 与 Session 迁移。
+接下来的最近里程碑是 RBAC、配额限流、生产部署与最终验收。
 
 ## 1. 建议目录
 

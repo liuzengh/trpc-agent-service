@@ -204,29 +204,46 @@ func run() error {
 		return fmt.Errorf("build background job repository: %w", err)
 	}
 	secretStore := secret.EnvStore{}
-	memoryRouter, err := platformstorage.NewMemoryRouter(controlPlaneRepository, secretStore)
+	sessionRouter, err := platformstorage.NewSessionRouter(
+		controlPlaneRepository,
+		secretStore,
+		sessionService,
+		sessionSummarizer,
+	)
 	if err != nil {
+		_ = backgroundJobs.Close()
 		_ = approvalRepository.Close()
 		_ = auditWriter.Close()
 		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
 		_ = sessionService.Close()
+		return fmt.Errorf("build session router: %w", err)
+	}
+	memoryRouter, err := platformstorage.NewMemoryRouter(controlPlaneRepository, secretStore)
+	if err != nil {
+		_ = sessionRouter.Close()
+		_ = approvalRepository.Close()
+		_ = auditWriter.Close()
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
 		return fmt.Errorf("build memory router: %w", err)
 	}
 	artifactRouter, err := platformstorage.NewArtifactRouter(controlPlaneRepository, secretStore)
 	if err != nil {
+		_ = sessionRouter.Close()
 		_ = memoryRouter.Close()
 		_ = approvalRepository.Close()
 		_ = auditWriter.Close()
 		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
-		_ = sessionService.Close()
 		return fmt.Errorf("build artifact router: %w", err)
 	}
 	knowledgeRouter, err := platformstorage.NewKnowledgeRouter(controlPlaneRepository, secretStore)
 	if err != nil {
+		_ = sessionRouter.Close()
 		_ = artifactRouter.Close()
 		_ = memoryRouter.Close()
 		_ = approvalRepository.Close()
@@ -234,23 +251,22 @@ func run() error {
 		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
-		_ = sessionService.Close()
 		return fmt.Errorf("build knowledge router: %w", err)
 	}
 	routeResolver, err := routing.NewControlPlaneResolver(controlPlaneRepository)
 	if err != nil {
+		_ = sessionRouter.Close()
 		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
-		_ = sessionService.Close()
 		return fmt.Errorf("build route resolver: %w", err)
 	}
 	inboundJournal, err := gateway.NewJournalForControlPlane(controlPlaneRepository)
 	if err != nil {
+		_ = sessionRouter.Close()
 		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
-		_ = sessionService.Close()
 		return fmt.Errorf("build inbound journal: %w", err)
 	}
 	gatewayIntake, err := gateway.NewIntake(
@@ -260,11 +276,11 @@ func run() error {
 		gateway.WithMetrics(metricRecorder),
 	)
 	if err != nil {
+		_ = sessionRouter.Close()
 		_ = inboundJournal.Close()
 		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
-		_ = sessionService.Close()
 		return fmt.Errorf("build Gateway intake: %w", err)
 	}
 	toolCatalog := platformtool.DefaultCatalog()
@@ -278,17 +294,17 @@ func run() error {
 		agentservice.WithKnowledgeProvider(knowledgeRouter),
 	)
 	if err != nil {
+		_ = sessionRouter.Close()
 		_ = gatewayIntake.Close()
 		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
-		_ = sessionService.Close()
 		return fmt.Errorf("build Agent revision compiler: %w", err)
 	}
 	runtime, err := agentservice.NewRuntimeWithCompilerServices(
 		selectedModel,
 		revisionCompiler,
-		sessionService,
+		sessionRouter,
 		sessionCoordinator,
 		idempotencyStore,
 		modelConfig.Stream,
@@ -296,11 +312,11 @@ func run() error {
 		agentrunner.WithArtifactService(artifactRouter),
 	)
 	if err != nil {
+		_ = sessionRouter.Close()
 		_ = gatewayIntake.Close()
 		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
-		_ = sessionService.Close()
 		return fmt.Errorf("create agent runtime: %w", err)
 	}
 	startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
@@ -320,7 +336,7 @@ func run() error {
 	backgroundProcessor, err := background.NewProcessor(
 		backgroundJobs,
 		controlPlaneRepository,
-		sessionService,
+		sessionRouter,
 		memoryRouter,
 		knowledgeRouter,
 		selectedModel,
@@ -556,6 +572,7 @@ func run() error {
 		web.WithReadinessCheck("artifact-router", artifactRouter.Ready),
 		web.WithReadinessCheck("knowledge-router", knowledgeRouter.Ready),
 		web.WithReadinessCheck("background-jobs", backgroundJobs.Ready),
+		web.WithReadinessCheck("session-router", sessionRouter.Ready),
 	}
 	if adminHandler != nil {
 		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))
