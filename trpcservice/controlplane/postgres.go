@@ -126,6 +126,38 @@ WHERE callback_key = $1`, callbackKey)
 	return result, nil
 }
 
+func (r *PostgresRepository) GetChannelBinding(
+	ctx context.Context,
+	tenantID string,
+	bindingID string,
+) (ChannelBinding, error) {
+	row := r.db.QueryRowContext(ctx, `
+SELECT channel_binding_id, tenant_id, app_id, channel_type, account_id,
+       callback_key, config, secret_ref, status, version, created_at, updated_at
+FROM channel_binding
+WHERE tenant_id = $1 AND channel_binding_id = $2`, tenantID, bindingID)
+	var result ChannelBinding
+	var configJSON []byte
+	if err := row.Scan(
+		&result.ID,
+		&result.TenantID,
+		&result.AppID,
+		&result.ChannelType,
+		&result.AccountID,
+		&result.CallbackKey,
+		&configJSON,
+		&result.SecretRef,
+		&result.Status,
+		&result.Version,
+		&result.CreatedAt,
+		&result.UpdatedAt,
+	); err != nil {
+		return ChannelBinding{}, mapNotFound("channel binding", err)
+	}
+	result.Config = json.RawMessage(configJSON)
+	return result, nil
+}
+
 func (r *PostgresRepository) ListBackendBindings(
 	ctx context.Context,
 	tenantID string,

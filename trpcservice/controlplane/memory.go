@@ -8,23 +8,25 @@ import (
 
 // MemoryRepository is an immutable local snapshot for tutorials and tests.
 type MemoryRepository struct {
-	mu        sync.RWMutex
-	closed    bool
-	tenants   map[string]Tenant
-	apps      map[string]AgentApp
-	revisions map[string]AgentRevision
-	channels  map[string]ChannelBinding
-	backends  []BackendBinding
+	mu         sync.RWMutex
+	closed     bool
+	tenants    map[string]Tenant
+	apps       map[string]AgentApp
+	revisions  map[string]AgentRevision
+	channels   map[string]ChannelBinding
+	channelIDs map[string]ChannelBinding
+	backends   []BackendBinding
 }
 
 // NewMemoryRepository builds a validated in-process snapshot.
 func NewMemoryRepository(data BootstrapData) *MemoryRepository {
 	repository := &MemoryRepository{
-		tenants:   make(map[string]Tenant),
-		apps:      make(map[string]AgentApp),
-		revisions: make(map[string]AgentRevision),
-		channels:  make(map[string]ChannelBinding),
-		backends:  append([]BackendBinding(nil), data.BackendBindings...),
+		tenants:    make(map[string]Tenant),
+		apps:       make(map[string]AgentApp),
+		revisions:  make(map[string]AgentRevision),
+		channels:   make(map[string]ChannelBinding),
+		channelIDs: make(map[string]ChannelBinding),
+		backends:   append([]BackendBinding(nil), data.BackendBindings...),
 	}
 	for _, tenant := range data.Tenants {
 		repository.tenants[tenant.ID] = cloneTenant(tenant)
@@ -37,8 +39,26 @@ func NewMemoryRepository(data BootstrapData) *MemoryRepository {
 	}
 	for _, binding := range data.ChannelBindings {
 		repository.channels[binding.CallbackKey] = cloneChannelBinding(binding)
+		repository.channelIDs[scopedKey(binding.TenantID, binding.ID)] = cloneChannelBinding(binding)
 	}
 	return repository
+}
+
+func (r *MemoryRepository) GetChannelBinding(
+	ctx context.Context,
+	tenantID string,
+	bindingID string,
+) (ChannelBinding, error) {
+	if err := r.check(ctx); err != nil {
+		return ChannelBinding{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	binding, ok := r.channelIDs[scopedKey(tenantID, bindingID)]
+	if !ok {
+		return ChannelBinding{}, ErrNotFound
+	}
+	return cloneChannelBinding(binding), nil
 }
 
 func (r *MemoryRepository) GetTenant(ctx context.Context, tenantID string) (Tenant, error) {

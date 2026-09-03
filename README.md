@@ -273,6 +273,8 @@ TRPC_AGENT_QUEUE_CLAIM_MIN_IDLE=30s
 
 Outbox Relay、Redis Streams pending reclaim 和 Worker 完成链路见 [异步执行链路](docs/getting-started.md#17-outbox-relayredis-streams-和-agent-worker)。
 
+Reply Sender、通道能力、长度切分、发送重试和回执见 [Reply Sender 和 Channel Adapter](docs/getting-started.md#18-reply-sender-和-channel-adapter)。
+
 停止服务：
 
 ```bash

@@ -2165,6 +2165,50 @@ AgentTask 携带 Gateway 事务生成的稳定 `request_id`，Runtime 通过 tRP
 
 `agent_run` 和 `outbound_message` 更新检查 fencing token。Worker 即使在完成后、ACK 前崩溃，接管 Worker 只会重放幂等结果并幂等写入同一个 outbound。
 
-## 18. 下一步
+## 18. Reply Sender 和 Channel Adapter
 
-下一阶段拆分进程角色并实现 Reply Sender：Gateway、Worker、Relay 和 Sender 可以独立启动；Sender 领取 `outbound_message`，按 Channel Adapter 发送、退避重试并记录 delivery receipt。
+Worker 不直接调用外部 IM API。它只在完成事务中写入 `outbound_message(status=pending)`，Reply Sender 独立领取：
+
+```text
+outbound_message(pending)
+→ FOR UPDATE SKIP LOCKED
+→ sending + locked_by + locked_until + attempt_count
+→ ControlPlane.GetChannelBinding
+→ ChannelRegistry.Get(channel_type)
+→ Adapter.Send
+→ sent + provider_message_id + sent_at
+```
+
+当前提供 HTTP Test Adapter，它不会发起网络请求，只记录 Delivery Receipt，用于验证完整链路。统一 Adapter 接口包含通道类型、发送方法和能力描述；后续企业微信与 Telegram 实现相同接口。
+
+Reply Sender 根据 `Capabilities.MaxTextRunes` 按 Unicode rune 切分长文本，避免按字节切坏中文或 emoji。Provider 错误可以通过 `DeliveryError` 标记 `Retryable` 和 `RetryAfter`。
+
+发送失败时：
+
+```text
+可重试 + 未超过 MaxAttempts
+→ outbound 退回 pending
+→ 设置 next_attempt_at
+
+不可重试或超过 MaxAttempts
+→ outbound=dead
+→ 保留错误类型和脱敏错误信息
+```
+
+最终异步闭环已经是：
+
+```text
+/inbound
+→ PostgreSQL Inbox/Outbox
+→ Redis Streams
+→ Agent Worker
+→ tRPC-Agent-Go Runner
+→ outbound_message
+→ Reply Sender
+→ Channel Adapter
+→ provider receipt
+```
+
+## 19. 下一步
+
+下一阶段拆分进程角色，让 Gateway、Relay、Worker 和 Reply Sender 可以作为独立进程与 Kubernetes Deployment 启动，而不是只能运行在一个 `all-in-one` 进程里。

@@ -16,6 +16,7 @@ type Repository interface {
 	GetAgentApp(ctx context.Context, tenantID string, appID string) (AgentApp, error)
 	GetRevision(ctx context.Context, tenantID string, revisionID string) (AgentRevision, error)
 	GetStableRevision(ctx context.Context, tenantID string, appID string) (AgentRevision, error)
+	GetChannelBinding(ctx context.Context, tenantID string, bindingID string) (ChannelBinding, error)
 	GetChannelBindingByCallbackKey(ctx context.Context, callbackKey string) (ChannelBinding, error)
 	ListBackendBindings(ctx context.Context, tenantID string, appID string) ([]BackendBinding, error)
 	Ready(ctx context.Context) error

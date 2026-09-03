@@ -453,6 +453,111 @@ WHERE request_id = $1 AND status <> 'completed'`, requestID, errorType, errorTex
 	return nil
 }
 
+func (j *PostgresJournal) ClaimOutbound(
+	ctx context.Context,
+	workerID string,
+	limit int,
+	lease time.Duration,
+) ([]OutboundItem, error) {
+	if workerID == "" || limit <= 0 || lease <= 0 {
+		return nil, fmt.Errorf("outbound worker, limit and lease are required")
+	}
+	rows, err := j.db.QueryContext(ctx, `
+WITH candidates AS (
+    SELECT outbound_id
+    FROM outbound_message
+    WHERE status IN ('pending', 'sending')
+      AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+      AND (locked_until IS NULL OR locked_until < now())
+    ORDER BY created_at
+    FOR UPDATE SKIP LOCKED
+    LIMIT $1
+)
+UPDATE outbound_message o
+SET status = 'sending', locked_by = $2,
+    locked_until = now() + $3::interval,
+    attempt_count = attempt_count + 1
+FROM candidates c
+WHERE o.outbound_id = c.outbound_id
+RETURNING o.outbound_id, o.request_id, o.tenant_id, o.channel_binding_id,
+          o.payload->>'text', o.attempt_count`,
+		limit, workerID, postgresInterval(lease))
+	if err != nil {
+		return nil, fmt.Errorf("claim outbound messages: %w", err)
+	}
+	defer rows.Close()
+	result := make([]OutboundItem, 0, limit)
+	for rows.Next() {
+		var item OutboundItem
+		if err := rows.Scan(
+			&item.ID,
+			&item.RequestID,
+			&item.TenantID,
+			&item.ChannelBindingID,
+			&item.Text,
+			&item.AttemptCount,
+		); err != nil {
+			return nil, fmt.Errorf("scan outbound message: %w", err)
+		}
+		result = append(result, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate outbound messages: %w", err)
+	}
+	return result, nil
+}
+
+func (j *PostgresJournal) MarkOutboundSent(
+	ctx context.Context,
+	outboundID string,
+	workerID string,
+	providerMessageID string,
+) error {
+	result, err := j.db.ExecContext(ctx, `
+UPDATE outbound_message
+SET status = 'sent', provider_message_id = $3, sent_at = now(),
+    locked_by = NULL, locked_until = NULL,
+    last_error_type = NULL, last_error_message = NULL
+WHERE outbound_id = $1 AND locked_by = $2 AND status = 'sending'`,
+		outboundID, workerID, providerMessageID)
+	if err != nil {
+		return fmt.Errorf("mark outbound sent: %w", err)
+	}
+	return requireOneRow(result, "outbound send ownership mismatch")
+}
+
+func (j *PostgresJournal) MarkOutboundFailed(
+	ctx context.Context,
+	outboundID string,
+	workerID string,
+	retryAt time.Time,
+	terminal bool,
+	cause error,
+) error {
+	status := "pending"
+	if terminal {
+		status = "dead"
+	}
+	errorType := "delivery"
+	errorText := ""
+	if cause != nil {
+		errorText = cause.Error()
+		if len(errorText) > 2048 {
+			errorText = errorText[:2048]
+		}
+	}
+	result, err := j.db.ExecContext(ctx, `
+UPDATE outbound_message
+SET status = $3, next_attempt_at = $4, locked_by = NULL,
+    locked_until = NULL, last_error_type = $5, last_error_message = $6
+WHERE outbound_id = $1 AND locked_by = $2 AND status = 'sending'`,
+		outboundID, workerID, status, retryAt, errorType, errorText)
+	if err != nil {
+		return fmt.Errorf("mark outbound failed: %w", err)
+	}
+	return requireOneRow(result, "outbound failure ownership mismatch")
+}
+
 func (j *PostgresJournal) Ready(ctx context.Context) error {
 	if j == nil || j.db == nil {
 		return ErrJournalClosed

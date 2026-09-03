@@ -51,6 +51,16 @@ type RunResult struct {
 	EventCount   int
 }
 
+// OutboundItem is one reply claimed for provider delivery.
+type OutboundItem struct {
+	ID               string
+	RequestID        string
+	TenantID         string
+	ChannelBindingID string
+	Text             string
+	AttemptCount     int
+}
+
 // Journal atomically creates inbound, run and queue-outbox records.
 type Journal interface {
 	Accept(ctx context.Context, request InboundRequest) (AcceptResult, error)
@@ -71,6 +81,26 @@ type Journal interface {
 	MarkRunRunning(ctx context.Context, requestID string, workerID string) error
 	CompleteRun(ctx context.Context, task workqueue.AgentTask, result RunResult) error
 	FailRun(ctx context.Context, requestID string, errorType string, cause error) error
+	ClaimOutbound(
+		ctx context.Context,
+		workerID string,
+		limit int,
+		lease time.Duration,
+	) ([]OutboundItem, error)
+	MarkOutboundSent(
+		ctx context.Context,
+		outboundID string,
+		workerID string,
+		providerMessageID string,
+	) error
+	MarkOutboundFailed(
+		ctx context.Context,
+		outboundID string,
+		workerID string,
+		retryAt time.Time,
+		terminal bool,
+		cause error,
+	) error
 	Ready(ctx context.Context) error
 	Close() error
 }

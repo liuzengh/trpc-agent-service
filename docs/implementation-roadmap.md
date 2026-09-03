@@ -19,9 +19,11 @@
 - PostgreSQL Outbox Relay 和 `FOR UPDATE SKIP LOCKED` claim；
 - Memory / Redis Streams Queue、Consumer Group 和 pending reclaim；
 - 异步 Agent Worker、稳定 request ID、run/outbound 持久化；
+- Channel Adapter Registry、HTTP Test Adapter 和 Reply Sender；
+- outbound claim、长度切分、Retry-After 和 provider receipt；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是进程角色拆分、Outbound Reply Sender 和 Channel Adapter 发送接口。
+接下来的最近里程碑是 Gateway/Relay/Worker/Reply Sender 进程角色拆分。
 
 ## 1. 建议目录
 

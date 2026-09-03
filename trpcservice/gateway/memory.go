@@ -36,6 +36,14 @@ type memoryRun struct {
 	errType  string
 }
 
+type memoryOutbound struct {
+	item        OutboundItem
+	status      string
+	lockedBy    string
+	lockedUntil time.Time
+	nextAttempt time.Time
+}
+
 // MemoryJournal is a process-local transactional model for tests and the
 // dependency-free tutorial.
 type MemoryJournal struct {
@@ -45,6 +53,7 @@ type MemoryJournal struct {
 	conversations map[string]*memoryConversation
 	outbox        map[string]*memoryQueueOutbox
 	runs          map[string]*memoryRun
+	outbound      map[string]*memoryOutbound
 }
 
 // NewMemoryJournal creates an empty journal.
@@ -54,6 +63,7 @@ func NewMemoryJournal() *MemoryJournal {
 		conversations: make(map[string]*memoryConversation),
 		outbox:        make(map[string]*memoryQueueOutbox),
 		runs:          make(map[string]*memoryRun),
+		outbound:      make(map[string]*memoryOutbound),
 	}
 }
 
@@ -259,6 +269,20 @@ func (j *MemoryJournal) CompleteRun(
 	}
 	run.status = "completed"
 	run.result = result
+	outboundID := stableID("out_", task.RequestID)
+	if j.outbound[outboundID] == nil {
+		j.outbound[outboundID] = &memoryOutbound{
+			item: OutboundItem{
+				ID:               outboundID,
+				RequestID:        task.RequestID,
+				TenantID:         task.Scope.TenantID,
+				ChannelBindingID: task.Scope.ChannelBindingID,
+				Text:             result.Reply,
+			},
+			status:      "pending",
+			nextAttempt: time.Now(),
+		}
+	}
 	return nil
 }
 
@@ -290,6 +314,93 @@ func (j *MemoryJournal) RunStatus(requestID string) (string, RunResult, bool) {
 		return "", RunResult{}, false
 	}
 	return run.status, run.result, true
+}
+
+func (j *MemoryJournal) ClaimOutbound(
+	ctx context.Context,
+	workerID string,
+	limit int,
+	lease time.Duration,
+) ([]OutboundItem, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, context.Cause(ctx)
+	}
+	if workerID == "" || limit <= 0 || lease <= 0 {
+		return nil, fmt.Errorf("outbound worker, limit and lease are required")
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	now := time.Now()
+	result := make([]OutboundItem, 0, limit)
+	for _, outbound := range j.outbound {
+		if len(result) >= limit {
+			break
+		}
+		if outbound.status == "sent" || outbound.status == "dead" ||
+			outbound.nextAttempt.After(now) ||
+			(outbound.lockedBy != "" && outbound.lockedUntil.After(now)) {
+			continue
+		}
+		outbound.status = "sending"
+		outbound.lockedBy = workerID
+		outbound.lockedUntil = now.Add(lease)
+		outbound.item.AttemptCount++
+		result = append(result, outbound.item)
+	}
+	return result, nil
+}
+
+func (j *MemoryJournal) MarkOutboundSent(
+	_ context.Context,
+	outboundID string,
+	workerID string,
+	_ string,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	outbound := j.outbound[outboundID]
+	if outbound == nil || outbound.lockedBy != workerID {
+		return fmt.Errorf("outbound ownership mismatch")
+	}
+	outbound.status = "sent"
+	outbound.lockedBy = ""
+	outbound.lockedUntil = time.Time{}
+	return nil
+}
+
+func (j *MemoryJournal) MarkOutboundFailed(
+	_ context.Context,
+	outboundID string,
+	workerID string,
+	retryAt time.Time,
+	terminal bool,
+	_ error,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	outbound := j.outbound[outboundID]
+	if outbound == nil || outbound.lockedBy != workerID {
+		return fmt.Errorf("outbound ownership mismatch")
+	}
+	if terminal {
+		outbound.status = "dead"
+	} else {
+		outbound.status = "pending"
+		outbound.nextAttempt = retryAt
+	}
+	outbound.lockedBy = ""
+	outbound.lockedUntil = time.Time{}
+	return nil
+}
+
+func (j *MemoryJournal) OutboundStatus(outboundID string) (string, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	outbound := j.outbound[outboundID]
+	if outbound == nil {
+		return "", false
+	}
+	return outbound.status, true
 }
 
 func (j *MemoryJournal) Ready(ctx context.Context) error {

@@ -14,11 +14,13 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/reply"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
@@ -209,6 +211,34 @@ func run() error {
 		_ = controlPlaneRepository.Close()
 		return fmt.Errorf("build Agent Worker: %w", err)
 	}
+	channelRegistry, err := channels.NewRegistry(channels.NewTestAdapter())
+	if err != nil {
+		_ = agentQueue.Close()
+		_ = runtime.Close()
+		_ = gatewayIntake.Close()
+		_ = controlPlaneRepository.Close()
+		return fmt.Errorf("build channel registry: %w", err)
+	}
+	replySender, err := reply.New(
+		inboundJournal,
+		controlPlaneRepository,
+		channelRegistry,
+		reply.Options{
+			WorkerID:     "sender-" + nodeID,
+			BatchSize:    100,
+			ClaimLease:   30 * time.Second,
+			PollInterval: 250 * time.Millisecond,
+			RetryDelay:   time.Second,
+			MaxAttempts:  5,
+		},
+	)
+	if err != nil {
+		_ = agentQueue.Close()
+		_ = runtime.Close()
+		_ = gatewayIntake.Close()
+		_ = controlPlaneRepository.Close()
+		return fmt.Errorf("build Reply Sender: %w", err)
+	}
 	fmt.Printf(
 		"model provider=%s name=%s stream=%t\n",
 		modelConfig.Provider,
@@ -296,6 +326,13 @@ func run() error {
 	})
 	group.Go(func() error {
 		err := agentWorker.Run(groupCtx)
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	})
+	group.Go(func() error {
+		err := replySender.Run(groupCtx)
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
