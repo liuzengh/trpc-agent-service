@@ -46,6 +46,17 @@ go run ./cmd/trpc-loadgen \
 
 输出成功/失败、吞吐、p50/p95/p99/max。它只测 Gateway 持久化 ACK；Runner 容量需要同时观察 Redis Stream lag 到 0 的时间。压测消息使用唯一 message ID，避免把幂等命中误当作真实吞吐。
 
+仓库还提供本地完整流水线基线脚本。它启动 PostgreSQL 和 Redis，使用 Mock Model 压测持久化 `/inbound`，并等待 Agent Run 与 Outbound 全部完成：
+
+```bash
+BENCHMARK_REQUESTS=1000 \
+BENCHMARK_CONCURRENCY=50 \
+BENCHMARK_SESSIONS=200 \
+  ./scripts/benchmark-local.sh
+```
+
+输出分为两部分：`trpc-loadgen` 给出 Gateway ACK 吞吐和延迟，`pipeline` 给出 Worker/Sender 排空时间与最终成功数。该结果只代表运行机器和 Mock Model，不可当作真实模型容量；正式报告还要加入模型供应商配额和真实响应耗时。
+
 ## 上线基线
 
 建议至少记录：硬件/Pod 配额、模型供应商限额、平均/分位 token、平均 Tool 数、Session 历史长度、Gateway 峰值、Worker active run、SQL/Redis QPS、队列最大 lag、GC pause 和成本。容量报告必须注明模型与后端版本，否则结果不可复现。

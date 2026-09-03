@@ -32,7 +32,7 @@
 | Secret 管理 | 已编码 | `env://` 和测试用 Static Store | Vault、KMS 或云 Secret Manager Adapter |
 | Docker Compose | 本地集成 | 依赖启动、镜像构建、非 root 运行 | 长时间稳定性验证 |
 | Kubernetes | 配置 | Deployment、HPA、PDB、NetworkPolicy YAML 校验 | 测试或生产集群部署 |
-| 容量与故障恢复 | 局部本地集成 | Worker 切换、Redis/PostgreSQL readiness 故障演练 | 正式压测报告、备份恢复和完整故障矩阵 |
+| 容量与故障恢复 | 本地集成 | Worker 切换、Redis/PostgreSQL readiness 故障演练、1000 请求 Mock 流水线基线 | 真实模型/多 Worker 压测、备份恢复和完整故障矩阵 |
 
 ## IM 能力边界
 
