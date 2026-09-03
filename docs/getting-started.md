@@ -139,6 +139,7 @@ TRPC_AGENT_MODEL_STREAM=true
 curl -sS -X POST http://127.0.0.1:8080/chat \
   -H 'Content-Type: application/json' \
   -d '{
+    "binding_key": "tutorial-http",
     "message_id": "tutorial-message-1",
     "user_id": "alice",
     "session_id": "demo",
@@ -176,6 +177,7 @@ curl -sS -X POST http://127.0.0.1:8080/chat \
 curl -sS -X POST http://127.0.0.1:8080/chat \
   -H 'Content-Type: application/json' \
   -d '{
+    "binding_key": "tutorial-http",
     "message_id": "tutorial-message-2",
     "user_id": "alice",
     "session_id": "demo",
@@ -207,6 +209,7 @@ TutorialModel 本身没有保存用户资料。它只检查 tRPC-Agent-Go 传给
 curl -sS -X POST http://127.0.0.1:8080/chat \
   -H 'Content-Type: application/json' \
   -d '{
+    "binding_key": "tutorial-http",
     "message_id": "tutorial-message-3",
     "user_id": "alice",
     "session_id": "another-session",
@@ -235,7 +238,7 @@ AppName + UserID + SessionID
 本示例固定使用：
 
 ```text
-AppName = tutorial-app
+AppName = t/tutorial-tenant/a/tutorial-app
 UserID = HTTP 请求中的 user_id
 SessionID = HTTP 请求中的 session_id
 ```
@@ -289,7 +292,9 @@ POST /chat
   ↓
 web.Handler.handleChat
   ↓
-agent.Runtime.ChatWithMessageID
+routing.Resolver.Resolve(binding_key)
+  ↓
+agent.Runtime.ChatWithScope
   ↓
 IdempotencyStore.Begin
   ↓
@@ -345,6 +350,7 @@ func main() {
 → 创建并探测 Session Coordinator
 → 读取 Idempotency 配置
 → 创建并探测 Idempotency Store
+→ 创建 Control Plane Route Resolver
 → 创建 Runtime
 → 创建 HTTP Handler
 → 启动 HTTP Server
@@ -568,10 +574,10 @@ runnerInstance := runner.NewRunner(
 
 `sessionService`、`coordinator` 和 `idempotencyStore` 都由外部 Factory 注入。三者分别负责会话存储、同 Session 串行和同消息去重，不能互相替代。
 
-`tutorialAppName` 固定为 `tutorial-app`。完整 Session Key 是：
+Runtime 不再使用固定 AppName。Route Resolver 根据 Channel Binding 构造内部 Storage Scope。完整 Session Key 是：
 
 ```text
-tutorial-app + user_id + session_id
+t/{tenant_id}/a/{app_id} + user_id + session_id
 ```
 
 `NewRuntime` 是默认 InMemory 的便捷函数，单元测试可以继续使用。正式启动路径使用：
@@ -588,13 +594,14 @@ BuildModel
 
 ### 6.9 一次 `ChatWithMessageID` 调用发生了什么
 
-HTTP 层最终调用 `Runtime.ChatWithMessageID`。它先进入幂等层；只有首次出现的 `message_id` 才会继续获取 Session Lease：
+HTTP 层先通过 `binding_key` 得到可信 Scope，再调用 `Runtime.ChatWithScope`。它先进入幂等层；只有首次出现的 `message_id` 才会继续获取 Session Lease：
 
 ```go
+scope, err := routeResolver.Resolve(ctx, bindingKey)
 begin, err := r.idempotency.Begin(ctx, idempotencyKey, fingerprint)
 
 lease, err := r.coordinator.Acquire(ctx, coordination.Key{
-    AppName:   tutorialAppName,
+    AppName:   scope.StorageScope,
     UserID:    userID,
     SessionID: sessionID,
 })
@@ -640,7 +647,7 @@ model.Message{
 锁的 Key 与 Session Key 一致：
 
 ```text
-tutorial-app + user_id + session_id
+t/{tenant_id}/a/{app_id} + user_id + session_id
 ```
 
 同一 Session 必须串行，不同 Session 可以并行。Coordinator 的保护范围覆盖 `runner.Run` 和整个 Event 消费过程，不会在 `runner.Run` 刚返回 channel 时就提前释放。第 11 节会继续拆解这条链路。
@@ -692,6 +699,7 @@ POST /chat
 
 ```json
 {
+  "binding_key": "tutorial-http",
   "message_id": "message-001",
   "user_id": "alice",
   "session_id": "demo",
@@ -708,7 +716,8 @@ POST /chat
 → 拒绝未知字段和多个 JSON 对象
 → 去除字符串首尾空格
 → 检查 message_id、user_id、session_id、message
-→ 调用 ChatService.ChatWithMessageID
+→ 根据 binding_key 反查 tenant/app/revision
+→ 调用 ChatService.ChatWithScope
 → 返回 chatResponse
 ```
 
@@ -716,13 +725,7 @@ HTTP 层只依赖一个小接口：
 
 ```go
 type ChatService interface {
-    ChatWithMessageID(
-        ctx context.Context,
-        messageID string,
-        userID string,
-        sessionID string,
-        text string,
-    ) (agent.ChatResult, error)
+    ChatWithScope(ctx context.Context, input agent.ChatInput) (agent.ChatResult, error)
 
     Ready(ctx context.Context) error
 }
@@ -1022,6 +1025,7 @@ runner.NewRunner(
 
 ```json
 {
+  "binding_key": "tutorial-http",
   "message_id": "redis-message-1",
   "user_id": "alice",
   "session_id": "redis-demo",
@@ -1204,7 +1208,7 @@ Runner processedEventCh
 下一次请求只要使用同一个：
 
 ```text
-tutorial-app + user_id + session_id
+t/{tenant_id}/a/{app_id} + user_id + session_id
 ```
 
 Runner 就会再次调用 Redis `GetSession`。这一次不再返回 `nil`，而是读取 Session 元数据、Event、State 和已有 Summary 等数据，恢复成新的 `session.Session` 对象。
@@ -1580,6 +1584,7 @@ HTTP / IM 消息
 
 ```json
 {
+  "binding_key": "tutorial-http",
   "message_id": "wecom-msg-10001",
   "user_id": "alice",
   "session_id": "demo",
@@ -1599,7 +1604,7 @@ HTTP / IM 消息
 幂等 Key 当前由四部分组成：
 
 ```text
-AppName + UserID + SessionID + MessageID
+StorageScope + ChannelBindingID + UserID + SessionID + MessageID
 ```
 
 因此同一个外部 ID 可以安全地出现在另一个 Session。进入多租户阶段后，还会在最外层加入 `tenant_id` 和 `channel`。
@@ -1943,20 +1948,69 @@ ListBackendBindings(tenant_id, app_id)
 
 PostgreSQL URL 不会写入启动日志。`/readyz` 除了检查 Runtime，还会调用 Repository `PingContext`；数据库断开后节点会退出就绪状态。
 
-## 14. 下一步
+## 14. Channel Binding 到租户 Runtime 的路由链路
 
-下一阶段把当前固定的：
-
-```text
-tutorial-app + user_id + session_id
-```
-
-改成可信租户运行作用域：
+HTTP Test Channel 现在要求 `binding_key`，不接受调用方直接指定 `tenant_id` 或 `app_id`：
 
 ```text
-t/{tenant_id}/a/{app_id}
-+ runtime_user_id
-+ session_id
+POST /chat(binding_key)
+→ ControlPlaneRepository.GetChannelBindingByCallbackKey
+→ 检查 binding.status
+→ GetTenant(binding.tenant_id)
+→ 检查 tenant.status
+→ GetAgentApp(binding.tenant_id, binding.app_id)
+→ GetStableRevision
+→ runtimecontext.NewScope
+→ Runtime.ChatWithScope
 ```
 
-HTTP Test Channel 将通过 `channel_binding` 解析 tenant/app，Runtime 不再相信请求直接传入的租户标识。Session、Coordinator 和 Idempotency Key 都会加入租户与应用边界。
+可信 Scope 包含：
+
+```text
+tenant_id
+app_id
+revision_id
+channel_type
+channel_binding_id
+storage_scope = t/{tenant_id}/a/{app_id}
+```
+
+`Scope.Validate` 会重新计算 Storage Scope。即使内部调用方构造：
+
+```text
+tenant_id = tenant-a
+storage_scope = t/tenant-b/a/app-b
+```
+
+Runtime 也会在接触 Idempotency、Coordinator 和 Session 之前拒绝请求。
+
+三个有状态边界现在分别使用：
+
+```text
+Session:
+  storage_scope + runtime_user_id + session_id
+
+Coordinator:
+  storage_scope + runtime_user_id + session_id
+
+Idempotency:
+  storage_scope + channel_binding_id + runtime_user_id + session_id + message_id
+```
+
+Runner 构造时仍然可以共享，但每次调用通过 tRPC-Agent-Go `agent.WithAppName(scope.StorageScope)` 覆盖 AppName。因此两个租户即使使用相同的 `user_id` 和 `session_id`，也会进入不同 Session。
+
+HTTP 响应会返回解析后的：
+
+```json
+{
+  "tenant_id": "tutorial-tenant",
+  "app_id": "tutorial-app",
+  "revision_id": "tutorial-revision-1"
+}
+```
+
+这些字段用于 Test Channel 调试。真实 IM Channel 不会允许回调请求覆盖它们。
+
+## 15. 下一步
+
+下一阶段是 Agent Revision Compiler：不再只用进程启动时创建的同一个 Agent，而是根据 `revision_id` 编译租户自己的 instruction、model、tool policy 和 knowledge/memory 配置，并按 revision 缓存不可变 Agent。

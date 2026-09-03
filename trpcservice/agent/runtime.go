@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -22,7 +24,8 @@ import (
 )
 
 const (
-	tutorialAppName            = "tutorial-app"
+	defaultRunnerAppName       = "trpc-agent-service"
+	readinessAppName           = "trpc-agent-service-readiness"
 	tutorialAgentName          = "tutorial-agent"
 	leaseReleaseTimeout        = 2 * time.Second
 	idempotencyFinalizeTimeout = 2 * time.Second
@@ -35,6 +38,18 @@ type ChatResult struct {
 	EventCount int
 	MessageID  string
 	Replayed   bool
+	TenantID   string
+	AppID      string
+	RevisionID string
+}
+
+// ChatInput is the trusted, transport-neutral input for one Agent turn.
+type ChatInput struct {
+	Scope     runtimecontext.Scope
+	MessageID string
+	UserID    string
+	SessionID string
+	Text      string
 }
 
 // Runtime owns the Agent Runner and its platform state services.
@@ -128,7 +143,7 @@ func NewRuntimeWithServices(
 
 	return &Runtime{
 		runner: runner.NewRunner(
-			tutorialAppName,
+			defaultRunnerAppName,
 			agentInstance,
 			runner.WithSessionService(sessionService),
 		),
@@ -155,7 +170,13 @@ func (r *Runtime) Chat(
 	sessionID string,
 	text string,
 ) (ChatResult, error) {
-	return r.ChatWithMessageID(ctx, uuid.NewString(), userID, sessionID, text)
+	return r.ChatWithScope(ctx, ChatInput{
+		Scope:     runtimecontext.TutorialScope(),
+		MessageID: uuid.NewString(),
+		UserID:    userID,
+		SessionID: sessionID,
+		Text:      text,
+	})
 }
 
 // ChatWithMessageID runs one idempotent user turn and drains the complete
@@ -166,6 +187,20 @@ func (r *Runtime) ChatWithMessageID(
 	userID string,
 	sessionID string,
 	text string,
+) (ChatResult, error) {
+	return r.ChatWithScope(ctx, ChatInput{
+		Scope:     runtimecontext.TutorialScope(),
+		MessageID: messageID,
+		UserID:    userID,
+		SessionID: sessionID,
+		Text:      text,
+	})
+}
+
+// ChatWithScope executes one turn inside a trusted tenant/app/channel scope.
+func (r *Runtime) ChatWithScope(
+	ctx context.Context,
+	input ChatInput,
 ) (ChatResult, error) {
 	if r == nil || r.runner == nil {
 		return ChatResult{}, errors.New("agent runtime is not initialized")
@@ -179,30 +214,34 @@ func (r *Runtime) ChatWithMessageID(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	messageID = strings.TrimSpace(messageID)
-	userID = strings.TrimSpace(userID)
-	sessionID = strings.TrimSpace(sessionID)
-	text = strings.TrimSpace(text)
-	if messageID == "" {
+	if err := input.Scope.Validate(); err != nil {
+		return ChatResult{}, fmt.Errorf("validate runtime scope: %w", err)
+	}
+	input.MessageID = strings.TrimSpace(input.MessageID)
+	input.UserID = strings.TrimSpace(input.UserID)
+	input.SessionID = strings.TrimSpace(input.SessionID)
+	input.Text = strings.TrimSpace(input.Text)
+	if input.MessageID == "" {
 		return ChatResult{}, errors.New("message_id is required")
 	}
-	if userID == "" {
+	if input.UserID == "" {
 		return ChatResult{}, errors.New("user_id is required")
 	}
-	if sessionID == "" {
+	if input.SessionID == "" {
 		return ChatResult{}, errors.New("session_id is required")
 	}
-	if text == "" {
+	if input.Text == "" {
 		return ChatResult{}, errors.New("message is required")
 	}
 
 	key := idempotency.Key{
-		AppName:   tutorialAppName,
-		UserID:    userID,
-		SessionID: sessionID,
-		MessageID: messageID,
+		AppName:          input.Scope.StorageScope,
+		UserID:           input.UserID,
+		SessionID:        input.SessionID,
+		MessageID:        input.MessageID,
+		ChannelBindingID: input.Scope.ChannelBindingID,
 	}
-	fingerprint := messageFingerprint(text)
+	fingerprint := messageFingerprint(input.Text)
 	for {
 		begin, err := r.idempotency.Begin(ctx, key, fingerprint)
 		if err != nil {
@@ -210,7 +249,7 @@ func (r *Runtime) ChatWithMessageID(
 		}
 		switch begin.Status {
 		case idempotency.BeginCompleted:
-			return chatResultFromIdempotency(messageID, begin.Result, true), nil
+			return chatResultFromIdempotency(input.Scope, input.MessageID, begin.Result, true), nil
 		case idempotency.BeginProcessing:
 			cached, waitErr := r.idempotency.Wait(ctx, key, fingerprint)
 			if errors.Is(waitErr, idempotency.ErrRetry) {
@@ -219,7 +258,7 @@ func (r *Runtime) ChatWithMessageID(
 			if waitErr != nil {
 				return ChatResult{}, fmt.Errorf("wait for idempotent chat: %w", waitErr)
 			}
-			return chatResultFromIdempotency(messageID, cached, true), nil
+			return chatResultFromIdempotency(input.Scope, input.MessageID, cached, true), nil
 		case idempotency.BeginStarted:
 			if begin.Attempt == nil {
 				return ChatResult{}, errors.New("idempotency store returned a nil attempt")
@@ -227,10 +266,7 @@ func (r *Runtime) ChatWithMessageID(
 			return r.executeIdempotentChat(
 				ctx,
 				begin.Attempt,
-				messageID,
-				userID,
-				sessionID,
-				text,
+				input,
 			)
 		default:
 			return ChatResult{}, fmt.Errorf(
@@ -244,16 +280,11 @@ func (r *Runtime) ChatWithMessageID(
 func (r *Runtime) executeIdempotentChat(
 	requestCtx context.Context,
 	attempt idempotency.Attempt,
-	messageID string,
-	userID string,
-	sessionID string,
-	text string,
+	input ChatInput,
 ) (ChatResult, error) {
 	result, runErr := r.runChatTurn(
 		attempt.Context(),
-		userID,
-		sessionID,
-		text,
+		input,
 	)
 	finalizeCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(requestCtx),
@@ -278,20 +309,21 @@ func (r *Runtime) executeIdempotentChat(
 	if err := attempt.Complete(finalizeCtx, cached); err != nil {
 		return ChatResult{}, fmt.Errorf("complete idempotent chat: %w", err)
 	}
-	result.MessageID = messageID
+	result.MessageID = input.MessageID
+	result.TenantID = input.Scope.TenantID
+	result.AppID = input.Scope.AppID
+	result.RevisionID = input.Scope.RevisionID
 	return result, nil
 }
 
 func (r *Runtime) runChatTurn(
 	ctx context.Context,
-	userID string,
-	sessionID string,
-	text string,
+	input ChatInput,
 ) (result ChatResult, err error) {
 	lease, err := r.coordinator.Acquire(ctx, coordination.Key{
-		AppName:   tutorialAppName,
-		UserID:    userID,
-		SessionID: sessionID,
+		AppName:   input.Scope.StorageScope,
+		UserID:    input.UserID,
+		SessionID: input.SessionID,
 	})
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("coordinate tutorial session: %w", err)
@@ -317,9 +349,10 @@ func (r *Runtime) runChatTurn(
 
 	events, err := r.runner.Run(
 		leaseCtx,
-		userID,
-		sessionID,
-		model.NewUserMessage(text),
+		input.UserID,
+		input.SessionID,
+		model.NewUserMessage(input.Text),
+		agentcore.WithAppName(input.Scope.StorageScope),
 	)
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("run tutorial agent: %w", err)
@@ -333,6 +366,7 @@ func (r *Runtime) runChatTurn(
 }
 
 func chatResultFromIdempotency(
+	scope runtimecontext.Scope,
 	messageID string,
 	result idempotency.Result,
 	replayed bool,
@@ -343,6 +377,9 @@ func chatResultFromIdempotency(
 		EventCount: result.EventCount,
 		MessageID:  messageID,
 		Replayed:   replayed,
+		TenantID:   scope.TenantID,
+		AppID:      scope.AppID,
+		RevisionID: scope.RevisionID,
 	}
 }
 
@@ -356,7 +393,7 @@ func (r *Runtime) Ready(ctx context.Context) error {
 	if r == nil || r.sessionService == nil {
 		return errors.New("session service is not initialized")
 	}
-	if _, err := r.sessionService.ListAppStates(ctx, tutorialAppName); err != nil {
+	if _, err := r.sessionService.ListAppStates(ctx, readinessAppName); err != nil {
 		return fmt.Errorf("session service is not ready: %w", err)
 	}
 	if r.coordinator == nil {

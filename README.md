@@ -167,7 +167,7 @@ cd trpc-agent-service
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/chat \
   -H 'Content-Type: application/json' \
-  -d '{"message_id":"readme-message-1","user_id":"alice","session_id":"demo","message":"我叫小明。"}'
+  -d '{"binding_key":"tutorial-http","message_id":"readme-message-1","user_id":"alice","session_id":"demo","message":"我叫小明。"}'
 ```
 
 保持相同的 `user_id` 和 `session_id` 再问：
@@ -175,7 +175,7 @@ curl -sS -X POST http://127.0.0.1:8080/chat \
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/chat \
   -H 'Content-Type: application/json' \
-  -d '{"message_id":"readme-message-2","user_id":"alice","session_id":"demo","message":"我叫什么？"}'
+  -d '{"binding_key":"tutorial-http","message_id":"readme-message-2","user_id":"alice","session_id":"demo","message":"我叫什么？"}'
 ```
 
 切换到真实 OpenAI-compatible 模型：

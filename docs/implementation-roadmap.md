@@ -11,9 +11,11 @@
 - PostgreSQL 16 migration；
 - tenant、agent app、revision、channel/backend binding 控制面模型；
 - InMemory / PostgreSQL Control Plane Repository；
+- Channel Binding → tenant/app/revision 可信路由；
+- tenant-scoped Session、Coordinator 和 Idempotency key；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是把 HTTP Test Channel 改为通过 Channel Binding 解析 `tenant_id/app_id`，并将 Session、Coordinator 和 Idempotency 全部切换到 tenant-scoped key。
+接下来的最近里程碑是 Agent Revision Compiler：根据发布 revision 动态构建租户 Agent、Model 和治理配置，并固定会话使用的 revision。
 
 ## 1. 建议目录
 

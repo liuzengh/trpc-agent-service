@@ -12,11 +12,13 @@ import (
 
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 )
 
 const (
 	defaultMaxBodyBytes = 32 << 10
 	maxMessageIDLength  = 256
+	maxBindingKeyLength = 128
 	maxUserIDLength     = 128
 	maxSessionIDLength  = 256
 	maxMessageLength    = 8 << 10
@@ -24,22 +26,17 @@ const (
 
 // ChatService is the small boundary between the HTTP layer and Agent runtime.
 type ChatService interface {
-	ChatWithMessageID(
-		ctx context.Context,
-		messageID string,
-		userID string,
-		sessionID string,
-		text string,
-	) (agentservice.ChatResult, error)
+	ChatWithScope(ctx context.Context, input agentservice.ChatInput) (agentservice.ChatResult, error)
 
 	Ready(ctx context.Context) error
 }
 
 // Handler serves the tutorial HTTP API.
 type Handler struct {
-	chatService ChatService
-	maxBodySize int64
-	readiness   []readinessCheck
+	chatService   ChatService
+	maxBodySize   int64
+	readiness     []readinessCheck
+	routeResolver routing.Resolver
 }
 
 type readinessCheck struct {
@@ -60,6 +57,14 @@ func WithReadinessCheck(name string, check func(context.Context) error) Option {
 			name:  strings.TrimSpace(name),
 			check: check,
 		})
+	}
+}
+
+// WithRouteResolver resolves an untrusted binding key into trusted tenant and
+// application identity.
+func WithRouteResolver(resolver routing.Resolver) Option {
+	return func(handler *Handler) {
+		handler.routeResolver = resolver
 	}
 }
 
@@ -109,10 +114,11 @@ func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 type chatRequest struct {
-	MessageID string `json:"message_id"`
-	UserID    string `json:"user_id"`
-	SessionID string `json:"session_id"`
-	Message   string `json:"message"`
+	BindingKey string `json:"binding_key"`
+	MessageID  string `json:"message_id"`
+	UserID     string `json:"user_id"`
+	SessionID  string `json:"session_id"`
+	Message    string `json:"message"`
 }
 
 type chatResponse struct {
@@ -123,6 +129,9 @@ type chatResponse struct {
 	SessionID  string `json:"session_id"`
 	EventCount int    `json:"event_count"`
 	Replayed   bool   `json:"replayed"`
+	TenantID   string `json:"tenant_id"`
+	AppID      string `json:"app_id"`
+	RevisionID string `json:"revision_id"`
 }
 
 type errorResponse struct {
@@ -148,12 +157,17 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "chat service is unavailable"})
 		return
 	}
+	if h.routeResolver == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "route resolver is unavailable"})
+		return
+	}
 
 	var request chatRequest
 	if err := decodeJSON(w, r, h.maxBodySize, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
+	request.BindingKey = strings.TrimSpace(request.BindingKey)
 	request.MessageID = strings.TrimSpace(request.MessageID)
 	request.UserID = strings.TrimSpace(request.UserID)
 	request.SessionID = strings.TrimSpace(request.SessionID)
@@ -163,13 +177,27 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.chatService.ChatWithMessageID(
-		r.Context(),
-		request.MessageID,
-		request.UserID,
-		request.SessionID,
-		request.Message,
-	)
+	scope, err := h.routeResolver.Resolve(r.Context(), request.BindingKey)
+	if err != nil {
+		if errors.Is(err, routing.ErrBindingNotFound) {
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "channel binding not found"})
+			return
+		}
+		if errors.Is(err, routing.ErrRouteDisabled) {
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "channel route is disabled"})
+			return
+		}
+		log.Printf("resolve chat route failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "route resolution failed"})
+		return
+	}
+	result, err := h.chatService.ChatWithScope(r.Context(), agentservice.ChatInput{
+		Scope:     scope,
+		MessageID: request.MessageID,
+		UserID:    request.UserID,
+		SessionID: request.SessionID,
+		Text:      request.Message,
+	})
 	if err != nil {
 		log.Printf("chat failed: %v", err)
 		if errors.Is(err, idempotency.ErrKeyConflict) {
@@ -190,11 +218,18 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		SessionID:  request.SessionID,
 		EventCount: result.EventCount,
 		Replayed:   result.Replayed,
+		TenantID:   result.TenantID,
+		AppID:      result.AppID,
+		RevisionID: result.RevisionID,
 	})
 }
 
 func validateChatRequest(request chatRequest) error {
 	switch {
+	case request.BindingKey == "":
+		return errors.New("binding_key is required")
+	case len(request.BindingKey) > maxBindingKeyLength:
+		return errors.New("binding_key is too long")
 	case request.MessageID == "":
 		return errors.New("message_id is required")
 	case len(request.MessageID) > maxMessageIDLength:

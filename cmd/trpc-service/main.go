@@ -18,6 +18,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 )
@@ -106,6 +107,14 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build control-plane repository: %w", err)
 	}
+	routeResolver, err := routing.NewControlPlaneResolver(controlPlaneRepository)
+	if err != nil {
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build route resolver: %w", err)
+	}
 	runtime, err := agentservice.NewRuntimeWithServices(
 		selectedModel,
 		sessionService,
@@ -160,6 +169,7 @@ func run() error {
 		Addr: listenAddr,
 		Handler: web.NewHandler(
 			runtime,
+			web.WithRouteResolver(routeResolver),
 			web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
 		),
 		ReadHeaderTimeout: 5 * time.Second,

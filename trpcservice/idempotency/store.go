@@ -23,10 +23,11 @@ var (
 
 // Key scopes a message ID to one application, user and Session.
 type Key struct {
-	AppName   string
-	UserID    string
-	SessionID string
-	MessageID string
+	AppName          string
+	UserID           string
+	SessionID        string
+	MessageID        string
+	ChannelBindingID string
 }
 
 // Validate rejects incomplete idempotency keys.
@@ -42,6 +43,9 @@ func (k Key) Validate() error {
 	}
 	if strings.TrimSpace(k.MessageID) == "" {
 		return fmt.Errorf("idempotency message ID is required")
+	}
+	if strings.TrimSpace(k.ChannelBindingID) == "" {
+		return fmt.Errorf("idempotency channel binding ID is required")
 	}
 	return nil
 }

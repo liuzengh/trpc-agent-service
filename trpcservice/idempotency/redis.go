@@ -245,11 +245,12 @@ func (s *RedisStore) newAttempt(
 
 func (s *RedisStore) redisKey(key Key) string {
 	digestInput := fmt.Sprintf(
-		"%d:%s|%d:%s|%d:%s|%d:%s",
+		"%d:%s|%d:%s|%d:%s|%d:%s|%d:%s",
 		len(key.AppName), key.AppName,
 		len(key.UserID), key.UserID,
 		len(key.SessionID), key.SessionID,
 		len(key.MessageID), key.MessageID,
+		len(key.ChannelBindingID), key.ChannelBindingID,
 	)
 	digest := sha256.Sum256([]byte(digestInput))
 	return s.keyPrefix + ":idempotency:message:" + hex.EncodeToString(digest[:])

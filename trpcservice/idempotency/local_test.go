@@ -139,9 +139,10 @@ func TestLocalStoreCloseCancelsAttemptAndWaiter(t *testing.T) {
 
 func testKey(messageID string) Key {
 	return Key{
-		AppName:   "tutorial-app",
-		UserID:    "alice",
-		SessionID: "session",
-		MessageID: messageID,
+		AppName:          "tutorial-app",
+		UserID:           "alice",
+		SessionID:        "session",
+		MessageID:        messageID,
+		ChannelBindingID: "binding",
 	}
 }
