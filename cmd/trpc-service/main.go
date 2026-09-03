@@ -35,6 +35,7 @@ import (
 	platformtelemetry "github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/toolexec"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
@@ -221,6 +222,18 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build background job repository: %w", err)
 	}
+	toolExecutionJournal, err := toolexec.NewForControlPlane(controlPlaneRepository)
+	if err != nil {
+		_ = backgroundJobs.Close()
+		_ = approvalRepository.Close()
+		_ = auditWriter.Close()
+		_ = quotaGuard.Close()
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build tool execution journal: %w", err)
+	}
 	secretStore := secret.EnvStore{}
 	sessionRouter, err := platformstorage.NewSessionRouter(
 		controlPlaneRepository,
@@ -311,6 +324,7 @@ func run() error {
 		agentservice.WithAuditWriter(auditWriter),
 		agentservice.WithApprovalRepository(approvalRepository),
 		agentservice.WithKnowledgeProvider(knowledgeRouter),
+		agentservice.WithToolExecutionJournal(toolExecutionJournal),
 	)
 	if err != nil {
 		_ = sessionRouter.Close()
@@ -537,6 +551,11 @@ func run() error {
 		fmt.Printf("Gateway HTTP server listening on %s\n", listenAddr)
 	}
 	defer func() {
+		if err := toolExecutionJournal.Close(); err != nil {
+			log.Printf("close tool execution journal: %v", err)
+		}
+	}()
+	defer func() {
 		if err := quotaGuard.Close(); err != nil {
 			log.Printf("close quota guard: %v", err)
 		}
@@ -607,6 +626,7 @@ func run() error {
 		web.WithReadinessCheck("background-jobs", backgroundJobs.Ready),
 		web.WithReadinessCheck("session-router", sessionRouter.Ready),
 		web.WithReadinessCheck("quota", quotaGuard.Ready),
+		web.WithReadinessCheck("tool-execution", toolExecutionJournal.Ready),
 	}
 	if adminHandler != nil {
 		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))

@@ -71,6 +71,8 @@ func (r *SessionRouter) CreateSession(
 	state session.StateMap,
 	opts ...session.Option,
 ) (*session.Session, error) {
+	ctx, span := startStorageSpan(ctx, "session.create", key.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return nil, err
@@ -83,6 +85,8 @@ func (r *SessionRouter) GetSession(
 	key session.Key,
 	opts ...session.Option,
 ) (*session.Session, error) {
+	ctx, span := startStorageSpan(ctx, "session.get", key.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return nil, err
@@ -107,6 +111,8 @@ func (r *SessionRouter) DeleteSession(
 	key session.Key,
 	opts ...session.Option,
 ) error {
+	ctx, span := startStorageSpan(ctx, "session.delete", key.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return err
@@ -182,6 +188,8 @@ func (r *SessionRouter) UpdateSessionState(
 	key session.Key,
 	state session.StateMap,
 ) error {
+	ctx, span := startStorageSpan(ctx, "session.state.update", key.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return err
@@ -198,6 +206,8 @@ func (r *SessionRouter) AppendEvent(
 	if sess == nil {
 		return session.ErrNilSession
 	}
+	ctx, span := startStorageSpan(ctx, "session.event.append", sess.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, sess.AppName)
 	if err != nil {
 		return err
@@ -214,6 +224,8 @@ func (r *SessionRouter) CreateSessionSummary(
 	if sess == nil {
 		return session.ErrNilSession
 	}
+	ctx, span := startStorageSpan(ctx, "session.summary.create", sess.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, sess.AppName)
 	if err != nil {
 		return err

@@ -356,6 +356,35 @@ RETURNING a.app_id, a.tenant_id, a.name, a.description, a.status,
 	return app, err
 }
 
+func (r *PostgresRepository) UpdateRolloutPolicy(
+	ctx context.Context,
+	tenantID string,
+	appID string,
+	rolloutPolicy []byte,
+	expectedVersion int64,
+) (AgentApp, error) {
+	result, err := r.db.ExecContext(ctx, `
+UPDATE agent_app
+SET rollout_policy=$3::jsonb,version=version+1,updated_at=now()
+WHERE tenant_id=$1 AND app_id=$2 AND version=$4`,
+		tenantID, appID, string(rolloutPolicy), expectedVersion,
+	)
+	if err != nil {
+		return AgentApp{}, fmt.Errorf("update rollout policy: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return AgentApp{}, err
+	}
+	if rows != 1 {
+		if _, err := r.GetAgentApp(ctx, tenantID, appID); errors.Is(err, ErrNotFound) {
+			return AgentApp{}, ErrNotFound
+		}
+		return AgentApp{}, ErrConflict
+	}
+	return r.GetAgentApp(ctx, tenantID, appID)
+}
+
 func (r *PostgresRepository) CreateChannelBinding(
 	ctx context.Context,
 	binding ChannelBinding,

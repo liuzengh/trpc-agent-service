@@ -2,7 +2,7 @@
 
 ## 1. 通道抽象
 
-当前代码已实现统一 `Adapter`、`CallbackAdapter`、Channel Registry、企业微信 Adapter、Telegram Adapter 和 HTTP Test Adapter。后续章节中的接口设计已经由 `trpcservice/channels` 落地；图片、文件、卡片和审批消息仍将在 Artifact/治理阶段继续扩展。
+当前代码已实现统一 `Adapter`、`CallbackAdapter`、Channel Registry、企业微信 Adapter、Telegram Adapter 和 HTTP Test Adapter。文本审批命令已接入 durable approval；图片/文件会规范化 provider media ID，但受控下载与病毒扫描仍应作为独立 Artifact Job 按需启用。
 
 OpenClaw 的 `Channel` 只有 `ID()` 和 `Run(ctx)`，适合示例和进程内组合。平台需要更明确的入站、回复和能力模型：
 
@@ -118,6 +118,8 @@ Agent 通常无法在 callback 的短处理窗口内完成，因此不把长时�
 ### 消息类型
 
 文本直接进入 Runner。图片、语音和文件先下载到隔离临时目录，完成病毒扫描后转存 Artifact。位置、链接和引用消息转成结构化内容。无法解析的消息返回通道级提示，并记录 `unsupported_message_type`。
+
+默认安全模式不自动下载：企业微信 image/file/voice/video 与 Telegram photo/document 会转换为包含 media/file ID、文件名、MIME/caption 的占位文本并可靠入库，不直接访问 callback 中的 URL。启用多模态处理时，必须由独立 downloader 使用 provider API 获取文件，完成大小/MIME/病毒扫描后再保存到 Artifact Router。
 
 ## 4. 微信公众号和微信客服
 

@@ -16,6 +16,7 @@
 | [implementation-roadmap.md](implementation-roadmap.md) | 代码模块、迭代顺序、测试策略和验收映射 |
 | [deployment.md](deployment.md) | Docker、Kubernetes、可观测栈、灰度、备份与告警 |
 | [capacity.md](capacity.md) | Worker/Token/Redis/SQL 容量公式和压测工具 |
+| [acceptance.md](acceptance.md) | README 验收项到代码、测试和命令的最终映射 |
 
 ## 推荐阅读顺序
 

@@ -13,7 +13,7 @@ func TraceParent(ctx context.Context) string {
 	return carrier.Get("traceparent")
 }
 
-func contextWithTraceParent(ctx context.Context, traceParent string) context.Context {
+func ContextWithTraceParent(ctx context.Context, traceParent string) context.Context {
 	carrier := propagation.MapCarrier{}
 	if traceParent != "" {
 		carrier.Set("traceparent", traceParent)

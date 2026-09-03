@@ -337,6 +337,10 @@ Admin 支持多 Principal RBAC；Gateway/Worker 支持 Local/Redis 租户限流�
 
 生产交付包含非 root Docker 镜像、独立 migration/loadgen、完整本地可观测栈，以及 Kubernetes 六角色 Deployment/HPA/PDB/NetworkPolicy。详见 [生产部署与可观测栈](docs/getting-started.md#32-生产部署与可观测栈)、[部署文档](docs/deployment.md) 和 [容量评估](docs/capacity.md)。
 
+灰度 Revision、Model Guardrail Callbacks、Tool Execution Journal、Storage/Reply trace 和媒体安全边界见 [最终链路加固](docs/getting-started.md#33-最终链路加固)。完整本地多进程验收执行 `./scripts/e2e-multiprocess.sh`。
+
+逐条验收映射见 [最终验收文档](docs/acceptance.md)。
+
 停止服务：
 
 ```bash

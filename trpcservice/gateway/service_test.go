@@ -78,3 +78,44 @@ func TestIntakeEnforcesTenantRateLimit(t *testing.T) {
 		t.Fatalf("rate error=%v", err)
 	}
 }
+
+func TestIntakePinsCanaryRevisionPerConversation(t *testing.T) {
+	data := controlplane.DefaultBootstrapData()
+	canary := data.Revisions[0]
+	canary.ID = "tutorial-canary"
+	canary.RevisionNo = 2
+	canary.Checksum = controlplane.RevisionChecksum(canary)
+	data.Revisions = append(data.Revisions, canary)
+	data.Apps[0].RolloutPolicy = json.RawMessage(`{
+        "canary_revision_id":"tutorial-canary","canary_percent":100
+    }`)
+	repository := controlplane.NewMemoryRepository(data)
+	resolver, _ := routing.NewControlPlaneResolver(repository)
+	journal := NewMemoryJournal()
+	intake, _ := NewIntake(resolver, journal)
+	t.Cleanup(func() {
+		_ = intake.Close()
+		_ = repository.Close()
+	})
+	first, err := intake.Accept(context.Background(), IntakeRequest{
+		BindingKey: "tutorial-http", ExternalMessageID: "canary-1",
+		UserID: "alice", SessionID: "pinned", ChatType: "direct", Text: "first",
+	})
+	if err != nil || first.RevisionID != canary.ID {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	_, err = repository.UpdateRolloutPolicy(
+		context.Background(), "tutorial-tenant", "tutorial-app",
+		json.RawMessage(`{"canary_percent":0}`), 1,
+	)
+	if err != nil {
+		t.Fatalf("disable canary: %v", err)
+	}
+	second, err := intake.Accept(context.Background(), IntakeRequest{
+		BindingKey: "tutorial-http", ExternalMessageID: "canary-2",
+		UserID: "alice", SessionID: "pinned", ChatType: "direct", Text: "second",
+	})
+	if err != nil || second.RevisionID != canary.ID {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+}

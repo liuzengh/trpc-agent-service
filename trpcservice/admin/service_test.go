@@ -53,6 +53,14 @@ func TestAdminCreatesAndPublishesRevision(t *testing.T) {
 	); !errors.Is(err, controlplane.ErrConflict) {
 		t.Fatalf("stale publish error=%v", err)
 	}
+	rolled, err := service.UpdateRolloutPolicy(
+		context.Background(), tenant.ID, app.ID,
+		json.RawMessage(`{"canary_revision_id":"revision-1","canary_percent":10,"salt":"v1"}`),
+		published.Version,
+	)
+	if err != nil || rolled.Version != 3 {
+		t.Fatalf("rollout=%+v err=%v", rolled, err)
+	}
 }
 
 func TestAdminRejectsUnknownTool(t *testing.T) {

@@ -13,6 +13,8 @@
 5. Summary 和 Memory 都不能越过尚未提交的 Event，也不能用旧水位覆盖新结果。
 6. 产生外部副作用的 Tool 必须具备业务幂等键或补偿流程。
 
+当前可执行边界包括 PostgreSQL Inbox/Run/Outbox、Redis Streams、Tenant Session Router、Durable Background Job、Tool Approval/Execution Journal 和 Backend Migration。文中自定义 SQL Session DDL 是可选扩展；仓库默认复用 tRPC-Agent-Go Redis/PostgreSQL adapter。
+
 ## 2. 同一 Session 并发写入
 
 Redis、MySQL 和 PostgreSQL Session 适配器可以保证单次 `AppendEvent` 内部原子，但两个 Runner 仍可能交错执行。例如 A、B 两条用户消息几乎同时到达，两个 Worker 都先读取旧 Session，再分别调用模型。即使数据库最终按顺序写入，B 的模型上下文也没有包含 A 的回答。
@@ -55,7 +57,7 @@ terminal_event_id
 
 自定义 SQL Session Service 在事务中锁定 Session 行，分配 `event_seq`，插入 Event，再合并 StateDelta。Redis Service 使用 Lua 将 Event 和 StateDelta 一次提交。禁止先更新 state、后写 Event，否则发生中断时无法解释状态来源。
 
-Summary Job 的 payload 不携带完整 Session 副本，只保存 Session Key、`filter_key` 和目标 `high_watermark`。Job Worker 收到任务后重新读取已提交 Session，最多总结到该水位。写入时使用条件更新：
+Summary Job 的 payload 不携带完整 Session 副本，只保存 Session Key 和 `turn_seq`。Job Worker 重新读取已提交 Session，tRPC-Agent-Go Summary boundary 记录实际 cutoff；Job 以 `conversation_id:turn_seq` 去重。
 
 ```sql
 INSERT INTO session_summary (..., high_watermark)
@@ -77,9 +79,9 @@ WHERE session_summary.high_watermark <= EXCLUDED.high_watermark;
 
 1. 读取 Session 和 `memory_high_watermark`；
 2. 取出上次水位之后、目标水位之前的用户和 assistant 消息；
-3. 调用 `memory/extractor.MemoryExtractor` 生成 add、update、delete 操作；
+3. 调用 `memory/extractor.MemoryExtractor` 生成操作；自动路径只开放 canonical-ID 幂等的 add；
 4. 读取现有 Memory 做去重和冲突判断；
-5. 执行幂等 Memory 操作；
+5. 执行幂等 Memory Add；用户主动 Update/Delete/Clear 仍走权限和审批保护的 Memory Tool；
 6. 在所有操作成功后推进 `memory_high_watermark`。
 
 框架内置 auto-memory worker 使用进程内 channel，适合单进程应用，不承担生产任务持久化。平台自己的任务队列需要支持至少一次投递，因此 Memory 操作和水位更新都必须可重试。
@@ -133,17 +135,11 @@ Runner 内部的 Event 去重只覆盖一次运行中的重复持久化，不应
 
 ## 8. Redis 到 SQL 的迁移
 
-Session 后端迁移采用以下状态机：
+当前 Session/Memory/Knowledge 后端迁移采用以下状态机：
 
 ```text
-PREPARE
-  → DUAL_WRITE
-  → BACKFILL
-  → VERIFY
-  → READ_NEW_WRITE_BOTH
-  → CUTOVER
-  → DRAIN
-  → CLEANUP
+planned → dual_write → backfill → verify → cutover → completed
+                         ↘ rollback → rolled_back
 ```
 
 具体步骤：
@@ -157,7 +153,7 @@ PREPARE
 7. 观察错误率和数据差异后停止旧端写入；
 8. 过保留期后清理 Redis 数据。
 
-双写不能放在两个互不相关的 goroutine 中。主写成功、次写失败时记录 repair outbox，由后台修复；切读前 repair backlog 必须为零或低于明确阈值。
+双写在同一调用链顺序执行。主写成功、次写失败时返回可重试错误并增加 `repair_backlog`；Durable Backfill/Verify Job 修复并校验，切读前 verification 必须通过。`cutover` 期间目标读、目标→源反向双写，保留快速回滚能力。
 
 ## 9. 本地向量库到远端向量库
 

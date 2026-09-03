@@ -287,6 +287,7 @@ func (j *MemoryJournal) CompleteRun(
 				ChannelBindingID: task.Scope.ChannelBindingID,
 				Text:             result.Reply,
 				ReplyTarget:      task.ReplyTarget,
+				TraceParent:      result.TraceParent,
 			},
 			status:      "pending",
 			nextAttempt: time.Now(),

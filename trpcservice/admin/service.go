@@ -2,12 +2,14 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -395,6 +397,9 @@ func (s *Service) CreateRevision(
 	if err := platformstorage.ValidateRevisionKnowledgeConfig(revision.KnowledgeConfig); err != nil {
 		return controlplane.AgentRevision{}, invalidf("knowledge_config: %v", err)
 	}
+	if _, err := governance.BuildModelCallbacks(revision.GuardrailConfig); err != nil {
+		return controlplane.AgentRevision{}, invalidf("guardrail_config: %v", err)
+	}
 	revision.Checksum = controlplane.RevisionChecksum(revision)
 	revision.CreatedAt = time.Now().UTC()
 	if err := s.repository.CreateRevision(ctx, revision); err != nil {
@@ -426,6 +431,59 @@ func (s *Service) PublishRevision(
 	if err := s.record(ctx, tenantID, "admin_revision_published", map[string]any{
 		"app_id": appID, "revision_id": revisionID,
 		"previous_version": expectedVersion, "version": app.Version,
+	}); err != nil {
+		return controlplane.AgentApp{}, err
+	}
+	return app, nil
+}
+
+func (s *Service) UpdateRolloutPolicy(
+	ctx context.Context,
+	tenantID string,
+	appID string,
+	policy json.RawMessage,
+	expectedVersion int64,
+) (controlplane.AgentApp, error) {
+	if expectedVersion <= 0 {
+		return controlplane.AgentApp{}, invalidf("expected app version must be positive")
+	}
+	if err := normalizeJSON(&policy); err != nil {
+		return controlplane.AgentApp{}, invalidf("rollout policy: %v", err)
+	}
+	var config struct {
+		Mode             string `json:"mode"`
+		CanaryRevisionID string `json:"canary_revision_id"`
+		CanaryPercent    int    `json:"canary_percent"`
+		Salt             string `json:"salt"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(policy))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil ||
+		decoder.Decode(&struct{}{}) != io.EOF ||
+		config.CanaryPercent < 0 || config.CanaryPercent > 100 {
+		return controlplane.AgentApp{}, invalidf("rollout policy is invalid")
+	}
+	if config.CanaryPercent > 0 {
+		if config.CanaryRevisionID == "" {
+			return controlplane.AgentApp{}, invalidf("canary_revision_id is required")
+		}
+		revision, err := s.repository.GetRevision(ctx, tenantID, config.CanaryRevisionID)
+		if err != nil {
+			return controlplane.AgentApp{}, err
+		}
+		if revision.AppID != appID {
+			return controlplane.AgentApp{}, invalidf("canary revision does not belong to app")
+		}
+	}
+	app, err := s.repository.UpdateRolloutPolicy(
+		ctx, tenantID, appID, policy, expectedVersion,
+	)
+	if err != nil {
+		return controlplane.AgentApp{}, err
+	}
+	if err := s.record(ctx, tenantID, "admin_rollout_policy_updated", map[string]any{
+		"app_id": appID, "canary_revision_id": config.CanaryRevisionID,
+		"canary_percent": config.CanaryPercent, "version": app.Version,
 	}); err != nil {
 		return controlplane.AgentApp{}, err
 	}

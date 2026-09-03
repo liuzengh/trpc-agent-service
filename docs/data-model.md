@@ -12,6 +12,18 @@
 
 以下 DDL 是最小逻辑模型，省略了组织成员、RBAC、计费明细和知识文档分片等扩展表。
 
+当前仓库的可执行 schema 由 `trpcservice/database/migrations/001..009` 管理，实际包含：
+
+```text
+tenant / agent_app / agent_revision
+backend_binding / backend_migration
+channel_binding / external_identity / conversation
+inbound_message / agent_run / outbound_message / queue_outbox
+tool_approval / tool_execution / background_job / audit_log
+```
+
+Session/State/Event/Summary、Memory、向量和对象内容由租户选择的 tRPC-Agent-Go backend 管理；Control DB 保存消息、运行、审批、迁移、任务和审计真相。
+
 ## 2. 租户和 Agent App
 
 ```sql
@@ -79,13 +91,13 @@ CREATE TABLE backend_binding (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX idx_backend_binding_app
+CREATE UNIQUE INDEX idx_backend_binding_active_app
     ON backend_binding (tenant_id, app_id, resource_type)
-    WHERE app_id IS NOT NULL;
+    WHERE app_id IS NOT NULL AND migration_state = 'active';
 
-CREATE UNIQUE INDEX idx_backend_binding_tenant_default
+CREATE UNIQUE INDEX idx_backend_binding_active_tenant_default
     ON backend_binding (tenant_id, resource_type)
-    WHERE app_id IS NULL;
+    WHERE app_id IS NULL AND migration_state = 'active';
 
 CREATE TABLE channel_binding (
     channel_binding_id  VARCHAR(64) PRIMARY KEY,
@@ -295,9 +307,80 @@ CREATE TABLE tool_execution (
 );
 ```
 
-Artifact 的内容放对象存储，SQL 只保存版本和索引。版本号应在 SQL 事务中分配，避免多个 Worker 同时保存同名文件时算出相同版本。
+Artifact 内容放对象存储。当前实现使用进程 mutex，并在 PostgreSQL 控制面模式下使用 session-level advisory lock 覆盖多节点的 list-version + put 临界区；如果未来允许绕过 Runner 直接大规模并发上传，可再增加独立 artifact metadata/version allocator。
 
-## 7. Outbox 和审计
+## 7. 审批、工具执行、后台任务和迁移
+
+```sql
+CREATE TABLE tool_approval (
+    approval_id          VARCHAR(64) PRIMARY KEY,
+    tenant_id            VARCHAR(64) NOT NULL,
+    channel_binding_id   VARCHAR(64) NOT NULL,
+    request_id           VARCHAR(128) NOT NULL,
+    user_id              VARCHAR(512) NOT NULL,
+    session_id           VARCHAR(512) NOT NULL,
+    tool_call_id         VARCHAR(255) NOT NULL,
+    tool_name            VARCHAR(255) NOT NULL,
+    arguments_hash       VARCHAR(64) NOT NULL,
+    status               VARCHAR(32) NOT NULL,
+    decision_message_id  VARCHAR(512),
+    expires_at           TIMESTAMPTZ NOT NULL,
+    decided_at           TIMESTAMPTZ,
+    resumed_at           TIMESTAMPTZ,
+    UNIQUE (tenant_id, request_id, tool_call_id)
+);
+
+CREATE TABLE tool_execution (
+    execution_id     VARCHAR(64) PRIMARY KEY,
+    tenant_id        VARCHAR(64) NOT NULL,
+    request_id       VARCHAR(128) NOT NULL,
+    revision_id      VARCHAR(64) NOT NULL,
+    tool_call_id     VARCHAR(255) NOT NULL,
+    tool_name        VARCHAR(255) NOT NULL,
+    arguments_hash   VARCHAR(64) NOT NULL,
+    status           VARCHAR(32) NOT NULL,
+    result_hash      VARCHAR(64),
+    error_type       VARCHAR(128),
+    started_at       TIMESTAMPTZ NOT NULL,
+    completed_at     TIMESTAMPTZ,
+    UNIQUE (request_id, tool_call_id)
+);
+
+CREATE TABLE background_job (
+    job_id            VARCHAR(64) PRIMARY KEY,
+    tenant_id         VARCHAR(64) NOT NULL,
+    app_id            VARCHAR(64) NOT NULL,
+    revision_id       VARCHAR(64) NOT NULL,
+    job_type          VARCHAR(64) NOT NULL,
+    dedupe_key        VARCHAR(512) NOT NULL,
+    payload           JSONB NOT NULL,
+    status            VARCHAR(32) NOT NULL,
+    attempt_count     INT NOT NULL,
+    max_attempts      INT NOT NULL,
+    next_attempt_at   TIMESTAMPTZ NOT NULL,
+    locked_by         VARCHAR(128),
+    locked_until      TIMESTAMPTZ,
+    trace_parent      VARCHAR(128),
+    last_error        TEXT,
+    UNIQUE (tenant_id, job_type, dedupe_key)
+);
+
+CREATE TABLE backend_migration (
+    migration_id       VARCHAR(64) PRIMARY KEY,
+    tenant_id          VARCHAR(64) NOT NULL,
+    app_id             VARCHAR(64),
+    resource_type      VARCHAR(64) NOT NULL,
+    source_binding_id  VARCHAR(64) NOT NULL,
+    target_binding_id  VARCHAR(64) NOT NULL,
+    state              VARCHAR(32) NOT NULL,
+    checkpoint         JSONB NOT NULL,
+    verification       JSONB NOT NULL,
+    repair_backlog     BIGINT NOT NULL,
+    version            BIGINT NOT NULL
+);
+```
+
+## 8. Outbox 和审计
 
 ```sql
 CREATE TABLE outbox_event (
@@ -349,7 +432,7 @@ CREATE INDEX idx_audit_trace
 
 审计日志应按月分区并设置租户级保留期。`details` 只保存脱敏后的结构化信息；原始 prompt、工具参数和工具结果不直接写入该表。
 
-## 8. 删除和保留策略
+## 9. 删除和保留策略
 
 租户删除采用两阶段流程：先冻结写入和撤销密钥，再异步清理 Session、Memory、Knowledge、Artifact 和审计数据。每个后端产生删除清单和校验结果，完成前租户状态保持 `deleting`。
 

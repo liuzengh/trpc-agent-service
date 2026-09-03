@@ -8,6 +8,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -70,7 +71,15 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 	if input.BindingKey == "" {
 		return AcceptResult{}, fmt.Errorf("binding key is required")
 	}
-	scope, err := i.resolver.Resolve(ctx, input.BindingKey)
+	var scope runtimecontext.Scope
+	var err error
+	if resolver, ok := i.resolver.(routing.RequestResolver); ok {
+		scope, err = resolver.ResolveFor(
+			ctx, input.BindingKey, input.UserID+"\x00"+input.SessionID,
+		)
+	} else {
+		scope, err = i.resolver.Resolve(ctx, input.BindingKey)
+	}
 	if err != nil {
 		return AcceptResult{}, err
 	}

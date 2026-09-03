@@ -6,14 +6,16 @@
 
 | 数据类型 | 框架接口或能力 | 平台包装器 |
 | --- | --- | --- |
-| Session / State / Summary | `session.Service` | `TenantSessionRouter` |
-| Memory | `memory.Service` | `TenantMemoryRouter` |
-| Artifact | `artifact.Service` | `TenantArtifactRouter` |
-| Knowledge | `knowledge.Knowledge`、`vectorstore.VectorStore` | `KnowledgeFactory`、`ScopedVectorStore` |
-| Audit Log | 无统一框架接口 | `AuditRepository` |
-| 异步任务 | `EnqueueSummaryJob`、`EnqueueAutoMemoryJob` | `DurableJobDispatcher` |
+| Session / State / Summary | `session.Service` | `storage.SessionRouter` |
+| Memory | `memory.Service` | `storage.MemoryRouter` |
+| Artifact | `artifact.Service` | `storage.ArtifactRouter` |
+| Knowledge | `knowledge.Knowledge`、`vectorstore.VectorStore` | `storage.KnowledgeRouter`、`scopedKnowledge` |
+| Audit Log | 无统一框架接口 | `audit.Writer/Reader` |
+| 异步任务 | Summary/Memory hooks | `background.Repository/Processor` |
 
 路由器不接收外部 `tenant_id` 参数，而是从内部 `storage_scope` 和可信 context 中取值，并要求两者一致。
+
+当前代码已接入的物理实现：Session startup/InMemory/Redis/PostgreSQL，Memory InMemory/Redis/PostgreSQL，Artifact InMemory/S3-compatible，Knowledge InMemory/Qdrant，Control/Audit/Job PostgreSQL。MySQL、MongoDB、Milvus 等仍属于框架可扩展选项，不在默认二进制依赖中。
 
 ```go
 type RuntimeScope struct {
@@ -207,7 +209,7 @@ SQL 保留结构化索引字段，原始大 payload 单独加密保存并记录�
 
 tRPC-Agent-Go 主模块和 Session、Memory、Storage、VectorStore、AG-UI、OpenClaw 使用独立 Go module 和独立 tag，版本号并不总是完全一致。项目需要维护固定依赖清单和兼容矩阵。
 
-当前实现若同时使用 AG-UI、OpenClaw、Qdrant 和 Milvus，建议将项目 Go 版本提升到至少 1.24.6，并在 CI 中运行：
+当前项目因 Qdrant adapter 使用 Go 1.24.0，并在 `go.mod` 固定 tRPC-Agent-Go 主模块 `v1.11.2`、各独立 Session/Memory/Artifact/Vector module `v1.11.0`。升级前在 CI 中运行：
 
 - 所有包单测和 race test；
 - Redis、PostgreSQL、MySQL、Qdrant、MinIO 集成测试；

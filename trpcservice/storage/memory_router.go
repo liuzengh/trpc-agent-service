@@ -64,6 +64,8 @@ func (r *MemoryRouter) AddMemory(
 	topics []string,
 	opts ...memory.AddOption,
 ) error {
+	ctx, span := startStorageSpan(ctx, "memory.add", key.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return err
@@ -78,6 +80,8 @@ func (r *MemoryRouter) UpdateMemory(
 	topics []string,
 	opts ...memory.UpdateOption,
 ) error {
+	ctx, span := startStorageSpan(ctx, "memory.update", key.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return err
@@ -86,6 +90,8 @@ func (r *MemoryRouter) UpdateMemory(
 }
 
 func (r *MemoryRouter) DeleteMemory(ctx context.Context, key memory.Key) error {
+	ctx, span := startStorageSpan(ctx, "memory.delete", key.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return err
@@ -94,6 +100,8 @@ func (r *MemoryRouter) DeleteMemory(ctx context.Context, key memory.Key) error {
 }
 
 func (r *MemoryRouter) ClearMemories(ctx context.Context, key memory.UserKey) error {
+	ctx, span := startStorageSpan(ctx, "memory.clear", key.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return err
@@ -106,6 +114,8 @@ func (r *MemoryRouter) ReadMemories(
 	key memory.UserKey,
 	limit int,
 ) ([]*memory.Entry, error) {
+	ctx, span := startStorageSpan(ctx, "memory.read", key.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return nil, err
@@ -119,6 +129,8 @@ func (r *MemoryRouter) SearchMemories(
 	query string,
 	opts ...memory.SearchOption,
 ) ([]*memory.Entry, error) {
+	ctx, span := startStorageSpan(ctx, "memory.search", key.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return nil, err

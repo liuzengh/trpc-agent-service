@@ -14,6 +14,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -298,7 +299,15 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scope, err := h.routeResolver.Resolve(r.Context(), request.BindingKey)
+	var scope runtimecontext.Scope
+	var err error
+	if resolver, ok := h.routeResolver.(routing.RequestResolver); ok {
+		scope, err = resolver.ResolveFor(
+			r.Context(), request.BindingKey, request.UserID+"\x00"+request.SessionID,
+		)
+	} else {
+		scope, err = h.routeResolver.Resolve(r.Context(), request.BindingKey)
+	}
 	if err != nil {
 		if errors.Is(err, routing.ErrBindingNotFound) {
 			writeJSON(w, http.StatusNotFound, errorResponse{Error: "channel binding not found"})

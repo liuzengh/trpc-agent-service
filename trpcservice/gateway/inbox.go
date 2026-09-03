@@ -58,6 +58,7 @@ type RunResult struct {
 	CompletionTokens int
 	Cost             float64
 	TraceID          string
+	TraceParent      string
 }
 
 // OutboundItem is one reply claimed for provider delivery.
@@ -69,6 +70,7 @@ type OutboundItem struct {
 	Text             string
 	ReplyTarget      string
 	AttemptCount     int
+	TraceParent      string
 }
 
 // Journal atomically creates inbound, run and queue-outbox records.

@@ -59,6 +59,8 @@ BeforeModel 在发送请求前预留预算，AfterModel 根据实际 usage 结�
 
 输入和输出按租户策略执行 DLP：身份证、手机号、邮箱、银行卡、密钥和内部账号等字段可以脱敏、拒绝或只在受控工具中使用。脱敏发生在日志和 trace 写出之前；若业务需要模型看到原值，DLP Plugin 可以保留内存中的原始输入，但输出记录只保留掩码和摘要。
 
+当前 Revision `guardrail_config` 已编译为 tRPC-Agent-Go `ModelCallbacks`：`max_input_chars` 和 `blocked_input_patterns` 在 BeforeModel 阻断，`redact_output_patterns` 在 AfterModel 克隆 Response 后替换文本。Go regexp 使用 RE2，不存在灾难性回溯；更复杂的企业 DLP 可继续实现为 Plugin/外部服务。
+
 ## 2. 密钥管理
 
 以下数据不进入配置明文、Git、Session、Memory、日志或 trace：
@@ -153,6 +155,8 @@ model.name
 
 tRPC-Agent-Go 会记录模型、工具和 workflow spans。平台还要为 Storage Router、租约、队列和 IM 发送补 span。跨队列传播 `traceparent`；如果生产者 span 已结束，也可以由消费者创建新 trace 并添加 link。
 
+当前实现已覆盖 HTTP callback、durable AgentTask、Worker、Session/Memory/Knowledge/Artifact Router、Background Job、outbound payload 和 Reply Sender；响应头 `X-Trace-ID` 可直接关联 `audit_log.trace_id`。
+
 ### Payload 采集
 
 生产环境默认不导出完整 prompt、模型响应、工具参数和工具结果。配置 span attribute policy：
@@ -176,6 +180,22 @@ agent_run_duration_seconds{agent_type,model}
 active_agent_runs{worker_pool}
 runner_event_drain_timeout_total
 ```
+
+当前代码导出的稳定指标名为：
+
+```text
+agent.inbound.messages
+agent.idempotency.replays
+agent.runs
+agent.run.duration
+agent.reply.deliveries
+agent.reply.duration
+agent.model.prompt_tokens
+agent.model.completion_tokens
+agent.model.cost
+```
+
+队列 lag、background pending/dead、repair backlog 当前从 PostgreSQL/Redis 状态采集，生产可用 Collector SQL/Redis receiver 或独立 exporter 转成 Prometheus gauge。
 
 ### 模型和工具指标
 
@@ -264,7 +284,7 @@ Session 和 Agent run 已经完成，发送失败只影响 delivery。Reply Send
 
 ## 8. 灰度发布和回滚
 
-发布新 revision 后，通过稳定哈希选择灰度对象：
+发布新 revision 后，通过稳定哈希选择灰度对象。当前实现使用 `tenant_id | app_id | salt | user_id | session_id` 作为 routing key：
 
 ```text
 hash(tenant_id | app_id | conversation_id) % 100 < rollout_percent

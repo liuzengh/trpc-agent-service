@@ -3116,6 +3116,80 @@ TRPC_AGENT_DRILL_CONFIRM=yes ./scripts/fault-drill.sh
 
 完整说明见 [deployment.md](deployment.md) 和 [capacity.md](capacity.md)。
 
-## 33. 下一步
+## 33. 最终链路加固
 
-最后阶段进行验收差距审计：更新总架构、数据模型、时序、一致性、后端适配、风险清单，并运行真实多进程端到端与故障恢复测试。
+最终验收补齐了四个容易被忽略的边界。
+
+第一，Reply Sender 现在继续原 trace。Worker 把当前 W3C `traceparent` 写入 outbound payload，Sender claim 后恢复父上下文并创建 `reply.send` span。因此一条 trace 可以覆盖：
+
+```text
+HTTP/IM callback
+→ Gateway persist
+→ Redis Agent Queue
+→ Worker / Runner / Model / Tool
+→ Session / Memory / Knowledge / Artifact spans
+→ outbound_message
+→ Reply Sender / IM API
+```
+
+第二，Agent 灰度策略真正参与路由：
+
+```json
+{
+  "canary_revision_id": "revision-2026-09-03",
+  "canary_percent": 10,
+  "salt": "rollout-wave-1"
+}
+```
+
+Admin 使用 `POST /admin/apps/rollout` 和 expected version 发布。Resolver 以 tenant/app/salt/user/session 做稳定哈希；同步 Test Channel 每轮稳定命中同一 bucket，异步 IM 的 conversation 在首轮写入 `pinned_revision_id`，即使随后把 canary 调回 0，已有会话也不跳版本。
+
+第三，Revision Guardrail 使用 tRPC-Agent-Go Model Callbacks：
+
+```json
+{
+  "max_input_chars": 8000,
+  "blocked_input_patterns": ["(?i)drop\\s+database"],
+  "redact_output_patterns": ["sk-[A-Za-z0-9_-]+"]
+}
+```
+
+BeforeModel 在调用供应商前阻断输入，AfterModel 克隆并脱敏 Response，不修改共享对象。Go regexp 使用 RE2。Tool 另有 `tool_execution` journal：BeforeTool 记录 request/tool_call/arguments hash，AfterTool 保存 succeeded/failed 和 result hash；相同 request/tool_call 再次出现时 fail closed，要求查询下游或人工对账，不盲目重放副作用。
+
+第四，企业微信和 Telegram 会识别图片/文件消息。默认只把受信任 provider media/file ID 与文件名/MIME/caption 转成占位文本，不自动访问 URL。真正下载必须经过独立 Artifact downloader、大小/MIME/病毒扫描；这避免 callback 直接触发 SSRF。
+
+## 34. 验收方式
+
+快速代码验收：
+
+```bash
+go test -race ./...
+go vet ./...
+./lint.sh
+./build.sh
+docker compose --profile observability config -q
+docker build -t trpc-agent-service:local .
+```
+
+真实多进程验收：
+
+```bash
+./scripts/e2e-multiprocess.sh
+```
+
+脚本启动 PostgreSQL/Redis 和 Gateway/Relay/Worker/Sender/Jobs。第一轮由 Worker A 保存“我叫小明”，随后终止 A，第二轮由 Worker B 从共享 Redis Session 恢复姓名；最终检查 PostgreSQL outbound sent 和 Background Job 无 dead/failed。脚本只 stop 容器，不删除 volume。
+
+主要交付物入口：
+
+```text
+docs/architecture.md             系统架构图与组件边界
+docs/sequence.md                 企业微信核心时序图
+docs/data-model.md               核心表和实际 migration
+docs/data-consistency.md         同步、幂等、双写和恢复
+docs/backend-adapters.md         Redis/SQL/Qdrant/S3 选型
+docs/im-channels.md              企业微信/Telegram 差异
+docs/governance-operations.md    Guardrail、审计、指标、安全
+docs/risks.md                    20 项生产风险与门禁
+docs/deployment.md               Compose/Kubernetes/灰度/备份
+docs/capacity.md                 容量公式和压测器
+```

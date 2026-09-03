@@ -139,6 +139,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		CompletionTokens: result.CompletionTokens,
 		Cost:             result.Cost,
 		TraceID:          audit.TraceID(ctx),
+		TraceParent:      background.TraceParent(ctx),
 	}); err != nil {
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
@@ -147,6 +148,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		FencingToken: result.FencingToken, EventCount: result.EventCount,
 		PromptTokens: result.PromptTokens, CompletionTokens: result.CompletionTokens,
 		Cost: result.Cost, TraceID: audit.TraceID(ctx),
+		TraceParent: background.TraceParent(ctx),
 	}, "run_completed", "", started); err != nil {
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}

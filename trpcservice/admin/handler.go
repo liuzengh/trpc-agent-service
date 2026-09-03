@@ -144,6 +144,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Context(), input.TenantID, input.AppID, input.RevisionID, input.ExpectedVersion,
 		)
 		h.writeResult(w, http.StatusOK, value, err)
+	case "/admin/apps/rollout":
+		var input struct {
+			TenantID        string          `json:"tenant_id"`
+			AppID           string          `json:"app_id"`
+			RolloutPolicy   json.RawMessage `json:"rollout_policy"`
+			ExpectedVersion int64           `json:"expected_version"`
+		}
+		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionWrite) {
+			return
+		}
+		value, err := h.service.UpdateRolloutPolicy(
+			r.Context(), input.TenantID, input.AppID,
+			input.RolloutPolicy, input.ExpectedVersion,
+		)
+		h.writeResult(w, http.StatusOK, value, err)
 	case "/admin/channel-bindings":
 		var input controlplane.ChannelBinding
 		if !decodeAdmin(w, r, &input) {

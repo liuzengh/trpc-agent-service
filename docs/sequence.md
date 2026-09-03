@@ -17,6 +17,7 @@ sequenceDiagram
     participant M as Model
     participant P as Plugin / Guardrail
     participant T as Tool / MCP
+    participant A as Approval / Tool Journal
     participant J as Summary / Memory Queue
     participant O as Reply Outbox
     participant D as Reply Sender
@@ -50,12 +51,15 @@ sequenceDiagram
             P-->>R: denied result
         else ask
             P-->>R: approval_required
+            R->>A: tool_approval(arguments_hash)
             R-->>W: 审批事件
-            W->>O: 写确认卡片任务
+            W->>O: 写确认文本/卡片任务
         else allow
             P-->>R: allow
+            R->>A: tool_execution=running
             R->>T: 执行工具，携带业务幂等键
             T-->>R: 工具结果
+            R->>A: succeeded/failed + result_hash
             R->>S: Append tool result + StateDelta
             R->>M: 继续生成最终答案
         end
@@ -63,14 +67,13 @@ sequenceDiagram
 
     M-->>R: 最终回答
     R->>S: Append assistant Event + StateDelta
-    R->>J: Enqueue summary job
-    R->>J: Enqueue auto-memory job
     R-->>W: Event stream closed
-    W->>DB: CAS agent_run=COMPLETED，校验 fencing_token
-    W->>O: 写 outbound_message
+    W->>DB: 事务写 agent_run=COMPLETED + outbound
+    W->>J: durable summary job
+    W->>J: durable memory job
     W->>L: Release lease
 
-    O->>D: 投递任务
+    O->>D: Claim outbound + 恢复 traceparent
     D->>D: 长度切分、卡片渲染、限流
     D->>U: 企业微信发送 API
     U-->>D: 发送结果
@@ -96,7 +99,7 @@ actor_user_id
 fencing_token
 ```
 
-Worker 调用 Runner 时使用 `agent.WithRequestID` 和 `agent.WithSpanAttributes`。Tool、Session、Memory、Reply Sender 均从 context 读取 trace；跨队列时把 traceparent 写入消息 metadata，由消费者恢复父子关系或建立 span link。
+Worker 调用 Runner 时使用 `agent.WithRequestID`。Tool、Session、Memory、Knowledge、Artifact Router 都从 context 创建子 span；Worker 把当前 `traceparent` 写入 outbound payload，Reply Sender 恢复父上下文后再调用 IM API。跨 Agent Queue 和 Background Job 同样持久化 traceparent。
 
 ## 3. 事件消费与流式回复
 

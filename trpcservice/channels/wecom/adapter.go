@@ -139,7 +139,8 @@ func (a *Adapter) Callback(
 		ContentType: "text/plain; charset=utf-8",
 		Body:        []byte("success"),
 	}
-	if message.MsgType != "text" || strings.TrimSpace(message.Content) == "" {
+	normalizedText := normalizedWeComMessage(message)
+	if normalizedText == "" {
 		return result, nil
 	}
 	chatType := "direct"
@@ -151,7 +152,7 @@ func (a *Adapter) Callback(
 	externalID := message.MsgID
 	if externalID == "" {
 		externalID = fallbackMessageID(
-			message.FromUserName, chatID, message.CreateTime, message.Content,
+			message.FromUserName, chatID, message.CreateTime, normalizedText,
 		)
 	}
 	result.Messages = []channels.InboundEnvelope{{
@@ -160,7 +161,7 @@ func (a *Adapter) Callback(
 		ExternalChatID:    chatID,
 		ChatType:          chatType,
 		MessageType:       message.MsgType,
-		Text:              strings.TrimSpace(message.Content),
+		Text:              normalizedText,
 		OccurredAt:        time.Unix(message.CreateTime, 0).UTC(),
 	}}
 	return result, nil
@@ -174,6 +175,29 @@ type callbackMessage struct {
 	Content      string `xml:"Content"`
 	MsgID        string `xml:"MsgId"`
 	ChatID       string `xml:"ChatId"`
+	PicURL       string `xml:"PicUrl"`
+	MediaID      string `xml:"MediaId"`
+	FileName     string `xml:"FileName"`
+}
+
+func normalizedWeComMessage(message callbackMessage) string {
+	switch message.MsgType {
+	case "text":
+		return strings.TrimSpace(message.Content)
+	case "image":
+		if message.MediaID != "" {
+			return fmt.Sprintf("[WeCom image media_id=%q pic_url=%q]", message.MediaID, message.PicURL)
+		}
+	case "file":
+		if message.MediaID != "" {
+			return fmt.Sprintf("[WeCom file name=%q media_id=%q]", message.FileName, message.MediaID)
+		}
+	case "voice", "video":
+		if message.MediaID != "" {
+			return fmt.Sprintf("[WeCom %s media_id=%q]", message.MsgType, message.MediaID)
+		}
+	}
+	return ""
 }
 
 func decodeMessage(plaintext []byte) (callbackMessage, error) {

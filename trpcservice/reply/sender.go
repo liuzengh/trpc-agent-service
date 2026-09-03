@@ -9,10 +9,13 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type Options struct {
@@ -70,6 +73,14 @@ func (s *Sender) ProcessOnce(ctx context.Context) (int, error) {
 }
 
 func (s *Sender) sendOne(ctx context.Context, item gateway.OutboundItem) error {
+	ctx = background.ContextWithTraceParent(ctx, item.TraceParent)
+	ctx, span := otel.Tracer("trpc-agent-service/reply").Start(ctx, "reply.send")
+	span.SetAttributes(
+		attribute.String("tenant.id", item.TenantID),
+		attribute.String("messaging.message.id", item.ID),
+		attribute.String("gen_ai.request.id", item.RequestID),
+	)
+	defer span.End()
 	started := time.Now()
 	binding, err := s.repository.GetChannelBinding(
 		ctx, item.TenantID, item.ChannelBindingID,

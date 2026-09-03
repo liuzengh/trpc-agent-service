@@ -82,6 +82,8 @@ func (r *KnowledgeRouter) UpsertDocument(
 	revision controlplane.AgentRevision,
 	doc KnowledgeDocument,
 ) (int, error) {
+	ctx, span := startStorageSpan(ctx, "knowledge.upsert", scope.StorageScope)
+	defer span.End()
 	handle, enabled, err := r.handleFor(ctx, scope, revision)
 	if err != nil {
 		return 0, err
@@ -148,6 +150,8 @@ func (r *KnowledgeRouter) DeleteDocument(
 	revision controlplane.AgentRevision,
 	documentID string,
 ) error {
+	ctx, span := startStorageSpan(ctx, "knowledge.delete", scope.StorageScope)
+	defer span.End()
 	handle, enabled, err := r.handleFor(ctx, scope, revision)
 	if err != nil {
 		return err
@@ -502,6 +506,10 @@ func (k *scopedKnowledge) Search(
 	ctx context.Context,
 	request *knowledge.SearchRequest,
 ) (*knowledge.SearchResult, error) {
+	ctx, span := startStorageSpan(
+		ctx, "knowledge.search", "t/"+k.tenantID+"/a/"+k.appID,
+	)
+	defer span.End()
 	if request == nil || strings.TrimSpace(request.Query) == "" {
 		return nil, errors.New("knowledge search query is required")
 	}

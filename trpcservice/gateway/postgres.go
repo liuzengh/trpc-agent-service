@@ -413,6 +413,7 @@ WHERE request_id = $1 AND fencing_token <= $2`,
 		"reply_target": task.ReplyTarget,
 		"agent_name":   result.AgentName,
 		"event_count":  result.EventCount,
+		"traceparent":  result.TraceParent,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal outbound payload: %w", err)
@@ -496,7 +497,7 @@ FROM candidates c
 WHERE o.outbound_id = c.outbound_id
 	RETURNING o.outbound_id, o.request_id, o.tenant_id, o.channel_binding_id,
 	          o.payload->>'text', COALESCE(o.payload->>'reply_target', ''),
-	          o.attempt_count`,
+	          o.attempt_count, COALESCE(o.payload->>'traceparent', '')`,
 		limit, workerID, postgresInterval(lease))
 	if err != nil {
 		return nil, fmt.Errorf("claim outbound messages: %w", err)
@@ -513,6 +514,7 @@ WHERE o.outbound_id = c.outbound_id
 			&item.Text,
 			&item.ReplyTarget,
 			&item.AttemptCount,
+			&item.TraceParent,
 		); err != nil {
 			return nil, fmt.Errorf("scan outbound message: %w", err)
 		}

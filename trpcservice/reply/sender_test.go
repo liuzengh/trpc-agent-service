@@ -13,9 +13,22 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func TestSenderDeliversCompletedRun(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	previousPropagator := otel.GetTextMapPropagator()
+	provider := tracesdk.NewTracerProvider(tracesdk.WithSampler(tracesdk.AlwaysSample()))
+	otel.SetTracerProvider(provider)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previousProvider)
+		otel.SetTextMapPropagator(previousPropagator)
+	})
 	repository := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
 	journal := gateway.NewMemoryJournal()
 	queue := workqueue.NewMemoryQueue(4)
@@ -33,7 +46,9 @@ func TestSenderDeliversCompletedRun(t *testing.T) {
 	})
 	resolver, _ := routing.NewControlPlaneResolver(repository)
 	intake, _ := gateway.NewIntake(resolver, journal)
-	accepted, err := intake.Accept(context.Background(), gateway.IntakeRequest{
+	rootCtx, rootSpan := otel.Tracer("test").Start(context.Background(), "callback")
+	rootTraceID := rootSpan.SpanContext().TraceID().String()
+	accepted, err := intake.Accept(rootCtx, gateway.IntakeRequest{
 		BindingKey:        "tutorial-http",
 		ExternalMessageID: "reply-message",
 		UserID:            "alice",
@@ -41,6 +56,7 @@ func TestSenderDeliversCompletedRun(t *testing.T) {
 		ChatType:          "direct",
 		Text:              "hello",
 	})
+	rootSpan.End()
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
@@ -77,7 +93,7 @@ func TestSenderDeliversCompletedRun(t *testing.T) {
 	}
 	events := auditWriter.Events()
 	if len(events) != 1 || events[0].Decision != "reply_sent" ||
-		events[0].RequestID != accepted.RequestID {
+		events[0].RequestID != accepted.RequestID || events[0].TraceID != rootTraceID {
 		t.Fatalf("audit events=%+v", events)
 	}
 }

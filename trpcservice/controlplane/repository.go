@@ -41,6 +41,13 @@ type MutableRepository interface {
 		revisionID string,
 		expectedVersion int64,
 	) (AgentApp, error)
+	UpdateRolloutPolicy(
+		ctx context.Context,
+		tenantID string,
+		appID string,
+		rolloutPolicy []byte,
+		expectedVersion int64,
+	) (AgentApp, error)
 	CreateChannelBinding(ctx context.Context, binding ChannelBinding) error
 	CreateBackendBinding(ctx context.Context, binding BackendBinding) error
 	CreateBackendMigration(ctx context.Context, migration BackendMigration) error

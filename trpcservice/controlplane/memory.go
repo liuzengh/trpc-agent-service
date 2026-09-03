@@ -322,6 +322,30 @@ func (r *MemoryRepository) PublishRevision(
 	return cloneAgentApp(app), nil
 }
 
+func (r *MemoryRepository) UpdateRolloutPolicy(
+	_ context.Context,
+	tenantID string,
+	appID string,
+	rolloutPolicy []byte,
+	expectedVersion int64,
+) (AgentApp, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := scopedKey(tenantID, appID)
+	app, ok := r.apps[key]
+	if !ok {
+		return AgentApp{}, ErrNotFound
+	}
+	if app.Version != expectedVersion {
+		return AgentApp{}, ErrConflict
+	}
+	app.RolloutPolicy = cloneJSON(rolloutPolicy)
+	app.Version++
+	app.UpdatedAt = time.Now().UTC()
+	r.apps[key] = app
+	return cloneAgentApp(app), nil
+}
+
 func (r *MemoryRepository) CreateChannelBinding(
 	_ context.Context,
 	binding ChannelBinding,

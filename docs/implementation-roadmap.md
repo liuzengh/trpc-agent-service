@@ -74,9 +74,16 @@
 - PostgreSQL/Redis/MinIO/Qdrant/OTel/Prometheus/Tempo/Grafana Compose；
 - Kubernetes 六角色 Deployment、HPA、PDB、NetworkPolicy 和 Secret 模板；
 - 容量公式、入站压测器和安全确认的故障演练脚本；
+- W3C traceparent 持久化到 outbound，Reply Sender 续接 trace；
+- Session/Memory/Knowledge/Artifact Storage spans；
+- deterministic canary rollout 与 conversation revision pin；
+- Revision Model Guardrail Callbacks；
+- Tool Execution Journal 和重复副作用 fail-closed；
+- 企业微信/Telegram 媒体 ID 安全规范化；
+- 真实多进程跨 Worker Session 恢复验收脚本；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是最终文档/代码验收与真实多进程故障测试。
+README 验收范围已全部形成代码、测试、部署文件或明确的生产安全边界。
 
 ## 1. 建议目录
 

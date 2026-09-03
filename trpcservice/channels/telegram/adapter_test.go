@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
@@ -38,6 +39,19 @@ func TestCallbackVerifiesAndDecodesUpdate(t *testing.T) {
 	if message.ExternalMessageID != "10001" || message.ExternalUserID != "42" ||
 		message.ExternalThreadID != "7" || message.ChatType != "group" || message.ReplyTarget == "" {
 		t.Fatalf("message=%+v", message)
+	}
+}
+
+func TestNormalizedTelegramMediaMessage(t *testing.T) {
+	messageType, text := normalizedTelegramMessage(&telegramMessage{
+		Caption: "invoice",
+		Document: &telegramDocument{
+			FileID: "file-1", FileName: "invoice.pdf", MimeType: "application/pdf",
+		},
+	})
+	if messageType != "file" || !strings.Contains(text, "invoice.pdf") ||
+		!strings.Contains(text, "file-1") {
+		t.Fatalf("type=%q text=%q", messageType, text)
 	}
 }
 

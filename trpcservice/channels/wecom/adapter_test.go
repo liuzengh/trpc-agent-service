@@ -67,6 +67,15 @@ func TestCallbackDecryptsTextMessage(t *testing.T) {
 	}
 }
 
+func TestNormalizedWeComMediaMessage(t *testing.T) {
+	text := normalizedWeComMessage(callbackMessage{
+		MsgType: "file", FileName: "report.pdf", MediaID: "media-1",
+	})
+	if !strings.Contains(text, "report.pdf") || !strings.Contains(text, "media-1") {
+		t.Fatalf("text=%q", text)
+	}
+}
+
 func TestCallbackVerifiesURLChallenge(t *testing.T) {
 	keyText := testEncodingKey()
 	adapter, _ := New(secret.StaticStore{

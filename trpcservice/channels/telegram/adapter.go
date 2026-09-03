@@ -81,7 +81,11 @@ func (a *Adapter) Callback(
 	if message == nil {
 		message = update.EditedMessage
 	}
-	if message == nil || message.From == nil || strings.TrimSpace(message.Text) == "" {
+	if message == nil || message.From == nil {
+		return result, nil
+	}
+	messageType, text := normalizedTelegramMessage(message)
+	if text == "" {
 		return result, nil
 	}
 	chatType := "group"
@@ -98,8 +102,8 @@ func (a *Adapter) Callback(
 		ExternalChatID:    strconv.FormatInt(message.Chat.ID, 10),
 		ExternalThreadID:  strconv.FormatInt(message.MessageThreadID, 10),
 		ChatType:          chatType,
-		MessageType:       "text",
-		Text:              strings.TrimSpace(message.Text),
+		MessageType:       messageType,
+		Text:              text,
 		ReplyTarget:       string(targetJSON),
 		OccurredAt:        time.Unix(message.Date, 0).UTC(),
 	}}
@@ -113,12 +117,46 @@ type telegramUpdate struct {
 }
 
 type telegramMessage struct {
-	MessageID       int64         `json:"message_id"`
-	MessageThreadID int64         `json:"message_thread_id"`
-	Date            int64         `json:"date"`
-	Text            string        `json:"text"`
-	From            *telegramUser `json:"from"`
-	Chat            telegramChat  `json:"chat"`
+	MessageID       int64             `json:"message_id"`
+	MessageThreadID int64             `json:"message_thread_id"`
+	Date            int64             `json:"date"`
+	Text            string            `json:"text"`
+	Caption         string            `json:"caption"`
+	Photo           []telegramPhoto   `json:"photo"`
+	Document        *telegramDocument `json:"document"`
+	From            *telegramUser     `json:"from"`
+	Chat            telegramChat      `json:"chat"`
+}
+
+type telegramPhoto struct {
+	FileID string `json:"file_id"`
+}
+
+type telegramDocument struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name"`
+	MimeType string `json:"mime_type"`
+}
+
+func normalizedTelegramMessage(message *telegramMessage) (string, string) {
+	if text := strings.TrimSpace(message.Text); text != "" {
+		return "text", text
+	}
+	caption := strings.TrimSpace(message.Caption)
+	if message.Document != nil && message.Document.FileID != "" {
+		return "file", fmt.Sprintf(
+			"[Telegram file name=%q mime=%q file_id=%q] %s",
+			message.Document.FileName, message.Document.MimeType,
+			message.Document.FileID, caption,
+		)
+	}
+	if len(message.Photo) > 0 {
+		photo := message.Photo[len(message.Photo)-1]
+		if photo.FileID != "" {
+			return "image", fmt.Sprintf("[Telegram image file_id=%q] %s", photo.FileID, caption)
+		}
+	}
+	return "", ""
 }
 
 type telegramUser struct {

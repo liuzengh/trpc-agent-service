@@ -57,6 +57,8 @@ func (r *ArtifactRouter) SaveArtifact(
 	filename string,
 	value *artifact.Artifact,
 ) (int, error) {
+	ctx, span := startStorageSpan(ctx, "artifact.save", info.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, info.AppName)
 	if err != nil {
 		return 0, err
@@ -85,6 +87,8 @@ func (r *ArtifactRouter) LoadArtifact(
 	filename string,
 	version *int,
 ) (*artifact.Artifact, error) {
+	ctx, span := startStorageSpan(ctx, "artifact.load", info.AppName)
+	defer span.End()
 	service, err := r.serviceFor(ctx, info.AppName)
 	if err != nil {
 		return nil, err

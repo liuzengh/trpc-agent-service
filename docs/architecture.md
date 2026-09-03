@@ -44,6 +44,8 @@ flowchart LR
         LEASE[Session Coordinator<br/>Lease + Fencing Token]
         RUNNER[runner.Runner]
         POLICY[Plugin / Guardrail<br/>权限、预算、脱敏]
+        APPROVAL[Approval + Tool Journal]
+        QUOTA[Redis Quota Guard]
         JOB[Summary / Memory / Migration Worker]
     end
 
@@ -71,6 +73,9 @@ flowchart LR
     WORKER --> LEASE
     WORKER --> RUNNER
     RUNNER --> POLICY
+    POLICY --> APPROVAL
+    GW --> QUOTA
+    WORKER --> QUOTA
     POLICY --> TOOLAPI
     RUNNER --> ROUTER
     JOB --> ROUTER
@@ -117,7 +122,7 @@ flowchart LR
 - Session、Memory、Knowledge、Artifact、Audit 的后端绑定；
 - 日志保留期、脱敏规则、审计级别和成本上限。
 
-Config Distributor 通过 watch 或消息总线通知 Gateway、Worker 和 Channel Adapter。节点本地只缓存已发布的不可变快照；缓存 miss 或版本不一致时回源 Control DB。一次运行从开始到结束固定使用同一个 revision，不能在中途读取“最新配置”。
+当前实现通过 Repository 读取和 `revision_id + checksum` 本地缓存编译结果；binding/revision version 变化自然产生新 cache key。生产规模继续扩大时可以增加 Config Distributor 主动失效。一次运行从开始到结束固定使用同一个 revision，不能在中途读取“最新配置”。
 
 ## 4. 接入层
 
@@ -211,6 +216,6 @@ tRPC-Agent-Go 的 Runner 在构造时接收 Session、Memory 和 Artifact Servic
 
 最小部署使用一个服务进程承载 Admin API、Gateway、Channel、Worker 和 Job Worker，外接 PostgreSQL、Redis、MinIO、Qdrant 与 OpenTelemetry Collector。它适合本地开发和功能验收，但不用于高可用生产。
 
-生产部署在 Kubernetes 中拆分组件。Gateway、Channel Adapter、Worker、Reply Sender 和 Job Worker 分别扩缩容；Worker 再按普通对话、长工具、代码执行等负载分池。HPA 主要观察队列 lag、active run、模型并发和投递延迟，不只看 CPU。PostgreSQL、Redis、对象存储和向量库采用托管或高可用形态，并定期做恢复演练。
+生产部署清单将 Gateway、Admin、Relay、Worker、Reply Sender 和 Jobs 分别扩缩容；企业微信/Telegram 协议代码当前随 Gateway/Sender 运行。Worker 可继续按普通对话、长工具、代码执行等负载分池。HPA 初始使用 CPU，生产应接入队列 lag、active run、模型并发和投递延迟。PostgreSQL、Redis、对象存储和向量库采用托管或高可用形态，并定期做恢复演练。
 
 完整时序、数据模型、一致性、后端适配和运维细节见本目录其他文档。

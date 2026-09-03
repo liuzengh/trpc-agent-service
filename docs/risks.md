@@ -17,7 +17,7 @@
 | R07 | `ToolFilter` 被误当作授权 | P0 | 框架工具或动态工具绕过可见列表 | 未授权 tool execution audit | PermissionPolicy、Tool PermissionChecker、MCP wrapper |
 | R08 | 群共享会话写入个人 Memory | P0 | `runtime_user_id` 使用合成群主体，自动提取未关闭 | 群主体出现个人事实、跨成员召回 | 明确群聊模式，共享模式禁用个人自动 Memory，个人工具独立 scope |
 | R09 | 密钥进入日志、trace 或 Session | P0 | 打印配置、HTTP header、下游错误体 | DLP 扫描发现 token 形态 | SecretRef、统一 redaction、payload drop、日志采样审查 |
-| R10 | S3 同名 Artifact 并发覆盖 | P1 | 多 goroutine 同时计算下一版本 | 同 filename/version checksum 不同 | SQL 版本分配、唯一 artifact ID、metadata 唯一索引 |
+| R10 | S3 同名 Artifact 并发覆盖 | P1 | 多 goroutine/多节点同时计算下一版本 | 同 filename/version checksum 不同 | 进程锁、PostgreSQL advisory lock、Runner Session lease；直传场景再加 SQL allocator |
 | R11 | Redis async persist 返回成功但实际未落盘 | P1 | 开启 `WithEnableAsyncPersist(true)` 后节点崩溃 | Session 缺 Event、后台 persist error | 生产保持同步 persist，把异步放到上层 durable queue |
 | R12 | 配置灰度使同一会话来回切版本 | P1 | 每次请求重新按百分比选 revision | 同 session revision 变化、工具列表跳变 | conversation pin revision、稳定哈希、显式迁移 |
 | R13 | 数据迁移双写不一致 | P1 | 主写成功、次写失败或回填遗漏 | repair backlog、checksum mismatch | repair outbox、水位、影子读、切读门禁、快速回滚 |

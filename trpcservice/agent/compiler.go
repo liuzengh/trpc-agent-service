@@ -17,6 +17,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/toolexec"
 	"golang.org/x/sync/singleflight"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
@@ -97,6 +98,7 @@ type RevisionCompiler struct {
 	auditWriter   audit.Writer
 	approvals     approval.Repository
 	knowledge     KnowledgeProvider
+	toolJournal   toolexec.Journal
 }
 
 type RevisionCompilerOption func(*RevisionCompiler)
@@ -122,6 +124,12 @@ func WithApprovalRepository(repository approval.Repository) RevisionCompilerOpti
 func WithKnowledgeProvider(provider KnowledgeProvider) RevisionCompilerOption {
 	return func(compiler *RevisionCompiler) {
 		compiler.knowledge = provider
+	}
+}
+
+func WithToolExecutionJournal(journal toolexec.Journal) RevisionCompilerOption {
+	return func(compiler *RevisionCompiler) {
+		compiler.toolJournal = journal
 	}
 }
 
@@ -284,6 +292,18 @@ func (c *RevisionCompiler) compileRevision(
 		llmagent.WithInstruction(agentConfig.Instruction),
 		llmagent.WithGenerationConfig(model.GenerationConfig{Stream: stream}),
 		llmagent.WithTools(tools),
+	}
+	modelCallbacks, err := governance.BuildModelCallbacks(revision.GuardrailConfig)
+	if err != nil {
+		return nil, err
+	}
+	if modelCallbacks != nil {
+		agentOptions = append(agentOptions, llmagent.WithModelCallbacks(modelCallbacks))
+	}
+	if toolCallbacks := toolexec.NewCallbacks(
+		c.toolJournal, c.auditWriter, revision.ID,
+	); toolCallbacks != nil {
+		agentOptions = append(agentOptions, llmagent.WithToolCallbacks(toolCallbacks))
 	}
 	if agentConfig.PreloadMemory > 0 {
 		agentOptions = append(agentOptions, llmagent.WithPreloadMemory(agentConfig.PreloadMemory))

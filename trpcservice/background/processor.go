@@ -89,7 +89,7 @@ func (p *Processor) ProcessOne(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	jobCtx := contextWithTraceParent(ctx, job.TraceParent)
+	jobCtx := ContextWithTraceParent(ctx, job.TraceParent)
 	jobCtx, span := otel.Tracer("trpc-agent-service/background").Start(jobCtx, "background."+job.Type)
 	span.SetAttributes(
 		attribute.String("tenant.id", job.TenantID),
