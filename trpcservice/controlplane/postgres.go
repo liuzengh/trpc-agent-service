@@ -191,6 +191,16 @@ func (r *PostgresRepository) Close() error {
 	return r.db.Close()
 }
 
+// SQLDB exposes the shared control-plane pool to repositories that participate
+// in the same transactional message journal. The PostgresRepository remains
+// the lifecycle owner.
+func (r *PostgresRepository) SQLDB() *sql.DB {
+	if r == nil {
+		return nil
+	}
+	return r.db
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }

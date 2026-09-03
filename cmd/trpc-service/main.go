@@ -17,6 +17,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
@@ -115,12 +116,30 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build route resolver: %w", err)
 	}
+	inboundJournal, err := gateway.NewJournalForControlPlane(controlPlaneRepository)
+	if err != nil {
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build inbound journal: %w", err)
+	}
+	gatewayIntake, err := gateway.NewIntake(routeResolver, inboundJournal)
+	if err != nil {
+		_ = inboundJournal.Close()
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build Gateway intake: %w", err)
+	}
 	revisionCompiler, err := agentservice.NewRevisionCompiler(
 		controlPlaneRepository,
 		selectedModel,
 		modelConfig.Stream,
 	)
 	if err != nil {
+		_ = gatewayIntake.Close()
 		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
@@ -168,6 +187,11 @@ func run() error {
 	fmt.Printf("control-plane backend=%s\n", controlPlaneConfig.Backend)
 	fmt.Printf("tutorial chat server listening on %s\n", listenAddr)
 	defer func() {
+		if err := gatewayIntake.Close(); err != nil {
+			log.Printf("close Gateway intake: %v", err)
+		}
+	}()
+	defer func() {
 		if err := controlPlaneRepository.Close(); err != nil {
 			log.Printf("close control-plane repository: %v", err)
 		}
@@ -183,7 +207,9 @@ func run() error {
 		Handler: web.NewHandler(
 			runtime,
 			web.WithRouteResolver(routeResolver),
+			web.WithGatewayIntake(gatewayIntake),
 			web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
+			web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
 		),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 )
@@ -37,6 +38,7 @@ type Handler struct {
 	maxBodySize   int64
 	readiness     []readinessCheck
 	routeResolver routing.Resolver
+	intake        *gateway.Intake
 }
 
 type readinessCheck struct {
@@ -68,6 +70,13 @@ func WithRouteResolver(resolver routing.Resolver) Option {
 	}
 }
 
+// WithGatewayIntake enables the durable asynchronous /inbound endpoint.
+func WithGatewayIntake(intake *gateway.Intake) Option {
+	return func(handler *Handler) {
+		handler.intake = intake
+	}
+}
+
 // NewHandler creates a handler with health and chat endpoints.
 func NewHandler(chatService ChatService, opts ...Option) http.Handler {
 	h := &Handler{
@@ -83,6 +92,7 @@ func NewHandler(chatService ChatService, opts ...Option) http.Handler {
 	mux.HandleFunc("/healthz", h.handleHealth)
 	mux.HandleFunc("/readyz", h.handleReady)
 	mux.HandleFunc("/chat", h.handleChat)
+	mux.HandleFunc("/inbound", h.handleInbound)
 	return mux
 }
 
@@ -137,6 +147,55 @@ type chatResponse struct {
 
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+type inboundRequest struct {
+	BindingKey string `json:"binding_key"`
+	MessageID  string `json:"message_id"`
+	UserID     string `json:"user_id"`
+	SessionID  string `json:"session_id"`
+	ChatType   string `json:"chat_type"`
+	Message    string `json:"message"`
+}
+
+func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if h.intake == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "Gateway intake is unavailable"})
+		return
+	}
+	var request inboundRequest
+	if err := decodeJSON(w, r, h.maxBodySize, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	result, err := h.intake.Accept(r.Context(), gateway.IntakeRequest{
+		BindingKey:        request.BindingKey,
+		ExternalMessageID: request.MessageID,
+		UserID:            request.UserID,
+		SessionID:         request.SessionID,
+		ChatType:          request.ChatType,
+		Text:              request.Message,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, gateway.ErrMessageConflict), errors.Is(err, idempotency.ErrKeyConflict):
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "message ID payload conflict"})
+		case errors.Is(err, routing.ErrBindingNotFound):
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "channel binding not found"})
+		case errors.Is(err, routing.ErrRouteDisabled):
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "channel route is disabled"})
+		default:
+			log.Printf("accept inbound message failed: %v", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "inbound persistence failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {

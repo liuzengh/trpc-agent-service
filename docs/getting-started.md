@@ -2068,6 +2068,52 @@ Revision JSON 使用 `DisallowUnknownFields`。错误字段、缺少 name/instru
 
 HTTP 响应新增实际执行的 `agent_name`。幂等 completed 结果也保存该字段，因此重放结果不会依赖当前最新 revision。
 
-## 16. 下一步
+## 16. 持久化 Inbox 和 Transactional Outbox
 
-下一阶段是持久化 Inbox、Agent Run 和 Transactional Outbox。外部消息将先写 PostgreSQL 并返回 ACK，再由 Redis Streams Worker 异步执行；同步 `/chat` 会保留为开发调试入口。
+同步 `/chat` 仍用于开发调试。新的 `/inbound` 模拟真实 IM callback：它不等待模型，而是先完成可靠入站事务。
+
+```text
+POST /inbound
+→ binding_key 解析 tenant/app/revision
+→ 生成稳定 conversation_id/inbound_id/request_id
+→ BEGIN PostgreSQL transaction
+→ INSERT conversation（首次会话固定 revision）
+→ INSERT inbound_message（binding + external message 唯一）
+→ conversation.last_turn_seq + 1
+→ INSERT agent_run(status=queued)
+→ INSERT queue_outbox(topic=agent.run)
+→ COMMIT
+→ HTTP 202 ACK
+```
+
+请求示例：
+
+```json
+{
+  "binding_key": "tutorial-http",
+  "message_id": "external-message-001",
+  "user_id": "alice",
+  "session_id": "durable-session",
+  "chat_type": "direct",
+  "message": "hello"
+}
+```
+
+同一个 `channel_binding_id + message_id` 再次到达时，PostgreSQL 唯一索引保证只保留一个 inbound。Payload hash 相同则返回原来的 request；内容不同则返回冲突。
+
+一次成功接收必须同时存在：
+
+```text
+1 conversation
+1 inbound_message
+1 agent_run
+1 queue_outbox
+```
+
+任何一步失败都会回滚整个事务，Gateway 不返回成功 ACK。conversation 在第一次创建时写入 `pinned_revision_id`，后续即使 stable revision 改变，同一会话仍使用原 revision。
+
+内存控制面对应 `MemoryJournal`，方便无 PostgreSQL 测试；PostgreSQL 控制面自动复用同一个连接池创建 `PostgresJournal`。
+
+## 17. 下一步
+
+下一阶段实现 Outbox Relay 和 Redis Streams Worker：relay 使用 PostgreSQL 行锁领取 pending outbox，发布到 Stream 后标记完成；Worker Consumer Group 消费任务，执行 Runtime 后写 outbound_message。

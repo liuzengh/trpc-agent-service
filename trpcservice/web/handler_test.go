@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 )
@@ -279,6 +281,69 @@ func TestHandlerRejectsMessageIDContentConflict(t *testing.T) {
 	}
 }
 
+func TestHandlerDurablyAcceptsInboundMessage(t *testing.T) {
+	repository := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
+	t.Cleanup(func() { _ = repository.Close() })
+	resolver, err := routing.NewControlPlaneResolver(repository)
+	if err != nil {
+		t.Fatalf("new resolver: %v", err)
+	}
+	journal := gateway.NewMemoryJournal()
+	intake, err := gateway.NewIntake(resolver, journal)
+	if err != nil {
+		t.Fatalf("new intake: %v", err)
+	}
+	t.Cleanup(func() { _ = intake.Close() })
+	handler := NewHandler(
+		&fakeChatService{},
+		WithRouteResolver(resolver),
+		WithGatewayIntake(intake),
+	)
+	body := `{
+        "binding_key":"tutorial-http",
+        "message_id":"inbound-message-1",
+        "user_id":"alice",
+        "session_id":"inbound-session",
+        "chat_type":"direct",
+        "message":"hello"
+    }`
+	first := postInbound(t, handler, body)
+	second := postInbound(t, handler, body)
+	if first.RequestID != second.RequestID || first.Duplicate || !second.Duplicate {
+		t.Fatalf("first=%+v second=%+v", first, second)
+	}
+	if len(journal.Tasks()) != 1 {
+		t.Fatalf("tasks = %d, want 1", len(journal.Tasks()))
+	}
+}
+
+func TestHandlerRejectsInboundPayloadConflict(t *testing.T) {
+	repository := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
+	t.Cleanup(func() { _ = repository.Close() })
+	resolver, _ := routing.NewControlPlaneResolver(repository)
+	journal := gateway.NewMemoryJournal()
+	intake, _ := gateway.NewIntake(resolver, journal)
+	t.Cleanup(func() { _ = intake.Close() })
+	handler := NewHandler(
+		&fakeChatService{},
+		WithRouteResolver(resolver),
+		WithGatewayIntake(intake),
+	)
+	postInbound(t, handler, `{
+        "binding_key":"tutorial-http","message_id":"conflict",
+        "user_id":"alice","session_id":"session","chat_type":"direct","message":"first"
+    }`)
+	request := httptest.NewRequest(http.MethodPost, "/inbound", bytes.NewBufferString(`{
+        "binding_key":"tutorial-http","message_id":"conflict",
+        "user_id":"alice","session_id":"session","chat_type":"direct","message":"second"
+    }`))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func postChat(t *testing.T, handler http.Handler, body string) chatResponse {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, "/chat", bytes.NewBufferString(body))
@@ -292,4 +357,19 @@ func postChat(t *testing.T, handler http.Handler, body string) chatResponse {
 		t.Fatalf("decode response: %v", err)
 	}
 	return response
+}
+
+func postInbound(t *testing.T, handler http.Handler, body string) gateway.AcceptResult {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/inbound", bytes.NewBufferString(body))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var result gateway.AcceptResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode inbound response: %v", err)
+	}
+	return result
 }

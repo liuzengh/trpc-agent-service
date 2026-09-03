@@ -252,6 +252,16 @@ TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=true
 
 Channel Binding、tenant-scoped Runtime 和动态 Agent Revision 编译见 [Channel Binding 路由](docs/getting-started.md#14-channel-binding-到租户-runtime-的路由链路) 与 [Agent Revision Compiler](docs/getting-started.md#15-agent-revision-compiler-运行链路)。
 
+持久化异步入口：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/inbound \
+  -H 'Content-Type: application/json' \
+  -d '{"binding_key":"tutorial-http","message_id":"external-001","user_id":"alice","session_id":"durable-session","chat_type":"direct","message":"hello"}'
+```
+
+该接口只在 conversation、inbound、agent run 和 queue outbox 同一事务提交后返回 `202`。详见 [持久化 Inbox 和 Transactional Outbox](docs/getting-started.md#16-持久化-inbox-和-transactional-outbox)。
+
 停止服务：
 
 ```bash

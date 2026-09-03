@@ -14,9 +14,11 @@
 - Channel Binding → tenant/app/revision 可信路由；
 - tenant-scoped Session、Coordinator 和 Idempotency key；
 - Agent Revision Compiler、严格配置解析和不可变 Agent cache；
+- PostgreSQL conversation/inbound/agent_run/queue_outbox 原子事务；
+- `/inbound` 持久化 ACK 和重复消息唯一约束；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 PostgreSQL Inbox/Agent Run/Transactional Outbox 与 Redis Streams Worker，使 IM callback 可以先可靠入库再异步执行。
+接下来的最近里程碑是 Transactional Outbox Relay、Redis Streams Consumer Group 和异步 Agent Worker。
 
 ## 1. 建议目录
 
