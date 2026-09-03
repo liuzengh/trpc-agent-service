@@ -48,3 +48,28 @@ func TestApprovedDangerousTool(t *testing.T) {
 		t.Fatalf("decision=%+v", decision)
 	}
 }
+
+func TestToolPermissionDecisionRecorder(t *testing.T) {
+	policy := ToolPolicy{AllowedTools: []string{"echo"}}
+	var recorded ToolDecision
+	runOptions := agentcore.NewRunOptions(RunOptions(
+		policy,
+		"alice",
+		nil,
+		func(_ context.Context, decision ToolDecision) error {
+			recorded = decision
+			return nil
+		},
+	)...)
+	decision, err := runOptions.ToolPermissionPolicy.CheckToolPermission(
+		context.Background(),
+		&agenttool.PermissionRequest{ToolName: "echo", ToolCallID: "call-1"},
+	)
+	if err != nil || decision.Action != agenttool.PermissionActionAllow {
+		t.Fatalf("decision=%+v err=%v", decision, err)
+	}
+	if recorded.ToolName != "echo" || recorded.ToolCallID != "call-1" ||
+		recorded.Action != "allow" {
+		t.Fatalf("recorded=%+v", recorded)
+	}
+}

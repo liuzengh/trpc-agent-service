@@ -52,11 +52,14 @@ func (k Key) Validate() error {
 
 // Result is the transport-neutral value cached after a successful Agent turn.
 type Result struct {
-	Reply        string `json:"reply"`
-	RequestID    string `json:"request_id"`
-	EventCount   int    `json:"event_count"`
-	AgentName    string `json:"agent_name"`
-	FencingToken int64  `json:"fencing_token"`
+	Reply            string  `json:"reply"`
+	RequestID        string  `json:"request_id"`
+	EventCount       int     `json:"event_count"`
+	AgentName        string  `json:"agent_name"`
+	FencingToken     int64   `json:"fencing_token"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	Cost             float64 `json:"cost"`
 }
 
 // BeginStatus describes what Begin found for one message ID.

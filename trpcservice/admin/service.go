@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
@@ -22,6 +23,7 @@ var ErrInvalid = errors.New("invalid Admin request")
 type Service struct {
 	repository controlplane.MutableRepository
 	tools      *platformtool.Catalog
+	audit      audit.Writer
 }
 
 func New(repository controlplane.Repository, catalogs ...*platformtool.Catalog) (*Service, error) {
@@ -34,6 +36,15 @@ func New(repository controlplane.Repository, catalogs ...*platformtool.Catalog) 
 		catalog = catalogs[0]
 	}
 	return &Service{repository: mutable, tools: catalog}, nil
+}
+
+// WithAuditWriter enables fail-closed audit recording for successful control
+// plane mutations. The writer is owned by the process, not by Service.
+func (s *Service) WithAuditWriter(writer audit.Writer) *Service {
+	if s != nil {
+		s.audit = writer
+	}
+	return s
 }
 
 func (s *Service) CreateTenant(ctx context.Context, tenant controlplane.Tenant) (controlplane.Tenant, error) {
@@ -59,6 +70,11 @@ func (s *Service) CreateTenant(ctx context.Context, tenant controlplane.Tenant) 
 	if err := s.repository.CreateTenant(ctx, tenant); err != nil {
 		return controlplane.Tenant{}, err
 	}
+	if err := s.record(ctx, tenant.ID, "admin_tenant_created", map[string]any{
+		"tenant_id": tenant.ID, "version": tenant.Version,
+	}); err != nil {
+		return controlplane.Tenant{}, err
+	}
 	return tenant, nil
 }
 
@@ -79,6 +95,11 @@ func (s *Service) CreateAgentApp(ctx context.Context, app controlplane.AgentApp)
 	app.CreatedAt = now
 	app.UpdatedAt = now
 	if err := s.repository.CreateAgentApp(ctx, app); err != nil {
+		return controlplane.AgentApp{}, err
+	}
+	if err := s.record(ctx, app.TenantID, "admin_app_created", map[string]any{
+		"app_id": app.ID, "version": app.Version,
+	}); err != nil {
 		return controlplane.AgentApp{}, err
 	}
 	return app, nil
@@ -123,6 +144,12 @@ func (s *Service) CreateRevision(
 	if err := s.repository.CreateRevision(ctx, revision); err != nil {
 		return controlplane.AgentRevision{}, err
 	}
+	if err := s.record(ctx, revision.TenantID, "admin_revision_created", map[string]any{
+		"app_id": revision.AppID, "revision_id": revision.ID,
+		"revision_no": revision.RevisionNo, "checksum": revision.Checksum,
+	}); err != nil {
+		return controlplane.AgentRevision{}, err
+	}
 	return revision, nil
 }
 
@@ -136,7 +163,17 @@ func (s *Service) PublishRevision(
 	if expectedVersion <= 0 {
 		return controlplane.AgentApp{}, invalidf("expected app version must be positive")
 	}
-	return s.repository.PublishRevision(ctx, tenantID, appID, revisionID, expectedVersion)
+	app, err := s.repository.PublishRevision(ctx, tenantID, appID, revisionID, expectedVersion)
+	if err != nil {
+		return controlplane.AgentApp{}, err
+	}
+	if err := s.record(ctx, tenantID, "admin_revision_published", map[string]any{
+		"app_id": appID, "revision_id": revisionID,
+		"previous_version": expectedVersion, "version": app.Version,
+	}); err != nil {
+		return controlplane.AgentApp{}, err
+	}
+	return app, nil
 }
 
 func (s *Service) CreateChannelBinding(
@@ -167,6 +204,12 @@ func (s *Service) CreateChannelBinding(
 	binding.CreatedAt = now
 	binding.UpdatedAt = now
 	if err := s.repository.CreateChannelBinding(ctx, binding); err != nil {
+		return controlplane.ChannelBinding{}, err
+	}
+	if err := s.record(ctx, binding.TenantID, "admin_channel_binding_created", map[string]any{
+		"app_id": binding.AppID, "binding_id": binding.ID,
+		"channel": binding.ChannelType, "version": binding.Version,
+	}); err != nil {
 		return controlplane.ChannelBinding{}, err
 	}
 	return binding, nil
@@ -201,7 +244,35 @@ func (s *Service) CreateBackendBinding(
 	if err := s.repository.CreateBackendBinding(ctx, binding); err != nil {
 		return controlplane.BackendBinding{}, err
 	}
+	if err := s.record(ctx, binding.TenantID, "admin_backend_binding_created", map[string]any{
+		"app_id": binding.AppID, "binding_id": binding.ID,
+		"resource_type": binding.ResourceType, "backend_type": binding.BackendType,
+		"version": binding.Version,
+	}); err != nil {
+		return controlplane.BackendBinding{}, err
+	}
 	return binding, nil
+}
+
+func (s *Service) record(
+	ctx context.Context,
+	tenantID string,
+	decision string,
+	details map[string]any,
+) error {
+	if s.audit == nil {
+		return nil
+	}
+	if err := s.audit.Record(ctx, audit.Event{
+		TenantID: tenantID,
+		UserID:   "admin",
+		TraceID:  audit.TraceID(ctx),
+		Decision: decision,
+		Details:  details,
+	}); err != nil {
+		return fmt.Errorf("record Admin audit: %w", err)
+	}
+	return nil
 }
 
 func normalizeJSON(value *json.RawMessage) error {

@@ -18,4 +18,6 @@ type AgentTask struct {
 	ReplyTarget    string               `json:"reply_target"`
 	TurnSeq        int64                `json:"turn_seq"`
 	Attempt        int                  `json:"attempt"`
+	TraceParent    string               `json:"traceparent,omitempty"`
+	TraceState     string               `json:"tracestate,omitempty"`
 }

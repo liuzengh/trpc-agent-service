@@ -8,8 +8,13 @@ import (
 	"time"
 
 	agentruntime "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // Runtime is the tenant-scoped Agent execution boundary used by a Worker.
@@ -21,6 +26,8 @@ type Options struct {
 	WorkerID    string
 	MaxAttempts int
 	RetryDelay  time.Duration
+	Audit       audit.Writer
+	Metrics     *platformmetrics.Recorder
 }
 
 // Worker processes at-least-once queue deliveries. Durable idempotency makes
@@ -57,6 +64,17 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	task := delivery.Task()
+	ctx = taskContext(ctx, task)
+	ctx, span := otel.Tracer("trpc-agent-service/worker").Start(ctx, "worker.agent.run")
+	span.SetAttributes(
+		attribute.String("tenant.id", task.Scope.TenantID),
+		attribute.String("agent.app.id", task.Scope.AppID),
+		attribute.String("agent.revision.id", task.Scope.RevisionID),
+		attribute.String("messaging.message.id", task.MessageID),
+		attribute.String("gen_ai.request.id", task.RequestID),
+	)
+	defer span.End()
+	started := time.Now()
 	if err := task.Scope.Validate(); err != nil {
 		_ = delivery.Ack(ctx)
 		return true, fmt.Errorf("reject invalid task scope: %w", err)
@@ -73,21 +91,86 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		RequestID: task.RequestID,
 	})
 	if runErr != nil {
+		w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "failed", time.Since(started))
 		failErr := w.journal.FailRun(ctx, task.RequestID, "agent_execution", runErr)
-		return true, w.retryOrAck(ctx, delivery, task, errors.Join(runErr, failErr))
+		auditErr := w.recordAudit(ctx, task, gateway.RunResult{}, "run_failed", "agent_execution", started)
+		return true, w.retryOrAck(ctx, delivery, task, errors.Join(runErr, failErr, auditErr))
 	}
 	if err := w.journal.CompleteRun(ctx, task, gateway.RunResult{
-		Reply:        result.Reply,
-		AgentName:    result.AgentName,
-		FencingToken: result.FencingToken,
-		EventCount:   result.EventCount,
+		Reply:            result.Reply,
+		AgentName:        result.AgentName,
+		FencingToken:     result.FencingToken,
+		EventCount:       result.EventCount,
+		PromptTokens:     result.PromptTokens,
+		CompletionTokens: result.CompletionTokens,
+		Cost:             result.Cost,
+		TraceID:          audit.TraceID(ctx),
 	}); err != nil {
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
+	if err := w.recordAudit(ctx, task, gateway.RunResult{
+		Reply: result.Reply, AgentName: result.AgentName,
+		FencingToken: result.FencingToken, EventCount: result.EventCount,
+		PromptTokens: result.PromptTokens, CompletionTokens: result.CompletionTokens,
+		Cost: result.Cost, TraceID: audit.TraceID(ctx),
+	}, "run_completed", "", started); err != nil {
+		return true, w.retryOrAck(ctx, delivery, task, err)
+	}
+	w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "completed", time.Since(started))
+	w.opts.Metrics.RecordUsage(
+		ctx, task.Scope.TenantID, result.PromptTokens, result.CompletionTokens, result.Cost,
+	)
 	if err := delivery.Ack(ctx); err != nil {
 		return true, err
 	}
 	return true, nil
+}
+
+func (w *Worker) recordAudit(
+	ctx context.Context,
+	task workqueue.AgentTask,
+	result gateway.RunResult,
+	decision string,
+	errorType string,
+	started time.Time,
+) error {
+	if w.opts.Audit == nil {
+		return nil
+	}
+	return w.opts.Audit.Record(ctx, audit.Event{
+		TenantID:         task.Scope.TenantID,
+		Channel:          task.Scope.ChannelType,
+		ChannelBindingID: task.Scope.ChannelBindingID,
+		UserID:           task.UserID,
+		SessionID:        task.SessionID,
+		MessageID:        task.MessageID,
+		RequestID:        task.RequestID,
+		TraceID:          audit.TraceID(ctx),
+		AgentName:        result.AgentName,
+		RevisionID:       task.Scope.RevisionID,
+		Decision:         decision,
+		Latency:          time.Since(started),
+		ErrorType:        errorType,
+		Cost:             result.Cost,
+		Details: map[string]any{
+			"fencing_token":     result.FencingToken,
+			"event_count":       result.EventCount,
+			"attempt":           task.Attempt,
+			"prompt_tokens":     result.PromptTokens,
+			"completion_tokens": result.CompletionTokens,
+		},
+	})
+}
+
+func taskContext(ctx context.Context, task workqueue.AgentTask) context.Context {
+	carrier := propagation.MapCarrier{}
+	if task.TraceParent != "" {
+		carrier.Set("traceparent", task.TraceParent)
+	}
+	if task.TraceState != "" {
+		carrier.Set("tracestate", task.TraceState)
+	}
+	return otel.GetTextMapPropagator().Extract(ctx, carrier)
 }
 
 func (w *Worker) retryOrAck(

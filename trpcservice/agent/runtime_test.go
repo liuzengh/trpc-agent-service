@@ -4,7 +4,37 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
+
+func TestCollectChatResultAggregatesUsageOncePerModelResponse(t *testing.T) {
+	events := make(chan *event.Event, 3)
+	usage := &model.Usage{PromptTokens: 12, CompletionTokens: 5, TotalTokens: 17}
+	response := &model.Response{
+		ID: "response-1", Usage: usage,
+		Choices: []model.Choice{{Message: model.Message{
+			Role: model.RoleAssistant, Content: "done",
+		}}},
+	}
+	events <- &event.Event{InvocationID: "invocation-1", Response: response}
+	events <- &event.Event{InvocationID: "invocation-1", Response: response.Clone()}
+	events <- &event.Event{
+		InvocationID: "invocation-2",
+		Response: &model.Response{
+			ID: "response-2", Usage: &model.Usage{PromptTokens: 3, CompletionTokens: 2},
+		},
+	}
+	close(events)
+	result, err := collectChatResult(context.Background(), events)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if result.PromptTokens != 15 || result.CompletionTokens != 7 {
+		t.Fatalf("result=%+v", result)
+	}
+}
 
 func TestRuntimeRemembersNameWithinSession(t *testing.T) {
 	runtime := NewDemoRuntime()

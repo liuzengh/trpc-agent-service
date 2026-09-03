@@ -2397,6 +2397,72 @@ Admin 创建 Revision 时会严格解析 Tool Policy，并拒绝 Catalog 中不�
 
 `dangerous_demo` 本身没有外部副作用，只用于验证审批链路。后续接入真实业务 Tool/MCP 时，每个危险 Tool 还必须实施自己的不可绕过授权和业务幂等。
 
-## 23. 下一步
+## 23. OpenTelemetry、审计和成本链路
 
-下一阶段补齐审批记录、审计日志和 OpenTelemetry，然后接入 Memory、Knowledge、Artifact 和租户级 Storage Router。
+现在一条消息不再只有业务结果，还会同时产生 trace、指标和审计事件。OpenTelemetry 默认关闭导出，但 W3C `traceparent` 传播始终启用；开发环境不启动 Collector 也不会影响聊天。
+
+启用 OTLP/gRPC 导出：
+
+```dotenv
+TRPC_AGENT_OTEL_ENABLED=true
+TRPC_AGENT_OTEL_SERVICE_NAME=trpc-agent-service
+TRPC_AGENT_OTEL_ENDPOINT=127.0.0.1:4317
+TRPC_AGENT_OTEL_INSECURE=true
+TRPC_AGENT_OTEL_SAMPLE_RATIO=1
+```
+
+HTTP 中间件先提取调用方的 `traceparent`，再创建入口 span，并通过响应头返回 `X-Trace-ID`。Gateway 把 trace context 写入持久化 `AgentTask`，因此 Outbox Relay 和 Redis Streams 不会切断调用链。Worker 从任务恢复父上下文，创建 `worker.agent.run` span；审计记录使用同一个 trace ID。进程退出时会在五秒超时内 flush trace 和 metric provider。
+
+```text
+IM callback / HTTP
+  → 提取或创建 trace_id
+  → Gateway 持久化 AgentTask(traceparent)
+  → Outbox Relay / Redis Streams
+  → Worker 恢复父上下文
+  → Runner / Model / Tool
+  → Reply Sender
+```
+
+关键运行事件会写入统一 `audit.Writer`。InMemory 控制面使用内存 Writer，PostgreSQL 控制面写 `audit_log`：
+
+```text
+inbound_accepted / inbound_duplicate
+run_completed / run_failed
+tool_allow / tool_deny / tool_ask
+reply_sent / reply_failed
+admin_tenant_created / admin_app_created
+admin_revision_created / admin_revision_published
+admin_channel_binding_created / admin_backend_binding_created
+```
+
+审计字段包括 tenant、channel、user、session、message、request、trace、Agent、Revision、Tool、decision、latency、error type 和 cost。`details` 会递归屏蔽名称含 `secret`、`token`、`password`、`api_key`、`authorization`、`cookie` 的字段；工具参数本身不会进入权限审计。审计 Writer 不拥有共享 PostgreSQL 连接，关闭顺序不会提前断开控制面。
+
+Runner Event 中的 `model.Usage` 会按“invocation + response ID”去重后汇总，避免同一个流式响应被重复计费。Revision 可在 `model_config` 中声明单价：
+
+```json
+{
+  "source": "startup_env",
+  "prompt_cost_per_million": 2.5,
+  "completion_cost_per_million": 10
+}
+```
+
+价格单位为每百万 token 的美元成本。结果写入 `agent_run.prompt_tokens`、`completion_tokens`、`cost`，同时写审计并输出以下租户维度指标：
+
+```text
+agent.inbound.messages
+agent.idempotency.replays
+agent.runs
+agent.run.duration
+agent.reply.deliveries
+agent.reply.duration
+agent.model.prompt_tokens
+agent.model.completion_tokens
+agent.model.cost
+```
+
+当前实现已经把 callback、Gateway、队列和 Worker 串成一个 trace。后续接入 Memory、Knowledge、Artifact 时，会在各 Storage Adapter 上继续创建读写 span；Reply Sender 的跨进程父上下文也会随 outbound 记录继续完善。
+
+## 24. 下一步
+
+下一阶段实现真正可恢复的危险工具审批记录和 IM 确认流程，然后接入 Memory、Summary、Knowledge、Artifact 与租户级 Storage Router。

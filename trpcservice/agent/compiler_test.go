@@ -7,11 +7,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
+	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -233,5 +235,69 @@ func TestRevisionCompilerAddsOnlyRevisionTools(t *testing.T) {
 	tools := provider.Tools()
 	if len(tools) != 1 || tools[0].Declaration().Name != "echo" {
 		t.Fatalf("tools=%+v", tools)
+	}
+}
+
+func TestRevisionCompilerAuditsToolPermissionDecision(t *testing.T) {
+	data := controlplane.DefaultBootstrapData()
+	data.Revisions[0].ToolPolicy = json.RawMessage(`{"allowed_tools":["echo"]}`)
+	repository := controlplane.NewMemoryRepository(data)
+	auditWriter := audit.NewMemoryWriter()
+	t.Cleanup(func() {
+		_ = auditWriter.Close()
+		_ = repository.Close()
+	})
+	compiler, err := NewRevisionCompiler(
+		repository,
+		NewTutorialModel(),
+		false,
+		WithToolCatalog(platformtool.DefaultCatalog()),
+		WithAuditWriter(auditWriter),
+	)
+	if err != nil {
+		t.Fatalf("new compiler: %v", err)
+	}
+	input := ChatInput{
+		Scope: runtimecontext.TutorialScope(), MessageID: "message-1",
+		RequestID: "request-1", UserID: "alice", SessionID: "session-1",
+	}
+	options, err := compiler.RunPolicyOptions(context.Background(), input)
+	if err != nil {
+		t.Fatalf("run policy options: %v", err)
+	}
+	runOptions := agentcore.NewRunOptions(options...)
+	decision, err := runOptions.ToolPermissionPolicy.CheckToolPermission(
+		context.Background(),
+		&agenttool.PermissionRequest{ToolName: "echo", ToolCallID: "call-1"},
+	)
+	if err != nil || decision.Action != agenttool.PermissionActionAllow {
+		t.Fatalf("decision=%+v err=%v", decision, err)
+	}
+	events := auditWriter.Events()
+	if len(events) != 1 || events[0].ToolName != "echo" ||
+		events[0].Decision != "tool_allow" || events[0].RequestID != "request-1" {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestRevisionCompilerLoadsUsagePricing(t *testing.T) {
+	data := controlplane.DefaultBootstrapData()
+	data.Revisions[0].ModelConfig = json.RawMessage(`{
+        "source":"startup_env",
+        "prompt_cost_per_million":2.5,
+        "completion_cost_per_million":10
+    }`)
+	repository := controlplane.NewMemoryRepository(data)
+	t.Cleanup(func() { _ = repository.Close() })
+	compiler, err := NewRevisionCompiler(repository, NewTutorialModel(), false)
+	if err != nil {
+		t.Fatalf("new compiler: %v", err)
+	}
+	pricing, err := compiler.UsagePricing(context.Background(), runtimecontext.TutorialScope())
+	if err != nil {
+		t.Fatalf("load pricing: %v", err)
+	}
+	if cost := pricing.Cost(1_000_000, 500_000); cost != 7.5 {
+		t.Fatalf("cost=%v", cost)
 	}
 }

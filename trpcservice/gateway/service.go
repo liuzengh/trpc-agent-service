@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 )
 
@@ -23,16 +25,38 @@ type IntakeRequest struct {
 type Intake struct {
 	resolver routing.Resolver
 	journal  Journal
+	audit    audit.Writer
+	metrics  *platformmetrics.Recorder
 }
 
-func NewIntake(resolver routing.Resolver, journal Journal) (*Intake, error) {
+type IntakeOption func(*Intake)
+
+func WithAuditWriter(writer audit.Writer) IntakeOption {
+	return func(intake *Intake) { intake.audit = writer }
+}
+
+func WithMetrics(recorder *platformmetrics.Recorder) IntakeOption {
+	return func(intake *Intake) { intake.metrics = recorder }
+}
+
+func NewIntake(
+	resolver routing.Resolver,
+	journal Journal,
+	opts ...IntakeOption,
+) (*Intake, error) {
 	if resolver == nil {
 		return nil, fmt.Errorf("Gateway route resolver is required")
 	}
 	if journal == nil {
 		return nil, fmt.Errorf("Gateway inbound journal is required")
 	}
-	return &Intake{resolver: resolver, journal: journal}, nil
+	intake := &Intake{resolver: resolver, journal: journal}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(intake)
+		}
+	}
+	return intake, nil
 }
 
 func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult, error) {
@@ -44,7 +68,7 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 	if err != nil {
 		return AcceptResult{}, err
 	}
-	return i.journal.Accept(ctx, InboundRequest{
+	result, err := i.journal.Accept(ctx, InboundRequest{
 		Scope:             scope,
 		ExternalMessageID: input.ExternalMessageID,
 		UserID:            input.UserID,
@@ -53,6 +77,31 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 		Text:              input.Text,
 		ReplyTarget:       input.ReplyTarget,
 	})
+	if err != nil {
+		return AcceptResult{}, err
+	}
+	if i.audit != nil {
+		decision := "inbound_accepted"
+		if result.Duplicate {
+			decision = "inbound_duplicate"
+		}
+		if err := i.audit.Record(ctx, audit.Event{
+			TenantID:         scope.TenantID,
+			Channel:          scope.ChannelType,
+			ChannelBindingID: scope.ChannelBindingID,
+			UserID:           input.UserID,
+			SessionID:        input.SessionID,
+			MessageID:        input.ExternalMessageID,
+			RequestID:        result.RequestID,
+			RevisionID:       result.RevisionID,
+			TraceID:          audit.TraceID(ctx),
+			Decision:         decision,
+		}); err != nil {
+			return AcceptResult{}, fmt.Errorf("write inbound audit: %w", err)
+		}
+	}
+	i.metrics.RecordInbound(ctx, scope.TenantID, scope.ChannelType, result.Duplicate)
+	return result, nil
 }
 
 func (i *Intake) Ready(ctx context.Context) error {

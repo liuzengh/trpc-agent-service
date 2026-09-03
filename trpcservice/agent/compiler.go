@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
@@ -33,10 +34,22 @@ type Compiler interface {
 type RunPolicyProvider interface {
 	RunPolicyOptions(
 		ctx context.Context,
-		scope runtimecontext.Scope,
-		userID string,
-		approvedTools []string,
+		input ChatInput,
 	) ([]agentcore.RunOption, error)
+}
+
+type UsagePricing struct {
+	PromptPerMillion     float64
+	CompletionPerMillion float64
+}
+
+func (p UsagePricing) Cost(promptTokens int, completionTokens int) float64 {
+	return float64(promptTokens)/1_000_000*p.PromptPerMillion +
+		float64(completionTokens)/1_000_000*p.CompletionPerMillion
+}
+
+type UsagePricingProvider interface {
+	UsagePricing(ctx context.Context, scope runtimecontext.Scope) (UsagePricing, error)
 }
 
 // StaticCompiler preserves the dependency-free tutorial and focused tests.
@@ -71,6 +84,7 @@ type RevisionCompiler struct {
 	cache         map[string]agentcore.Agent
 	group         singleflight.Group
 	toolCatalog   *platformtool.Catalog
+	auditWriter   audit.Writer
 }
 
 type RevisionCompilerOption func(*RevisionCompiler)
@@ -78,6 +92,12 @@ type RevisionCompilerOption func(*RevisionCompiler)
 func WithToolCatalog(catalog *platformtool.Catalog) RevisionCompilerOption {
 	return func(compiler *RevisionCompiler) {
 		compiler.toolCatalog = catalog
+	}
+}
+
+func WithAuditWriter(writer audit.Writer) RevisionCompilerOption {
+	return func(compiler *RevisionCompiler) {
+		compiler.auditWriter = writer
 	}
 }
 
@@ -177,11 +197,13 @@ type revisionAgentConfig struct {
 }
 
 type revisionModelConfig struct {
-	Source    string `json:"source"`
-	Provider  string `json:"provider"`
-	Name      string `json:"name"`
-	BaseURL   string `json:"base_url"`
-	APIKeyEnv string `json:"api_key_env"`
+	Source                   string  `json:"source"`
+	Provider                 string  `json:"provider"`
+	Name                     string  `json:"name"`
+	BaseURL                  string  `json:"base_url"`
+	APIKeyEnv                string  `json:"api_key_env"`
+	PromptCostPerMillion     float64 `json:"prompt_cost_per_million,omitempty"`
+	CompletionCostPerMillion float64 `json:"completion_cost_per_million,omitempty"`
 }
 
 func (c *RevisionCompiler) compileRevision(
@@ -234,11 +256,9 @@ func (c *RevisionCompiler) compileRevision(
 
 func (c *RevisionCompiler) RunPolicyOptions(
 	ctx context.Context,
-	scope runtimecontext.Scope,
-	userID string,
-	approvedTools []string,
+	input ChatInput,
 ) ([]agentcore.RunOption, error) {
-	revision, err := c.repository.GetRevision(ctx, scope.TenantID, scope.RevisionID)
+	revision, err := c.repository.GetRevision(ctx, input.Scope.TenantID, input.Scope.RevisionID)
 	if err != nil {
 		return nil, fmt.Errorf("load revision tool policy: %w", err)
 	}
@@ -246,13 +266,53 @@ func (c *RevisionCompiler) RunPolicyOptions(
 	if err != nil {
 		return nil, err
 	}
-	return governance.RunOptions(policy, userID, approvedTools), nil
+	var recorder governance.DecisionRecorder
+	if c.auditWriter != nil {
+		recorder = func(ctx context.Context, decision governance.ToolDecision) error {
+			return c.auditWriter.Record(ctx, audit.Event{
+				TenantID:         input.Scope.TenantID,
+				Channel:          input.Scope.ChannelType,
+				ChannelBindingID: input.Scope.ChannelBindingID,
+				UserID:           input.UserID,
+				SessionID:        input.SessionID,
+				MessageID:        input.MessageID,
+				RequestID:        input.RequestID,
+				TraceID:          audit.TraceID(ctx),
+				RevisionID:       input.Scope.RevisionID,
+				ToolName:         decision.ToolName,
+				Decision:         "tool_" + decision.Action,
+				Details: map[string]any{
+					"tool_call_id": decision.ToolCallID,
+					"reason":       decision.Reason,
+				},
+			})
+		}
+	}
+	return governance.RunOptions(policy, input.UserID, input.ApprovedTools, recorder), nil
+}
+
+func (c *RevisionCompiler) UsagePricing(
+	ctx context.Context,
+	scope runtimecontext.Scope,
+) (UsagePricing, error) {
+	revision, err := c.repository.GetRevision(ctx, scope.TenantID, scope.RevisionID)
+	if err != nil {
+		return UsagePricing{}, fmt.Errorf("load revision usage pricing: %w", err)
+	}
+	modelConfig, err := parseRevisionModelConfig(revision.ModelConfig)
+	if err != nil {
+		return UsagePricing{}, err
+	}
+	return UsagePricing{
+		PromptPerMillion:     modelConfig.PromptCostPerMillion,
+		CompletionPerMillion: modelConfig.CompletionCostPerMillion,
+	}, nil
 }
 
 func (c *RevisionCompiler) buildRevisionModel(raw json.RawMessage) (model.Model, error) {
-	var modelConfig revisionModelConfig
-	if err := decodeStrictJSON(raw, &modelConfig); err != nil {
-		return nil, fmt.Errorf("decode revision model config: %w", err)
+	modelConfig, err := parseRevisionModelConfig(raw)
+	if err != nil {
+		return nil, err
 	}
 	modelConfig.Source = strings.ToLower(strings.TrimSpace(modelConfig.Source))
 	if modelConfig.Source == "" || modelConfig.Source == "startup_env" {
@@ -276,6 +336,17 @@ func (c *RevisionCompiler) buildRevisionModel(raw json.RawMessage) (model.Model,
 	})
 }
 
+func parseRevisionModelConfig(raw json.RawMessage) (revisionModelConfig, error) {
+	var modelConfig revisionModelConfig
+	if err := decodeStrictJSON(raw, &modelConfig); err != nil {
+		return revisionModelConfig{}, fmt.Errorf("decode revision model config: %w", err)
+	}
+	if modelConfig.PromptCostPerMillion < 0 || modelConfig.CompletionCostPerMillion < 0 {
+		return revisionModelConfig{}, fmt.Errorf("model token prices must not be negative")
+	}
+	return modelConfig, nil
+}
+
 func decodeStrictJSON(raw json.RawMessage, target any) error {
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
@@ -291,3 +362,4 @@ func decodeStrictJSON(raw json.RawMessage, target any) error {
 var _ Compiler = (*StaticCompiler)(nil)
 var _ Compiler = (*RevisionCompiler)(nil)
 var _ RunPolicyProvider = (*RevisionCompiler)(nil)
+var _ UsagePricingProvider = (*RevisionCompiler)(nil)

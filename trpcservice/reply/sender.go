@@ -8,9 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 )
 
 type Options struct {
@@ -20,6 +22,8 @@ type Options struct {
 	PollInterval time.Duration
 	RetryDelay   time.Duration
 	MaxAttempts  int
+	Audit        audit.Writer
+	Metrics      *platformmetrics.Recorder
 }
 
 // Sender claims outbound rows and delegates provider calls to an Adapter.
@@ -66,18 +70,19 @@ func (s *Sender) ProcessOnce(ctx context.Context) (int, error) {
 }
 
 func (s *Sender) sendOne(ctx context.Context, item gateway.OutboundItem) error {
+	started := time.Now()
 	binding, err := s.repository.GetChannelBinding(
 		ctx, item.TenantID, item.ChannelBindingID,
 	)
 	if err != nil {
-		return s.fail(ctx, item, true, err)
+		return s.fail(ctx, item, "", true, started, err)
 	}
 	if binding.Status != controlplane.StatusActive {
-		return s.fail(ctx, item, true, fmt.Errorf("channel binding is disabled"))
+		return s.fail(ctx, item, binding.ChannelType, true, started, fmt.Errorf("channel binding is disabled"))
 	}
 	adapter, err := s.registry.Get(binding.ChannelType)
 	if err != nil {
-		return s.fail(ctx, item, true, err)
+		return s.fail(ctx, item, binding.ChannelType, true, started, err)
 	}
 	parts := splitText(item.Text, adapter.Capabilities().MaxTextRunes)
 	providerIDs := make([]string, 0, len(parts))
@@ -89,7 +94,11 @@ func (s *Sender) sendOne(ctx context.Context, item gateway.OutboundItem) error {
 			ReplyTarget: item.ReplyTarget,
 		})
 		if sendErr != nil {
-			return s.fail(ctx, item, deliveryTerminal(sendErr, item.AttemptCount, s.opts.MaxAttempts), sendErr)
+			return s.fail(
+				ctx, item, binding.ChannelType,
+				deliveryTerminal(sendErr, item.AttemptCount, s.opts.MaxAttempts),
+				started, sendErr,
+			)
 		}
 		providerIDs = append(providerIDs, receipt.ProviderMessageID)
 	}
@@ -98,13 +107,35 @@ func (s *Sender) sendOne(ctx context.Context, item gateway.OutboundItem) error {
 	); err != nil {
 		return err
 	}
+	s.opts.Metrics.RecordDelivery(
+		ctx, binding.TenantID, binding.ChannelType, "sent", time.Since(started),
+	)
+	if s.opts.Audit != nil {
+		if err := s.opts.Audit.Record(ctx, audit.Event{
+			TenantID:         binding.TenantID,
+			Channel:          binding.ChannelType,
+			ChannelBindingID: binding.ID,
+			RequestID:        item.RequestID,
+			TraceID:          audit.TraceID(ctx),
+			Decision:         "reply_sent",
+			Latency:          time.Since(started),
+			Details: map[string]any{
+				"outbound_id": item.ID,
+				"parts":       len(parts),
+			},
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (s *Sender) fail(
 	ctx context.Context,
 	item gateway.OutboundItem,
+	channelType string,
 	terminal bool,
+	started time.Time,
 	cause error,
 ) error {
 	retryAt := time.Now().Add(s.opts.RetryDelay)
@@ -115,7 +146,27 @@ func (s *Sender) fail(
 	markErr := s.journal.MarkOutboundFailed(
 		ctx, item.ID, s.opts.WorkerID, retryAt, terminal, cause,
 	)
-	return errors.Join(cause, markErr)
+	s.opts.Metrics.RecordDelivery(
+		ctx, item.TenantID, channelType, "failed", time.Since(started),
+	)
+	var auditErr error
+	if s.opts.Audit != nil {
+		auditErr = s.opts.Audit.Record(ctx, audit.Event{
+			TenantID:         item.TenantID,
+			Channel:          channelType,
+			ChannelBindingID: item.ChannelBindingID,
+			RequestID:        item.RequestID,
+			TraceID:          audit.TraceID(ctx),
+			Decision:         "reply_failed",
+			Latency:          time.Since(started),
+			ErrorType:        "channel_delivery",
+			Details: map[string]any{
+				"outbound_id": item.ID,
+				"terminal":    terminal,
+			},
+		})
+	}
+	return errors.Join(cause, markErr, auditErr)
 }
 
 func deliveryTerminal(err error, attempt int, maxAttempts int) bool {

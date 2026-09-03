@@ -23,6 +23,18 @@ type ToolPolicy struct {
 	MaxRunDuration string   `json:"max_run_duration"`
 }
 
+// ToolDecision is the security-relevant result of one tool permission check.
+// Arguments are intentionally excluded so secrets from tool payloads do not
+// leak into the audit trail.
+type ToolDecision struct {
+	ToolName   string
+	ToolCallID string
+	Action     string
+	Reason     string
+}
+
+type DecisionRecorder func(context.Context, ToolDecision) error
+
 func ParseToolPolicy(raw json.RawMessage) (ToolPolicy, error) {
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
@@ -49,6 +61,7 @@ func RunOptions(
 	policy ToolPolicy,
 	userID string,
 	approvedTools []string,
+	recorders ...DecisionRecorder,
 ) []agentcore.RunOption {
 	allowed := stringSet(policy.AllowedTools)
 	dangerous := stringSet(policy.DangerousTools)
@@ -62,23 +75,41 @@ func RunOptions(
 	}
 	var calls atomic.Int64
 	options = append(options, agentcore.WithToolPermissionPolicyFunc(
-		func(_ context.Context, request *agenttool.PermissionRequest) (agenttool.PermissionDecision, error) {
+		func(ctx context.Context, request *agenttool.PermissionRequest) (agenttool.PermissionDecision, error) {
+			var decision agenttool.PermissionDecision
 			if request == nil {
-				return agenttool.DenyPermission("invalid tool permission request"), nil
+				decision = agenttool.DenyPermission("invalid tool permission request")
+			} else {
+				switch {
+				case contains(deniedUsers, userID):
+					decision = agenttool.DenyPermission("user is not allowed to call tools")
+				case !contains(allowed, request.ToolName):
+					decision = agenttool.DenyPermission("tool is not allowed by the Agent revision")
+				case policy.MaxToolCalls > 0 && calls.Add(1) > int64(policy.MaxToolCalls):
+					decision = agenttool.DenyPermission("tool call budget exceeded")
+				case contains(dangerous, request.ToolName) && !contains(approved, request.ToolName):
+					decision = agenttool.AskPermission("explicit user approval is required")
+				default:
+					decision = agenttool.AllowPermission()
+				}
 			}
-			if contains(deniedUsers, userID) {
-				return agenttool.DenyPermission("user is not allowed to call tools"), nil
+			for _, recorder := range recorders {
+				if recorder == nil {
+					continue
+				}
+				toolDecision := ToolDecision{
+					Action: string(decision.Action),
+					Reason: decision.Reason,
+				}
+				if request != nil {
+					toolDecision.ToolName = request.ToolName
+					toolDecision.ToolCallID = request.ToolCallID
+				}
+				if err := recorder(ctx, toolDecision); err != nil {
+					return decision, fmt.Errorf("record tool permission decision: %w", err)
+				}
 			}
-			if !contains(allowed, request.ToolName) {
-				return agenttool.DenyPermission("tool is not allowed by the Agent revision"), nil
-			}
-			if policy.MaxToolCalls > 0 && calls.Add(1) > int64(policy.MaxToolCalls) {
-				return agenttool.DenyPermission("tool call budget exceeded"), nil
-			}
-			if contains(dangerous, request.ToolName) && !contains(approved, request.ToolName) {
-				return agenttool.AskPermission("explicit user approval is required"), nil
-			}
-			return agenttool.AllowPermission(), nil
+			return decision, nil
 		},
 	))
 	if policy.MaxRunDuration != "" {

@@ -306,6 +306,16 @@ Tenant、App、Revision、Channel/Backend Binding 和乐观锁发布说明见 [A
 
 Tool Catalog、租户白名单、用户权限、调用预算和危险工具审批说明见 [租户级 Tool 治理](docs/getting-started.md#22-租户级-tool-治理)。
 
+启用 OpenTelemetry OTLP 导出：
+
+```dotenv
+TRPC_AGENT_OTEL_ENABLED=true
+TRPC_AGENT_OTEL_ENDPOINT=127.0.0.1:4317
+TRPC_AGENT_OTEL_SAMPLE_RATIO=1
+```
+
+HTTP、Gateway、持久化任务、Worker 的 trace 传播，运行/Admin/Tool 审计，以及 token 与租户成本指标见 [OpenTelemetry、审计和成本链路](docs/getting-started.md#23-opentelemetry审计和成本链路)。模型价格通过 Revision 的 `model_config.prompt_cost_per_million` 和 `completion_cost_per_million` 配置。
+
 停止服务：
 
 ```bash

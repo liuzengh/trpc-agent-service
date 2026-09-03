@@ -6,6 +6,7 @@ import (
 	"time"
 
 	agentruntime "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
@@ -54,9 +55,11 @@ func TestSenderDeliversCompletedRun(t *testing.T) {
 	if _, err := agentWorker.ProcessOne(context.Background()); err != nil {
 		t.Fatalf("process Agent task: %v", err)
 	}
+	auditWriter := audit.NewMemoryWriter()
 	sender, err := New(journal, repository, registry, Options{
 		WorkerID: "sender", BatchSize: 10, ClaimLease: time.Second,
 		PollInterval: time.Second, RetryDelay: time.Millisecond, MaxAttempts: 3,
+		Audit: auditWriter,
 	})
 	if err != nil {
 		t.Fatalf("new sender: %v", err)
@@ -71,6 +74,11 @@ func TestSenderDeliversCompletedRun(t *testing.T) {
 	}
 	if status, ok := journal.OutboundStatus(delivery.Message.OutboundID); !ok || status != "sent" {
 		t.Fatalf("outbound status=%q ok=%t", status, ok)
+	}
+	events := auditWriter.Events()
+	if len(events) != 1 || events[0].Decision != "reply_sent" ||
+		events[0].RequestID != accepted.RequestID {
+		t.Fatalf("audit events=%+v", events)
 	}
 }
 

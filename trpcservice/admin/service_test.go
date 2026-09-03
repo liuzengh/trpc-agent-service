@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 )
 
@@ -60,5 +61,26 @@ func TestAdminRejectsUnknownTool(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestAdminAuditsControlPlaneMutation(t *testing.T) {
+	repository := controlplane.NewMemoryRepository(controlplane.BootstrapData{})
+	auditWriter := audit.NewMemoryWriter()
+	service, err := New(repository)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	service.WithAuditWriter(auditWriter)
+	_, err = service.CreateTenant(context.Background(), controlplane.Tenant{
+		ID: "tenant-a", DisplayName: "Tenant A", Region: "local", SecretNamespace: "tenant/a",
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	events := auditWriter.Events()
+	if len(events) != 1 || events[0].Decision != "admin_tenant_created" ||
+		events[0].TenantID != "tenant-a" || events[0].UserID != "admin" {
+		t.Fatalf("events=%+v", events)
 	}
 }

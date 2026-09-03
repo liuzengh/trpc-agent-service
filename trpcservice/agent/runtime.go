@@ -33,16 +33,19 @@ const (
 
 // ChatResult is the transport-neutral result of one tutorial chat turn.
 type ChatResult struct {
-	Reply        string
-	RequestID    string
-	EventCount   int
-	MessageID    string
-	Replayed     bool
-	TenantID     string
-	AppID        string
-	RevisionID   string
-	AgentName    string
-	FencingToken int64
+	Reply            string
+	RequestID        string
+	EventCount       int
+	MessageID        string
+	Replayed         bool
+	TenantID         string
+	AppID            string
+	RevisionID       string
+	AgentName        string
+	FencingToken     int64
+	PromptTokens     int
+	CompletionTokens int
+	Cost             float64
 }
 
 // ChatInput is the trusted, transport-neutral input for one Agent turn.
@@ -348,11 +351,17 @@ func (r *Runtime) executeIdempotentChat(
 ) (ChatResult, error) {
 	compiledAgent, runErr := r.compiler.Compile(attempt.Context(), input.Scope)
 	var policyOptions []agentcore.RunOption
+	var usagePricing UsagePricing
 	if runErr == nil {
 		if provider, ok := r.compiler.(RunPolicyProvider); ok {
 			policyOptions, runErr = provider.RunPolicyOptions(
-				attempt.Context(), input.Scope, input.UserID, input.ApprovedTools,
+				attempt.Context(), input,
 			)
+		}
+	}
+	if runErr == nil {
+		if provider, ok := r.compiler.(UsagePricingProvider); ok {
+			usagePricing, runErr = provider.UsagePricing(attempt.Context(), input.Scope)
 		}
 	}
 	var result ChatResult
@@ -364,6 +373,7 @@ func (r *Runtime) executeIdempotentChat(
 			policyOptions,
 		)
 		result.AgentName = compiledAgent.Info().Name
+		result.Cost = usagePricing.Cost(result.PromptTokens, result.CompletionTokens)
 	}
 	finalizeCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(requestCtx),
@@ -381,11 +391,14 @@ func (r *Runtime) executeIdempotentChat(
 		return ChatResult{}, runErr
 	}
 	cached := idempotency.Result{
-		Reply:        result.Reply,
-		RequestID:    result.RequestID,
-		EventCount:   result.EventCount,
-		AgentName:    result.AgentName,
-		FencingToken: result.FencingToken,
+		Reply:            result.Reply,
+		RequestID:        result.RequestID,
+		EventCount:       result.EventCount,
+		AgentName:        result.AgentName,
+		FencingToken:     result.FencingToken,
+		PromptTokens:     result.PromptTokens,
+		CompletionTokens: result.CompletionTokens,
+		Cost:             result.Cost,
 	}
 	if err := attempt.Complete(finalizeCtx, cached); err != nil {
 		return ChatResult{}, fmt.Errorf("complete idempotent chat: %w", err)
@@ -464,16 +477,19 @@ func chatResultFromIdempotency(
 	replayed bool,
 ) ChatResult {
 	return ChatResult{
-		Reply:        result.Reply,
-		RequestID:    result.RequestID,
-		EventCount:   result.EventCount,
-		MessageID:    messageID,
-		Replayed:     replayed,
-		TenantID:     scope.TenantID,
-		AppID:        scope.AppID,
-		RevisionID:   scope.RevisionID,
-		AgentName:    result.AgentName,
-		FencingToken: result.FencingToken,
+		Reply:            result.Reply,
+		RequestID:        result.RequestID,
+		EventCount:       result.EventCount,
+		MessageID:        messageID,
+		Replayed:         replayed,
+		TenantID:         scope.TenantID,
+		AppID:            scope.AppID,
+		RevisionID:       scope.RevisionID,
+		AgentName:        result.AgentName,
+		FencingToken:     result.FencingToken,
+		PromptTokens:     result.PromptTokens,
+		CompletionTokens: result.CompletionTokens,
+		Cost:             result.Cost,
 	}
 }
 
@@ -512,6 +528,7 @@ func collectChatResult(
 	var result ChatResult
 	var partial strings.Builder
 	var runErr error
+	usageByResponse := make(map[string]model.Usage)
 
 	for evt := range events {
 		if evt == nil {
@@ -532,6 +549,13 @@ func collectChatResult(
 			)
 			continue
 		}
+		if evt.Response.Usage != nil {
+			usageKey := evt.InvocationID + "\x00" + evt.Response.ID
+			if usageKey == "\x00" {
+				usageKey = evt.ID
+			}
+			usageByResponse[usageKey] = *evt.Response.Usage
+		}
 		for _, choice := range evt.Response.Choices {
 			if choice.Delta.Content != "" {
 				partial.WriteString(choice.Delta.Content)
@@ -540,6 +564,10 @@ func collectChatResult(
 				result.Reply = choice.Message.Content
 			}
 		}
+	}
+	for _, usage := range usageByResponse {
+		result.PromptTokens += usage.PromptTokens
+		result.CompletionTokens += usage.CompletionTokens
 	}
 
 	if runErr != nil {

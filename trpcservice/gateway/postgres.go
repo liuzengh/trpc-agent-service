@@ -159,6 +159,7 @@ INSERT INTO agent_run(
 	}
 	scope := request.Scope
 	scope.RevisionID = pinnedRevisionID
+	traceParent, traceState := outboundTraceHeaders(ctx)
 	task := workqueue.AgentTask{
 		InboundID:      inboundID,
 		RequestID:      requestID,
@@ -170,6 +171,8 @@ INSERT INTO agent_run(
 		Text:           request.Text,
 		ReplyTarget:    request.ReplyTarget,
 		TurnSeq:        turnSeq,
+		TraceParent:    traceParent,
+		TraceState:     traceState,
 	}
 	taskJSON, err := json.Marshal(task)
 	if err != nil {
@@ -384,11 +387,16 @@ func (j *PostgresJournal) CompleteRun(
 	updated, err := tx.ExecContext(ctx, `
 UPDATE agent_run
 SET status = 'completed', fencing_token = $2, agent_name = $3,
+    prompt_tokens = $4, completion_tokens = $5, cost = $6, trace_id = NULLIF($7, ''),
     completed_at = now(), error_type = NULL, error_message = NULL
 WHERE request_id = $1 AND fencing_token <= $2`,
 		task.RequestID,
 		result.FencingToken,
 		result.AgentName,
+		result.PromptTokens,
+		result.CompletionTokens,
+		result.Cost,
+		result.TraceID,
 	)
 	if err != nil {
 		return fmt.Errorf("complete Agent run: %w", err)

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	agentruntime "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
@@ -51,6 +52,7 @@ func TestWorkerCompletesDurableRun(t *testing.T) {
 		WorkerID:    "worker-1",
 		MaxAttempts: 3,
 		RetryDelay:  time.Millisecond,
+		Audit:       audit.NewMemoryWriter(),
 	})
 	if err != nil {
 		t.Fatalf("new Worker: %v", err)
@@ -62,5 +64,10 @@ func TestWorkerCompletesDurableRun(t *testing.T) {
 	status, result, ok := journal.RunStatus(accepted.RequestID)
 	if !ok || status != "completed" || result.Reply == "" || result.FencingToken == 0 {
 		t.Fatalf("status=%q result=%+v ok=%t", status, result, ok)
+	}
+	events := worker.opts.Audit.(*audit.MemoryWriter).Events()
+	if len(events) != 1 || events[0].Decision != "run_completed" ||
+		events[0].RequestID != accepted.RequestID {
+		t.Fatalf("audit events=%+v", events)
 	}
 }

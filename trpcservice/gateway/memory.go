@@ -128,6 +128,7 @@ func (j *MemoryJournal) Accept(
 	}
 	scope := request.Scope
 	scope.RevisionID = conversation.revisionID
+	traceParent, traceState := outboundTraceHeaders(ctx)
 	task := workqueue.AgentTask{
 		InboundID:      result.InboundID,
 		RequestID:      result.RequestID,
@@ -139,6 +140,8 @@ func (j *MemoryJournal) Accept(
 		Text:           request.Text,
 		ReplyTarget:    request.ReplyTarget,
 		TurnSeq:        result.TurnSeq,
+		TraceParent:    traceParent,
+		TraceState:     traceState,
 	}
 	outboxID := stableID("qout_", result.RequestID)
 	j.outbox[outboxID] = &memoryQueueOutbox{

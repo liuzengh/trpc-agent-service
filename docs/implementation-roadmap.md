@@ -31,9 +31,14 @@
 - Tool Catalog、Revision allowlist 和未知工具发布校验；
 - tRPC-Agent-Go ToolFilter/PermissionPolicy/MaxRunDuration；
 - 用户 deny、调用次数预算和危险工具 approval_required；
+- OTLP/gRPC trace 与 metric provider、W3C trace context 传播；
+- HTTP → Gateway → durable task → Worker trace 串联；
+- PostgreSQL/InMemory 审计 Writer 与敏感字段递归脱敏；
+- inbound、run、tool permission、reply 和 Admin mutation 审计；
+- Runner Event token usage 去重汇总、Revision 单价和租户成本指标；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是审批记录、审计日志、OpenTelemetry 和成本指标。
+接下来的最近里程碑是持久化审批记录、IM 确认交互，以及 Memory、Summary、Knowledge 和 Artifact。
 
 ## 1. 建议目录
 

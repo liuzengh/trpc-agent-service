@@ -46,10 +46,14 @@ type QueueOutboxItem struct {
 
 // RunResult is the durable outcome written by an Agent Worker.
 type RunResult struct {
-	Reply        string
-	AgentName    string
-	FencingToken int64
-	EventCount   int
+	Reply            string
+	AgentName        string
+	FencingToken     int64
+	EventCount       int
+	PromptTokens     int
+	CompletionTokens int
+	Cost             float64
+	TraceID          string
 }
 
 // OutboundItem is one reply claimed for provider delivery.

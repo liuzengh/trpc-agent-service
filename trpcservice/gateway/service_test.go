@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 )
@@ -16,7 +17,8 @@ func TestIntakeResolvesAndAcceptsBinding(t *testing.T) {
 		t.Fatalf("new resolver: %v", err)
 	}
 	journal := NewMemoryJournal()
-	intake, err := NewIntake(resolver, journal)
+	auditWriter := audit.NewMemoryWriter()
+	intake, err := NewIntake(resolver, journal, WithAuditWriter(auditWriter))
 	if err != nil {
 		t.Fatalf("new intake: %v", err)
 	}
@@ -37,5 +39,10 @@ func TestIntakeResolvesAndAcceptsBinding(t *testing.T) {
 	}
 	if len(journal.Tasks()) != 1 || journal.Tasks()[0].Scope.TenantID != "tutorial-tenant" {
 		t.Fatalf("unexpected tasks: %+v", journal.Tasks())
+	}
+	events := auditWriter.Events()
+	if len(events) != 1 || events[0].Decision != "inbound_accepted" ||
+		events[0].TenantID != "tutorial-tenant" {
+		t.Fatalf("audit events: %+v", events)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
 	adminservice "github.com/liuzengh/trpc-agent-service/trpcservice/admin"
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
@@ -23,10 +24,12 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/reply"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	platformtelemetry "github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
@@ -112,6 +115,25 @@ func run() error {
 	if roleName == config.RoleAdmin && !adminConfig.Enabled {
 		return fmt.Errorf("Admin role requires TRPC_AGENT_ADMIN_ENABLED=true")
 	}
+	telemetryConfig, err := config.LoadTelemetryConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("load telemetry config: %w", err)
+	}
+	telemetryShutdown, err := platformtelemetry.Setup(context.Background(), telemetryConfig)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetryShutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown telemetry: %v", err)
+		}
+	}()
+	metricRecorder, err := platformmetrics.New()
+	if err != nil {
+		return fmt.Errorf("build platform metrics: %w", err)
+	}
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
 	sessionService, err := platformstorage.NewSessionService(startupCtx, sessionConfig)
 	cancelStartup()
@@ -142,6 +164,14 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build control-plane repository: %w", err)
 	}
+	auditWriter, err := audit.NewForControlPlane(controlPlaneRepository)
+	if err != nil {
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build audit writer: %w", err)
+	}
 	routeResolver, err := routing.NewControlPlaneResolver(controlPlaneRepository)
 	if err != nil {
 		_ = controlPlaneRepository.Close()
@@ -158,7 +188,12 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build inbound journal: %w", err)
 	}
-	gatewayIntake, err := gateway.NewIntake(routeResolver, inboundJournal)
+	gatewayIntake, err := gateway.NewIntake(
+		routeResolver,
+		inboundJournal,
+		gateway.WithAuditWriter(auditWriter),
+		gateway.WithMetrics(metricRecorder),
+	)
 	if err != nil {
 		_ = inboundJournal.Close()
 		_ = controlPlaneRepository.Close()
@@ -173,6 +208,7 @@ func run() error {
 		selectedModel,
 		modelConfig.Stream,
 		agentservice.WithToolCatalog(toolCatalog),
+		agentservice.WithAuditWriter(auditWriter),
 	)
 	if err != nil {
 		_ = gatewayIntake.Close()
@@ -230,6 +266,8 @@ func run() error {
 		WorkerID:    "worker-" + nodeID,
 		MaxAttempts: 3,
 		RetryDelay:  250 * time.Millisecond,
+		Audit:       auditWriter,
+		Metrics:     metricRecorder,
 	})
 	if err != nil {
 		_ = agentQueue.Close()
@@ -289,6 +327,7 @@ func run() error {
 			_ = controlPlaneRepository.Close()
 			return fmt.Errorf("build Admin service: %w", err)
 		}
+		adminService.WithAuditWriter(auditWriter)
 		adminHandler, err = adminservice.NewHandler(adminService, adminConfig.Token)
 		if err != nil {
 			_ = agentQueue.Close()
@@ -309,6 +348,8 @@ func run() error {
 			PollInterval: 250 * time.Millisecond,
 			RetryDelay:   time.Second,
 			MaxAttempts:  5,
+			Audit:        auditWriter,
+			Metrics:      metricRecorder,
 		},
 	)
 	if err != nil {
@@ -348,6 +389,11 @@ func run() error {
 		fmt.Printf("Gateway HTTP server listening on %s\n", listenAddr)
 	}
 	defer func() {
+		if err := auditWriter.Close(); err != nil {
+			log.Printf("close audit writer: %v", err)
+		}
+	}()
+	defer func() {
 		if err := agentQueue.Close(); err != nil {
 			log.Printf("close Agent work queue: %v", err)
 		}
@@ -374,6 +420,7 @@ func run() error {
 		web.WithCallbackGateway(callbackGateway),
 		web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
 		web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
+		web.WithReadinessCheck("audit", auditWriter.Ready),
 	}
 	if adminHandler != nil {
 		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))
@@ -385,8 +432,10 @@ func run() error {
 		)
 	}
 	server := &http.Server{
-		Addr:              listenAddr,
-		Handler:           web.NewHandler(runtime, handlerOptions...),
+		Addr: listenAddr,
+		Handler: platformtelemetry.HTTPMiddleware(
+			web.NewHandler(runtime, handlerOptions...),
+		),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,
