@@ -2308,6 +2308,48 @@ Telegram Binding Config：
 
 开发环境使用 `env://VARIABLE` Secret Store。Adapter、日志和 HTTP 错误不会打印 Secret 值；生产阶段会替换为 KMS/Secret Manager 实现。
 
-## 21. 下一步
+## 21. Admin API 和 Revision 发布
 
-下一阶段实现 Admin API 和控制面写服务，让管理员通过鉴权接口创建 Tenant、Agent Revision、企业微信/Telegram Binding 和 Backend Binding，不再依赖 bootstrap 或手工 SQL。
+Admin API 默认关闭：
+
+```dotenv
+TRPC_AGENT_ADMIN_ENABLED=true
+TRPC_AGENT_ADMIN_TOKEN="至少 24 字符的随机 Token"
+```
+
+独立启动：
+
+```bash
+./bin/trpc-service -role admin -addr :8081
+```
+
+所有 `/admin/*` 请求要求 Bearer Token，比较使用常量时间函数。Token 只从环境或 Secret 注入，不写数据库和日志。
+
+当前写接口：
+
+```text
+POST /admin/tenants
+POST /admin/apps
+POST /admin/revisions
+POST /admin/revisions/publish
+POST /admin/channel-bindings
+POST /admin/backend-bindings
+```
+
+Admin Service 负责：
+
+- 标识符、状态和 JSON 配置校验；
+- JSON canonicalization；
+- Revision checksum；
+- 自动生成 revision/binding ID；
+- Secret 只保存引用；
+- 创建时间和 version；
+- 发布时使用 expected app version 乐观锁。
+
+Revision 发布不会修改旧 Revision，只更新 `agent_app.stable_revision_id` 并把 app version 加一。使用旧 version 再次发布返回 `409 Conflict`，因此两个管理员不会静默覆盖彼此的发布。
+
+同一接口可以把 stable revision 指回历史 revision，实现配置回滚。后续审计阶段会为每次写操作记录操作者、旧值、新值、request ID 和 trace ID。
+
+## 22. 下一步
+
+下一阶段实现租户级 Tool/MCP 治理、预算、危险工具审批和审计；随后接入 Memory、Knowledge、Artifact 与多后端 Storage Router。

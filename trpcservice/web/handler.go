@@ -34,11 +34,13 @@ type ChatService interface {
 
 // Handler serves the tutorial HTTP API.
 type Handler struct {
-	chatService   ChatService
-	maxBodySize   int64
-	readiness     []readinessCheck
-	routeResolver routing.Resolver
-	intake        *gateway.Intake
+	chatService     ChatService
+	maxBodySize     int64
+	readiness       []readinessCheck
+	routeResolver   routing.Resolver
+	intake          *gateway.Intake
+	callbackGateway *gateway.CallbackGateway
+	adminHandler    http.Handler
 }
 
 type readinessCheck struct {
@@ -77,6 +79,20 @@ func WithGatewayIntake(intake *gateway.Intake) Option {
 	}
 }
 
+// WithCallbackGateway enables provider callback routes.
+func WithCallbackGateway(callbackGateway *gateway.CallbackGateway) Option {
+	return func(handler *Handler) {
+		handler.callbackGateway = callbackGateway
+	}
+}
+
+// WithAdminHandler mounts an authenticated control-plane handler.
+func WithAdminHandler(adminHandler http.Handler) Option {
+	return func(handler *Handler) {
+		handler.adminHandler = adminHandler
+	}
+}
+
 // NewHandler creates a handler with health and chat endpoints.
 func NewHandler(chatService ChatService, opts ...Option) http.Handler {
 	h := &Handler{
@@ -93,7 +109,39 @@ func NewHandler(chatService ChatService, opts ...Option) http.Handler {
 	mux.HandleFunc("/readyz", h.handleReady)
 	mux.HandleFunc("/chat", h.handleChat)
 	mux.HandleFunc("/inbound", h.handleInbound)
+	mux.HandleFunc("/callbacks/", h.handleCallback)
+	if h.adminHandler != nil {
+		mux.Handle("/admin/", h.adminHandler)
+	}
 	return mux
+}
+
+func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
+	if h.callbackGateway == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "callback Gateway is unavailable"})
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/callbacks/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "callback route not found"})
+		return
+	}
+	result, err := h.callbackGateway.Handle(r.Context(), parts[0], parts[1], r)
+	if err != nil {
+		log.Printf("channel callback rejected: %v", err)
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "callback rejected"})
+		return
+	}
+	if result.ContentType != "" {
+		w.Header().Set("Content-Type", result.ContentType)
+	}
+	w.WriteHeader(result.StatusCode)
+	if len(result.Body) > 0 {
+		if _, err := w.Write(result.Body); err != nil {
+			log.Printf("write callback response: %v", err)
+		}
+	}
 }
 
 func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
@@ -132,18 +180,18 @@ type chatRequest struct {
 }
 
 type chatResponse struct {
-	Reply      string `json:"reply"`
-	RequestID  string `json:"request_id,omitempty"`
-	MessageID  string `json:"message_id"`
-	UserID     string `json:"user_id"`
-	SessionID  string `json:"session_id"`
-	EventCount int    `json:"event_count"`
-	Replayed   bool   `json:"replayed"`
-	TenantID   string `json:"tenant_id"`
-	AppID      string `json:"app_id"`
-	RevisionID string `json:"revision_id"`
-	AgentName  string `json:"agent_name"`
-	FencingToken int64 `json:"fencing_token,omitempty"`
+	Reply        string `json:"reply"`
+	RequestID    string `json:"request_id,omitempty"`
+	MessageID    string `json:"message_id"`
+	UserID       string `json:"user_id"`
+	SessionID    string `json:"session_id"`
+	EventCount   int    `json:"event_count"`
+	Replayed     bool   `json:"replayed"`
+	TenantID     string `json:"tenant_id"`
+	AppID        string `json:"app_id"`
+	RevisionID   string `json:"revision_id"`
+	AgentName    string `json:"agent_name"`
+	FencingToken int64  `json:"fencing_token,omitempty"`
 }
 
 type errorResponse struct {
@@ -272,17 +320,17 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, chatResponse{
-		Reply:      result.Reply,
-		RequestID:  result.RequestID,
-		MessageID:  result.MessageID,
-		UserID:     request.UserID,
-		SessionID:  request.SessionID,
-		EventCount: result.EventCount,
-		Replayed:   result.Replayed,
-		TenantID:   result.TenantID,
-		AppID:      result.AppID,
-		RevisionID: result.RevisionID,
-		AgentName:  result.AgentName,
+		Reply:        result.Reply,
+		RequestID:    result.RequestID,
+		MessageID:    result.MessageID,
+		UserID:       request.UserID,
+		SessionID:    request.SessionID,
+		EventCount:   result.EventCount,
+		Replayed:     result.Replayed,
+		TenantID:     result.TenantID,
+		AppID:        result.AppID,
+		RevisionID:   result.RevisionID,
+		AgentName:    result.AgentName,
 		FencingToken: result.FencingToken,
 	})
 }

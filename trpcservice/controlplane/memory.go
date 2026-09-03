@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
-// MemoryRepository is an immutable local snapshot for tutorials and tests.
+// MemoryRepository is an in-process control plane for tutorials and tests.
 type MemoryRepository struct {
 	mu         sync.RWMutex
 	closed     bool
@@ -173,6 +174,117 @@ func (r *MemoryRepository) Close() error {
 	return nil
 }
 
+func (r *MemoryRepository) CreateTenant(_ context.Context, tenant Tenant) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return ErrRepositoryClosed
+	}
+	if _, exists := r.tenants[tenant.ID]; exists {
+		return ErrConflict
+	}
+	r.tenants[tenant.ID] = cloneTenant(tenant)
+	return nil
+}
+
+func (r *MemoryRepository) CreateAgentApp(_ context.Context, app AgentApp) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.tenants[app.TenantID]; !exists {
+		return ErrNotFound
+	}
+	key := scopedKey(app.TenantID, app.ID)
+	if _, exists := r.apps[key]; exists {
+		return ErrConflict
+	}
+	r.apps[key] = cloneAgentApp(app)
+	return nil
+}
+
+func (r *MemoryRepository) CreateRevision(_ context.Context, revision AgentRevision) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.apps[scopedKey(revision.TenantID, revision.AppID)]; !exists {
+		return ErrNotFound
+	}
+	key := scopedKey(revision.TenantID, revision.ID)
+	if _, exists := r.revisions[key]; exists {
+		return ErrConflict
+	}
+	r.revisions[key] = cloneRevision(revision)
+	return nil
+}
+
+func (r *MemoryRepository) PublishRevision(
+	_ context.Context,
+	tenantID string,
+	appID string,
+	revisionID string,
+	expectedVersion int64,
+) (AgentApp, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := scopedKey(tenantID, appID)
+	app, exists := r.apps[key]
+	if !exists {
+		return AgentApp{}, ErrNotFound
+	}
+	revision, exists := r.revisions[scopedKey(tenantID, revisionID)]
+	if !exists || revision.AppID != appID {
+		return AgentApp{}, ErrNotFound
+	}
+	if app.Version != expectedVersion {
+		return AgentApp{}, ErrConflict
+	}
+	app.StableRevisionID = revisionID
+	app.Version++
+	app.UpdatedAt = time.Now().UTC()
+	r.apps[key] = app
+	return cloneAgentApp(app), nil
+}
+
+func (r *MemoryRepository) CreateChannelBinding(
+	_ context.Context,
+	binding ChannelBinding,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.apps[scopedKey(binding.TenantID, binding.AppID)]; !exists {
+		return ErrNotFound
+	}
+	if _, exists := r.channels[binding.CallbackKey]; exists {
+		return ErrConflict
+	}
+	if _, exists := r.channelIDs[scopedKey(binding.TenantID, binding.ID)]; exists {
+		return ErrConflict
+	}
+	r.channels[binding.CallbackKey] = cloneChannelBinding(binding)
+	r.channelIDs[scopedKey(binding.TenantID, binding.ID)] = cloneChannelBinding(binding)
+	return nil
+}
+
+func (r *MemoryRepository) CreateBackendBinding(
+	_ context.Context,
+	binding BackendBinding,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if binding.AppID != "" {
+		if _, exists := r.apps[scopedKey(binding.TenantID, binding.AppID)]; !exists {
+			return ErrNotFound
+		}
+	}
+	for _, existing := range r.backends {
+		if existing.ID == binding.ID ||
+			(existing.TenantID == binding.TenantID && existing.AppID == binding.AppID &&
+				existing.ResourceType == binding.ResourceType) {
+			return ErrConflict
+		}
+	}
+	r.backends = append(r.backends, cloneBackendBinding(binding))
+	return nil
+}
+
 func (r *MemoryRepository) check(ctx context.Context) error {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
@@ -225,3 +337,4 @@ func cloneBackendBinding(value BackendBinding) BackendBinding {
 }
 
 var _ Repository = (*MemoryRepository)(nil)
+var _ MutableRepository = (*MemoryRepository)(nil)

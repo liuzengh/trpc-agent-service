@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
+	adminservice "github.com/liuzengh/trpc-agent-service/trpcservice/admin"
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
@@ -42,7 +43,7 @@ func main() {
 func run() error {
 	envFile := flag.String("env-file", ".env", "dotenv configuration file")
 	addr := flag.String("addr", "", "HTTP listen address (overrides TRPC_AGENT_ADDR)")
-	roleFlag := flag.String("role", "", "service role: all, gateway, relay, worker, sender")
+	roleFlag := flag.String("role", "", "service role: all, gateway, relay, worker, sender, admin")
 	flag.Parse()
 
 	loaded, err := config.LoadDotEnv(*envFile)
@@ -102,6 +103,13 @@ func run() error {
 	queueConfig, err := config.LoadQueueConfigFromEnv()
 	if err != nil {
 		return fmt.Errorf("load queue config: %w", err)
+	}
+	adminConfig, err := config.LoadAdminConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("load Admin config: %w", err)
+	}
+	if roleName == config.RoleAdmin && !adminConfig.Enabled {
+		return fmt.Errorf("Admin role requires TRPC_AGENT_ADMIN_ENABLED=true")
 	}
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
 	sessionService, err := platformstorage.NewSessionService(startupCtx, sessionConfig)
@@ -268,6 +276,25 @@ func run() error {
 		_ = controlPlaneRepository.Close()
 		return fmt.Errorf("build callback Gateway: %w", err)
 	}
+	var adminHandler http.Handler
+	if adminConfig.Enabled {
+		adminService, err := adminservice.New(controlPlaneRepository)
+		if err != nil {
+			_ = agentQueue.Close()
+			_ = runtime.Close()
+			_ = gatewayIntake.Close()
+			_ = controlPlaneRepository.Close()
+			return fmt.Errorf("build Admin service: %w", err)
+		}
+		adminHandler, err = adminservice.NewHandler(adminService, adminConfig.Token)
+		if err != nil {
+			_ = agentQueue.Close()
+			_ = runtime.Close()
+			_ = gatewayIntake.Close()
+			_ = controlPlaneRepository.Close()
+			return fmt.Errorf("build Admin handler: %w", err)
+		}
+	}
 	replySender, err := reply.New(
 		inboundJournal,
 		controlPlaneRepository,
@@ -313,7 +340,8 @@ func run() error {
 	)
 	fmt.Printf("control-plane backend=%s\n", controlPlaneConfig.Backend)
 	fmt.Printf("queue backend=%s stream=%s group=%s\n", queueConfig.Backend, queueConfig.Stream, queueConfig.Group)
-	if roles.Gateway {
+	serverEnabled := roles.Gateway || roles.Admin
+	if serverEnabled {
 		fmt.Printf("Gateway HTTP server listening on %s\n", listenAddr)
 	}
 	defer func() {
@@ -344,6 +372,9 @@ func run() error {
 		web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
 		web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
 	}
+	if adminHandler != nil {
+		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))
+	}
 	if roles.Relay || roles.Worker {
 		handlerOptions = append(
 			handlerOptions,
@@ -367,7 +398,7 @@ func run() error {
 	defer stop()
 
 	group, groupCtx := errgroup.WithContext(ctx)
-	if roles.Gateway {
+	if serverEnabled {
 		group.Go(func() error {
 			err := server.ListenAndServe()
 			if errors.Is(err, http.ErrServerClosed) {
@@ -388,7 +419,7 @@ func run() error {
 
 	<-groupCtx.Done()
 
-	if roles.Gateway {
+	if serverEnabled {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {

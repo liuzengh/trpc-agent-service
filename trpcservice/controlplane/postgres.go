@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // PostgresRepository reads control-plane snapshots from PostgreSQL.
@@ -231,6 +232,127 @@ func (r *PostgresRepository) SQLDB() *sql.DB {
 		return nil
 	}
 	return r.db
+}
+
+func (r *PostgresRepository) CreateTenant(ctx context.Context, tenant Tenant) error {
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO tenant(
+    tenant_id, display_name, status, region, quota_config, audit_policy,
+    secret_namespace, version, created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)`,
+		tenant.ID, tenant.DisplayName, tenant.Status, tenant.Region,
+		string(tenant.QuotaConfig), string(tenant.AuditPolicy), tenant.SecretNamespace,
+		tenant.Version, tenant.CreatedAt, tenant.UpdatedAt)
+	return mapMutationError("create tenant", err)
+}
+
+func (r *PostgresRepository) CreateAgentApp(ctx context.Context, app AgentApp) error {
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO agent_app(
+    app_id, tenant_id, name, description, status, stable_revision_id,
+    rollout_policy, version, created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7::jsonb, $8, $9, $10)`,
+		app.ID, app.TenantID, app.Name, app.Description, app.Status,
+		app.StableRevisionID, string(app.RolloutPolicy), app.Version,
+		app.CreatedAt, app.UpdatedAt)
+	return mapMutationError("create Agent app", err)
+}
+
+func (r *PostgresRepository) CreateRevision(
+	ctx context.Context,
+	revision AgentRevision,
+) error {
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO agent_revision(
+    revision_id, tenant_id, app_id, revision_no, agent_type,
+    agent_config, model_config, tool_policy, knowledge_config,
+    memory_config, guardrail_config, checksum, created_by, created_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb,
+    $10::jsonb, $11::jsonb, $12, $13, $14
+)`, revision.ID, revision.TenantID, revision.AppID, revision.RevisionNo,
+		revision.AgentType, string(revision.AgentConfig), string(revision.ModelConfig),
+		string(revision.ToolPolicy), string(revision.KnowledgeConfig),
+		string(revision.MemoryConfig), string(revision.GuardrailConfig),
+		revision.Checksum, revision.CreatedBy, revision.CreatedAt)
+	return mapMutationError("create Agent revision", err)
+}
+
+func (r *PostgresRepository) PublishRevision(
+	ctx context.Context,
+	tenantID string,
+	appID string,
+	revisionID string,
+	expectedVersion int64,
+) (AgentApp, error) {
+	row := r.db.QueryRowContext(ctx, `
+UPDATE agent_app a
+SET stable_revision_id = r.revision_id,
+    version = a.version + 1,
+    updated_at = now()
+FROM agent_revision r
+WHERE a.tenant_id = $1 AND a.app_id = $2 AND a.version = $4
+  AND r.tenant_id = a.tenant_id AND r.app_id = a.app_id AND r.revision_id = $3
+RETURNING a.app_id, a.tenant_id, a.name, a.description, a.status,
+          a.stable_revision_id, a.rollout_policy, a.version,
+          a.created_at, a.updated_at`, tenantID, appID, revisionID, expectedVersion)
+	app, err := scanAgentApp(row)
+	if errors.Is(err, ErrNotFound) {
+		return AgentApp{}, ErrConflict
+	}
+	return app, err
+}
+
+func (r *PostgresRepository) CreateChannelBinding(
+	ctx context.Context,
+	binding ChannelBinding,
+) error {
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO channel_binding(
+    channel_binding_id, tenant_id, app_id, channel_type, account_id,
+    callback_key, config, secret_ref, status, version, created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12)`,
+		binding.ID, binding.TenantID, binding.AppID, binding.ChannelType,
+		binding.AccountID, binding.CallbackKey, string(binding.Config),
+		binding.SecretRef, binding.Status, binding.Version,
+		binding.CreatedAt, binding.UpdatedAt)
+	return mapMutationError("create channel binding", err)
+}
+
+func (r *PostgresRepository) CreateBackendBinding(
+	ctx context.Context,
+	binding BackendBinding,
+) error {
+	var appID any
+	if binding.AppID != "" {
+		appID = binding.AppID
+	}
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO backend_binding(
+    binding_id, tenant_id, app_id, resource_type, backend_type, config,
+    secret_ref, isolation_level, migration_state, version, created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6::jsonb, NULLIF($7, ''), $8, $9, $10, $11, $12)`,
+		binding.ID, binding.TenantID, appID, binding.ResourceType,
+		binding.BackendType, string(binding.Config), binding.SecretRef,
+		binding.IsolationLevel, binding.MigrationState, binding.Version,
+		binding.CreatedAt, binding.UpdatedAt)
+	return mapMutationError("create backend binding", err)
+}
+
+func mapMutationError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) {
+		switch postgresError.Code {
+		case "23505":
+			return fmt.Errorf("%s: %w", operation, ErrConflict)
+		case "23503":
+			return fmt.Errorf("%s: %w", operation, ErrNotFound)
+		}
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 type scanner interface {

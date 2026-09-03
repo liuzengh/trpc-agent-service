@@ -16,80 +16,80 @@ const (
 
 // Tenant is the top-level isolation and billing boundary.
 type Tenant struct {
-	ID              string
-	DisplayName     string
-	Status          string
-	Region          string
-	QuotaConfig     json.RawMessage
-	AuditPolicy     json.RawMessage
-	SecretNamespace string
-	Version         int64
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID              string          `json:"tenant_id"`
+	DisplayName     string          `json:"display_name"`
+	Status          string          `json:"status"`
+	Region          string          `json:"region"`
+	QuotaConfig     json.RawMessage `json:"quota_config"`
+	AuditPolicy     json.RawMessage `json:"audit_policy"`
+	SecretNamespace string          `json:"secret_namespace"`
+	Version         int64           `json:"version"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
 }
 
 // AgentApp is a named Agent deployment owned by one tenant.
 type AgentApp struct {
-	ID               string
-	TenantID         string
-	Name             string
-	Description      string
-	Status           string
-	StableRevisionID string
-	RolloutPolicy    json.RawMessage
-	Version          int64
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ID               string          `json:"app_id"`
+	TenantID         string          `json:"tenant_id"`
+	Name             string          `json:"name"`
+	Description      string          `json:"description"`
+	Status           string          `json:"status"`
+	StableRevisionID string          `json:"stable_revision_id,omitempty"`
+	RolloutPolicy    json.RawMessage `json:"rollout_policy"`
+	Version          int64           `json:"version"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
 }
 
 // AgentRevision is an immutable, reproducible Agent configuration snapshot.
 type AgentRevision struct {
-	ID              string
-	TenantID        string
-	AppID           string
-	RevisionNo      int64
-	AgentType       string
-	AgentConfig     json.RawMessage
-	ModelConfig     json.RawMessage
-	ToolPolicy      json.RawMessage
-	KnowledgeConfig json.RawMessage
-	MemoryConfig    json.RawMessage
-	GuardrailConfig json.RawMessage
-	Checksum        string
-	CreatedBy       string
-	CreatedAt       time.Time
+	ID              string          `json:"revision_id"`
+	TenantID        string          `json:"tenant_id"`
+	AppID           string          `json:"app_id"`
+	RevisionNo      int64           `json:"revision_no"`
+	AgentType       string          `json:"agent_type"`
+	AgentConfig     json.RawMessage `json:"agent_config"`
+	ModelConfig     json.RawMessage `json:"model_config"`
+	ToolPolicy      json.RawMessage `json:"tool_policy"`
+	KnowledgeConfig json.RawMessage `json:"knowledge_config"`
+	MemoryConfig    json.RawMessage `json:"memory_config"`
+	GuardrailConfig json.RawMessage `json:"guardrail_config"`
+	Checksum        string          `json:"checksum"`
+	CreatedBy       string          `json:"created_by"`
+	CreatedAt       time.Time       `json:"created_at"`
 }
 
 // ChannelBinding maps one external channel account to a tenant Agent app.
 type ChannelBinding struct {
-	ID          string
-	TenantID    string
-	AppID       string
-	ChannelType string
-	AccountID   string
-	CallbackKey string
-	Config      json.RawMessage
-	SecretRef   string
-	Status      string
-	Version     int64
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID          string          `json:"channel_binding_id"`
+	TenantID    string          `json:"tenant_id"`
+	AppID       string          `json:"app_id"`
+	ChannelType string          `json:"channel_type"`
+	AccountID   string          `json:"account_id"`
+	CallbackKey string          `json:"callback_key"`
+	Config      json.RawMessage `json:"config"`
+	SecretRef   string          `json:"secret_ref"`
+	Status      string          `json:"status"`
+	Version     int64           `json:"version"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
 }
 
 // BackendBinding chooses a physical backend for one tenant resource type.
 type BackendBinding struct {
-	ID             string
-	TenantID       string
-	AppID          string
-	ResourceType   string
-	BackendType    string
-	Config         json.RawMessage
-	SecretRef      string
-	IsolationLevel string
-	MigrationState string
-	Version        int64
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID             string          `json:"binding_id"`
+	TenantID       string          `json:"tenant_id"`
+	AppID          string          `json:"app_id,omitempty"`
+	ResourceType   string          `json:"resource_type"`
+	BackendType    string          `json:"backend_type"`
+	Config         json.RawMessage `json:"config"`
+	SecretRef      string          `json:"secret_ref,omitempty"`
+	IsolationLevel string          `json:"isolation_level"`
+	MigrationState string          `json:"migration_state"`
+	Version        int64           `json:"version"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
 // BootstrapData is the initial control-plane snapshot for local development.
@@ -124,7 +124,7 @@ func DefaultBootstrapData() BootstrapData {
 		CreatedBy:       "bootstrap",
 		CreatedAt:       now,
 	}
-	revision.Checksum = revisionChecksum(revision)
+	revision.Checksum = RevisionChecksum(revision)
 	return BootstrapData{
 		Tenants: []Tenant{{
 			ID:              "tutorial-tenant",
@@ -183,7 +183,8 @@ func DefaultBootstrapData() BootstrapData {
 	}
 }
 
-func revisionChecksum(revision AgentRevision) string {
+// RevisionChecksum returns a stable checksum for immutable Agent behavior.
+func RevisionChecksum(revision AgentRevision) string {
 	digest := sha256.New()
 	for _, value := range [][]byte{
 		[]byte(revision.AgentType),
@@ -194,8 +195,24 @@ func revisionChecksum(revision AgentRevision) string {
 		revision.MemoryConfig,
 		revision.GuardrailConfig,
 	} {
-		_, _ = digest.Write(value)
+		canonical := canonicalJSON(value)
+		_, _ = digest.Write(canonical)
 		_, _ = digest.Write([]byte{0})
 	}
 	return hex.EncodeToString(digest.Sum(nil))
+}
+
+func canonicalJSON(value []byte) []byte {
+	if len(value) == 0 {
+		return value
+	}
+	var decoded any
+	if err := json.Unmarshal(value, &decoded); err != nil {
+		return value
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return value
+	}
+	return canonical
 }

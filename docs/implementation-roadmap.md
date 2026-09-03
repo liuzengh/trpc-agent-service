@@ -25,9 +25,12 @@
 - 企业微信验签、AES callback、Token cache 和应用消息发送；
 - Telegram webhook、topic Session、sendMessage 和 Retry-After；
 - binding-scoped 外部身份与 Session ID 规范化；
+- Bearer 鉴权 Admin API；
+- Tenant/App/Revision/Channel/Backend 写服务；
+- Revision checksum、乐观锁发布与回滚；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 Admin API、控制面写服务和 Revision 发布/回滚。
+接下来的最近里程碑是 Tool/MCP 治理、预算、审批和审计。
 
 ## 1. 建议目录
 

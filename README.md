@@ -295,6 +295,15 @@ IM callback 地址：
 
 企业微信验签/AES/Token 和 Telegram webhook/sendMessage 的实现链路见 [企业微信和 Telegram Channel Adapter](docs/getting-started.md#20-企业微信和-telegram-channel-adapter)。
 
+启用控制面管理接口：
+
+```dotenv
+TRPC_AGENT_ADMIN_ENABLED=true
+TRPC_AGENT_ADMIN_TOKEN="replace-with-a-random-token"
+```
+
+Tenant、App、Revision、Channel/Backend Binding 和乐观锁发布说明见 [Admin API 和 Revision 发布](docs/getting-started.md#21-admin-api-和-revision-发布)。
+
 停止服务：
 
 ```bash
