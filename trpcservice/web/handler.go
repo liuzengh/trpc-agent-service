@@ -132,6 +132,7 @@ type chatResponse struct {
 	TenantID   string `json:"tenant_id"`
 	AppID      string `json:"app_id"`
 	RevisionID string `json:"revision_id"`
+	AgentName  string `json:"agent_name"`
 }
 
 type errorResponse struct {
@@ -221,6 +222,7 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		TenantID:   result.TenantID,
 		AppID:      result.AppID,
 		RevisionID: result.RevisionID,
+		AgentName:  result.AgentName,
 	})
 }
 

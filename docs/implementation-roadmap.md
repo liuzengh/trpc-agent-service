@@ -13,9 +13,10 @@
 - InMemory / PostgreSQL Control Plane Repository；
 - Channel Binding → tenant/app/revision 可信路由；
 - tenant-scoped Session、Coordinator 和 Idempotency key；
+- Agent Revision Compiler、严格配置解析和不可变 Agent cache；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 Agent Revision Compiler：根据发布 revision 动态构建租户 Agent、Model 和治理配置，并固定会话使用的 revision。
+接下来的最近里程碑是 PostgreSQL Inbox/Agent Run/Transactional Outbox 与 Redis Streams Worker，使 IM callback 可以先可靠入库再异步执行。
 
 ## 1. 建议目录
 

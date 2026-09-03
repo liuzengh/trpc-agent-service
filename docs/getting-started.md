@@ -157,7 +157,11 @@ curl -sS -X POST http://127.0.0.1:8080/chat \
   "user_id": "alice",
   "session_id": "demo",
   "event_count": 7,
-  "replayed": false
+  "replayed": false,
+  "tenant_id": "tutorial-tenant",
+  "app_id": "tutorial-app",
+  "revision_id": "tutorial-revision-1",
+  "agent_name": "tutorial-agent"
 }
 ```
 
@@ -541,7 +545,7 @@ WithEnableAsyncPersist(false)
 
 ### 6.8 Runtime 如何创建 Agent 和 Runner
 
-核心装配在 [`trpcservice/agent/runtime.go`](../trpcservice/agent/runtime.go) 的 `NewRuntimeWithServices`：
+正式启动使用 [`NewRuntimeWithCompilerServices`](../trpcservice/agent/runtime.go)，Runner 保留一个 fallback Agent，但每次请求会由 Revision Compiler 选择实际 Agent：
 
 ```go
 agentInstance := llmagent.New(
@@ -554,8 +558,8 @@ agentInstance := llmagent.New(
 )
 
 runnerInstance := runner.NewRunner(
-    tutorialAppName,
-    agentInstance,
+    "trpc-agent-service",
+    fallbackAgent,
     runner.WithSessionService(sessionService),
 )
 ```
@@ -567,6 +571,7 @@ runnerInstance := runner.NewRunner(
 | `session.Service` | 保存用户消息、assistant 消息和会话状态 |
 | `coordination.Coordinator` | 保证同一个 Session 的完整 Agent turn 不会并发推进 |
 | `idempotency.Store` | 保证同一个外部 message ID 只执行一次并缓存结果 |
+| `agent.Compiler` | 把不可变 revision 编译成当前请求使用的 Agent |
 | `LLMAgent` | 组织提示词、模型调用和将来的 Tool 循环 |
 | `runner.Runner` | 管理一次运行、Session 读写、request ID 和 Event 流 |
 
@@ -587,7 +592,8 @@ BuildModel
 + NewSessionService
 + NewCoordinator
 + idempotency.New
-+ NewRuntimeWithServices
++ NewRevisionCompiler
++ NewRuntimeWithCompilerServices
 ```
 
 因此 `.env` 可以分别选择真实模型、Session 后端、协调后端和幂等后端。
@@ -599,6 +605,7 @@ HTTP 层先通过 `binding_key` 得到可信 Scope，再调用 `Runtime.ChatWith
 ```go
 scope, err := routeResolver.Resolve(ctx, bindingKey)
 begin, err := r.idempotency.Begin(ctx, idempotencyKey, fingerprint)
+compiledAgent, err := r.compiler.Compile(ctx, scope)
 
 lease, err := r.coordinator.Acquire(ctx, coordination.Key{
     AppName:   scope.StorageScope,
@@ -615,6 +622,7 @@ events, err := r.runner.Run(
     userID,
     sessionID,
     model.NewUserMessage(text),
+    agent.WithAgent(compiledAgent),
 )
 ```
 
@@ -973,7 +981,7 @@ trpc-agent-go/session/redis.NewService
   ↓
 ProbeSessionService
   ↓
-agent.NewRuntimeWithServices
+agent.NewRuntimeWithCompilerServices
   ↓
 runner.NewRunner(..., runner.WithSessionService(redisService))
 ```
@@ -1007,7 +1015,7 @@ case config.SessionBackendRedis:
 
 第三步，Factory 调用一次只读的 `ListAppStates`。这会强制发生 Redis 网络访问。如果 Redis 不可达，错误在 HTTP Server 启动前返回。
 
-第四步，[`NewRuntimeWithServices`](../trpcservice/agent/runtime.go) 把已经创建好的 Redis Service 和 Coordinator 交给 Runtime，其中 Session Service 会注入 Runner：
+第四步，[`NewRuntimeWithCompilerServices`](../trpcservice/agent/runtime.go) 把 Redis Service、Coordinator、Idempotency Store 和 Revision Compiler 交给 Runtime，其中 Session Service 会注入 Runner：
 
 ```go
 runner.NewRunner(
@@ -1640,7 +1648,7 @@ message
       ├── LocalStore
       └── RedisStore
   → Store.Ready
-  → agent.NewRuntimeWithServices
+  → agent.NewRuntimeWithCompilerServices
 ```
 
 本地默认配置是：
@@ -2011,6 +2019,55 @@ HTTP 响应会返回解析后的：
 
 这些字段用于 Test Channel 调试。真实 IM Channel 不会允许回调请求覆盖它们。
 
-## 15. 下一步
+## 15. Agent Revision Compiler 运行链路
 
-下一阶段是 Agent Revision Compiler：不再只用进程启动时创建的同一个 Agent，而是根据 `revision_id` 编译租户自己的 instruction、model、tool policy 和 knowledge/memory 配置，并按 revision 缓存不可变 Agent。
+Route Resolver 已经得到稳定 `revision_id`。Runtime 在获得 Idempotency Attempt 后、获取 Session Lease 前调用 Revision Compiler：
+
+```text
+Runtime Scope(revision_id)
+→ ControlPlaneRepository.GetRevision(tenant_id, revision_id)
+→ 校验 revision.tenant_id/app_id 与 Scope 一致
+→ cache key = tenant_id + revision_id + checksum
+→ cache hit：返回不可变 Agent
+→ cache miss：singleflight 编译
+    → 严格解析 agent_config
+    → 解析 model_config
+    → llmagent.New
+    → 写入并发安全 cache
+→ runner.Run(..., agent.WithAgent(compiledAgent))
+```
+
+编译发生在 Session Lease 之前，避免配置读取和模型客户端创建占用会话执行锁。Idempotency Attempt 在外层，因此同一条重复消息也不会触发多次实际 Runner 执行。
+
+当前支持 `agent_type=llm`，Agent 配置包括：
+
+```json
+{
+  "name": "tenant-specific-agent",
+  "description": "Agent description",
+  "instruction": "Tenant instruction",
+  "stream": false
+}
+```
+
+Model 有两种来源：
+
+```text
+source=startup_env
+  → 复用进程启动时配置的 Model
+
+source=revision
+  → 根据 provider/name/base_url 创建 tRPC-Agent-Go Model
+  → API Key 只保存环境变量名 api_key_env
+  → 实际 Secret 从进程环境读取
+```
+
+Revision JSON 使用 `DisallowUnknownFields`。错误字段、缺少 name/instruction、未知 Agent 类型、Scope 不一致或 Secret 不存在都会在调用模型前失败。
+
+同一 revision 的并发 cache miss 使用 `singleflight` 合并，避免多个 Worker goroutine 在一个进程里重复构造同一模型客户端。不同进程各自拥有本地不可变缓存，控制面仍是配置真相。
+
+HTTP 响应新增实际执行的 `agent_name`。幂等 completed 结果也保存该字段，因此重放结果不会依赖当前最新 revision。
+
+## 16. 下一步
+
+下一阶段是持久化 Inbox、Agent Run 和 Transactional Outbox。外部消息将先写 PostgreSQL 并返回 ACK，再由 Redis Streams Worker 异步执行；同步 `/chat` 会保留为开发调试入口。

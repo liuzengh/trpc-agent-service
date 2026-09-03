@@ -41,6 +41,7 @@ type ChatResult struct {
 	TenantID   string
 	AppID      string
 	RevisionID string
+	AgentName  string
 }
 
 // ChatInput is the trusted, transport-neutral input for one Agent turn.
@@ -58,6 +59,7 @@ type Runtime struct {
 	sessionService session.Service
 	coordinator    coordination.Coordinator
 	idempotency    idempotency.Store
+	compiler       Compiler
 	closeOnce      sync.Once
 	closeErr       error
 }
@@ -121,6 +123,52 @@ func NewRuntimeWithServices(
 	if selectedModel == nil {
 		return nil, errors.New("model is required")
 	}
+	defaultAgent := newTutorialAgent(selectedModel, stream)
+	compiler, err := NewStaticCompiler(defaultAgent)
+	if err != nil {
+		return nil, err
+	}
+	return newRuntimeWithCompiler(
+		defaultAgent,
+		compiler,
+		sessionService,
+		coordinator,
+		idempotencyStore,
+	)
+}
+
+// NewRuntimeWithCompilerServices creates a shared Runner whose per-request
+// Agent is selected by compiler.
+func NewRuntimeWithCompilerServices(
+	selectedModel model.Model,
+	compiler Compiler,
+	sessionService session.Service,
+	coordinator coordination.Coordinator,
+	idempotencyStore idempotency.Store,
+	stream bool,
+) (*Runtime, error) {
+	if selectedModel == nil {
+		return nil, errors.New("model is required")
+	}
+	if compiler == nil {
+		return nil, errors.New("Agent compiler is required")
+	}
+	return newRuntimeWithCompiler(
+		newTutorialAgent(selectedModel, stream),
+		compiler,
+		sessionService,
+		coordinator,
+		idempotencyStore,
+	)
+}
+
+func newRuntimeWithCompiler(
+	defaultAgent agentcore.Agent,
+	compiler Compiler,
+	sessionService session.Service,
+	coordinator coordination.Coordinator,
+	idempotencyStore idempotency.Store,
+) (*Runtime, error) {
 	if sessionService == nil {
 		return nil, errors.New("session service is required")
 	}
@@ -130,7 +178,28 @@ func NewRuntimeWithServices(
 	if idempotencyStore == nil {
 		return nil, errors.New("idempotency store is required")
 	}
-	agentInstance := llmagent.New(
+	if compiler == nil {
+		return nil, errors.New("Agent compiler is required")
+	}
+	if defaultAgent == nil {
+		return nil, errors.New("default Agent is required")
+	}
+
+	return &Runtime{
+		runner: runner.NewRunner(
+			defaultRunnerAppName,
+			defaultAgent,
+			runner.WithSessionService(sessionService),
+		),
+		sessionService: sessionService,
+		coordinator:    coordinator,
+		idempotency:    idempotencyStore,
+		compiler:       compiler,
+	}, nil
+}
+
+func newTutorialAgent(selectedModel model.Model, stream bool) agentcore.Agent {
+	return llmagent.New(
 		tutorialAgentName,
 		llmagent.WithModel(selectedModel),
 		llmagent.WithDescription("A minimal agent for learning tRPC-Agent-Go"),
@@ -140,17 +209,6 @@ func NewRuntimeWithServices(
 		),
 		llmagent.WithGenerationConfig(model.GenerationConfig{Stream: stream}),
 	)
-
-	return &Runtime{
-		runner: runner.NewRunner(
-			defaultRunnerAppName,
-			agentInstance,
-			runner.WithSessionService(sessionService),
-		),
-		sessionService: sessionService,
-		coordinator:    coordinator,
-		idempotency:    idempotencyStore,
-	}, nil
 }
 
 // NewDemoRuntime creates a runnable LLMAgent without external dependencies.
@@ -210,6 +268,9 @@ func (r *Runtime) ChatWithScope(
 	}
 	if r.idempotency == nil {
 		return ChatResult{}, errors.New("idempotency store is not initialized")
+	}
+	if r.compiler == nil {
+		return ChatResult{}, errors.New("Agent compiler is not initialized")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -282,10 +343,16 @@ func (r *Runtime) executeIdempotentChat(
 	attempt idempotency.Attempt,
 	input ChatInput,
 ) (ChatResult, error) {
-	result, runErr := r.runChatTurn(
-		attempt.Context(),
-		input,
-	)
+	compiledAgent, runErr := r.compiler.Compile(attempt.Context(), input.Scope)
+	var result ChatResult
+	if runErr == nil {
+		result, runErr = r.runChatTurn(
+			attempt.Context(),
+			input,
+			compiledAgent,
+		)
+		result.AgentName = compiledAgent.Info().Name
+	}
 	finalizeCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(requestCtx),
 		idempotencyFinalizeTimeout,
@@ -305,6 +372,7 @@ func (r *Runtime) executeIdempotentChat(
 		Reply:      result.Reply,
 		RequestID:  result.RequestID,
 		EventCount: result.EventCount,
+		AgentName:  result.AgentName,
 	}
 	if err := attempt.Complete(finalizeCtx, cached); err != nil {
 		return ChatResult{}, fmt.Errorf("complete idempotent chat: %w", err)
@@ -319,6 +387,7 @@ func (r *Runtime) executeIdempotentChat(
 func (r *Runtime) runChatTurn(
 	ctx context.Context,
 	input ChatInput,
+	compiledAgent agentcore.Agent,
 ) (result ChatResult, err error) {
 	lease, err := r.coordinator.Acquire(ctx, coordination.Key{
 		AppName:   input.Scope.StorageScope,
@@ -353,6 +422,7 @@ func (r *Runtime) runChatTurn(
 		input.SessionID,
 		model.NewUserMessage(input.Text),
 		agentcore.WithAppName(input.Scope.StorageScope),
+		agentcore.WithAgent(compiledAgent),
 	)
 	if err != nil {
 		return ChatResult{}, fmt.Errorf("run tutorial agent: %w", err)
@@ -380,6 +450,7 @@ func chatResultFromIdempotency(
 		TenantID:   scope.TenantID,
 		AppID:      scope.AppID,
 		RevisionID: scope.RevisionID,
+		AgentName:  result.AgentName,
 	}
 }
 

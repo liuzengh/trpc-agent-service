@@ -115,8 +115,21 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build route resolver: %w", err)
 	}
-	runtime, err := agentservice.NewRuntimeWithServices(
+	revisionCompiler, err := agentservice.NewRevisionCompiler(
+		controlPlaneRepository,
 		selectedModel,
+		modelConfig.Stream,
+	)
+	if err != nil {
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build Agent revision compiler: %w", err)
+	}
+	runtime, err := agentservice.NewRuntimeWithCompilerServices(
+		selectedModel,
+		revisionCompiler,
 		sessionService,
 		sessionCoordinator,
 		idempotencyStore,

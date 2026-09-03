@@ -250,6 +250,8 @@ TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=true
 
 启动、migration、bootstrap 和 readiness 链路见 [PostgreSQL 控制面接入后的启动链路](docs/getting-started.md#13-postgresql-控制面接入后的启动链路)。
 
+Channel Binding、tenant-scoped Runtime 和动态 Agent Revision 编译见 [Channel Binding 路由](docs/getting-started.md#14-channel-binding-到租户-runtime-的路由链路) 与 [Agent Revision Compiler](docs/getting-started.md#15-agent-revision-compiler-运行链路)。
+
 停止服务：
 
 ```bash

@@ -55,6 +55,7 @@ type Result struct {
 	Reply      string `json:"reply"`
 	RequestID  string `json:"request_id"`
 	EventCount int    `json:"event_count"`
+	AgentName  string `json:"agent_name"`
 }
 
 // BeginStatus describes what Begin found for one message ID.
