@@ -8,6 +8,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	agentsession "trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	postgressession "trpc.group/trpc-go/trpc-agent-go/session/postgres"
 	redissession "trpc.group/trpc-go/trpc-agent-go/session/redis"
 )
 
@@ -41,6 +42,16 @@ func NewSessionService(
 		)
 		if err != nil {
 			return nil, fmt.Errorf("create Redis session service: %w", err)
+		}
+	case config.SessionBackendPostgres:
+		service, err = postgressession.NewService(
+			postgressession.WithPostgresClientDSN(cfg.PostgresURL),
+			postgressession.WithTablePrefix(cfg.PostgresPrefix),
+			postgressession.WithSessionTTL(cfg.TTL),
+			postgressession.WithEnableAsyncPersist(false),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create PostgreSQL session service: %w", err)
 		}
 	default:
 		return nil, fmt.Errorf("unsupported session backend %q", cfg.Backend)

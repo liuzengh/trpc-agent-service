@@ -231,6 +231,8 @@ curl -sS http://127.0.0.1:8080/readyz
 
 Redis 接入后的启动装配、首轮 Session 创建、历史恢复、模型消息构造和 Event 回写链路，见 [Redis Session 接入后的运行链路](docs/getting-started.md#10-redis-session-接入后的运行链路)。
 
+也可以把 `TRPC_AGENT_SESSION_BACKEND` 设为 `postgres`，复用 `TRPC_AGENT_POSTGRES_URL`，并通过 `TRPC_AGENT_SESSION_POSTGRES_PREFIX` 隔离 tRPC-Agent-Go 的 Session/State/Event/Summary 表。同步持久化保持开启，Worker 返回成功前数据已经对其他节点可见。
+
 同 Session 串行、不同 Session 并行、Redis 租约、续租、安全释放和 fencing token 的链路，见 [Session Coordinator 接入后的运行链路](docs/getting-started.md#11-session-coordinator-接入后的运行链路)。
 
 `message_id` 去重、processing 等待、completed 结果复用和失败重试链路，见 [消息幂等接入后的运行链路](docs/getting-started.md#12-消息幂等接入后的运行链路)。

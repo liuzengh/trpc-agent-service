@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -14,15 +15,21 @@ const (
 	// SessionBackendRedis stores sessions in Redis for restart persistence and
 	// cross-instance sharing.
 	SessionBackendRedis = "redis"
+	// SessionBackendPostgres stores sessions and summaries in PostgreSQL.
+	SessionBackendPostgres = "postgres"
 
 	defaultRedisKeyPrefix = "trpc-agent-service"
 )
+
+var postgresTablePrefixPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,62}$`)
 
 // SessionConfig contains the settings needed to create a Session service.
 type SessionConfig struct {
 	Backend        string
 	RedisURL       string
 	RedisKeyPrefix string
+	PostgresURL    string
+	PostgresPrefix string
 	TTL            time.Duration
 }
 
@@ -38,6 +45,8 @@ func LoadSessionConfigFromEnv() (SessionConfig, error) {
 		Backend:        backend,
 		RedisURL:       strings.TrimSpace(os.Getenv("REDIS_URL")),
 		RedisKeyPrefix: strings.TrimSpace(os.Getenv("REDIS_KEY_PREFIX")),
+		PostgresURL:    strings.TrimSpace(os.Getenv("TRPC_AGENT_POSTGRES_URL")),
+		PostgresPrefix: strings.TrimSpace(os.Getenv("TRPC_AGENT_SESSION_POSTGRES_PREFIX")),
 	}
 	if config.RedisKeyPrefix == "" {
 		config.RedisKeyPrefix = defaultRedisKeyPrefix
@@ -67,9 +76,19 @@ func LoadSessionConfigFromEnv() (SessionConfig, error) {
 			return SessionConfig{}, err
 		}
 		return config, nil
+	case SessionBackendPostgres:
+		if config.PostgresURL == "" {
+			return SessionConfig{}, fmt.Errorf(
+				"TRPC_AGENT_POSTGRES_URL is required when session backend is postgres",
+			)
+		}
+		if config.PostgresPrefix != "" && !postgresTablePrefixPattern.MatchString(config.PostgresPrefix) {
+			return SessionConfig{}, fmt.Errorf("TRPC_AGENT_SESSION_POSTGRES_PREFIX is invalid")
+		}
+		return config, nil
 	default:
 		return SessionConfig{}, fmt.Errorf(
-			"unsupported TRPC_AGENT_SESSION_BACKEND %q: use inmemory or redis",
+			"unsupported TRPC_AGENT_SESSION_BACKEND %q: use inmemory, redis or postgres",
 			config.Backend,
 		)
 	}

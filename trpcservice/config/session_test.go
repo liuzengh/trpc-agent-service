@@ -40,6 +40,20 @@ func TestLoadSessionConfigRedis(t *testing.T) {
 	}
 }
 
+func TestLoadSessionConfigPostgres(t *testing.T) {
+	clearSessionEnvironment(t)
+	t.Setenv("TRPC_AGENT_SESSION_BACKEND", "postgres")
+	t.Setenv("TRPC_AGENT_POSTGRES_URL", "postgres://user:pass@localhost/agent?sslmode=disable")
+	t.Setenv("TRPC_AGENT_SESSION_POSTGRES_PREFIX", "runtime")
+	config, err := LoadSessionConfigFromEnv()
+	if err != nil {
+		t.Fatalf("load session config: %v", err)
+	}
+	if config.Backend != SessionBackendPostgres || config.PostgresPrefix != "runtime" {
+		t.Fatalf("config=%+v", config)
+	}
+}
+
 func TestLoadSessionConfigRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -50,6 +64,7 @@ func TestLoadSessionConfigRejectsInvalidValues(t *testing.T) {
 	}{
 		{name: "unknown backend", backend: "sql", wantError: "unsupported"},
 		{name: "missing Redis URL", backend: "redis", wantError: "REDIS_URL"},
+		{name: "missing PostgreSQL URL", backend: "postgres", wantError: "POSTGRES_URL"},
 		{name: "invalid Redis scheme", backend: "redis", redisURL: "http://localhost:6379", wantError: "redis or rediss"},
 		{name: "invalid TTL", ttl: "tomorrow", wantError: "TRPC_AGENT_SESSION_TTL"},
 		{name: "negative TTL", ttl: "-1s", wantError: "must not be negative"},
@@ -77,6 +92,8 @@ func clearSessionEnvironment(t *testing.T) {
 		"TRPC_AGENT_SESSION_TTL",
 		"REDIS_URL",
 		"REDIS_KEY_PREFIX",
+		"TRPC_AGENT_POSTGRES_URL",
+		"TRPC_AGENT_SESSION_POSTGRES_PREFIX",
 	} {
 		t.Setenv(key, "")
 	}
