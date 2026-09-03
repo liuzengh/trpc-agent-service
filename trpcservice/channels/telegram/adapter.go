@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
@@ -22,9 +23,14 @@ import (
 const defaultAPIBase = "https://api.telegram.org"
 
 type bindingConfig struct {
-	BotTokenRef      string `json:"bot_token_ref"`
-	WebhookSecretRef string `json:"webhook_secret_ref"`
-	APIBaseURL       string `json:"api_base_url,omitempty"`
+	BotTokenRef       string  `json:"bot_token_ref"`
+	WebhookSecretRef  string  `json:"webhook_secret_ref"`
+	APIBaseURL        string  `json:"api_base_url,omitempty"`
+	BotUserID         int64   `json:"bot_user_id,omitempty"`
+	BotUsername       string  `json:"bot_username,omitempty"`
+	AllowedChatIDs    []int64 `json:"allowed_chat_ids,omitempty"`
+	RequireMention    bool    `json:"require_mention,omitempty"`
+	IgnoreBotMessages bool    `json:"ignore_bot_messages,omitempty"`
 }
 
 type Adapter struct {
@@ -87,6 +93,9 @@ func (a *Adapter) Callback(
 	if message == nil || message.From == nil {
 		return result, nil
 	}
+	if !acceptMessage(cfg, message) {
+		return result, nil
+	}
 	messageType, text := normalizedTelegramMessage(message)
 	if text == "" {
 		return result, nil
@@ -120,15 +129,25 @@ type telegramUpdate struct {
 }
 
 type telegramMessage struct {
-	MessageID       int64             `json:"message_id"`
-	MessageThreadID int64             `json:"message_thread_id"`
-	Date            int64             `json:"date"`
-	Text            string            `json:"text"`
-	Caption         string            `json:"caption"`
-	Photo           []telegramPhoto   `json:"photo"`
-	Document        *telegramDocument `json:"document"`
-	From            *telegramUser     `json:"from"`
-	Chat            telegramChat      `json:"chat"`
+	MessageID       int64                   `json:"message_id"`
+	MessageThreadID int64                   `json:"message_thread_id"`
+	Date            int64                   `json:"date"`
+	Text            string                  `json:"text"`
+	Caption         string                  `json:"caption"`
+	Entities        []telegramMessageEntity `json:"entities"`
+	CaptionEntities []telegramMessageEntity `json:"caption_entities"`
+	Photo           []telegramPhoto         `json:"photo"`
+	Document        *telegramDocument       `json:"document"`
+	From            *telegramUser           `json:"from"`
+	Chat            telegramChat            `json:"chat"`
+	ReplyToMessage  *telegramMessage        `json:"reply_to_message"`
+}
+
+type telegramMessageEntity struct {
+	Type   string        `json:"type"`
+	Offset int           `json:"offset"`
+	Length int           `json:"length"`
+	User   *telegramUser `json:"user,omitempty"`
 }
 
 type telegramPhoto struct {
@@ -162,8 +181,98 @@ func normalizedTelegramMessage(message *telegramMessage) (string, string) {
 	return "", ""
 }
 
+func acceptMessage(cfg bindingConfig, message *telegramMessage) bool {
+	if message == nil || message.From == nil {
+		return false
+	}
+	if cfg.IgnoreBotMessages && message.From.IsBot {
+		return false
+	}
+	if message.Chat.Type == "private" {
+		return true
+	}
+	if len(cfg.AllowedChatIDs) > 0 && !containsChatID(cfg.AllowedChatIDs, message.Chat.ID) {
+		return false
+	}
+	if !cfg.RequireMention {
+		return true
+	}
+	return messageAddressesBot(cfg, message)
+}
+
+func containsChatID(allowed []int64, chatID int64) bool {
+	for _, item := range allowed {
+		if item == chatID {
+			return true
+		}
+	}
+	return false
+}
+
+func messageAddressesBot(cfg bindingConfig, message *telegramMessage) bool {
+	if message.ReplyToMessage != nil && userMatchesBot(cfg, message.ReplyToMessage.From) {
+		return true
+	}
+	if entitiesAddressBot(cfg, message.Text, message.Entities) {
+		return true
+	}
+	return entitiesAddressBot(cfg, message.Caption, message.CaptionEntities)
+}
+
+func entitiesAddressBot(
+	cfg bindingConfig,
+	text string,
+	entities []telegramMessageEntity,
+) bool {
+	for _, entity := range entities {
+		switch entity.Type {
+		case "text_mention":
+			if userMatchesBot(cfg, entity.User) {
+				return true
+			}
+		case "mention":
+			value, ok := telegramEntityText(text, entity.Offset, entity.Length)
+			if ok && strings.EqualFold(
+				strings.TrimPrefix(value, "@"), cfg.BotUsername,
+			) {
+				return true
+			}
+		case "bot_command":
+			value, ok := telegramEntityText(text, entity.Offset, entity.Length)
+			if !ok {
+				continue
+			}
+			_, target, addressed := strings.Cut(value, "@")
+			if addressed && strings.EqualFold(target, cfg.BotUsername) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func userMatchesBot(cfg bindingConfig, user *telegramUser) bool {
+	if user == nil {
+		return false
+	}
+	if cfg.BotUserID > 0 && user.ID == cfg.BotUserID {
+		return true
+	}
+	return cfg.BotUsername != "" && strings.EqualFold(user.Username, cfg.BotUsername)
+}
+
+func telegramEntityText(text string, offset int, length int) (string, bool) {
+	units := utf16.Encode([]rune(text))
+	if offset < 0 || length <= 0 || offset > len(units) || length > len(units)-offset {
+		return "", false
+	}
+	return string(utf16.Decode(units[offset : offset+length])), true
+}
+
 type telegramUser struct {
-	ID int64 `json:"id"`
+	ID       int64  `json:"id"`
+	IsBot    bool   `json:"is_bot"`
+	Username string `json:"username"`
 }
 
 type telegramChat struct {
@@ -251,6 +360,22 @@ func parseBinding(binding controlplane.ChannelBinding) (bindingConfig, error) {
 	}
 	if cfg.BotTokenRef == "" || cfg.WebhookSecretRef == "" {
 		return bindingConfig{}, fmt.Errorf("Telegram binding config is incomplete")
+	}
+	cfg.BotUsername = strings.TrimPrefix(strings.TrimSpace(cfg.BotUsername), "@")
+	if cfg.RequireMention && (cfg.BotUserID <= 0 || cfg.BotUsername == "") {
+		return bindingConfig{}, fmt.Errorf(
+			"Telegram mention filtering requires bot_user_id and bot_username",
+		)
+	}
+	seenChatIDs := make(map[int64]struct{}, len(cfg.AllowedChatIDs))
+	for _, chatID := range cfg.AllowedChatIDs {
+		if chatID == 0 {
+			return bindingConfig{}, fmt.Errorf("Telegram allowed_chat_ids contains zero")
+		}
+		if _, exists := seenChatIDs[chatID]; exists {
+			return bindingConfig{}, fmt.Errorf("Telegram allowed_chat_ids contains duplicates")
+		}
+		seenChatIDs[chatID] = struct{}{}
 	}
 	return cfg, nil
 }

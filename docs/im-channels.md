@@ -146,7 +146,21 @@ Agent 通常无法在 callback 的短处理窗口内完成，因此不把长时�
 
 当前 Telegram Adapter 实现 webhook；`getUpdates` 长轮询仅作为可选设计，尚未实现。生产环境联调需要使用真实 Bot 配置公网 webhook。
 
-当前 Binding 保存 bot token Secret 引用、webhook secret token 和可选 API Base URL。Webhook 校验 `X-Telegram-Bot-Api-Secret-Token`。允许用户/群、代理、最大文件大小、流式模式和长轮询水位仍是目标配置，尚未进入当前 `bindingConfig`。
+当前 Binding 保存 bot token Secret 引用、webhook secret token、可选 API Base URL，以及群聊安全字段：
+
+```json
+{
+  "bot_token_ref": "env://TELEGRAM_BOT_TOKEN",
+  "webhook_secret_ref": "env://TELEGRAM_WEBHOOK_SECRET",
+  "bot_user_id": 123456789,
+  "bot_username": "example_bot",
+  "allowed_chat_ids": [-1001234567890],
+  "require_mention": true,
+  "ignore_bot_messages": true
+}
+```
+
+Webhook 校验 `X-Telegram-Bot-Api-Secret-Token`。过滤只作用于群聊：私聊继续正常进入；群聊先检查白名单和发送者，再识别 Telegram `mention`、`text_mention`、`bot_command` entity 或对 Bot 消息的回复。不符合条件时 Adapter 返回正常 ACK，但不写 Inbox。Telegram entity 的 offset/length 使用 UTF-16 code unit，不能按 Go byte 或 rune 下标直接截取。
 
 Telegram 的 `update_id` 可作为外部去重键。消息 ID 在 chat 内唯一，组合键为：
 
@@ -162,7 +176,7 @@ bot_id | chat_id | message_thread_id | message_id
 
 当前 Adapter 只实现 `off`，即聚合完成后调用 `sendMessage` 发送最终文本，不声明 `SupportsEdit` 或 `SupportsFile`。
 
-群组话题已使用 `message_thread_id` 生成独立 session。Bot 隐私模式由 Telegram 平台配置决定；@ 提及和群白名单过滤尚未实现，接入真实群聊前需要在 Adapter 入队前补上。
+群组话题使用 `message_thread_id` 生成独立 session。Bot 隐私模式由 Telegram 平台配置决定；平台侧已经支持 `allowed_chat_ids`、`require_mention` 和 `ignore_bot_messages`。要使用自然的 `@Bot` 文本，需要关闭 Privacy Mode 让 Telegram 先投递群消息，再由平台过滤；保持 Privacy Mode 时仍可使用 `/ask@bot` 或回复 Bot。
 
 ## 6. Session ID 规则
 

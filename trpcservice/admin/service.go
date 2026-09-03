@@ -529,6 +529,40 @@ func (s *Service) CreateChannelBinding(
 	return binding, nil
 }
 
+func (s *Service) UpdateChannelBinding(
+	ctx context.Context,
+	tenantID string,
+	bindingID string,
+	config json.RawMessage,
+	status string,
+	expectedVersion int64,
+) (controlplane.ChannelBinding, error) {
+	if !identifierPattern.MatchString(tenantID) ||
+		!identifierPattern.MatchString(bindingID) || expectedVersion <= 0 {
+		return controlplane.ChannelBinding{}, invalidf("channel binding update identity is invalid")
+	}
+	if status != controlplane.StatusActive && status != controlplane.StatusDisabled {
+		return controlplane.ChannelBinding{}, invalidf("channel binding status is invalid")
+	}
+	if err := normalizeJSON(&config); err != nil {
+		return controlplane.ChannelBinding{}, invalidf("channel binding config: %v", err)
+	}
+	binding, err := s.repository.UpdateChannelBinding(
+		ctx, tenantID, bindingID, config, status, expectedVersion,
+	)
+	if err != nil {
+		return controlplane.ChannelBinding{}, err
+	}
+	if err := s.record(ctx, tenantID, "admin_channel_binding_updated", map[string]any{
+		"app_id": binding.AppID, "binding_id": binding.ID,
+		"channel": binding.ChannelType, "previous_version": expectedVersion,
+		"version": binding.Version, "status": binding.Status,
+	}); err != nil {
+		return controlplane.ChannelBinding{}, err
+	}
+	return binding, nil
+}
+
 func (s *Service) CreateBackendBinding(
 	ctx context.Context,
 	binding controlplane.BackendBinding,

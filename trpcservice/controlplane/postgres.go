@@ -401,6 +401,36 @@ INSERT INTO channel_binding(
 	return mapMutationError("create channel binding", err)
 }
 
+func (r *PostgresRepository) UpdateChannelBinding(
+	ctx context.Context,
+	tenantID string,
+	bindingID string,
+	config []byte,
+	status string,
+	expectedVersion int64,
+) (ChannelBinding, error) {
+	result, err := r.db.ExecContext(ctx, `
+UPDATE channel_binding
+SET config=$3::jsonb,status=$4,version=version+1,updated_at=now()
+WHERE tenant_id=$1 AND channel_binding_id=$2 AND version=$5`,
+		tenantID, bindingID, string(config), status, expectedVersion,
+	)
+	if err != nil {
+		return ChannelBinding{}, fmt.Errorf("update channel binding: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return ChannelBinding{}, err
+	}
+	if rows != 1 {
+		if _, err := r.GetChannelBinding(ctx, tenantID, bindingID); errors.Is(err, ErrNotFound) {
+			return ChannelBinding{}, ErrNotFound
+		}
+		return ChannelBinding{}, ErrConflict
+	}
+	return r.GetChannelBinding(ctx, tenantID, bindingID)
+}
+
 func (r *PostgresRepository) CreateBackendBinding(
 	ctx context.Context,
 	binding BackendBinding,

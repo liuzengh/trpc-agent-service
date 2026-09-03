@@ -25,7 +25,7 @@
 ## 3. IM 接入
 
 - 企业微信 Adapter：SHA1 验签、时间窗、AES-CBC/PKCS7、CorpID、Token cache、应用文本消息、429/Token 刷新；当前由模拟协议测试覆盖，真实企业账号联调待完成；
-- Telegram Adapter：Webhook Secret、private/group/topic Session、sendMessage、Retry-After；真实 Bot 已完成开发环境私聊、多轮 Session 和异步回复联调，群聊/Topic 与媒体发送待完成；
+- Telegram Adapter：Webhook Secret、private/group/topic Session、sendMessage、Retry-After、群白名单、mention/command/reply 识别和其他 Bot 过滤；真实 Bot 已完成私聊/群聊/Topic 基础联调，新增过滤策略待真实复验；
 - 用户/群/线程经 binding-scoped hash 生成隔离身份；
 - 文本、图片和文件 ID 可规范化；当前出站仅支持文本，默认不自动下载媒体；
 - 重复 callback 由 `(channel_binding_id, external_message_id)` 唯一约束处理；

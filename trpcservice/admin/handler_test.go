@@ -70,3 +70,32 @@ func TestAdminHandlerEnforcesTenantRBAC(t *testing.T) {
 		t.Fatalf("denied status=%d body=%s", deniedRecorder.Code, deniedRecorder.Body.String())
 	}
 }
+
+func TestAdminHandlerUpdatesChannelBinding(t *testing.T) {
+	repository := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
+	service, _ := New(repository)
+	handler, _ := NewHandler(service, testAdminToken)
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/admin/channel-bindings/update",
+		bytes.NewBufferString(`{
+            "tenant_id":"tutorial-tenant",
+            "binding_id":"tutorial-http-binding",
+            "config":{"require_mention":true},
+            "status":"active",
+            "expected_version":1
+        }`),
+	)
+	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	updated, err := repository.GetChannelBinding(
+		request.Context(), "tutorial-tenant", "tutorial-http-binding",
+	)
+	if err != nil || updated.Version != 2 || string(updated.Config) != `{"require_mention":true}` {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+}

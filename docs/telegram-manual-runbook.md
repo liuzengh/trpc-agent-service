@@ -97,7 +97,85 @@ Privacy Mode 开启时，使用明确命令：
 /ask@trpc_agent_test_bot 你的问题
 ```
 
-普通 `@trpc_agent_test_bot 文本` 不保证被 Telegram 投递。关闭 Privacy Mode 后需要把 Bot 移出群再重新加入；当前平台还没有 `require_mention` 和群白名单，因此关闭后 Bot 会处理 Telegram 推送的所有群文本，只适合测试群。
+普通 `@trpc_agent_test_bot 文本` 在 Privacy Mode 下不保证被 Telegram 投递。关闭 Privacy Mode 后需要把 Bot 移出群再重新加入；平台可以通过 Binding 的 `allowed_chat_ids`、`require_mention` 和 `ignore_bot_messages` 在持久化前过滤群消息。
+
+## 启用群白名单和 mention 过滤
+
+升级代码后先启动 PostgreSQL、Redis 和 Agent，并临时把 `.env` 中的 Admin 打开：
+
+```dotenv
+TRPC_AGENT_ADMIN_ENABLED=true
+```
+
+重启服务后查询 Bot 身份：
+
+```bash
+set -a
+source .env
+set +a
+curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"
+```
+
+记录 `result.id` 和 `result.username`。再查询已经出现过的群 ID：
+
+```bash
+docker compose exec -T postgres \
+  psql -U trpc_agent -d trpc_agent \
+  -c "
+    SELECT DISTINCT
+      ((i.payload->>'reply_target')::jsonb->>'chat_id') AS chat_id
+    FROM inbound_message i
+    JOIN conversation c ON c.conversation_id = i.conversation_id
+    WHERE i.channel_binding_id = 'telegram-tutorial-binding'
+      AND c.chat_type = 'group';
+  "
+```
+
+查询 Binding 当前版本：
+
+```bash
+docker compose exec -T postgres \
+  psql -U trpc_agent -d trpc_agent \
+  -c "
+    SELECT channel_binding_id, version, status
+    FROM channel_binding
+    WHERE channel_binding_id = 'telegram-tutorial-binding';
+  "
+```
+
+加载 Admin Token 后更新 Binding。将示例中的 Bot ID、用户名、群 ID 和 `expected_version` 替换成查询结果：
+
+```bash
+read -rsp "Admin Token: " ADMIN_TOKEN
+echo
+
+curl -sS -X POST http://127.0.0.1:8080/admin/channel-bindings/update \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "tenant_id": "tutorial-tenant",
+    "binding_id": "telegram-tutorial-binding",
+    "config": {
+      "bot_token_ref": "env://TELEGRAM_BOT_TOKEN",
+      "webhook_secret_ref": "env://TELEGRAM_WEBHOOK_SECRET",
+      "bot_user_id": 123456789,
+      "bot_username": "trpc_agent_test_bot",
+      "allowed_chat_ids": [-1001234567890],
+      "require_mention": true,
+      "ignore_bot_messages": true
+    },
+    "status": "active",
+    "expected_version": 1
+  }'
+```
+
+更新成功后版本加一。把 Admin 再次关闭并重启：
+
+```dotenv
+TRPC_AGENT_ADMIN_ENABLED=false
+```
+
+关闭 Telegram Privacy Mode、移出并重新加入 Bot 后，验证：普通群消息不产生 Inbox；正确 @、`/ask@bot` 和回复 Bot 会进入；非白名单群和其他 Bot 消息被忽略。
 
 ## 查看完整处理状态
 
@@ -221,4 +299,4 @@ Webhook pending: 0
 
 已覆盖私聊、多轮 Session、进程重启恢复、重复 Update、群聊、Topic、Webhook 暂时不可用后的恢复，以及 Quick Tunnel 到固定 Named Tunnel 的切换。
 
-尚未覆盖 Telegram 真实 429、应用层 `require_mention`/群白名单、媒体发送、消息编辑和长期稳定性压测。
+尚未覆盖新增群过滤策略的真实复验、Telegram 真实 429、媒体发送、消息编辑和长期稳定性压测。

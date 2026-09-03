@@ -70,6 +70,31 @@ func TestMemoryRepositoryReturnsCopies(t *testing.T) {
 	}
 }
 
+func TestMemoryRepositoryUpdatesChannelBindingWithVersion(t *testing.T) {
+	repository := NewMemoryRepository(DefaultBootstrapData())
+	t.Cleanup(func() { _ = repository.Close() })
+	updated, err := repository.UpdateChannelBinding(
+		context.Background(), "tutorial-tenant", "tutorial-http-binding",
+		[]byte(`{"require_mention":true}`), StatusDisabled, 1,
+	)
+	if err != nil || updated.Version != 2 || updated.Status != StatusDisabled ||
+		string(updated.Config) != `{"require_mention":true}` {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	byCallback, err := repository.GetChannelBindingByCallbackKey(
+		context.Background(), "tutorial-http",
+	)
+	if err != nil || byCallback.Version != 2 || byCallback.Status != StatusDisabled {
+		t.Fatalf("callback binding=%+v err=%v", byCallback, err)
+	}
+	if _, err := repository.UpdateChannelBinding(
+		context.Background(), "tutorial-tenant", "tutorial-http-binding",
+		[]byte(`{}`), StatusActive, 1,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale update error=%v", err)
+	}
+}
+
 func TestMemoryRepositoryClose(t *testing.T) {
 	repository := NewMemoryRepository(DefaultBootstrapData())
 	if err := repository.Close(); err != nil {

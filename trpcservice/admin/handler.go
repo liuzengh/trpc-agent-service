@@ -169,6 +169,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		value, err := h.service.CreateChannelBinding(r.Context(), input)
 		h.writeResult(w, http.StatusCreated, value, err)
+	case "/admin/channel-bindings/update":
+		var input struct {
+			TenantID        string          `json:"tenant_id"`
+			BindingID       string          `json:"binding_id"`
+			Config          json.RawMessage `json:"config"`
+			Status          string          `json:"status"`
+			ExpectedVersion int64           `json:"expected_version"`
+		}
+		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionWrite) {
+			return
+		}
+		value, err := h.service.UpdateChannelBinding(
+			r.Context(), input.TenantID, input.BindingID,
+			input.Config, input.Status, input.ExpectedVersion,
+		)
+		h.writeResult(w, http.StatusOK, value, err)
 	case "/admin/backend-bindings":
 		var input controlplane.BackendBinding
 		if !decodeAdmin(w, r, &input) {

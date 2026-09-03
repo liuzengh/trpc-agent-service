@@ -99,6 +99,31 @@ func TestAdminAuditsControlPlaneMutation(t *testing.T) {
 	}
 }
 
+func TestAdminUpdatesChannelBinding(t *testing.T) {
+	repository := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
+	auditWriter := audit.NewMemoryWriter()
+	service, _ := New(repository)
+	service.WithAuditWriter(auditWriter)
+	updated, err := service.UpdateChannelBinding(
+		context.Background(), "tutorial-tenant", "tutorial-http-binding",
+		json.RawMessage(`{"allowed_chat_ids":[-100]}`), controlplane.StatusActive, 1,
+	)
+	if err != nil || updated.Version != 2 ||
+		string(updated.Config) != `{"allowed_chat_ids":[-100]}` {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	events := auditWriter.Events()
+	if len(events) != 1 || events[0].Decision != "admin_channel_binding_updated" {
+		t.Fatalf("events=%+v", events)
+	}
+	if _, err := service.UpdateChannelBinding(
+		context.Background(), "tutorial-tenant", "tutorial-http-binding",
+		json.RawMessage(`{}`), controlplane.StatusActive, 1,
+	); !errors.Is(err, controlplane.ErrConflict) {
+		t.Fatalf("stale update error=%v", err)
+	}
+}
+
 func TestAdminUpsertsKnowledgeDocument(t *testing.T) {
 	data := controlplane.DefaultBootstrapData()
 	data.BackendBindings = append(data.BackendBindings, controlplane.BackendBinding{

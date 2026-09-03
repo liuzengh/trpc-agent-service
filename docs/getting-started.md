@@ -2359,6 +2359,7 @@ POST /admin/apps
 POST /admin/revisions
 POST /admin/revisions/publish
 POST /admin/channel-bindings
+POST /admin/channel-bindings/update
 POST /admin/backend-bindings
 ```
 

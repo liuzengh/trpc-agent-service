@@ -366,6 +366,33 @@ func (r *MemoryRepository) CreateChannelBinding(
 	return nil
 }
 
+func (r *MemoryRepository) UpdateChannelBinding(
+	_ context.Context,
+	tenantID string,
+	bindingID string,
+	config []byte,
+	status string,
+	expectedVersion int64,
+) (ChannelBinding, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := scopedKey(tenantID, bindingID)
+	binding, exists := r.channelIDs[key]
+	if !exists {
+		return ChannelBinding{}, ErrNotFound
+	}
+	if binding.Version != expectedVersion {
+		return ChannelBinding{}, ErrConflict
+	}
+	binding.Config = cloneJSON(config)
+	binding.Status = status
+	binding.Version++
+	binding.UpdatedAt = time.Now().UTC()
+	r.channelIDs[key] = cloneChannelBinding(binding)
+	r.channels[binding.CallbackKey] = cloneChannelBinding(binding)
+	return cloneChannelBinding(binding), nil
+}
+
 func (r *MemoryRepository) CreateBackendBinding(
 	_ context.Context,
 	binding BackendBinding,

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -85,5 +86,63 @@ func TestPostgresBackendMigrationIntegration(t *testing.T) {
 	target, _ := repository.GetBackendBinding(context.Background(), tenantID, targetID)
 	if source.MigrationState != "retired" || target.MigrationState != "active" {
 		t.Fatalf("source=%+v target=%+v", source, target)
+	}
+}
+
+func TestPostgresChannelBindingUpdateIntegration(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_URL")
+	if dsn == "" {
+		t.Skip("TEST_POSTGRES_URL is not set")
+	}
+	repository, err := New(context.Background(), config.ControlPlaneConfig{
+		Backend: config.ControlPlaneBackendPostgres, PostgresURL: dsn,
+		AutoMigrate: true, MaxOpenConns: 10, MaxIdleConns: 2,
+	})
+	if err != nil {
+		t.Fatalf("repository: %v", err)
+	}
+	t.Cleanup(func() { _ = repository.Close() })
+	mutable := repository.(MutableRepository)
+	suffix := fmt.Sprintf("%x", time.Now().UnixNano())
+	tenantID, appID := "tc-"+suffix, "ac-"+suffix
+	now := time.Now().UTC()
+	if err := mutable.CreateTenant(context.Background(), Tenant{
+		ID: tenantID, DisplayName: tenantID, Status: StatusActive, Region: "test",
+		QuotaConfig: json.RawMessage(`{}`), AuditPolicy: json.RawMessage(`{}`),
+		SecretNamespace: "test", Version: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("tenant: %v", err)
+	}
+	if err := mutable.CreateAgentApp(context.Background(), AgentApp{
+		ID: appID, TenantID: tenantID, Name: appID, Status: StatusActive,
+		RolloutPolicy: json.RawMessage(`{}`), Version: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("app: %v", err)
+	}
+	bindingID := "channel-" + suffix
+	if err := mutable.CreateChannelBinding(context.Background(), ChannelBinding{
+		ID: bindingID, TenantID: tenantID, AppID: appID, ChannelType: "telegram",
+		AccountID: "bot-" + suffix, CallbackKey: "callback-" + suffix,
+		Config: json.RawMessage(`{"require_mention":false}`), SecretRef: "env://BOT_TOKEN",
+		Status: StatusActive, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create channel binding: %v", err)
+	}
+	updated, err := mutable.UpdateChannelBinding(
+		context.Background(), tenantID, bindingID,
+		json.RawMessage(`{"require_mention":true}`), StatusActive, 1,
+	)
+	var updatedConfig map[string]any
+	if decodeErr := json.Unmarshal(updated.Config, &updatedConfig); decodeErr != nil {
+		t.Fatalf("decode updated config: %v", decodeErr)
+	}
+	if err != nil || updated.Version != 2 || updatedConfig["require_mention"] != true {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	if _, err := mutable.UpdateChannelBinding(
+		context.Background(), tenantID, bindingID,
+		json.RawMessage(`{}`), StatusActive, 1,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale update error=%v", err)
 	}
 }
