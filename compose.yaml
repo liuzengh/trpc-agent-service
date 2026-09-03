@@ -54,7 +54,16 @@ services:
       - -c
       - until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done; mc mb --ignore-existing local/trpc-agent-artifacts
 
+  qdrant:
+    image: qdrant/qdrant:v1.15.4
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
 volumes:
   postgres-data:
   redis-data:
   minio-data:
+  qdrant-data:

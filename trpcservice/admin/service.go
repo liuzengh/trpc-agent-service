@@ -14,6 +14,8 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 )
 
@@ -24,6 +26,98 @@ type Service struct {
 	repository controlplane.MutableRepository
 	tools      *platformtool.Catalog
 	audit      audit.Writer
+	knowledge  *platformstorage.KnowledgeRouter
+}
+
+func (s *Service) WithKnowledgeRouter(router *platformstorage.KnowledgeRouter) *Service {
+	if s != nil {
+		s.knowledge = router
+	}
+	return s
+}
+
+type KnowledgeDocumentInput struct {
+	TenantID   string         `json:"tenant_id"`
+	AppID      string         `json:"app_id"`
+	RevisionID string         `json:"revision_id"`
+	DocumentID string         `json:"document_id"`
+	Name       string         `json:"name"`
+	Content    string         `json:"content"`
+	Metadata   map[string]any `json:"metadata"`
+}
+
+func (s *Service) UpsertKnowledgeDocument(
+	ctx context.Context,
+	input KnowledgeDocumentInput,
+) (int, error) {
+	if s.knowledge == nil {
+		return 0, invalidf("knowledge router is unavailable")
+	}
+	if !identifierPattern.MatchString(input.TenantID) ||
+		!identifierPattern.MatchString(input.AppID) ||
+		!identifierPattern.MatchString(input.RevisionID) ||
+		!identifierPattern.MatchString(input.DocumentID) || strings.TrimSpace(input.Content) == "" {
+		return 0, invalidf("knowledge document identity and content are invalid")
+	}
+	revision, scope, err := s.knowledgeScope(ctx, input.TenantID, input.AppID, input.RevisionID)
+	if err != nil {
+		return 0, err
+	}
+	chunks, err := s.knowledge.UpsertDocument(ctx, scope, revision, platformstorage.KnowledgeDocument{
+		ID: input.DocumentID, Name: input.Name, Content: input.Content, Metadata: input.Metadata,
+	})
+	if err != nil {
+		return 0, err
+	}
+	if err := s.record(ctx, input.TenantID, "admin_knowledge_document_upserted", map[string]any{
+		"app_id": input.AppID, "revision_id": input.RevisionID,
+		"document_id": input.DocumentID, "chunks": chunks,
+	}); err != nil {
+		return 0, err
+	}
+	return chunks, nil
+}
+
+func (s *Service) DeleteKnowledgeDocument(
+	ctx context.Context,
+	tenantID string,
+	appID string,
+	revisionID string,
+	documentID string,
+) error {
+	if s.knowledge == nil {
+		return invalidf("knowledge router is unavailable")
+	}
+	if !identifierPattern.MatchString(documentID) {
+		return invalidf("knowledge document ID is invalid")
+	}
+	revision, scope, err := s.knowledgeScope(ctx, tenantID, appID, revisionID)
+	if err != nil {
+		return err
+	}
+	if err := s.knowledge.DeleteDocument(ctx, scope, revision, documentID); err != nil {
+		return err
+	}
+	return s.record(ctx, tenantID, "admin_knowledge_document_deleted", map[string]any{
+		"app_id": appID, "revision_id": revisionID, "document_id": documentID,
+	})
+}
+
+func (s *Service) knowledgeScope(
+	ctx context.Context,
+	tenantID string,
+	appID string,
+	revisionID string,
+) (controlplane.AgentRevision, runtimecontext.Scope, error) {
+	revision, err := s.repository.GetRevision(ctx, tenantID, revisionID)
+	if err != nil {
+		return controlplane.AgentRevision{}, runtimecontext.Scope{}, err
+	}
+	if revision.AppID != appID {
+		return controlplane.AgentRevision{}, runtimecontext.Scope{}, invalidf("revision does not belong to app")
+	}
+	scope, err := runtimecontext.NewScope(tenantID, appID, revisionID, "admin", "admin-knowledge")
+	return revision, scope, err
 }
 
 func New(repository controlplane.Repository, catalogs ...*platformtool.Catalog) (*Service, error) {
@@ -138,6 +232,9 @@ func (s *Service) CreateRevision(
 	}
 	if _, err := s.tools.Resolve(toolPolicy.AllowedTools); err != nil {
 		return controlplane.AgentRevision{}, invalidf("tool_policy: %v", err)
+	}
+	if err := platformstorage.ValidateRevisionKnowledgeConfig(revision.KnowledgeConfig); err != nil {
+		return controlplane.AgentRevision{}, invalidf("knowledge_config: %v", err)
 	}
 	revision.Checksum = controlplane.RevisionChecksum(revision)
 	revision.CreatedAt = time.Now().UTC()

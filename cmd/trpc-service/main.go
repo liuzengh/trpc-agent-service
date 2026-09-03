@@ -205,6 +205,18 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build artifact router: %w", err)
 	}
+	knowledgeRouter, err := platformstorage.NewKnowledgeRouter(controlPlaneRepository, secretStore)
+	if err != nil {
+		_ = artifactRouter.Close()
+		_ = memoryRouter.Close()
+		_ = approvalRepository.Close()
+		_ = auditWriter.Close()
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build knowledge router: %w", err)
+	}
 	routeResolver, err := routing.NewControlPlaneResolver(controlPlaneRepository)
 	if err != nil {
 		_ = controlPlaneRepository.Close()
@@ -243,6 +255,7 @@ func run() error {
 		agentservice.WithToolCatalog(toolCatalog),
 		agentservice.WithAuditWriter(auditWriter),
 		agentservice.WithApprovalRepository(approvalRepository),
+		agentservice.WithKnowledgeProvider(knowledgeRouter),
 	)
 	if err != nil {
 		_ = gatewayIntake.Close()
@@ -377,6 +390,7 @@ func run() error {
 			return fmt.Errorf("build Admin service: %w", err)
 		}
 		adminService.WithAuditWriter(auditWriter)
+		adminService.WithKnowledgeRouter(knowledgeRouter)
 		adminHandler, err = adminservice.NewHandler(adminService, adminConfig.Token)
 		if err != nil {
 			_ = agentQueue.Close()
@@ -438,6 +452,11 @@ func run() error {
 		fmt.Printf("Gateway HTTP server listening on %s\n", listenAddr)
 	}
 	defer func() {
+		if err := knowledgeRouter.Close(); err != nil {
+			log.Printf("close knowledge router: %v", err)
+		}
+	}()
+	defer func() {
 		if err := artifactRouter.Close(); err != nil {
 			log.Printf("close artifact router: %v", err)
 		}
@@ -488,6 +507,7 @@ func run() error {
 		web.WithReadinessCheck("approval", approvalRepository.Ready),
 		web.WithReadinessCheck("memory-router", memoryRouter.Ready),
 		web.WithReadinessCheck("artifact-router", artifactRouter.Ready),
+		web.WithReadinessCheck("knowledge-router", knowledgeRouter.Ready),
 	}
 	if adminHandler != nil {
 		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))

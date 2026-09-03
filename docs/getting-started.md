@@ -18,7 +18,7 @@ HTTP 请求
 
 环境要求：
 
-- Go 1.22.2 或更高版本；
+- Go 1.24.0 或更高版本；
 - `curl`；
 - 端口 8080 未被占用。
 
@@ -2660,8 +2660,99 @@ TEST_S3_ENDPOINT=http://127.0.0.1:9000 \
   go test ./trpcservice/storage -run TestArtifactRouterS3Integration -v
 ```
 
-由于官方 S3 adapter 依赖 Go 1.22.2，项目最低 Go 版本同步提升到 1.22.2。生产环境应开启 bucket versioning、服务端加密、生命周期清理、恶意文件扫描和最小权限 IAM；公开下载应通过短期签名 URL 或受鉴权代理，不能直接暴露 bucket。
+官方 S3 adapter 本身要求 Go 1.22.2；后续 Qdrant adapter 要求 Go 1.24.0，因此项目统一使用 Go 1.24.0。生产环境应开启 bucket versioning、服务端加密、生命周期清理、恶意文件扫描和最小权限 IAM；公开下载应通过短期签名 URL 或受鉴权代理，不能直接暴露 bucket。
 
-## 27. 下一步
+## 27. Knowledge Router 与 Qdrant
 
-下一阶段实现带强制租户过滤的 Knowledge/Vector Store、文档导入任务和可恢复的数据迁移状态机。
+Agent Revision 的 `knowledge_config` 现在会在编译时生成真正的 tRPC-Agent-Go `knowledge.Knowledge`，并通过 `llmagent.WithKnowledge` 注入。框架自动增加 `knowledge_search` Tool；平台的请求级 ToolFilter/PermissionPolicy 会把这个框架 Tool 加入当前 Run 的允许集合，但不会把它放进用户可注册的全局 Tool Catalog。
+
+Revision 示例：
+
+```json
+{
+  "enabled": true,
+  "max_results": 5,
+  "min_score": 0.2,
+  "chunk_size": 800,
+  "chunk_overlap": 100,
+  "embedding": {
+    "provider": "openai",
+    "model": "text-embedding-3-small",
+    "base_url": "https://api.openai.com/v1",
+    "dimensions": 1536,
+    "secret_ref": "env://TENANT_EMBEDDING_API_KEY"
+  }
+}
+```
+
+离线学习可以把 provider 改为 `hash`。Hash Embedder 是确定性的归一化哈希向量，不访问网络，只适合测试路由、切块和权限，不代表生产检索质量。
+
+Backend Binding 可选择进程内向量库或 Qdrant：
+
+```json
+{
+  "resource_type": "knowledge",
+  "backend_type": "qdrant",
+  "config": {
+    "host": "qdrant",
+    "port": 6334,
+    "tls": false,
+    "collection_name": "tenant_documents",
+    "dimensions": 1536,
+    "max_results": 20
+  },
+  "secret_ref": "env://TENANT_QDRANT_API_KEY"
+}
+```
+
+向量维度必须和 Embedder 完全一致。Router 以 `binding_id + binding_version + revision_checksum` 缓存 Vector Store/Embedder，Revision 配置或后端 binding 变化会得到新实例。
+
+文档写入时平台执行：
+
+```text
+验证 tenant/app/revision
+→ 删除同 source_document_id 的旧 chunks
+→ 按 rune 切块并保留 overlap
+→ 计算 embedding
+→ 生成不可猜测的 tenant/app scoped chunk ID
+→ 强制写 metadata.tenant_id / app_id / source_document_id / chunk_index
+→ VectorStore.Add
+```
+
+搜索时，即使模型或调用方在 SearchFilter 中伪造另一个 `tenant_id` / `app_id`，Scoped Knowledge 也会丢弃这两个外部值并写回当前 Scope。共享 Qdrant collection 因此仍有强制租户过滤；文档 ID 本身也包含 tenant/app 的 SHA-256 派生值。
+
+当前 Admin 写入口：
+
+```text
+POST /admin/knowledge/documents
+POST /admin/knowledge/documents/delete
+```
+
+写入请求示例：
+
+```json
+{
+  "tenant_id": "tenant-a",
+  "app_id": "support-agent",
+  "revision_id": "revision-3",
+  "document_id": "refund-policy",
+  "name": "退款政策",
+  "content": "完整文档文本",
+  "metadata": {"category": "policy"}
+}
+```
+
+Compose 已加入 Qdrant。真实集成测试：
+
+```bash
+docker compose up -d qdrant
+
+TEST_QDRANT_HOST=127.0.0.1 TEST_QDRANT_PORT=6334 \
+  go test ./trpcservice/storage -run TestKnowledgeRouterQdrantIntegration -v
+```
+
+官方 Qdrant adapter 要求 Go 1.24，因此项目最低版本提升为 Go 1.24.0。当前 Admin 文档写入是同步接口，适合验证；下一阶段会把它改造成 PostgreSQL 持久化 Job + Worker，解决大文档、进程退出、Embedding 限流和可重试问题。
+
+## 28. 下一步
+
+下一阶段实现 Summary、Memory Extraction、Knowledge Ingest 的 durable job，并加入状态水位、重试、死信和管理查询。

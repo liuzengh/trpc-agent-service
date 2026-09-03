@@ -8,6 +8,10 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
+	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 )
 
 func TestAdminCreatesAndPublishesRevision(t *testing.T) {
@@ -82,5 +86,48 @@ func TestAdminAuditsControlPlaneMutation(t *testing.T) {
 	if len(events) != 1 || events[0].Decision != "admin_tenant_created" ||
 		events[0].TenantID != "tenant-a" || events[0].UserID != "admin" {
 		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestAdminUpsertsKnowledgeDocument(t *testing.T) {
+	data := controlplane.DefaultBootstrapData()
+	data.BackendBindings = append(data.BackendBindings, controlplane.BackendBinding{
+		ID: "knowledge", TenantID: "tutorial-tenant", AppID: "tutorial-app",
+		ResourceType: "knowledge", BackendType: "inmemory", MigrationState: "active", Version: 1,
+		Config: json.RawMessage(`{"dimensions":32}`),
+	})
+	data.Revisions[0].KnowledgeConfig = json.RawMessage(`{
+        "enabled":true,"chunk_size":100,
+        "embedding":{"provider":"hash","dimensions":32}
+    }`)
+	data.Revisions[0].Checksum = controlplane.RevisionChecksum(data.Revisions[0])
+	repository := controlplane.NewMemoryRepository(data)
+	router, err := platformstorage.NewKnowledgeRouter(repository, secret.StaticStore{})
+	if err != nil {
+		t.Fatalf("new knowledge router: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = router.Close()
+		_ = repository.Close()
+	})
+	service, _ := New(repository)
+	service.WithKnowledgeRouter(router)
+	chunks, err := service.UpsertKnowledgeDocument(context.Background(), KnowledgeDocumentInput{
+		TenantID: "tutorial-tenant", AppID: "tutorial-app",
+		RevisionID: "tutorial-revision-1", DocumentID: "policy",
+		Name: "Policy", Content: "refunds are available for thirty days",
+	})
+	if err != nil || chunks != 1 {
+		t.Fatalf("chunks=%d err=%v", chunks, err)
+	}
+	kb, enabled, err := router.KnowledgeForRevision(
+		context.Background(), runtimecontext.TutorialScope(), data.Revisions[0],
+	)
+	if err != nil || !enabled {
+		t.Fatalf("enabled=%t err=%v", enabled, err)
+	}
+	result, err := kb.Search(context.Background(), &knowledge.SearchRequest{Query: "refunds"})
+	if err != nil || result.Document == nil {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }

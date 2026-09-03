@@ -49,9 +49,13 @@
 - tenant-scoped Artifact Router 与 InMemory/S3-compatible 后端；
 - MinIO Compose、bucket 初始化和真实 S3 兼容性测试；
 - Artifact 同文件进程锁、PostgreSQL advisory lock 和多节点版本保护；
+- Revision-scoped Knowledge Router 与 InMemory/Qdrant Vector Store；
+- Hash/OpenAI Embedder、文档切块和 Admin 写入/删除接口；
+- 强制 tenant/app metadata、不可伪造 chunk ID 和搜索过滤；
+- Qdrant Compose 与真实写入/检索测试；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 Knowledge/Vector Store、Summary/Memory durable job 和数据迁移。
+接下来的最近里程碑是 Summary/Memory/Knowledge durable job 和数据迁移。
 
 ## 1. 建议目录
 

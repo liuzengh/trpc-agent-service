@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sync/singleflight"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -51,6 +52,14 @@ func (p UsagePricing) Cost(promptTokens int, completionTokens int) float64 {
 
 type UsagePricingProvider interface {
 	UsagePricing(ctx context.Context, scope runtimecontext.Scope) (UsagePricing, error)
+}
+
+type KnowledgeProvider interface {
+	KnowledgeForRevision(
+		ctx context.Context,
+		scope runtimecontext.Scope,
+		revision controlplane.AgentRevision,
+	) (knowledge.Knowledge, bool, error)
 }
 
 // StaticCompiler preserves the dependency-free tutorial and focused tests.
@@ -87,6 +96,7 @@ type RevisionCompiler struct {
 	toolCatalog   *platformtool.Catalog
 	auditWriter   audit.Writer
 	approvals     approval.Repository
+	knowledge     KnowledgeProvider
 }
 
 type RevisionCompilerOption func(*RevisionCompiler)
@@ -106,6 +116,12 @@ func WithAuditWriter(writer audit.Writer) RevisionCompilerOption {
 func WithApprovalRepository(repository approval.Repository) RevisionCompilerOption {
 	return func(compiler *RevisionCompiler) {
 		compiler.approvals = repository
+	}
+}
+
+func WithKnowledgeProvider(provider KnowledgeProvider) RevisionCompilerOption {
+	return func(compiler *RevisionCompiler) {
+		compiler.knowledge = provider
 	}
 }
 
@@ -166,7 +182,7 @@ func (c *RevisionCompiler) Compile(
 		if existing != nil {
 			return existing, nil
 		}
-		compiled, compileErr := c.compileRevision(revision)
+		compiled, compileErr := c.compileRevision(ctx, scope, revision)
 		if compileErr != nil {
 			return nil, compileErr
 		}
@@ -216,6 +232,8 @@ type revisionModelConfig struct {
 }
 
 func (c *RevisionCompiler) compileRevision(
+	ctx context.Context,
+	scope runtimecontext.Scope,
 	revision controlplane.AgentRevision,
 ) (agentcore.Agent, error) {
 	if revision.AgentType != "llm" {
@@ -266,7 +284,23 @@ func (c *RevisionCompiler) compileRevision(
 	if agentConfig.PreloadMemory > 0 {
 		agentOptions = append(agentOptions, llmagent.WithPreloadMemory(agentConfig.PreloadMemory))
 	}
+	if c.knowledge != nil {
+		knowledgeBase, enabled, err := c.knowledge.KnowledgeForRevision(ctx, scope, revision)
+		if err != nil {
+			return nil, fmt.Errorf("build revision knowledge: %w", err)
+		}
+		if enabled {
+			agentOptions = append(agentOptions, llmagent.WithKnowledge(knowledgeBase))
+		}
+	}
 	return llmagent.New(agentConfig.Name, agentOptions...), nil
+}
+
+func revisionKnowledgeEnabled(raw json.RawMessage) bool {
+	var config struct {
+		Enabled bool `json:"enabled"`
+	}
+	return json.Unmarshal(raw, &config) == nil && config.Enabled
 }
 
 func (c *RevisionCompiler) RunPolicyOptions(
@@ -280,6 +314,9 @@ func (c *RevisionCompiler) RunPolicyOptions(
 	policy, err := governance.ParseToolPolicy(revision.ToolPolicy)
 	if err != nil {
 		return nil, err
+	}
+	if revisionKnowledgeEnabled(revision.KnowledgeConfig) {
+		policy.AllowedTools = append(policy.AllowedTools, "knowledge_search")
 	}
 	var recorder governance.DecisionRecorder
 	if c.auditWriter != nil || c.approvals != nil {

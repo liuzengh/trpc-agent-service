@@ -324,6 +324,8 @@ Memory 通过 tenant-scoped `AppName` 路由到每个租户选择的 InMemory、
 
 Artifact 通过同一 Storage Scope 路由到 InMemory 或 S3-compatible 后端。Compose 提供 MinIO，PostgreSQL advisory lock 保护多节点对同一文件的版本分配。详见 [Artifact Router 与 S3 / MinIO](docs/getting-started.md#26-artifact-router-与-s3--minio)。
 
+Knowledge 根据 Revision 构建 InMemory 或 Qdrant Vector Store，支持 Hash/OpenAI Embedder、切块、Admin 文档导入，并在写入和搜索两端强制 tenant/app metadata。详见 [Knowledge Router 与 Qdrant](docs/getting-started.md#27-knowledge-router-与-qdrant)。
+
 停止服务：
 
 ```bash

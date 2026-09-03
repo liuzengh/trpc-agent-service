@@ -85,6 +85,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		value, err := h.service.CreateBackendBinding(r.Context(), input)
 		h.writeResult(w, http.StatusCreated, value, err)
+	case "/admin/knowledge/documents":
+		var input KnowledgeDocumentInput
+		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		chunks, err := h.service.UpsertKnowledgeDocument(r.Context(), input)
+		h.writeResult(w, http.StatusOK, map[string]any{
+			"document_id": input.DocumentID, "chunks": chunks,
+		}, err)
+	case "/admin/knowledge/documents/delete":
+		var input struct {
+			TenantID   string `json:"tenant_id"`
+			AppID      string `json:"app_id"`
+			RevisionID string `json:"revision_id"`
+			DocumentID string `json:"document_id"`
+		}
+		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		err := h.service.DeleteKnowledgeDocument(
+			r.Context(), input.TenantID, input.AppID, input.RevisionID, input.DocumentID,
+		)
+		h.writeResult(w, http.StatusOK, map[string]string{"status": "deleted"}, err)
 	default:
 		adminJSON(w, http.StatusNotFound, map[string]string{"error": "Admin route not found"})
 	}

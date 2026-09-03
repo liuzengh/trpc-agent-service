@@ -348,3 +348,27 @@ func TestRevisionCompilerCreatesDurableApproval(t *testing.T) {
 		t.Fatalf("pending=%+v err=%v", pending, err)
 	}
 }
+
+func TestRevisionCompilerAllowsFrameworkKnowledgeTool(t *testing.T) {
+	data := controlplane.DefaultBootstrapData()
+	data.Revisions[0].KnowledgeConfig = json.RawMessage(`{"enabled":true}`)
+	repository := controlplane.NewMemoryRepository(data)
+	t.Cleanup(func() { _ = repository.Close() })
+	compiler, err := NewRevisionCompiler(repository, NewTutorialModel(), false)
+	if err != nil {
+		t.Fatalf("new compiler: %v", err)
+	}
+	options, err := compiler.RunPolicyOptions(context.Background(), ChatInput{
+		Scope: runtimecontext.TutorialScope(), UserID: "alice",
+	})
+	if err != nil {
+		t.Fatalf("run options: %v", err)
+	}
+	runOptions := agentcore.NewRunOptions(options...)
+	decision, err := runOptions.ToolPermissionPolicy.CheckToolPermission(
+		context.Background(), &agenttool.PermissionRequest{ToolName: "knowledge_search"},
+	)
+	if err != nil || decision.Action != agenttool.PermissionActionAllow {
+		t.Fatalf("decision=%+v err=%v", decision, err)
+	}
+}
