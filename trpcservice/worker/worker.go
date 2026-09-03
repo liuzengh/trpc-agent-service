@@ -61,6 +61,12 @@ func withTraceID(ctx context.Context, traceID string) context.Context {
 // Consumer group on stream:inbound shared by all worker nodes.
 const Group = "workers"
 
+// runTimeout bounds one agent turn end-to-end. A turn may issue several model
+// calls (tool loop), each individually capped by the model HTTP timeout; this
+// is the outer budget that prevents a pathological turn from blocking the IM
+// user indefinitely. Default is generous enough for a deep reasoning model.
+const runTimeout = 300 * time.Second
+
 // StateBus is the bus plus the cross-node session state the worker relies on;
 // bus.RedisBus satisfies it.
 type StateBus interface {
@@ -369,7 +375,13 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 	r := runner.NewRunner(m.TenantID, ag, opts...)
 	defer func() { _ = r.Close() }()
 
-	events, err := r.Run(ctx, m.UserID, m.SessionID, *m.Content)
+	// Bound the whole turn so a hung model/tool cannot stall the worker (the
+	// IM user waits on this). The per-model HTTP timeout already caps a single
+	// request; this is the end-to-end budget for a multi-call turn.
+	runCtx, cancel := context.WithTimeout(ctx, runTimeout)
+	defer cancel()
+
+	events, err := r.Run(runCtx, m.UserID, m.SessionID, *m.Content)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("worker: run agent %q: %w", agentID, err)
 	}

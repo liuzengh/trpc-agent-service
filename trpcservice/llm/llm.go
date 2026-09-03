@@ -10,8 +10,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -20,6 +22,23 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model/gemini"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 )
+
+// DefaultHTTPTimeout bounds a single model HTTP request. Without it the
+// framework's default client has no timeout, so a slow or hung backend (a
+// relay like cn.meai.cloud under load) can block the worker for minutes.
+// Overridable via SetHTTPTimeout for operators that need a longer budget.
+const DefaultHTTPTimeout = 120 * time.Second
+
+// httpTimeout is the effective model HTTP timeout (mutable for tests/ops).
+var httpTimeout = DefaultHTTPTimeout
+
+// SetHTTPTimeout overrides the model HTTP timeout used by all provider
+// factories. Call before building models (startup) for a consistent budget.
+func SetHTTPTimeout(d time.Duration) {
+	if d > 0 {
+		httpTimeout = d
+	}
+}
 
 // Scope values for an endpoint.
 const (
@@ -119,6 +138,7 @@ func openAIFactory(_ context.Context, ep Endpoint) (model.Model, error) {
 	return openai.New(ep.ModelName,
 		openai.WithBaseURL(ep.BaseURL),
 		openai.WithAPIKey(ep.APIKey),
+		openai.WithHTTPClientOptions(openai.WithHTTPClientTimeout(httpTimeout)),
 	), nil
 }
 
@@ -126,13 +146,15 @@ func anthropicFactory(_ context.Context, ep Endpoint) (model.Model, error) {
 	return anthropic.New(ep.ModelName,
 		anthropic.WithBaseURL(ep.BaseURL),
 		anthropic.WithAPIKey(ep.APIKey),
+		anthropic.WithHTTPClientOptions(anthropic.WithHTTPClientTimeout(httpTimeout)),
 	), nil
 }
 
 func geminiFactory(ctx context.Context, ep Endpoint) (model.Model, error) {
 	cfg := &genai.ClientConfig{
-		APIKey:  ep.APIKey,
-		Backend: genai.BackendGeminiAPI,
+		APIKey:     ep.APIKey,
+		Backend:    genai.BackendGeminiAPI,
+		HTTPClient: &http.Client{Timeout: httpTimeout},
 	}
 	if ep.BaseURL != "" {
 		cfg.HTTPOptions = genai.HTTPOptions{BaseURL: ep.BaseURL}
