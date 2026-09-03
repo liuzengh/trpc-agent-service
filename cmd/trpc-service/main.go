@@ -17,6 +17,7 @@ import (
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
@@ -37,6 +38,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 	"golang.org/x/sync/errgroup"
 	agentrunner "trpc.group/trpc-go/trpc-agent-go/runner"
+	sessionsummary "trpc.group/trpc-go/trpc-agent-go/session/summary"
 )
 
 func main() {
@@ -49,7 +51,7 @@ func main() {
 func run() error {
 	envFile := flag.String("env-file", ".env", "dotenv configuration file")
 	addr := flag.String("addr", "", "HTTP listen address (overrides TRPC_AGENT_ADDR)")
-	roleFlag := flag.String("role", "", "service role: all, gateway, relay, worker, sender, admin")
+	roleFlag := flag.String("role", "", "service role: all, gateway, relay, worker, sender, jobs, admin")
 	flag.Parse()
 
 	loaded, err := config.LoadDotEnv(*envFile)
@@ -136,8 +138,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("build platform metrics: %w", err)
 	}
+	sessionSummarizer := sessionsummary.NewSummarizer(
+		selectedModel,
+		sessionsummary.WithMaxSummaryWords(500),
+	)
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
-	sessionService, err := platformstorage.NewSessionService(startupCtx, sessionConfig)
+	sessionService, err := platformstorage.NewSessionService(
+		startupCtx,
+		sessionConfig,
+		platformstorage.WithSessionSummarizer(sessionSummarizer),
+	)
 	cancelStartup()
 	if err != nil {
 		return fmt.Errorf("build session service: %w", err)
@@ -182,6 +192,16 @@ func run() error {
 		_ = sessionCoordinator.Close()
 		_ = sessionService.Close()
 		return fmt.Errorf("build approval repository: %w", err)
+	}
+	backgroundJobs, err := background.NewForControlPlane(controlPlaneRepository)
+	if err != nil {
+		_ = approvalRepository.Close()
+		_ = auditWriter.Close()
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build background job repository: %w", err)
 	}
 	secretStore := secret.EnvStore{}
 	memoryRouter, err := platformstorage.NewMemoryRouter(controlPlaneRepository, secretStore)
@@ -297,6 +317,26 @@ func run() error {
 		hostname, _ := os.Hostname()
 		nodeID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
 	}
+	backgroundProcessor, err := background.NewProcessor(
+		backgroundJobs,
+		controlPlaneRepository,
+		sessionService,
+		memoryRouter,
+		knowledgeRouter,
+		selectedModel,
+		auditWriter,
+		background.ProcessorOptions{
+			WorkerID: "jobs-" + nodeID, ClaimLease: 2 * time.Minute,
+			PollInterval: 500 * time.Millisecond, RetryDelay: time.Second,
+		},
+	)
+	if err != nil {
+		_ = agentQueue.Close()
+		_ = runtime.Close()
+		_ = gatewayIntake.Close()
+		_ = controlPlaneRepository.Close()
+		return fmt.Errorf("build background job processor: %w", err)
+	}
 	outboxRelay, err := gateway.NewOutboxRelay(inboundJournal, agentQueue, gateway.RelayOptions{
 		WorkerID:     "relay-" + nodeID,
 		BatchSize:    100,
@@ -318,6 +358,7 @@ func run() error {
 		Audit:       auditWriter,
 		Metrics:     metricRecorder,
 		Approvals:   approvalRepository,
+		Jobs:        backgroundJobs,
 	})
 	if err != nil {
 		_ = agentQueue.Close()
@@ -391,6 +432,7 @@ func run() error {
 		}
 		adminService.WithAuditWriter(auditWriter)
 		adminService.WithKnowledgeRouter(knowledgeRouter)
+		adminService.WithBackgroundJobs(backgroundJobs)
 		adminHandler, err = adminservice.NewHandler(adminService, adminConfig.Token)
 		if err != nil {
 			_ = agentQueue.Close()
@@ -452,6 +494,11 @@ func run() error {
 		fmt.Printf("Gateway HTTP server listening on %s\n", listenAddr)
 	}
 	defer func() {
+		if err := backgroundJobs.Close(); err != nil {
+			log.Printf("close background jobs: %v", err)
+		}
+	}()
+	defer func() {
 		if err := knowledgeRouter.Close(); err != nil {
 			log.Printf("close knowledge router: %v", err)
 		}
@@ -508,6 +555,7 @@ func run() error {
 		web.WithReadinessCheck("memory-router", memoryRouter.Ready),
 		web.WithReadinessCheck("artifact-router", artifactRouter.Ready),
 		web.WithReadinessCheck("knowledge-router", knowledgeRouter.Ready),
+		web.WithReadinessCheck("background-jobs", backgroundJobs.Ready),
 	}
 	if adminHandler != nil {
 		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))
@@ -554,6 +602,9 @@ func run() error {
 	}
 	if roles.Sender {
 		group.Go(func() error { return ignoreCancellation(replySender.Run(groupCtx)) })
+	}
+	if roles.Jobs {
+		group.Go(func() error { return ignoreCancellation(backgroundProcessor.Run(groupCtx)) })
 	}
 
 	<-groupCtx.Done()

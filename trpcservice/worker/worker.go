@@ -3,6 +3,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	agentruntime "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
@@ -32,6 +34,7 @@ type Options struct {
 	Audit       audit.Writer
 	Metrics     *platformmetrics.Recorder
 	Approvals   approval.Repository
+	Jobs        background.Repository
 }
 
 // Worker processes at-least-once queue deliveries. Durable idempotency makes
@@ -132,6 +135,9 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	}, "run_completed", "", started); err != nil {
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
+	if err := w.enqueueSessionJobs(ctx, task); err != nil {
+		return true, w.retryOrAck(ctx, delivery, task, err)
+	}
 	w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "completed", time.Since(started))
 	w.opts.Metrics.RecordUsage(
 		ctx, task.Scope.TenantID, result.PromptTokens, result.CompletionTokens, result.Cost,
@@ -140,6 +146,36 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	return true, nil
+}
+
+func (w *Worker) enqueueSessionJobs(ctx context.Context, task workqueue.AgentTask) error {
+	if w.opts.Jobs == nil {
+		return nil
+	}
+	payload, err := json.Marshal(background.SessionJobPayload{
+		StorageScope: task.Scope.StorageScope,
+		UserID:       task.UserID,
+		SessionID:    task.SessionID,
+		TurnSeq:      task.TurnSeq,
+	})
+	if err != nil {
+		return err
+	}
+	dedupeKey := task.ConversationID + ":" + fmt.Sprint(task.TurnSeq)
+	for _, jobType := range []string{background.JobSummary, background.JobMemoryExtract} {
+		if _, err := w.opts.Jobs.Enqueue(ctx, background.EnqueueRequest{
+			TenantID:    task.Scope.TenantID,
+			AppID:       task.Scope.AppID,
+			RevisionID:  task.Scope.RevisionID,
+			Type:        jobType,
+			DedupeKey:   dedupeKey,
+			Payload:     payload,
+			TraceParent: background.TraceParent(ctx),
+		}); err != nil {
+			return fmt.Errorf("enqueue %s job: %w", jobType, err)
+		}
+	}
+	return nil
 }
 
 func appendApprovalInstructions(reply string, records []approval.Record) string {

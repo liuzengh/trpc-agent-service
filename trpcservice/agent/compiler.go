@@ -214,11 +214,12 @@ func (c *RevisionCompiler) Invalidate(tenantID string, revisionID string) {
 }
 
 type revisionAgentConfig struct {
-	Name          string `json:"name"`
-	Description   string `json:"description"`
-	Instruction   string `json:"instruction"`
-	Stream        *bool  `json:"stream,omitempty"`
-	PreloadMemory int    `json:"preload_memory,omitempty"`
+	Name              string `json:"name"`
+	Description       string `json:"description"`
+	Instruction       string `json:"instruction"`
+	Stream            *bool  `json:"stream,omitempty"`
+	PreloadMemory     int    `json:"preload_memory,omitempty"`
+	SummaryEveryTurns int    `json:"summary_every_turns,omitempty"`
 }
 
 type revisionModelConfig struct {
@@ -251,6 +252,9 @@ func (c *RevisionCompiler) compileRevision(
 	}
 	if agentConfig.PreloadMemory < 0 {
 		return nil, fmt.Errorf("Agent revision preload_memory must not be negative")
+	}
+	if agentConfig.SummaryEveryTurns < 0 {
+		return nil, fmt.Errorf("Agent revision summary_every_turns must not be negative")
 	}
 	selectedModel, err := c.buildRevisionModel(revision.ModelConfig)
 	if err != nil {

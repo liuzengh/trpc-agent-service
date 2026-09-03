@@ -10,15 +10,27 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	postgressession "trpc.group/trpc-go/trpc-agent-go/session/postgres"
 	redissession "trpc.group/trpc-go/trpc-agent-go/session/redis"
+	"trpc.group/trpc-go/trpc-agent-go/session/summary"
 )
 
 const readinessAppName = "trpc-agent-service-readiness"
+
+type sessionServiceOptions struct {
+	summarizer summary.SessionSummarizer
+}
+
+type SessionServiceOption func(*sessionServiceOptions)
+
+func WithSessionSummarizer(summarizer summary.SessionSummarizer) SessionServiceOption {
+	return func(options *sessionServiceOptions) { options.summarizer = summarizer }
+}
 
 // NewSessionService creates the configured tRPC-Agent-Go Session service and
 // verifies that its backing store is reachable before returning it.
 func NewSessionService(
 	ctx context.Context,
 	cfg config.SessionConfig,
+	optionFunctions ...SessionServiceOption,
 ) (agentsession.Service, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -28,28 +40,46 @@ func NewSessionService(
 		service agentsession.Service
 		err     error
 	)
+	options := sessionServiceOptions{}
+	for _, option := range optionFunctions {
+		if option != nil {
+			option(&options)
+		}
+	}
 	switch cfg.Backend {
 	case config.SessionBackendInMemory:
-		service = inmemory.NewSessionService()
+		inMemoryOptions := []inmemory.ServiceOpt{}
+		if options.summarizer != nil {
+			inMemoryOptions = append(inMemoryOptions, inmemory.WithSummarizer(options.summarizer))
+		}
+		service = inmemory.NewSessionService(inMemoryOptions...)
 	case config.SessionBackendRedis:
-		service, err = redissession.NewService(
+		redisOptions := []redissession.ServiceOpt{
 			redissession.WithRedisClientURL(cfg.RedisURL),
 			redissession.WithKeyPrefix(cfg.RedisKeyPrefix),
 			redissession.WithSessionTTL(cfg.TTL),
 			redissession.WithEnableAsyncPersist(false),
 			redissession.WithEnableUserSessionIndex(true),
 			redissession.WithCompatMode(redissession.CompatModeNone),
-		)
+		}
+		if options.summarizer != nil {
+			redisOptions = append(redisOptions, redissession.WithSummarizer(options.summarizer))
+		}
+		service, err = redissession.NewService(redisOptions...)
 		if err != nil {
 			return nil, fmt.Errorf("create Redis session service: %w", err)
 		}
 	case config.SessionBackendPostgres:
-		service, err = postgressession.NewService(
+		postgresOptions := []postgressession.ServiceOpt{
 			postgressession.WithPostgresClientDSN(cfg.PostgresURL),
 			postgressession.WithTablePrefix(cfg.PostgresPrefix),
 			postgressession.WithSessionTTL(cfg.TTL),
 			postgressession.WithEnableAsyncPersist(false),
-		)
+		}
+		if options.summarizer != nil {
+			postgresOptions = append(postgresOptions, postgressession.WithSummarizer(options.summarizer))
+		}
+		service, err = postgressession.NewService(postgresOptions...)
 		if err != nil {
 			return nil, fmt.Errorf("create PostgreSQL session service: %w", err)
 		}

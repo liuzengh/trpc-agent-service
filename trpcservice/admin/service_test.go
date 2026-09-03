@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
@@ -129,5 +131,39 @@ func TestAdminUpsertsKnowledgeDocument(t *testing.T) {
 	result, err := kb.Search(context.Background(), &knowledge.SearchRequest{Query: "refunds"})
 	if err != nil || result.Document == nil {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestAdminQueuesKnowledgeDocumentWhenJobsConfigured(t *testing.T) {
+	data := controlplane.DefaultBootstrapData()
+	data.BackendBindings = append(data.BackendBindings, controlplane.BackendBinding{
+		ID: "knowledge", TenantID: "tutorial-tenant", AppID: "tutorial-app",
+		ResourceType: "knowledge", BackendType: "inmemory", MigrationState: "active", Version: 1,
+		Config: json.RawMessage(`{"dimensions":32}`),
+	})
+	data.Revisions[0].KnowledgeConfig = json.RawMessage(`{
+        "enabled":true,"embedding":{"provider":"hash","dimensions":32}
+    }`)
+	data.Revisions[0].Checksum = controlplane.RevisionChecksum(data.Revisions[0])
+	repository := controlplane.NewMemoryRepository(data)
+	router, _ := platformstorage.NewKnowledgeRouter(repository, secret.StaticStore{})
+	jobs := background.NewMemoryRepository()
+	t.Cleanup(func() {
+		_ = jobs.Close()
+		_ = router.Close()
+		_ = repository.Close()
+	})
+	service, _ := New(repository)
+	service.WithKnowledgeRouter(router).WithBackgroundJobs(jobs)
+	result, err := service.SubmitKnowledgeDocument(context.Background(), KnowledgeDocumentInput{
+		TenantID: "tutorial-tenant", AppID: "tutorial-app", RevisionID: "tutorial-revision-1",
+		DocumentID: "policy", OperationID: "upload-v1", Content: "refund policy",
+	})
+	if err != nil || !result.Queued || result.JobID == "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	job, err := jobs.Claim(context.Background(), "jobs", time.Second)
+	if err != nil || job.Type != background.JobKnowledgeUpsert {
+		t.Fatalf("job=%+v err=%v", job, err)
 	}
 }

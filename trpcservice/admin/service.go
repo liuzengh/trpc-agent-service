@@ -3,6 +3,8 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
@@ -27,6 +30,14 @@ type Service struct {
 	tools      *platformtool.Catalog
 	audit      audit.Writer
 	knowledge  *platformstorage.KnowledgeRouter
+	jobs       background.Repository
+}
+
+func (s *Service) WithBackgroundJobs(repository background.Repository) *Service {
+	if s != nil {
+		s.jobs = repository
+	}
+	return s
 }
 
 func (s *Service) WithKnowledgeRouter(router *platformstorage.KnowledgeRouter) *Service {
@@ -37,13 +48,22 @@ func (s *Service) WithKnowledgeRouter(router *platformstorage.KnowledgeRouter) *
 }
 
 type KnowledgeDocumentInput struct {
-	TenantID   string         `json:"tenant_id"`
-	AppID      string         `json:"app_id"`
-	RevisionID string         `json:"revision_id"`
-	DocumentID string         `json:"document_id"`
-	Name       string         `json:"name"`
-	Content    string         `json:"content"`
-	Metadata   map[string]any `json:"metadata"`
+	TenantID    string         `json:"tenant_id"`
+	AppID       string         `json:"app_id"`
+	RevisionID  string         `json:"revision_id"`
+	DocumentID  string         `json:"document_id"`
+	OperationID string         `json:"operation_id,omitempty"`
+	Name        string         `json:"name"`
+	Content     string         `json:"content"`
+	Metadata    map[string]any `json:"metadata"`
+}
+
+type KnowledgeOperationResult struct {
+	JobID      string `json:"job_id,omitempty"`
+	DocumentID string `json:"document_id"`
+	Chunks     int    `json:"chunks,omitempty"`
+	Queued     bool   `json:"queued"`
+	Duplicate  bool   `json:"duplicate,omitempty"`
 }
 
 func (s *Service) UpsertKnowledgeDocument(
@@ -78,6 +98,57 @@ func (s *Service) UpsertKnowledgeDocument(
 	return chunks, nil
 }
 
+func (s *Service) SubmitKnowledgeDocument(
+	ctx context.Context,
+	input KnowledgeDocumentInput,
+) (KnowledgeOperationResult, error) {
+	if s.jobs == nil {
+		chunks, err := s.UpsertKnowledgeDocument(ctx, input)
+		return KnowledgeOperationResult{
+			DocumentID: input.DocumentID, Chunks: chunks,
+		}, err
+	}
+	if _, _, err := s.knowledgeScope(ctx, input.TenantID, input.AppID, input.RevisionID); err != nil {
+		return KnowledgeOperationResult{}, err
+	}
+	if !identifierPattern.MatchString(input.DocumentID) || strings.TrimSpace(input.Content) == "" {
+		return KnowledgeOperationResult{}, invalidf("knowledge document identity and content are invalid")
+	}
+	payload, err := json.Marshal(background.KnowledgeUpsertPayload{Document: platformstorage.KnowledgeDocument{
+		ID: input.DocumentID, Name: input.Name, Content: input.Content, Metadata: input.Metadata,
+	}})
+	if err != nil {
+		return KnowledgeOperationResult{}, err
+	}
+	operationID := strings.TrimSpace(input.OperationID)
+	if operationID == "" {
+		digest := sha256.Sum256(payload)
+		operationID = hex.EncodeToString(digest[:])
+	}
+	if !identifierPattern.MatchString(operationID) {
+		return KnowledgeOperationResult{}, invalidf("knowledge operation_id is invalid")
+	}
+	queued, err := s.jobs.Enqueue(ctx, background.EnqueueRequest{
+		TenantID: input.TenantID, AppID: input.AppID, RevisionID: input.RevisionID,
+		Type:      background.JobKnowledgeUpsert,
+		DedupeKey: input.DocumentID + ":" + operationID,
+		Payload:   payload, TraceParent: background.TraceParent(ctx),
+	})
+	if err != nil {
+		return KnowledgeOperationResult{}, err
+	}
+	if err := s.record(ctx, input.TenantID, "admin_knowledge_job_enqueued", map[string]any{
+		"app_id": input.AppID, "revision_id": input.RevisionID,
+		"document_id": input.DocumentID, "job_id": queued.Job.ID,
+	}); err != nil {
+		return KnowledgeOperationResult{}, err
+	}
+	return KnowledgeOperationResult{
+		JobID: queued.Job.ID, DocumentID: input.DocumentID,
+		Queued: true, Duplicate: queued.Duplicate,
+	}, nil
+}
+
 func (s *Service) DeleteKnowledgeDocument(
 	ctx context.Context,
 	tenantID string,
@@ -100,6 +171,76 @@ func (s *Service) DeleteKnowledgeDocument(
 	}
 	return s.record(ctx, tenantID, "admin_knowledge_document_deleted", map[string]any{
 		"app_id": appID, "revision_id": revisionID, "document_id": documentID,
+	})
+}
+
+func (s *Service) SubmitKnowledgeDelete(
+	ctx context.Context,
+	tenantID string,
+	appID string,
+	revisionID string,
+	documentID string,
+	operationID string,
+) (KnowledgeOperationResult, error) {
+	if s.jobs == nil {
+		err := s.DeleteKnowledgeDocument(ctx, tenantID, appID, revisionID, documentID)
+		return KnowledgeOperationResult{DocumentID: documentID}, err
+	}
+	if _, _, err := s.knowledgeScope(ctx, tenantID, appID, revisionID); err != nil {
+		return KnowledgeOperationResult{}, err
+	}
+	if !identifierPattern.MatchString(documentID) || !identifierPattern.MatchString(operationID) {
+		return KnowledgeOperationResult{}, invalidf("knowledge document_id and operation_id are invalid")
+	}
+	payload, err := json.Marshal(background.KnowledgeDeletePayload{DocumentID: documentID})
+	if err != nil {
+		return KnowledgeOperationResult{}, err
+	}
+	queued, err := s.jobs.Enqueue(ctx, background.EnqueueRequest{
+		TenantID: tenantID, AppID: appID, RevisionID: revisionID,
+		Type:      background.JobKnowledgeDelete,
+		DedupeKey: documentID + ":" + operationID,
+		Payload:   payload, TraceParent: background.TraceParent(ctx),
+	})
+	if err != nil {
+		return KnowledgeOperationResult{}, err
+	}
+	return KnowledgeOperationResult{
+		JobID: queued.Job.ID, DocumentID: documentID,
+		Queued: true, Duplicate: queued.Duplicate,
+	}, nil
+}
+
+func (s *Service) GetBackgroundJob(
+	ctx context.Context,
+	tenantID string,
+	jobID string,
+) (background.Job, error) {
+	if s.jobs == nil {
+		return background.Job{}, invalidf("background jobs are unavailable")
+	}
+	if !identifierPattern.MatchString(tenantID) || !identifierPattern.MatchString(jobID) {
+		return background.Job{}, invalidf("background job identity is invalid")
+	}
+	return s.jobs.Get(ctx, tenantID, jobID)
+}
+
+func (s *Service) RetryBackgroundJob(
+	ctx context.Context,
+	tenantID string,
+	jobID string,
+) error {
+	if s.jobs == nil {
+		return invalidf("background jobs are unavailable")
+	}
+	if !identifierPattern.MatchString(tenantID) || !identifierPattern.MatchString(jobID) {
+		return invalidf("background job identity is invalid")
+	}
+	if err := s.jobs.Retry(ctx, tenantID, jobID); err != nil {
+		return err
+	}
+	return s.record(ctx, tenantID, "admin_background_job_retried", map[string]any{
+		"job_id": jobID,
 	})
 }
 

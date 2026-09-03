@@ -21,7 +21,7 @@
 - 异步 Agent Worker、稳定 request ID、run/outbound 持久化；
 - Channel Adapter Registry、HTTP Test Adapter 和 Reply Sender；
 - outbound claim、长度切分、Retry-After 和 provider receipt；
-- `all/gateway/relay/worker/sender` 独立进程角色；
+- `all/gateway/relay/worker/sender/jobs/admin` 独立进程角色；
 - 企业微信验签、AES callback、Token cache 和应用消息发送；
 - Telegram webhook、topic Session、sendMessage 和 Retry-After；
 - binding-scoped 外部身份与 Session ID 规范化；
@@ -53,9 +53,13 @@
 - Hash/OpenAI Embedder、文档切块和 Admin 写入/删除接口；
 - 强制 tenant/app metadata、不可伪造 chunk ID 和搜索过滤；
 - Qdrant Compose 与真实写入/检索测试；
+- PostgreSQL/InMemory Background Job Queue、lease claim、指数退避和 dead 状态；
+- `jobs` 进程角色与跨进程 traceparent；
+- durable Summary、Memory Extraction 水位和 Knowledge Ingest/Delete；
+- Admin Job 查询与 dead job retry；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 Summary/Memory/Knowledge durable job 和数据迁移。
+接下来的最近里程碑是 Backend Binding 数据迁移、双写与回滚。
 
 ## 1. 建议目录
 

@@ -9,6 +9,7 @@ import (
 	agentruntime "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
@@ -17,11 +18,13 @@ import (
 func TestWorkerCompletesDurableRun(t *testing.T) {
 	journal := gateway.NewMemoryJournal()
 	queue := workqueue.NewMemoryQueue(4)
+	jobs := background.NewMemoryRepository()
 	runtime := agentruntime.NewDemoRuntime()
 	t.Cleanup(func() {
 		_ = runtime.Close()
 		_ = queue.Close()
 		_ = journal.Close()
+		_ = jobs.Close()
 	})
 	scope, _ := runtimecontext.NewScope(
 		"tenant-a", "app-a", "revision-a", "http", "binding-a",
@@ -55,6 +58,7 @@ func TestWorkerCompletesDurableRun(t *testing.T) {
 		MaxAttempts: 3,
 		RetryDelay:  time.Millisecond,
 		Audit:       audit.NewMemoryWriter(),
+		Jobs:        jobs,
 	})
 	if err != nil {
 		t.Fatalf("new Worker: %v", err)
@@ -71,6 +75,17 @@ func TestWorkerCompletesDurableRun(t *testing.T) {
 	if len(events) != 1 || events[0].Decision != "run_completed" ||
 		events[0].RequestID != accepted.RequestID {
 		t.Fatalf("audit events=%+v", events)
+	}
+	firstJob, err := jobs.Claim(context.Background(), "jobs", time.Second)
+	if err != nil || (firstJob.Type != background.JobSummary && firstJob.Type != background.JobMemoryExtract) {
+		t.Fatalf("first background job=%+v err=%v", firstJob, err)
+	}
+	if err := jobs.Complete(context.Background(), firstJob.ID, "jobs"); err != nil {
+		t.Fatalf("complete first background job: %v", err)
+	}
+	secondJob, err := jobs.Claim(context.Background(), "jobs", time.Second)
+	if err != nil || secondJob.Type == firstJob.Type {
+		t.Fatalf("second background job=%+v err=%v", secondJob, err)
 	}
 }
 

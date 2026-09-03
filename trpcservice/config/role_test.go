@@ -4,7 +4,7 @@ import "testing"
 
 func TestParseRole(t *testing.T) {
 	all, err := ParseRole("all")
-	if err != nil || !all.Gateway || !all.Relay || !all.Worker || !all.Sender {
+	if err != nil || !all.Gateway || !all.Relay || !all.Worker || !all.Sender || !all.Jobs {
 		t.Fatalf("all roles = %+v, err = %v", all, err)
 	}
 	worker, err := ParseRole("worker")

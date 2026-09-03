@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 )
 
@@ -90,24 +91,52 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !decodeAdmin(w, r, &input) {
 			return
 		}
-		chunks, err := h.service.UpsertKnowledgeDocument(r.Context(), input)
-		h.writeResult(w, http.StatusOK, map[string]any{
-			"document_id": input.DocumentID, "chunks": chunks,
-		}, err)
+		result, err := h.service.SubmitKnowledgeDocument(r.Context(), input)
+		status := http.StatusOK
+		if result.Queued {
+			status = http.StatusAccepted
+		}
+		h.writeResult(w, status, result, err)
 	case "/admin/knowledge/documents/delete":
 		var input struct {
-			TenantID   string `json:"tenant_id"`
-			AppID      string `json:"app_id"`
-			RevisionID string `json:"revision_id"`
-			DocumentID string `json:"document_id"`
+			TenantID    string `json:"tenant_id"`
+			AppID       string `json:"app_id"`
+			RevisionID  string `json:"revision_id"`
+			DocumentID  string `json:"document_id"`
+			OperationID string `json:"operation_id"`
 		}
 		if !decodeAdmin(w, r, &input) {
 			return
 		}
-		err := h.service.DeleteKnowledgeDocument(
-			r.Context(), input.TenantID, input.AppID, input.RevisionID, input.DocumentID,
+		result, err := h.service.SubmitKnowledgeDelete(
+			r.Context(), input.TenantID, input.AppID, input.RevisionID,
+			input.DocumentID, input.OperationID,
 		)
-		h.writeResult(w, http.StatusOK, map[string]string{"status": "deleted"}, err)
+		status := http.StatusOK
+		if result.Queued {
+			status = http.StatusAccepted
+		}
+		h.writeResult(w, status, result, err)
+	case "/admin/jobs/get":
+		var input struct {
+			TenantID string `json:"tenant_id"`
+			JobID    string `json:"job_id"`
+		}
+		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		value, err := h.service.GetBackgroundJob(r.Context(), input.TenantID, input.JobID)
+		h.writeResult(w, http.StatusOK, value, err)
+	case "/admin/jobs/retry":
+		var input struct {
+			TenantID string `json:"tenant_id"`
+			JobID    string `json:"job_id"`
+		}
+		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		err := h.service.RetryBackgroundJob(r.Context(), input.TenantID, input.JobID)
+		h.writeResult(w, http.StatusOK, map[string]string{"status": "pending"}, err)
 	default:
 		adminJSON(w, http.StatusNotFound, map[string]string{"error": "Admin route not found"})
 	}
@@ -136,6 +165,10 @@ func (h *Handler) writeResult(w http.ResponseWriter, success int, value any, err
 		status = http.StatusConflict
 	case errors.Is(err, controlplane.ErrNotFound):
 		status = http.StatusNotFound
+	case errors.Is(err, background.ErrJobNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, background.ErrJobConflict):
+		status = http.StatusConflict
 	default:
 		status = http.StatusInternalServerError
 	}

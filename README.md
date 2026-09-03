@@ -284,6 +284,7 @@ Reply Sender、通道能力、长度切分、发送重试和回执见 [Reply Sen
 ./bin/trpc-service -role relay
 ./bin/trpc-service -role worker
 ./bin/trpc-service -role sender
+./bin/trpc-service -role jobs
 ```
 
 角色职责和关闭链路见 [进程角色拆分](docs/getting-started.md#19-进程角色拆分)。
@@ -325,6 +326,8 @@ Memory 通过 tenant-scoped `AppName` 路由到每个租户选择的 InMemory、
 Artifact 通过同一 Storage Scope 路由到 InMemory 或 S3-compatible 后端。Compose 提供 MinIO，PostgreSQL advisory lock 保护多节点对同一文件的版本分配。详见 [Artifact Router 与 S3 / MinIO](docs/getting-started.md#26-artifact-router-与-s3--minio)。
 
 Knowledge 根据 Revision 构建 InMemory 或 Qdrant Vector Store，支持 Hash/OpenAI Embedder、切块、Admin 文档导入，并在写入和搜索两端强制 tenant/app metadata。详见 [Knowledge Router 与 Qdrant](docs/getting-started.md#27-knowledge-router-与-qdrant)。
+
+Summary、Memory Extraction、Knowledge Upsert/Delete 通过 PostgreSQL `background_job` 异步执行，支持 lease reclaim、幂等、指数退避、dead job 查询/重试和独立 `jobs` 角色。详见 [Durable Background Job](docs/getting-started.md#28-durable-background-job)。
 
 停止服务：
 

@@ -2211,14 +2211,16 @@ Reply Sender 根据 `Capabilities.MaxTextRunes` 按 Unicode rune 切分长文本
 
 ## 19. 进程角色拆分
 
-同一个二进制现在支持五种角色：
+同一个二进制现在支持六类运行角色：
 
 ```text
-all      Gateway + Relay + Worker + Sender
+all      Gateway + Relay + Worker + Sender + Jobs + Admin
 gateway  只启动 HTTP Gateway
 relay    只转发 PostgreSQL queue_outbox
 worker   只消费 Agent task
 sender   只发送 outbound_message
+jobs     只处理 Summary / Memory / Knowledge 后台任务
+admin    只提供控制面 HTTP API
 ```
 
 本地仍可使用：
@@ -2234,6 +2236,7 @@ go run ./cmd/trpc-service -role gateway -addr :8080
 go run ./cmd/trpc-service -role relay
 go run ./cmd/trpc-service -role worker
 go run ./cmd/trpc-service -role sender
+go run ./cmd/trpc-service -role jobs
 ```
 
 也可以设置 `TRPC_AGENT_ROLE`。Relay 和 Worker 之间必须使用 Redis Queue；所有角色共享 PostgreSQL Control Plane/Journal，Worker 共享 Redis Session、Coordinator 和 Idempotency。
@@ -2751,8 +2754,86 @@ TEST_QDRANT_HOST=127.0.0.1 TEST_QDRANT_PORT=6334 \
   go test ./trpcservice/storage -run TestKnowledgeRouterQdrantIntegration -v
 ```
 
-官方 Qdrant adapter 要求 Go 1.24，因此项目最低版本提升为 Go 1.24.0。当前 Admin 文档写入是同步接口，适合验证；下一阶段会把它改造成 PostgreSQL 持久化 Job + Worker，解决大文档、进程退出、Embedding 限流和可重试问题。
+官方 Qdrant adapter 要求 Go 1.24，因此项目最低版本提升为 Go 1.24.0。Admin 文档写入在 InMemory Job Repository 下可同步验证；生产 PostgreSQL 模式会返回 durable job。
 
-## 28. 下一步
+## 28. Durable Background Job
 
-下一阶段实现 Summary、Memory Extraction、Knowledge Ingest 的 durable job，并加入状态水位、重试、死信和管理查询。
+平台现在有独立于 Agent Run Queue 的 `background_job`。它用于耗时较长、允许最终一致、但不能因进程退出而丢失的任务：
+
+```text
+session_summary
+memory_extract
+knowledge_upsert
+knowledge_delete
+```
+
+PostgreSQL Job Queue 使用 `FOR UPDATE SKIP LOCKED` 抢占任务，字段包括 job ID、tenant/app/revision、type、dedupe key、JSON payload、attempt/max attempts、next attempt、lock owner/lease、last error、traceparent 和完成时间。Worker 崩溃后，`locked_until` 到期即可被其他节点重新领取；失败按指数退避，超过上限进入 `dead`。
+
+Agent Worker 在 `agent_run + outbound_message` 完成后，为同一个 conversation turn 写入 Summary 和 Memory Job：
+
+```text
+Agent 完成 Session Event 持久化
+→ agent_run completed / outbound pending
+→ Enqueue session_summary(dedupe=conversation_id:turn_seq)
+→ Enqueue memory_extract(dedupe=conversation_id:turn_seq)
+→ ACK Agent Queue
+```
+
+如果 Job 入队失败，Agent Task 不会 ACK。重试时 Runtime 命中消息幂等结果，`CompleteRun` 与 Background Job dedupe 都不会重复产生业务副作用。
+
+Revision 的 Agent Config 控制 Summary 周期：
+
+```json
+{
+  "name": "support-agent",
+  "instruction": "Help the user.",
+  "summary_every_turns": 10
+}
+```
+
+到达水位后，Job Processor 重新从共享 Session 后端读取完整 Session，调用配置在 tRPC-Agent-Go Session Service 上的 `SessionSummarizer`，再由 Session backend 原子保存 Summary 与 cutoff boundary。未到水位的 Job 直接完成，不调用模型。
+
+Memory Config 控制自动抽取：
+
+```json
+{
+  "auto_extract": true,
+  "every_turns": 5
+}
+```
+
+Memory Job 只读取 `memory:last_extract_at` 之后的 Session Event，使用 tRPC-Agent-Go `memory/extractor` 生成操作。自动路径只允许幂等的 `memory_add`，不会让后台模型自行执行 clear/delete；写入全部成功后才推进 Session State 水位。若在写入后、水位前崩溃，重试的 Add 仍由 Memory backend 的 canonical ID 保证幂等。
+
+Knowledge Admin API 现在默认返回 `202 Accepted`：
+
+```json
+{
+  "job_id": "job_...",
+  "document_id": "refund-policy",
+  "queued": true,
+  "duplicate": false
+}
+```
+
+Upsert 在未提供 `operation_id` 时使用完整 payload SHA-256 去重；Delete 必须提供 `operation_id`，避免一次旧删除永久阻止未来重新上传后的删除。
+
+管理接口：
+
+```text
+POST /admin/jobs/get
+POST /admin/jobs/retry
+```
+
+`retry` 只允许把 `dead` 任务恢复到 pending，且 attempt 重置；运行中或已完成任务返回 `409 Conflict`。Job 查询按 tenant ID 强制过滤。
+
+生产中建议独立启动：
+
+```bash
+./bin/trpc-service -role jobs
+```
+
+Job payload 保存 W3C `traceparent`，Processor 恢复父上下文后创建 `background.{job_type}` span，审计记录完成/失败、attempt、latency 和 error type。`context.Context` 取消会终止模型/Embedding 调用；状态 finalize 使用独立三秒 Context，尽量在进程退出前释放 claim 或记录失败。
+
+## 29. 下一步
+
+下一阶段实现 Backend Binding 数据迁移状态机：双写、回填、校验、切读、回滚和 repair backlog，并覆盖 Redis → PostgreSQL Memory/Session 与本地 → Qdrant Knowledge。
