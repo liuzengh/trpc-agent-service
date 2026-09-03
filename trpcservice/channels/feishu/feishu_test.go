@@ -85,7 +85,9 @@ func TestToInboundP2PText(t *testing.T) {
 	if got.Content != "hello" {
 		t.Errorf("Content = %q, want %q", got.Content, "hello")
 	}
-	if got.SessionID != "t1:feishu:user:ou_1" {
+	// Single-chat reply targets the message's stable chat_id (oc_1), so the
+	// session keys on it — not on the sender's open_id (permission-dependent).
+	if got.SessionID != "t1:feishu:user:oc_1" {
 		t.Errorf("SessionID = %q", got.SessionID)
 	}
 	if got.PlatformMsgID != "ev-1" {
@@ -104,7 +106,7 @@ func TestToInboundGroupWithMention(t *testing.T) {
 				ChatType:    "group",
 				MessageType: "text",
 				Content:     `{"text":"hello bot"}`,
-				Mentions:    []Mention{{Key: "bot_openid", Name: "bot"}},
+				Mentions:    []Mention{{Key: "@_user_1", Name: "bot", Id: MentionID{OpenID: "bot_openid"}}},
 			},
 		},
 	}

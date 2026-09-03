@@ -24,9 +24,9 @@ func buildAdapter(_ context.Context, b channels.ChannelBinding, secret string) (
 		return wecom.New(b.TenantID, conn), nil
 	case channels.ChannelFeishu:
 		conn := feishu.NewConn(b.AccountID, secret)
-		// bot_open_id (group @-mention gating) is not part of the binding yet;
-		// empty means single chat works and group @-mentions are filtered.
-		return feishu.New(b.TenantID, "", conn), nil
+		// bot_open_id is fetched from bot/v3/info at connect time (group
+		// @-mention gating); empty falls back to accepting group messages.
+		return feishu.New(b.TenantID, conn.BotOpenID(), conn), nil
 	default:
 		return nil, fmt.Errorf("unsupported channel %q", b.Channel)
 	}

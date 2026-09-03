@@ -69,16 +69,30 @@ type Message struct {
 	Mentions    []Mention `json:"mentions"`
 }
 
-// Mention references a user or bot mentioned in a group message.
+// MentionID holds the identity of a mentioned user/bot. Which field is set
+// depends on the app's permissions; open_id is preferred for the bot.
+type MentionID struct {
+	OpenID  string `json:"open_id"`
+	UserID  string `json:"user_id"`
+	UnionID string `json:"union_id"`
+}
+
+// Mention references a user or bot mentioned in a group message. Key is a
+// positional placeholder ("@_user_1"); the real identity is in Id.
 type Mention struct {
-	Key  string `json:"key"`
-	Name string `json:"name"`
+	Key  string    `json:"key"`
+	Name string    `json:"name"`
+	Id   MentionID `json:"id"`
 }
 
 // ToInbound converts a Feishu event into a normalized InboundMessage.
 // botOpenID is the bot's own open_id, used to enforce the group-chat rule that
 // the bot only responds when explicitly @-mentioned. Returns nil when a group
 // message does not mention the bot.
+//
+// The reply target is always msg.ChatID: Feishu p2p messages also carry a
+// stable chat_id (oc_xxx_p2p), so replies can uniformly use
+// receive_id_type=chat_id and never depend on the sender's open_id permission.
 func ToInbound(tenantID string, ev *Event, botOpenID string) *channels.InboundMessage {
 	if ev == nil {
 		return nil
@@ -89,9 +103,6 @@ func ToInbound(tenantID string, ev *Event, botOpenID string) *channels.InboundMe
 		return nil
 	}
 	chatID := msg.ChatID
-	if chatType == channels.ChatTypeSingle {
-		chatID = ev.Event.Sender.SenderID.OpenID
-	}
 	userID := ev.Event.Sender.SenderID.OpenID
 	if userID == "" {
 		userID = ev.Event.Sender.SenderID.UserID
@@ -115,9 +126,16 @@ func chatTypeOf(t string) string {
 	return channels.ChatTypeSingle
 }
 
+// mentioned reports whether the bot (identified by open_id) was @-mentioned.
+// The mention's Id.OpenID (not Key, which is a positional placeholder) carries
+// the real identity. botOpenID empty means no gating is possible, so we accept
+// the message rather than silently dropping every group message.
 func mentioned(mentions []Mention, botOpenID string) bool {
+	if botOpenID == "" {
+		return true
+	}
 	for _, m := range mentions {
-		if m.Key == botOpenID {
+		if m.Id.OpenID == botOpenID || m.Id.UnionID == botOpenID {
 			return true
 		}
 	}

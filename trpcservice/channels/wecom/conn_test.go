@@ -17,9 +17,12 @@ func TestTranslateTextGroup(t *testing.T) {
 				`"from":{"userid":"u1"},"msgtype":"text","text":{"content":"hello @bot"}}`,
 		),
 	}
-	raw, err := translateText(frame)
+	raw, target, err := translateText(frame)
 	if err != nil {
 		t.Fatalf("translateText: %v", err)
+	}
+	if target != "chat1" {
+		t.Errorf("target = %q, want chat1 (group chatid)", target)
 	}
 	var m Message
 	if err := xml.Unmarshal(raw, &m); err != nil {
@@ -33,7 +36,7 @@ func TestTranslateTextGroup(t *testing.T) {
 
 func TestTranslateTextSingleChat(t *testing.T) {
 	// Single chat carries no chatid; ChatId must stay empty so ToInbound
-	// keys the session on FromUserName.
+	// keys the session on FromUserName, and the reply target is the userid.
 	frame := &aibot.WsFrame{
 		Cmd: "aibot_msg_callback",
 		Body: json.RawMessage(
@@ -41,9 +44,12 @@ func TestTranslateTextSingleChat(t *testing.T) {
 				`"from":{"userid":"u2"},"msgtype":"text","text":{"content":"hi"}}`,
 		),
 	}
-	raw, err := translateText(frame)
+	raw, target, err := translateText(frame)
 	if err != nil {
 		t.Fatalf("translateText: %v", err)
+	}
+	if target != "u2" {
+		t.Errorf("target = %q, want u2 (single-chat userid)", target)
 	}
 	var m Message
 	if err := xml.Unmarshal(raw, &m); err != nil {
@@ -59,7 +65,7 @@ func TestTranslateTextNoMsgID(t *testing.T) {
 		Cmd:  "aibot_msg_callback",
 		Body: json.RawMessage(`{"aibotid":"bot1","chattype":"single","from":{"userid":"u"}}`),
 	}
-	raw, err := translateText(frame)
+	raw, _, err := translateText(frame)
 	if err != nil {
 		t.Fatalf("translateText: %v", err)
 	}
@@ -76,7 +82,7 @@ func TestTranslateTextNonTextBody(t *testing.T) {
 		Cmd:  "aibot_msg_callback",
 		Body: json.RawMessage(`{"msgid":"m3","msgtype":"image","image":{"url":"x"}}`),
 	}
-	if _, err := translateText(frame); err != nil {
+	if _, _, err := translateText(frame); err != nil {
 		t.Logf("non-text body rejected (acceptable): %v", err)
 	}
 }
