@@ -14,6 +14,16 @@ tenants:
       name: deepseek-v4-flash        # model name of an OpenAI-compatible service
       api_key: REPLACE_WITH_YOUR_KEY # secret, keep out of git
       base_url: https://api.deepseek.com  # optional; omit for official OpenAI
+    # WeCom (企业微信) binding — callback URL is
+    # https://<public-host>/callback/wecom/<tenant id>
+    # A declared wecom block must be complete or startup fails.
+    # channels:
+    #   wecom:
+    #     corp_id: ww1234567890abcdef        # 企业 ID
+    #     corp_secret: REPLACE_WITH_SECRET   # 应用 Secret
+    #     agent_id: 1000002                  # 应用 AgentId（数字）
+    #     token: REPLACE_WITH_TOKEN          # 回调配置 Token
+    #     encoding_aes_key: REPLACE_43_CHARS # 回调配置 EncodingAESKey，43 位
 
   - id: demo-alt
     name: Demo Tenant Alt

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/admin"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
@@ -36,10 +37,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	gw := channels.NewGateway(reg, channels.NewWebChat())
+	// Admin service owns the live config: adapters resolve bindings through
+	// it so tenant hot updates take effect without rewiring the gateway.
+	adm := admin.NewService(*configPath, cfg, reg)
+	gw := channels.NewGateway(reg, channels.NewWebChat(), channels.NewWeCom(adm.WeComBinding))
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           web.NewServer(gw.Handler(), reg.IDs()),
+		Handler:           web.NewServer(gw.Handler(), adm.Handler(), reg.IDs),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -52,7 +56,7 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	fmt.Printf("listening on %s, tenants=%v, chat UI: http://localhost%s/\n", *addr, reg.IDs(), *addr)
+	fmt.Printf("listening on %s, tenants=%v, chat UI: http://localhost%s/, admin: %s/admin/tenants\n", *addr, reg.IDs(), *addr, *addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
 		os.Exit(1)

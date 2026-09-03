@@ -11,8 +11,10 @@ import (
 var static embed.FS
 
 // NewServer assembles the public HTTP handler: the chat page at "/", the
-// tenant list API, and the channel gateway under /callback and /webchat.
-func NewServer(gateway http.Handler, tenants []string) http.Handler {
+// tenant list API, the admin API under /admin/, and the channel gateway
+// under /callback and /webchat. tenantIDs is queried per request so admin
+// hot updates show up without a restart.
+func NewServer(gateway, admin http.Handler, tenantIDs func() []string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -29,8 +31,9 @@ func NewServer(gateway http.Handler, tenants []string) http.Handler {
 	})
 	mux.HandleFunc("/api/tenants", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(tenants)
+		_ = json.NewEncoder(w).Encode(tenantIDs())
 	})
+	mux.Handle("/admin/", admin)
 	mux.Handle("/callback/", gateway)
 	mux.Handle("/webchat/", gateway)
 	return mux

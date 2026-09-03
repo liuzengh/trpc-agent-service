@@ -5,6 +5,7 @@ package agent
 import (
 	"fmt"
 	"sort"
+	"sync"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -53,10 +54,12 @@ func NewRunner(t *tenant.Context) (runner.Runner, error) {
 	), nil
 }
 
-// Registry holds one Runner per tenant, built once at startup. Tenant
-// isolation at this stage is by separate Runner instances; per-tenant tool
-// whitelists and guardrails will hang off the same lookup later.
+// Registry holds one Runner per tenant. Tenant isolation at this stage is
+// by separate Runner instances; per-tenant tool whitelists and guardrails
+// will hang off the same lookup later. The mutex guards hot swaps driven by
+// the Admin API; lookups only take a read lock.
 type Registry struct {
+	mu      sync.RWMutex
 	runners map[string]runner.Runner
 	def     string
 }
@@ -77,11 +80,36 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 	return r, nil
 }
 
-// Default returns the default tenant id.
-func (r *Registry) Default() string { return r.def }
+// Apply rebuilds the runner set for a new config (Admin API hot reload).
+// New runners are fully built before the swap, so a build failure keeps the
+// old set serving.
+func (r *Registry) Apply(cfg *config.Config) error {
+	runners := make(map[string]runner.Runner, len(cfg.Tenants))
+	for id, t := range cfg.Tenants {
+		rr, err := NewRunner(t)
+		if err != nil {
+			return err
+		}
+		runners[id] = rr
+	}
+	r.mu.Lock()
+	r.runners = runners
+	r.def = cfg.DefaultTenant
+	r.mu.Unlock()
+	return nil
+}
 
-// IDs returns the sorted tenant ids, for listing in the CLI.
+// Default returns the default tenant id.
+func (r *Registry) Default() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.def
+}
+
+// IDs returns the sorted tenant ids.
 func (r *Registry) IDs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	ids := make([]string, 0, len(r.runners))
 	for id := range r.runners {
 		ids = append(ids, id)
@@ -92,6 +120,8 @@ func (r *Registry) IDs() []string {
 
 // Runner returns the Runner of tenant id, or false if unknown.
 func (r *Registry) Runner(id string) (runner.Runner, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	rr, ok := r.runners[id]
 	return rr, ok
 }

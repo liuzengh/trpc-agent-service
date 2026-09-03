@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 
@@ -22,21 +23,11 @@ const (
 	envBaseURL = "MODEL_BASE_URL"
 )
 
-type modelYAML struct {
-	Name    string `yaml:"name"`
-	APIKey  string `yaml:"api_key"`
-	BaseURL string `yaml:"base_url"`
-}
-
-type tenantYAML struct {
-	ID    string    `yaml:"id"`
-	Name  string    `yaml:"name"`
-	Model modelYAML `yaml:"model"`
-}
-
+// fileYAML is the on-disk shape; tenant.Context carries the yaml tags so
+// Load and Save round-trip through the same schema.
 type fileYAML struct {
-	DefaultTenant string       `yaml:"default_tenant"`
-	Tenants       []tenantYAML `yaml:"tenants"`
+	DefaultTenant string           `yaml:"default_tenant,omitempty"`
+	Tenants       []tenant.Context `yaml:"tenants"`
 }
 
 // Config is the loaded and validated platform configuration.
@@ -61,45 +52,108 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	if len(f.Tenants) == 0 {
-		return nil, fmt.Errorf("config %s: at least one tenant is required", path)
-	}
 
 	cfg := &Config{Tenants: make(map[string]*tenant.Context, len(f.Tenants))}
-	for _, t := range f.Tenants {
+	for i := range f.Tenants {
+		t := f.Tenants[i]
 		if t.ID == "" {
 			return nil, fmt.Errorf("config %s: every tenant needs an id", path)
 		}
 		if _, dup := cfg.Tenants[t.ID]; dup {
 			return nil, fmt.Errorf("config %s: duplicate tenant %q", path, t.ID)
 		}
-		if t.Model.APIKey == "" {
-			return nil, fmt.Errorf("config %s: tenant %q: model.api_key is required", path, t.ID)
-		}
-		if t.Model.Name == "" {
-			return nil, fmt.Errorf("config %s: tenant %q: model.name is required", path, t.ID)
-		}
-		cfg.Tenants[t.ID] = &tenant.Context{
-			ID:   t.ID,
-			Name: t.Name,
-			Model: tenant.ModelConfig{
-				Name:    t.Model.Name,
-				APIKey:  t.Model.APIKey,
-				BaseURL: t.Model.BaseURL,
-			},
-		}
+		cfg.Tenants[t.ID] = &t
 	}
-
 	cfg.DefaultTenant = f.DefaultTenant
-	if cfg.DefaultTenant == "" {
+	if cfg.DefaultTenant == "" && len(f.Tenants) > 0 {
 		cfg.DefaultTenant = f.Tenants[0].ID
 	}
-	if _, ok := cfg.Tenants[cfg.DefaultTenant]; !ok {
-		return nil, fmt.Errorf("config %s: default_tenant %q is not defined", path, cfg.DefaultTenant)
-	}
 
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
+	}
 	applyEnvOverride(cfg.Tenants[cfg.DefaultTenant])
 	return cfg, nil
+}
+
+// Validate checks the invariants shared by Load, Save, and the Admin API:
+// at least one tenant, complete model settings, complete wecom bindings,
+// and an existing default tenant.
+func (c *Config) Validate() error {
+	if len(c.Tenants) == 0 {
+		return fmt.Errorf("at least one tenant is required")
+	}
+	for id, t := range c.Tenants {
+		if t.Model.APIKey == "" {
+			return fmt.Errorf("tenant %q: model.api_key is required", id)
+		}
+		if t.Model.Name == "" {
+			return fmt.Errorf("tenant %q: model.name is required", id)
+		}
+		if err := validateWeCom(id, t.Channels.WeCom); err != nil {
+			return err
+		}
+	}
+	if _, ok := c.Tenants[c.DefaultTenant]; !ok {
+		return fmt.Errorf("default_tenant %q is not defined", c.DefaultTenant)
+	}
+	return nil
+}
+
+// Save atomically persists cfg to path (tmp file + rename), so a partial
+// write can never leave an unloadable config behind. Tenants are written in
+// sorted order for stable diffs.
+func Save(path string, cfg *Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(cfg.Tenants))
+	for id := range cfg.Tenants {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	f := fileYAML{DefaultTenant: cfg.DefaultTenant}
+	for _, id := range ids {
+		f.Tenants = append(f.Tenants, *cfg.Tenants[id])
+	}
+	data, err := yaml.Marshal(f)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	return nil
+}
+
+// validateWeCom fails fast on half-filled channel bindings: a declared
+// wecom block must be complete, otherwise the callback would 403 at runtime
+// with a much less obvious error.
+func validateWeCom(tenantID string, w *tenant.WeComBinding) error {
+	if w == nil {
+		return nil
+	}
+	if w.CorpID == "" || w.CorpSecret == "" || w.AgentID <= 0 || w.Token == "" || w.EncodingAESKey == "" {
+		return fmt.Errorf("tenant %q: channels.wecom is incomplete (corp_id, corp_secret, agent_id, token, encoding_aes_key are all required)", tenantID)
+	}
+	if len(w.EncodingAESKey) != 43 {
+		return fmt.Errorf("tenant %q: channels.wecom.encoding_aes_key must be 43 characters", tenantID)
+	}
+	return nil
+}
+
+// WeComBinding returns the WeCom app binding of tenantID. Tenants without a
+// binding reject wecom callbacks with a clear error.
+func (c *Config) WeComBinding(tenantID string) (*tenant.WeComBinding, bool) {
+	if t, ok := c.Tenants[tenantID]; ok && t.Channels.WeCom != nil {
+		return t.Channels.WeCom, true
+	}
+	return nil, false
 }
 
 // fromEnv builds the legacy single-tenant config from environment variables.
