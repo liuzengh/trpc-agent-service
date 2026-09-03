@@ -39,3 +39,34 @@ func TestAdminHandlerRequiresAuthorizationAndCreatesTenant(t *testing.T) {
 		t.Fatalf("tenant not stored: %v", err)
 	}
 }
+
+func TestAdminHandlerEnforcesTenantRBAC(t *testing.T) {
+	repository := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
+	service, _ := New(repository)
+	const tenantToken = "tenant-admin-token-12345678901234567890"
+	handler, err := NewHandlerWithPrincipals(service, []Principal{{
+		Name: "tutorial-admin", Token: tenantToken,
+		Role: RoleTenantAdmin, TenantIDs: []string{"tutorial-tenant"},
+	}})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	allowed := httptest.NewRequest(http.MethodPost, "/admin/apps", bytes.NewBufferString(`{
+        "app_id":"rbac-app","tenant_id":"tutorial-tenant","name":"RBAC App"
+    }`))
+	allowed.Header.Set("Authorization", "Bearer "+tenantToken)
+	allowedRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(allowedRecorder, allowed)
+	if allowedRecorder.Code != http.StatusCreated {
+		t.Fatalf("allowed status=%d body=%s", allowedRecorder.Code, allowedRecorder.Body.String())
+	}
+	denied := httptest.NewRequest(http.MethodPost, "/admin/apps", bytes.NewBufferString(`{
+        "app_id":"other-app","tenant_id":"other-tenant","name":"Other App"
+    }`))
+	denied.Header.Set("Authorization", "Bearer "+tenantToken)
+	deniedRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(deniedRecorder, denied)
+	if deniedRecorder.Code != http.StatusForbidden {
+		t.Fatalf("denied status=%d body=%s", deniedRecorder.Code, deniedRecorder.Body.String())
+	}
+}

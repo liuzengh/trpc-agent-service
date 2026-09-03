@@ -66,9 +66,13 @@
 - startup/InMemory/Redis/PostgreSQL 租户级 Session Binding；
 - Session/Event/State/Summary 在线双写、切读与回滚；
 - Session 批量 backfill/verify durable job；
+- Admin multi-principal RBAC：superadmin/tenant_admin/operator/auditor；
+- tenant-scoped 配置、Job、Migration 和 Audit 查询接口；
+- Local/Redis 租户 rate limit、concurrency、daily token/cost budget；
+- request_id 幂等成本记账与统一日志 Secret redaction；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 RBAC、配额限流、生产部署与最终验收。
+接下来的最近里程碑是生产部署、容量/故障测试与最终验收。
 
 ## 1. 建议目录
 

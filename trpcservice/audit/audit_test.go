@@ -18,3 +18,13 @@ func TestMemoryWriterRedactsSensitiveDetails(t *testing.T) {
 		t.Fatalf("details=%+v", event.Details)
 	}
 }
+
+func TestMemoryWriterQueryIsTenantScoped(t *testing.T) {
+	writer := NewMemoryWriter()
+	_ = writer.Record(context.Background(), Event{TenantID: "tenant-a", Decision: "allow"})
+	_ = writer.Record(context.Background(), Event{TenantID: "tenant-b", Decision: "deny"})
+	events, err := writer.Query(context.Background(), Query{TenantID: "tenant-a", Limit: 10})
+	if err != nil || len(events) != 1 || events[0].TenantID != "tenant-a" {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+}

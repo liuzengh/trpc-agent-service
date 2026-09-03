@@ -1,46 +1,108 @@
 package admin
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net/http"
-	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 )
 
 type Handler struct {
-	service *Service
-	token   string
+	service    *Service
+	principals []Principal
 }
 
 func NewHandler(service *Service, token string) (*Handler, error) {
-	if service == nil || len(token) < 24 {
-		return nil, errors.New("Admin service and strong bearer token are required")
+	return NewHandlerWithPrincipals(service, []Principal{{
+		Name: "legacy-superadmin", Token: token, Role: RoleSuperAdmin,
+	}})
+}
+
+func NewHandlerWithPrincipals(service *Service, principals []Principal) (*Handler, error) {
+	if service == nil {
+		return nil, errors.New("Admin service is required")
 	}
-	return &Handler{service: service, token: token}, nil
+	if err := ValidatePrincipals(principals); err != nil {
+		return nil, err
+	}
+	return &Handler{service: service, principals: append([]Principal(nil), principals...)}, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !h.authorized(r) {
+	principal, authorized := authenticate(h.principals, r.Header.Get("Authorization"))
+	if !authorized {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		adminJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	r = r.WithContext(contextWithPrincipal(r.Context(), principal))
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		adminJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
 	switch r.URL.Path {
+	case "/admin/tenants/get":
+		var input struct {
+			TenantID string `json:"tenant_id"`
+		}
+		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionRead) {
+			return
+		}
+		value, err := h.service.repository.GetTenant(r.Context(), input.TenantID)
+		h.writeResult(w, http.StatusOK, value, err)
+	case "/admin/apps/get":
+		var input struct {
+			TenantID string `json:"tenant_id"`
+			AppID    string `json:"app_id"`
+		}
+		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionRead) {
+			return
+		}
+		value, err := h.service.repository.GetAgentApp(r.Context(), input.TenantID, input.AppID)
+		h.writeResult(w, http.StatusOK, value, err)
+	case "/admin/revisions/get":
+		var input struct {
+			TenantID   string `json:"tenant_id"`
+			RevisionID string `json:"revision_id"`
+		}
+		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionRead) {
+			return
+		}
+		value, err := h.service.repository.GetRevision(r.Context(), input.TenantID, input.RevisionID)
+		h.writeResult(w, http.StatusOK, value, err)
+	case "/admin/channel-bindings/get":
+		var input struct {
+			TenantID  string `json:"tenant_id"`
+			BindingID string `json:"binding_id"`
+		}
+		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionRead) {
+			return
+		}
+		value, err := h.service.repository.GetChannelBinding(r.Context(), input.TenantID, input.BindingID)
+		h.writeResult(w, http.StatusOK, value, err)
+	case "/admin/backend-bindings/list":
+		var input struct {
+			TenantID string `json:"tenant_id"`
+			AppID    string `json:"app_id"`
+		}
+		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionRead) {
+			return
+		}
+		value, err := h.service.repository.ListBackendBindings(r.Context(), input.TenantID, input.AppID)
+		h.writeResult(w, http.StatusOK, value, err)
 	case "/admin/tenants":
 		var input controlplane.Tenant
 		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		if !h.require(w, r, input.ID, PermissionTenantCreate) {
 			return
 		}
 		value, err := h.service.CreateTenant(r.Context(), input)
@@ -50,11 +112,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !decodeAdmin(w, r, &input) {
 			return
 		}
+		if !h.require(w, r, input.TenantID, PermissionWrite) {
+			return
+		}
 		value, err := h.service.CreateAgentApp(r.Context(), input)
 		h.writeResult(w, http.StatusCreated, value, err)
 	case "/admin/revisions":
 		var input controlplane.AgentRevision
 		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		if !h.require(w, r, input.TenantID, PermissionWrite) {
 			return
 		}
 		value, err := h.service.CreateRevision(r.Context(), input)
@@ -69,6 +137,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !decodeAdmin(w, r, &input) {
 			return
 		}
+		if !h.require(w, r, input.TenantID, PermissionWrite) {
+			return
+		}
 		value, err := h.service.PublishRevision(
 			r.Context(), input.TenantID, input.AppID, input.RevisionID, input.ExpectedVersion,
 		)
@@ -78,6 +149,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !decodeAdmin(w, r, &input) {
 			return
 		}
+		if !h.require(w, r, input.TenantID, PermissionWrite) {
+			return
+		}
 		value, err := h.service.CreateChannelBinding(r.Context(), input)
 		h.writeResult(w, http.StatusCreated, value, err)
 	case "/admin/backend-bindings":
@@ -85,11 +159,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !decodeAdmin(w, r, &input) {
 			return
 		}
+		if !h.require(w, r, input.TenantID, PermissionWrite) {
+			return
+		}
 		value, err := h.service.CreateBackendBinding(r.Context(), input)
 		h.writeResult(w, http.StatusCreated, value, err)
 	case "/admin/backend-migrations":
 		var input controlplane.BackendMigration
 		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		if !h.require(w, r, input.TenantID, PermissionWrite) {
 			return
 		}
 		value, err := h.service.CreateBackendMigration(r.Context(), input)
@@ -106,6 +186,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !decodeAdmin(w, r, &input) {
 			return
 		}
+		if !h.require(w, r, input.TenantID, PermissionOperate) {
+			return
+		}
 		value, err := h.service.TransitionBackendMigration(
 			r.Context(), input.TenantID, input.MigrationID, input.NextState,
 			input.ExpectedVersion, input.Checkpoint, input.Verification,
@@ -117,6 +200,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			MigrationID string `json:"migration_id"`
 		}
 		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		if !h.require(w, r, input.TenantID, PermissionRead) {
 			return
 		}
 		value, err := h.service.repository.GetBackendMigration(
@@ -136,6 +222,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !decodeAdmin(w, r, &input) {
 			return
 		}
+		if !h.require(w, r, input.TenantID, PermissionWrite) {
+			return
+		}
 		result, err := h.service.SubmitKnowledgeDocument(r.Context(), input)
 		status := http.StatusOK
 		if result.Queued {
@@ -151,6 +240,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			OperationID string `json:"operation_id"`
 		}
 		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		if !h.require(w, r, input.TenantID, PermissionWrite) {
 			return
 		}
 		result, err := h.service.SubmitKnowledgeDelete(
@@ -170,6 +262,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !decodeAdmin(w, r, &input) {
 			return
 		}
+		if !h.require(w, r, input.TenantID, PermissionRead) {
+			return
+		}
 		value, err := h.service.GetBackgroundJob(r.Context(), input.TenantID, input.JobID)
 		h.writeResult(w, http.StatusOK, value, err)
 	case "/admin/jobs/retry":
@@ -180,8 +275,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !decodeAdmin(w, r, &input) {
 			return
 		}
+		if !h.require(w, r, input.TenantID, PermissionOperate) {
+			return
+		}
 		err := h.service.RetryBackgroundJob(r.Context(), input.TenantID, input.JobID)
 		h.writeResult(w, http.StatusOK, map[string]string{"status": "pending"}, err)
+	case "/admin/audit/query":
+		var input struct {
+			TenantID string `json:"tenant_id"`
+			Decision string `json:"decision"`
+			TraceID  string `json:"trace_id"`
+			Limit    int    `json:"limit"`
+		}
+		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionRead) {
+			return
+		}
+		value, err := h.service.QueryAudit(r.Context(), audit.Query{
+			TenantID: input.TenantID, Decision: input.Decision,
+			TraceID: input.TraceID, Limit: input.Limit,
+		})
+		h.writeResult(w, http.StatusOK, value, err)
 	default:
 		adminJSON(w, http.StatusNotFound, map[string]string{"error": "Admin route not found"})
 	}
@@ -199,6 +312,9 @@ func (h *Handler) handleSessionMigrationJob(
 		Sessions    []platformstorage.SessionMigrationItem `json:"sessions"`
 	}
 	if !decodeAdmin(w, r, &input) {
+		return
+	}
+	if !h.require(w, r, input.TenantID, PermissionOperate) {
 		return
 	}
 	value, err := h.service.SubmitSessionMigrationJob(
@@ -222,6 +338,9 @@ func (h *Handler) handleMemoryMigrationJob(
 	if !decodeAdmin(w, r, &input) {
 		return
 	}
+	if !h.require(w, r, input.TenantID, PermissionOperate) {
+		return
+	}
 	value, err := h.service.SubmitMemoryMigrationJob(
 		r.Context(), input.TenantID, input.MigrationID,
 		jobType, input.OperationID, input.UserIDs,
@@ -229,14 +348,18 @@ func (h *Handler) handleMemoryMigrationJob(
 	h.writeResult(w, http.StatusAccepted, value, err)
 }
 
-func (h *Handler) authorized(r *http.Request) bool {
-	header := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if !strings.HasPrefix(header, prefix) {
-		return false
+func (h *Handler) require(
+	w http.ResponseWriter,
+	r *http.Request,
+	tenantID string,
+	permission Permission,
+) bool {
+	principal, _ := r.Context().Value(principalContextKey{}).(Principal)
+	if principal.Allows(permission, tenantID) {
+		return true
 	}
-	provided := strings.TrimSpace(strings.TrimPrefix(header, prefix))
-	return subtle.ConstantTimeCompare([]byte(provided), []byte(h.token)) == 1
+	adminJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+	return false
 }
 
 func (h *Handler) writeResult(w http.ResponseWriter, success int, value any, err error) {

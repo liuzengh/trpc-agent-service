@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -51,6 +52,47 @@ func (w *PostgresWriter) Ready(ctx context.Context) error {
 	return w.db.PingContext(ctx)
 }
 
+func (w *PostgresWriter) Query(ctx context.Context, query Query) ([]Event, error) {
+	limit := query.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := w.db.QueryContext(ctx, `
+SELECT occurred_at,tenant_id,COALESCE(channel,''),COALESCE(channel_binding_id,''),
+       COALESCE(user_id,''),COALESCE(session_id,''),COALESCE(message_id,''),
+       COALESCE(request_id,''),COALESCE(trace_id,''),COALESCE(agent_name,''),
+       COALESCE(revision_id,''),COALESCE(tool_name,''),decision,latency_ms,
+       COALESCE(error_type,''),cost,details
+FROM audit_log
+WHERE tenant_id=$1 AND ($2='' OR decision=$2) AND ($3='' OR trace_id=$3)
+ORDER BY occurred_at DESC LIMIT $4`, query.TenantID, query.Decision, query.TraceID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query audit events: %w", err)
+	}
+	defer rows.Close()
+	result := make([]Event, 0, limit)
+	for rows.Next() {
+		var event Event
+		var latencyMS int64
+		var details []byte
+		if err := rows.Scan(
+			&event.OccurredAt, &event.TenantID, &event.Channel, &event.ChannelBindingID,
+			&event.UserID, &event.SessionID, &event.MessageID, &event.RequestID,
+			&event.TraceID, &event.AgentName, &event.RevisionID, &event.ToolName,
+			&event.Decision, &latencyMS, &event.ErrorType, &event.Cost, &details,
+		); err != nil {
+			return nil, fmt.Errorf("scan audit event: %w", err)
+		}
+		event.Latency = time.Duration(latencyMS) * time.Millisecond
+		if err := json.Unmarshal(details, &event.Details); err != nil {
+			return nil, fmt.Errorf("decode audit details: %w", err)
+		}
+		result = append(result, event)
+	}
+	return result, rows.Err()
+}
+
 func (w *PostgresWriter) Close() error { return nil }
 
 var _ Writer = (*PostgresWriter)(nil)
+var _ Reader = (*PostgresWriter)(nil)

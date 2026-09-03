@@ -14,6 +14,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
 const (
@@ -41,6 +42,7 @@ type Handler struct {
 	intake          *gateway.Intake
 	callbackGateway *gateway.CallbackGateway
 	adminHandler    http.Handler
+	quotaGuard      *tenant.Guard
 }
 
 type readinessCheck struct {
@@ -93,6 +95,10 @@ func WithAdminHandler(adminHandler http.Handler) Option {
 	}
 }
 
+func WithQuotaGuard(guard *tenant.Guard) Option {
+	return func(handler *Handler) { handler.quotaGuard = guard }
+}
+
 // NewHandler creates a handler with health and chat endpoints.
 func NewHandler(chatService ChatService, opts ...Option) http.Handler {
 	h := &Handler{
@@ -130,6 +136,10 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	result, err := h.callbackGateway.Handle(r.Context(), parts[0], parts[1], r)
 	if err != nil {
 		log.Printf("channel callback rejected: %v", err)
+		if errors.Is(err, tenant.ErrRateLimited) {
+			writeJSON(w, http.StatusTooManyRequests, errorResponse{Error: "tenant rate limit exceeded"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "callback rejected"})
 		return
 	}
@@ -238,6 +248,8 @@ func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, errorResponse{Error: "channel binding not found"})
 		case errors.Is(err, routing.ErrRouteDisabled):
 			writeJSON(w, http.StatusForbidden, errorResponse{Error: "channel route is disabled"})
+		case errors.Is(err, tenant.ErrRateLimited):
+			writeJSON(w, http.StatusTooManyRequests, errorResponse{Error: "tenant rate limit exceeded"})
 		default:
 			log.Printf("accept inbound message failed: %v", err)
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "inbound persistence failed"})
@@ -300,6 +312,22 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "route resolution failed"})
 		return
 	}
+	if h.quotaGuard != nil {
+		if err := h.quotaGuard.AllowInbound(r.Context(), scope.TenantID, request.UserID); err != nil {
+			writeJSON(w, http.StatusTooManyRequests, errorResponse{Error: "tenant rate limit exceeded"})
+			return
+		}
+	}
+	releaseQuota := func() {}
+	if h.quotaGuard != nil {
+		release, err := h.quotaGuard.AcquireRun(r.Context(), scope.TenantID)
+		if err != nil {
+			writeJSON(w, http.StatusTooManyRequests, errorResponse{Error: "tenant quota exceeded"})
+			return
+		}
+		releaseQuota = release
+	}
+	defer releaseQuota()
 	result, err := h.chatService.ChatWithScope(r.Context(), agentservice.ChatInput{
 		Scope:     scope,
 		MessageID: request.MessageID,
@@ -317,6 +345,16 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "agent execution failed"})
 		return
+	}
+	if h.quotaGuard != nil {
+		if err := h.quotaGuard.RecordUsage(
+			r.Context(), scope.TenantID, result.RequestID,
+			result.PromptTokens, result.CompletionTokens, result.Cost,
+		); err != nil {
+			log.Printf("record chat usage failed: %v", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "usage accounting failed"})
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, chatResponse{

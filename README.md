@@ -333,6 +333,8 @@ Backend Migration 通过 `planned → dual_write → backfill → verify → cut
 
 Session Router 实现完整 tRPC-Agent-Go `session.Service`，让不同 tenant/app 选择 startup、InMemory、Redis 或 PostgreSQL，并支持 Event/State/Summary 双写迁移、批量回填和切读回滚。详见 [Tenant Session Router](docs/getting-started.md#30-tenant-session-router)。
 
+Admin 支持多 Principal RBAC；Gateway/Worker 支持 Local/Redis 租户限流、并发和每日 token/cost 预算；标准日志和 Audit 分别执行 Secret 脱敏。详见 [RBAC、限流、预算与日志脱敏](docs/getting-started.md#31-rbac限流预算与日志脱敏)。
+
 停止服务：
 
 ```bash

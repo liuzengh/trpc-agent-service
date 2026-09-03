@@ -19,6 +19,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	platformtenant "github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 )
 
@@ -244,6 +245,20 @@ func (s *Service) RetryBackgroundJob(
 	})
 }
 
+func (s *Service) QueryAudit(
+	ctx context.Context,
+	query audit.Query,
+) ([]audit.Event, error) {
+	reader, ok := s.audit.(audit.Reader)
+	if !ok {
+		return nil, invalidf("audit query is unavailable")
+	}
+	if !identifierPattern.MatchString(query.TenantID) {
+		return nil, invalidf("audit tenant_id is invalid")
+	}
+	return reader.Query(ctx, query)
+}
+
 func (s *Service) knowledgeScope(
 	ctx context.Context,
 	tenantID string,
@@ -293,6 +308,9 @@ func (s *Service) CreateTenant(ctx context.Context, tenant controlplane.Tenant) 
 		return controlplane.Tenant{}, invalidf("tenant region and secret namespace are required")
 	}
 	if err := normalizeJSON(&tenant.QuotaConfig); err != nil {
+		return controlplane.Tenant{}, invalidf("quota config: %v", err)
+	}
+	if _, err := platformtenant.ParseQuotaPolicy(tenant.QuotaConfig); err != nil {
 		return controlplane.Tenant{}, invalidf("quota config: %v", err)
 	}
 	if err := normalizeJSON(&tenant.AuditPolicy); err != nil {
@@ -746,7 +764,7 @@ func (s *Service) record(
 	}
 	if err := s.audit.Record(ctx, audit.Event{
 		TenantID: tenantID,
-		UserID:   "admin",
+		UserID:   PrincipalName(ctx),
 		TraceID:  audit.TraceID(ctx),
 		Decision: decision,
 		Details:  details,

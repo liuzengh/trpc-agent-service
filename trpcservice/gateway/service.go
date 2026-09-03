@@ -8,6 +8,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
 // IntakeRequest is the untrusted Test Channel input before binding resolution.
@@ -27,6 +28,7 @@ type Intake struct {
 	journal  Journal
 	audit    audit.Writer
 	metrics  *platformmetrics.Recorder
+	quota    *tenant.Guard
 }
 
 type IntakeOption func(*Intake)
@@ -37,6 +39,10 @@ func WithAuditWriter(writer audit.Writer) IntakeOption {
 
 func WithMetrics(recorder *platformmetrics.Recorder) IntakeOption {
 	return func(intake *Intake) { intake.metrics = recorder }
+}
+
+func WithQuotaGuard(guard *tenant.Guard) IntakeOption {
+	return func(intake *Intake) { intake.quota = guard }
 }
 
 func NewIntake(
@@ -67,6 +73,21 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 	scope, err := i.resolver.Resolve(ctx, input.BindingKey)
 	if err != nil {
 		return AcceptResult{}, err
+	}
+	if i.quota != nil {
+		if err := i.quota.AllowInbound(ctx, scope.TenantID, input.UserID); err != nil {
+			if i.audit != nil {
+				_ = i.audit.Record(ctx, audit.Event{
+					TenantID: scope.TenantID, Channel: scope.ChannelType,
+					ChannelBindingID: scope.ChannelBindingID,
+					UserID:           input.UserID, SessionID: input.SessionID,
+					MessageID: input.ExternalMessageID,
+					TraceID:   audit.TraceID(ctx), Decision: "inbound_rate_rejected",
+					ErrorType: "tenant_quota",
+				})
+			}
+			return AcceptResult{}, err
+		}
 	}
 	result, err := i.journal.Accept(ctx, InboundRequest{
 		Scope:             scope,

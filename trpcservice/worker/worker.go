@@ -16,6 +16,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -35,6 +36,7 @@ type Options struct {
 	Metrics     *platformmetrics.Recorder
 	Approvals   approval.Repository
 	Jobs        background.Repository
+	Quota       *tenant.Guard
 }
 
 // Worker processes at-least-once queue deliveries. Durable idempotency makes
@@ -89,6 +91,19 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	if err := w.journal.MarkRunRunning(ctx, task.RequestID, w.opts.WorkerID); err != nil {
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
+	releaseQuota := func() {}
+	if w.opts.Quota != nil {
+		release, quotaErr := w.opts.Quota.AcquireRun(ctx, task.Scope.TenantID)
+		if quotaErr != nil {
+			failErr := w.journal.FailRun(ctx, task.RequestID, "tenant_quota", quotaErr)
+			auditErr := w.recordAudit(
+				ctx, task, gateway.RunResult{}, "run_rejected", "tenant_quota", started,
+			)
+			return true, w.retryOrAck(ctx, delivery, task, errors.Join(quotaErr, failErr, auditErr))
+		}
+		releaseQuota = release
+	}
+	defer releaseQuota()
 	result, runErr := w.runtime.ChatWithScope(ctx, agentruntime.ChatInput{
 		Scope:             task.Scope,
 		MessageID:         task.MessageID,
@@ -134,6 +149,14 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		Cost: result.Cost, TraceID: audit.TraceID(ctx),
 	}, "run_completed", "", started); err != nil {
 		return true, w.retryOrAck(ctx, delivery, task, err)
+	}
+	if w.opts.Quota != nil {
+		if err := w.opts.Quota.RecordUsage(
+			ctx, task.Scope.TenantID, task.RequestID,
+			result.PromptTokens, result.CompletionTokens, result.Cost,
+		); err != nil {
+			return true, w.retryOrAck(ctx, delivery, task, err)
+		}
 	}
 	if err := w.enqueueSessionJobs(ctx, task); err != nil {
 		return true, w.retryOrAck(ctx, delivery, task, err)

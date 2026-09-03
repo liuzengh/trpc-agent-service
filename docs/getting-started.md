@@ -2991,6 +2991,80 @@ Backfill Job 复制 Session State 和完整 Event 顺序，同时复制 App/User
 
 当前正式支持 `startup_config`、InMemory、Redis 和 PostgreSQL 四种 Session binding。Redis 与 PostgreSQL 均关闭异步 Event persist，`AppendEvent` 成功意味着下一节点可见；Redis 的磁盘持久性仍取决于 AOF/RDB 策略，PostgreSQL 提供更强耐久性但写延迟和成本更高。
 
-## 31. 下一步
+## 31. RBAC、限流、预算与日志脱敏
 
-下一阶段补齐租户 RBAC/限流/预算、管理查询、结构化日志脱敏和部署清单，然后进行容量、故障与最终验收审计。
+Admin 不再只有一个全局共享 Token。兼容字段 `TRPC_AGENT_ADMIN_TOKEN` 仍会创建 legacy superadmin；生产推荐一次注入多个 Principal：
+
+```dotenv
+TRPC_AGENT_ADMIN_PRINCIPALS_JSON='[
+  {
+    "name":"platform-admin",
+    "token":"replace-with-secret-token-1",
+    "role":"superadmin",
+    "tenant_ids":["*"]
+  },
+  {
+    "name":"tenant-a-operator",
+    "token":"replace-with-secret-token-2",
+    "role":"operator",
+    "tenant_ids":["tenant-a"]
+  }
+]'
+```
+
+角色：
+
+| 角色 | 权限 |
+| --- | --- |
+| `superadmin` | 创建租户和所有跨租户操作 |
+| `tenant_admin` | 指定租户内配置写、运维和读 |
+| `operator` | 指定租户内 migration/job 运维和读 |
+| `auditor` | 指定租户只读、审计查询 |
+
+Token 使用常量时间比较。每个路由在 JSON 解码后、Repository 调用前检查 tenant scope；知道另一个租户的 app/revision/job ID 也会先得到 `403`。Principal 名称写入 Admin audit 的 `user_id`。
+
+只读管理接口包括：
+
+```text
+POST /admin/tenants/get
+POST /admin/apps/get
+POST /admin/revisions/get
+POST /admin/channel-bindings/get
+POST /admin/backend-bindings/list
+POST /admin/backend-migrations/get
+POST /admin/jobs/get
+POST /admin/audit/query
+```
+
+Audit Query 必须带 tenant ID，可按 decision、trace ID 和 limit 过滤；PostgreSQL 使用 tenant 条件查询，Memory Writer 也执行同样隔离。
+
+租户 Quota 保存在 `tenant.quota_config`：
+
+```json
+{
+  "requests_per_minute": 120,
+  "concurrent_runs": 20,
+  "daily_prompt_tokens": 5000000,
+  "daily_completion_tokens": 1000000,
+  "daily_cost_usd": 100
+}
+```
+
+`TRPC_AGENT_QUOTA_BACKEND=local` 用于单进程教程；生产设置为 `redis`，复用 `REDIS_URL` 和 `REDIS_KEY_PREFIX`。Gateway 在持久化新入站前按 tenant/user/minute 限流；Worker 在 Runner 前检查 tenant 并发和当日已用 token/cost。同步 `/chat` Test Channel 同样执行两层检查。
+
+并发计数使用 Redis Lua 原子 INCR/回滚并设置五分钟兜底 TTL，进程崩溃不会永久占槽。Usage 用 `tenant + UTC date + request_id` SET NX 幂等记账，因此 Agent Queue 重试不会重复增加成本。一次调用可以把余额推过阈值，但下一次 Runner 会被拒绝；这是“已发生调用必须记账、未来调用 fail closed”的边界。
+
+运行日志经过统一 Redacting Writer，当前会屏蔽：
+
+```text
+Authorization / Bearer
+api_key / access_token / password / secret
+postgres://user:password@host
+redis://user:password@host
+```
+
+Writer 向标准 `log` 保持原始写入长度语义，避免破坏调用方；Audit details 仍使用独立的结构化 key 递归脱敏。生产还应在 Collector 和日志平台再做一层字段过滤，并禁止记录完整用户消息和 Tool 参数。
+
+## 32. 下一步
+
+下一阶段补齐 Docker Compose 全栈、Kubernetes Deployment/HPA/PDB/NetworkPolicy、Prometheus/Grafana/OTel Collector，以及容量与故障演练脚本。

@@ -11,29 +11,40 @@ import (
 )
 
 type Event struct {
-	TenantID         string
-	Channel          string
-	ChannelBindingID string
-	UserID           string
-	SessionID        string
-	MessageID        string
-	RequestID        string
-	TraceID          string
-	AgentName        string
-	RevisionID       string
-	ToolName         string
-	Decision         string
-	Latency          time.Duration
-	ErrorType        string
-	Cost             float64
-	Details          map[string]any
-	OccurredAt       time.Time
+	TenantID         string         `json:"tenant_id"`
+	Channel          string         `json:"channel,omitempty"`
+	ChannelBindingID string         `json:"channel_binding_id,omitempty"`
+	UserID           string         `json:"user_id,omitempty"`
+	SessionID        string         `json:"session_id,omitempty"`
+	MessageID        string         `json:"message_id,omitempty"`
+	RequestID        string         `json:"request_id,omitempty"`
+	TraceID          string         `json:"trace_id,omitempty"`
+	AgentName        string         `json:"agent_name,omitempty"`
+	RevisionID       string         `json:"revision_id,omitempty"`
+	ToolName         string         `json:"tool_name,omitempty"`
+	Decision         string         `json:"decision"`
+	Latency          time.Duration  `json:"latency"`
+	ErrorType        string         `json:"error_type,omitempty"`
+	Cost             float64        `json:"cost"`
+	Details          map[string]any `json:"details"`
+	OccurredAt       time.Time      `json:"occurred_at"`
 }
 
 type Writer interface {
 	Record(ctx context.Context, event Event) error
 	Ready(ctx context.Context) error
 	Close() error
+}
+
+type Query struct {
+	TenantID string
+	Decision string
+	TraceID  string
+	Limit    int
+}
+
+type Reader interface {
+	Query(ctx context.Context, query Query) ([]Event, error)
 }
 
 func TraceID(ctx context.Context) string {

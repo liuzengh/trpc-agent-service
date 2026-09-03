@@ -26,12 +26,14 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	platformlog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/reply"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	platformtelemetry "github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
@@ -42,6 +44,7 @@ import (
 )
 
 func main() {
+	log.SetOutput(platformlog.NewRedactingWriter(os.Stderr))
 	if err := run(); err != nil {
 		log.Printf("trpc-agent-service stopped: %v", err)
 		os.Exit(1)
@@ -116,6 +119,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load Admin config: %w", err)
 	}
+	quotaConfig, err := config.LoadQuotaConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("load quota config: %w", err)
+	}
 	if roleName == config.RoleAdmin && !adminConfig.Enabled {
 		return fmt.Errorf("Admin role requires TRPC_AGENT_ADMIN_ENABLED=true")
 	}
@@ -176,8 +183,19 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build control-plane repository: %w", err)
 	}
+	startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
+	quotaGuard, err := tenant.NewGuard(startupCtx, controlPlaneRepository, quotaConfig)
+	cancelStartup()
+	if err != nil {
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build quota guard: %w", err)
+	}
 	auditWriter, err := audit.NewForControlPlane(controlPlaneRepository)
 	if err != nil {
+		_ = quotaGuard.Close()
 		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
@@ -274,6 +292,7 @@ func run() error {
 		inboundJournal,
 		gateway.WithAuditWriter(auditWriter),
 		gateway.WithMetrics(metricRecorder),
+		gateway.WithQuotaGuard(quotaGuard),
 	)
 	if err != nil {
 		_ = sessionRouter.Close()
@@ -375,6 +394,7 @@ func run() error {
 		Metrics:     metricRecorder,
 		Approvals:   approvalRepository,
 		Jobs:        backgroundJobs,
+		Quota:       quotaGuard,
 	})
 	if err != nil {
 		_ = agentQueue.Close()
@@ -449,7 +469,14 @@ func run() error {
 		adminService.WithAuditWriter(auditWriter)
 		adminService.WithKnowledgeRouter(knowledgeRouter)
 		adminService.WithBackgroundJobs(backgroundJobs)
-		adminHandler, err = adminservice.NewHandler(adminService, adminConfig.Token)
+		principals := make([]adminservice.Principal, 0, len(adminConfig.Principals))
+		for _, principal := range adminConfig.Principals {
+			principals = append(principals, adminservice.Principal{
+				Name: principal.Name, Token: principal.Token,
+				Role: principal.Role, TenantIDs: principal.TenantIDs,
+			})
+		}
+		adminHandler, err = adminservice.NewHandlerWithPrincipals(adminService, principals)
 		if err != nil {
 			_ = agentQueue.Close()
 			_ = runtime.Close()
@@ -510,6 +537,11 @@ func run() error {
 		fmt.Printf("Gateway HTTP server listening on %s\n", listenAddr)
 	}
 	defer func() {
+		if err := quotaGuard.Close(); err != nil {
+			log.Printf("close quota guard: %v", err)
+		}
+	}()
+	defer func() {
 		if err := backgroundJobs.Close(); err != nil {
 			log.Printf("close background jobs: %v", err)
 		}
@@ -564,6 +596,7 @@ func run() error {
 		web.WithRouteResolver(routeResolver),
 		web.WithGatewayIntake(gatewayIntake),
 		web.WithCallbackGateway(callbackGateway),
+		web.WithQuotaGuard(quotaGuard),
 		web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
 		web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
 		web.WithReadinessCheck("audit", auditWriter.Ready),
@@ -573,6 +606,7 @@ func run() error {
 		web.WithReadinessCheck("knowledge-router", knowledgeRouter.Ready),
 		web.WithReadinessCheck("background-jobs", backgroundJobs.Ready),
 		web.WithReadinessCheck("session-router", sessionRouter.Ready),
+		web.WithReadinessCheck("quota", quotaGuard.Ready),
 	}
 	if adminHandler != nil {
 		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))
