@@ -2209,6 +2209,39 @@ Reply Sender 根据 `Capabilities.MaxTextRunes` 按 Unicode rune 切分长文本
 → provider receipt
 ```
 
-## 19. 下一步
+## 19. 进程角色拆分
 
-下一阶段拆分进程角色，让 Gateway、Relay、Worker 和 Reply Sender 可以作为独立进程与 Kubernetes Deployment 启动，而不是只能运行在一个 `all-in-one` 进程里。
+同一个二进制现在支持五种角色：
+
+```text
+all      Gateway + Relay + Worker + Sender
+gateway  只启动 HTTP Gateway
+relay    只转发 PostgreSQL queue_outbox
+worker   只消费 Agent task
+sender   只发送 outbound_message
+```
+
+本地仍可使用：
+
+```bash
+go run ./cmd/trpc-service -role all
+```
+
+多进程运行：
+
+```bash
+go run ./cmd/trpc-service -role gateway -addr :8080
+go run ./cmd/trpc-service -role relay
+go run ./cmd/trpc-service -role worker
+go run ./cmd/trpc-service -role sender
+```
+
+也可以设置 `TRPC_AGENT_ROLE`。Relay 和 Worker 之间必须使用 Redis Queue；所有角色共享 PostgreSQL Control Plane/Journal，Worker 共享 Redis Session、Coordinator 和 Idempotency。
+
+服务收到 SIGINT/SIGTERM 后，errgroup 会取消对应角色循环；Gateway 先执行 HTTP Shutdown，Redis blocking read、续租 goroutine、Relay 和 Sender 随 context 退出，最后按所有权关闭 Queue、Runtime 和数据库连接。
+
+当前不同角色仍由同一装配函数创建依赖，后续 Kubernetes 阶段会进一步按角色最小化 Secret 和连接权限。
+
+## 20. 下一步
+
+下一阶段实现企业微信 Channel Adapter：callback URL 验证、签名、AES 解密、MsgId 去重、异步 ACK 和应用消息发送。随后实现 Telegram 作为第二种 IM 通道。

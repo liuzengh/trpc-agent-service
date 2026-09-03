@@ -39,6 +39,7 @@ func main() {
 func run() error {
 	envFile := flag.String("env-file", ".env", "dotenv configuration file")
 	addr := flag.String("addr", "", "HTTP listen address (overrides TRPC_AGENT_ADDR)")
+	roleFlag := flag.String("role", "", "service role: all, gateway, relay, worker, sender")
 	flag.Parse()
 
 	loaded, err := config.LoadDotEnv(*envFile)
@@ -56,8 +57,20 @@ func run() error {
 	if listenAddr == "" {
 		listenAddr = ":8080"
 	}
+	roleName := *roleFlag
+	if roleName == "" {
+		roleName = os.Getenv("TRPC_AGENT_ROLE")
+	}
+	roles, err := config.ParseRole(roleName)
+	if err != nil {
+		return err
+	}
+	if roleName == "" {
+		roleName = config.RoleAll
+	}
 
 	fmt.Printf("trpc-agent-service %s\n", trpcservice.Version)
+	fmt.Printf("service role=%s\n", roleName)
 
 	modelConfig, err := config.LoadModelConfigFromEnv()
 	if err != nil {
@@ -264,7 +277,9 @@ func run() error {
 	)
 	fmt.Printf("control-plane backend=%s\n", controlPlaneConfig.Backend)
 	fmt.Printf("queue backend=%s stream=%s group=%s\n", queueConfig.Backend, queueConfig.Stream, queueConfig.Group)
-	fmt.Printf("tutorial chat server listening on %s\n", listenAddr)
+	if roles.Gateway {
+		fmt.Printf("Gateway HTTP server listening on %s\n", listenAddr)
+	}
 	defer func() {
 		if err := agentQueue.Close(); err != nil {
 			log.Printf("close Agent work queue: %v", err)
@@ -286,16 +301,21 @@ func run() error {
 		}
 	}()
 
-	server := &http.Server{
-		Addr: listenAddr,
-		Handler: web.NewHandler(
-			runtime,
-			web.WithRouteResolver(routeResolver),
-			web.WithGatewayIntake(gatewayIntake),
-			web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
-			web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
+	handlerOptions := []web.Option{
+		web.WithRouteResolver(routeResolver),
+		web.WithGatewayIntake(gatewayIntake),
+		web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
+		web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
+	}
+	if roles.Relay || roles.Worker {
+		handlerOptions = append(
+			handlerOptions,
 			web.WithReadinessCheck("work-queue", agentQueue.Ready),
-		),
+		)
+	}
+	server := &http.Server{
+		Addr:              listenAddr,
+		Handler:           web.NewHandler(runtime, handlerOptions...),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -310,45 +330,44 @@ func run() error {
 	defer stop()
 
 	group, groupCtx := errgroup.WithContext(ctx)
-	group.Go(func() error {
-		err := server.ListenAndServe()
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
-	})
-	group.Go(func() error {
-		err := outboxRelay.Run(groupCtx)
-		if errors.Is(err, context.Canceled) {
-			return nil
-		}
-		return err
-	})
-	group.Go(func() error {
-		err := agentWorker.Run(groupCtx)
-		if errors.Is(err, context.Canceled) {
-			return nil
-		}
-		return err
-	})
-	group.Go(func() error {
-		err := replySender.Run(groupCtx)
-		if errors.Is(err, context.Canceled) {
-			return nil
-		}
-		return err
-	})
+	if roles.Gateway {
+		group.Go(func() error {
+			err := server.ListenAndServe()
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		})
+	}
+	if roles.Relay {
+		group.Go(func() error { return ignoreCancellation(outboxRelay.Run(groupCtx)) })
+	}
+	if roles.Worker {
+		group.Go(func() error { return ignoreCancellation(agentWorker.Run(groupCtx)) })
+	}
+	if roles.Sender {
+		group.Go(func() error { return ignoreCancellation(replySender.Run(groupCtx)) })
+	}
 
 	<-groupCtx.Done()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown HTTP server: %w", err)
+	if roles.Gateway {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown HTTP server: %w", err)
+		}
 	}
 
 	if err := group.Wait(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func ignoreCancellation(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }

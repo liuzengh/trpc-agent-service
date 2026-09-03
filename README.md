@@ -275,6 +275,17 @@ Outbox Relay、Redis Streams pending reclaim 和 Worker 完成链路见 [异步�
 
 Reply Sender、通道能力、长度切分、发送重试和回执见 [Reply Sender 和 Channel Adapter](docs/getting-started.md#18-reply-sender-和-channel-adapter)。
 
+生产组件可以使用同一镜像分别启动：
+
+```bash
+./bin/trpc-service -role gateway -addr :8080
+./bin/trpc-service -role relay
+./bin/trpc-service -role worker
+./bin/trpc-service -role sender
+```
+
+角色职责和关闭链路见 [进程角色拆分](docs/getting-started.md#19-进程角色拆分)。
+
 停止服务：
 
 ```bash
