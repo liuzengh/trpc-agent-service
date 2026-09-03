@@ -83,9 +83,10 @@ func (s *Sender) sendOne(ctx context.Context, item gateway.OutboundItem) error {
 	providerIDs := make([]string, 0, len(parts))
 	for index, part := range parts {
 		receipt, sendErr := adapter.Send(ctx, binding, channels.OutboundMessage{
-			OutboundID: partID(item.ID, index, len(parts)),
-			RequestID:  item.RequestID,
-			Text:       part,
+			OutboundID:  partID(item.ID, index, len(parts)),
+			RequestID:   item.RequestID,
+			Text:        part,
+			ReplyTarget: item.ReplyTarget,
 		})
 		if sendErr != nil {
 			return s.fail(ctx, item, deliveryTerminal(sendErr, item.AttemptCount, s.opts.MaxAttempts), sendErr)

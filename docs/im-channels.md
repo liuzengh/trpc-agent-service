@@ -2,6 +2,8 @@
 
 ## 1. 通道抽象
 
+当前代码已实现统一 `Adapter`、`CallbackAdapter`、Channel Registry、企业微信 Adapter、Telegram Adapter 和 HTTP Test Adapter。后续章节中的接口设计已经由 `trpcservice/channels` 落地；图片、文件、卡片和审批消息仍将在 Artifact/治理阶段继续扩展。
+
 OpenClaw 的 `Channel` 只有 `ID()` 和 `Run(ctx)`，适合示例和进程内组合。平台需要更明确的入站、回复和能力模型：
 
 ```go

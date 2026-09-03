@@ -88,8 +88,9 @@ FOR UPDATE`,
 		return AcceptResult{}, fmt.Errorf("lock conversation: %w", err)
 	}
 	payload, err := json.Marshal(map[string]any{
-		"text":      request.Text,
-		"chat_type": request.ChatType,
+		"text":         request.Text,
+		"chat_type":    request.ChatType,
+		"reply_target": request.ReplyTarget,
 	})
 	if err != nil {
 		return AcceptResult{}, fmt.Errorf("marshal inbound payload: %w", err)
@@ -167,6 +168,7 @@ INSERT INTO agent_run(
 		UserID:         request.UserID,
 		SessionID:      request.SessionID,
 		Text:           request.Text,
+		ReplyTarget:    request.ReplyTarget,
 		TurnSeq:        turnSeq,
 	}
 	taskJSON, err := json.Marshal(task)
@@ -395,9 +397,10 @@ WHERE request_id = $1 AND fencing_token <= $2`,
 		return err
 	}
 	payload, err := json.Marshal(map[string]any{
-		"text":        result.Reply,
-		"agent_name":  result.AgentName,
-		"event_count": result.EventCount,
+		"text":         result.Reply,
+		"reply_target": task.ReplyTarget,
+		"agent_name":   result.AgentName,
+		"event_count":  result.EventCount,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal outbound payload: %w", err)
@@ -479,8 +482,9 @@ SET status = 'sending', locked_by = $2,
     attempt_count = attempt_count + 1
 FROM candidates c
 WHERE o.outbound_id = c.outbound_id
-RETURNING o.outbound_id, o.request_id, o.tenant_id, o.channel_binding_id,
-          o.payload->>'text', o.attempt_count`,
+	RETURNING o.outbound_id, o.request_id, o.tenant_id, o.channel_binding_id,
+	          o.payload->>'text', COALESCE(o.payload->>'reply_target', ''),
+	          o.attempt_count`,
 		limit, workerID, postgresInterval(lease))
 	if err != nil {
 		return nil, fmt.Errorf("claim outbound messages: %w", err)
@@ -495,6 +499,7 @@ RETURNING o.outbound_id, o.request_id, o.tenant_id, o.channel_binding_id,
 			&item.TenantID,
 			&item.ChannelBindingID,
 			&item.Text,
+			&item.ReplyTarget,
 			&item.AttemptCount,
 		); err != nil {
 			return nil, fmt.Errorf("scan outbound message: %w", err)

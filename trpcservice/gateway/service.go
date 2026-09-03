@@ -16,6 +16,7 @@ type IntakeRequest struct {
 	SessionID         string
 	ChatType          string
 	Text              string
+	ReplyTarget       string
 }
 
 // Intake resolves a binding and durably accepts its normalized message.
@@ -50,6 +51,7 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 		SessionID:         input.SessionID,
 		ChatType:          input.ChatType,
 		Text:              input.Text,
+		ReplyTarget:       input.ReplyTarget,
 	})
 }
 

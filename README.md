@@ -286,6 +286,15 @@ Reply Sender、通道能力、长度切分、发送重试和回执见 [Reply Sen
 
 角色职责和关闭链路见 [进程角色拆分](docs/getting-started.md#19-进程角色拆分)。
 
+IM callback 地址：
+
+```text
+/callbacks/wecom/{callback_key}
+/callbacks/telegram/{callback_key}
+```
+
+企业微信验签/AES/Token 和 Telegram webhook/sendMessage 的实现链路见 [企业微信和 Telegram Channel Adapter](docs/getting-started.md#20-企业微信和-telegram-channel-adapter)。
+
 停止服务：
 
 ```bash

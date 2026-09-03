@@ -2242,6 +2242,72 @@ go run ./cmd/trpc-service -role sender
 
 当前不同角色仍由同一装配函数创建依赖，后续 Kubernetes 阶段会进一步按角色最小化 Secret 和连接权限。
 
-## 20. 下一步
+## 20. 企业微信和 Telegram Channel Adapter
 
-下一阶段实现企业微信 Channel Adapter：callback URL 验证、签名、AES 解密、MsgId 去重、异步 ACK 和应用消息发送。随后实现 Telegram 作为第二种 IM 通道。
+统一回调地址：
+
+```text
+/callbacks/{channel_type}/{callback_key}
+```
+
+`callback_key` 先查询 Control Plane Channel Binding，URL 不暴露 tenant ID。Callback Gateway 根据 `channel_type` 从 Registry 找到 Adapter，Adapter 完成协议验签和解码后，Gateway 将每条消息写入持久化 Inbox，最后才返回协议 ACK。
+
+企业微信实现包括：
+
+```text
+GET URL 验证
+POST msg_signature 校验
+timestamp 最大偏移校验
+EncodingAESKey AES-CBC 解密
+PKCS#7 padding 校验
+CorpID receiver 校验
+XML 文本消息解析
+MsgId → external_message_id
+Access Token 单飞缓存
+应用消息 send API
+无效 Token 刷新重试
+45009 Retry-After 分类
+```
+
+企业微信 Binding Config 保存 Secret 引用而不是明文：
+
+```json
+{
+  "corp_id": "ww123",
+  "agent_id": 1000002,
+  "callback_token_ref": "env://WECOM_CALLBACK_TOKEN",
+  "encoding_aes_key_ref": "env://WECOM_ENCODING_AES_KEY",
+  "app_secret_ref": "env://WECOM_APP_SECRET"
+}
+```
+
+Telegram 实现包括：
+
+```text
+X-Telegram-Bot-Api-Secret-Token 校验
+update_id → external_message_id
+private/group/supergroup 识别
+message_thread_id topic 隔离
+chat/user ID 规范化
+sendMessage
+4096 限制前的 4000 rune 切分
+429 retry_after
+5xx 可重试分类
+```
+
+Telegram Binding Config：
+
+```json
+{
+  "bot_token_ref": "env://TELEGRAM_BOT_TOKEN",
+  "webhook_secret_ref": "env://TELEGRAM_WEBHOOK_SECRET"
+}
+```
+
+原始 provider user/chat ID 不进入 Session Key。Callback Gateway 使用 binding-scoped SHA-256 生成 `runtime_user_id` 和 `session_id`；Reply Target 单独保存在加密受控的消息流水中，用于 Sender 回送。
+
+开发环境使用 `env://VARIABLE` Secret Store。Adapter、日志和 HTTP 错误不会打印 Secret 值；生产阶段会替换为 KMS/Secret Manager 实现。
+
+## 21. 下一步
+
+下一阶段实现 Admin API 和控制面写服务，让管理员通过鉴权接口创建 Tenant、Agent Revision、企业微信/Telegram Binding 和 Backend Binding，不再依赖 bootstrap 或手工 SQL。

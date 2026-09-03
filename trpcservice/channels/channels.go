@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -14,9 +15,10 @@ import (
 
 // OutboundMessage is independent from any provider-specific send API.
 type OutboundMessage struct {
-	OutboundID string
-	RequestID  string
-	Text       string
+	OutboundID  string
+	RequestID   string
+	Text        string
+	ReplyTarget string
 }
 
 // DeliveryReceipt records the provider acknowledgement for one send.
@@ -42,6 +44,38 @@ type Adapter interface {
 		message OutboundMessage,
 	) (DeliveryReceipt, error)
 	Capabilities() Capabilities
+}
+
+// InboundEnvelope is the protocol-neutral callback message passed to Gateway.
+type InboundEnvelope struct {
+	ExternalMessageID string
+	ExternalUserID    string
+	ExternalChatID    string
+	ExternalThreadID  string
+	ChatType          string
+	MessageType       string
+	Text              string
+	ReplyTarget       string
+	OccurredAt        time.Time
+}
+
+// CallbackResult includes both normalized messages and the immediate provider
+// acknowledgement. Agent execution never blocks the callback response.
+type CallbackResult struct {
+	Messages    []InboundEnvelope
+	StatusCode  int
+	ContentType string
+	Body        []byte
+}
+
+// CallbackAdapter verifies and decodes one provider webhook request.
+type CallbackAdapter interface {
+	Adapter
+	Callback(
+		ctx context.Context,
+		binding controlplane.ChannelBinding,
+		request *http.Request,
+	) (CallbackResult, error)
 }
 
 // DeliveryError classifies retryable provider failures.

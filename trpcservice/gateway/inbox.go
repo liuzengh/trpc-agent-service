@@ -25,6 +25,7 @@ type InboundRequest struct {
 	SessionID         string
 	ChatType          string
 	Text              string
+	ReplyTarget       string
 }
 
 // AcceptResult identifies the durable records created for an inbound message.
@@ -58,6 +59,7 @@ type OutboundItem struct {
 	TenantID         string
 	ChannelBindingID string
 	Text             string
+	ReplyTarget      string
 	AttemptCount     int
 }
 
@@ -117,9 +119,13 @@ func validateInbound(request *InboundRequest) error {
 	request.SessionID = strings.TrimSpace(request.SessionID)
 	request.ChatType = strings.TrimSpace(request.ChatType)
 	request.Text = strings.TrimSpace(request.Text)
+	request.ReplyTarget = strings.TrimSpace(request.ReplyTarget)
 	if request.ExternalMessageID == "" || request.UserID == "" ||
 		request.SessionID == "" || request.ChatType == "" || request.Text == "" {
 		return fmt.Errorf("inbound message ID, user, session, chat type and text are required")
+	}
+	if request.ReplyTarget == "" {
+		request.ReplyTarget = request.UserID
 	}
 	return nil
 }

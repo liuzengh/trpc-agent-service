@@ -22,9 +22,12 @@
 - Channel Adapter Registry、HTTP Test Adapter 和 Reply Sender；
 - outbound claim、长度切分、Retry-After 和 provider receipt；
 - `all/gateway/relay/worker/sender` 独立进程角色；
+- 企业微信验签、AES callback、Token cache 和应用消息发送；
+- Telegram webhook、topic Session、sendMessage 和 Retry-After；
+- binding-scoped 外部身份与 Session ID 规范化；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是企业微信和 Telegram Channel Adapter。
+接下来的最近里程碑是 Admin API、控制面写服务和 Revision 发布/回滚。
 
 ## 1. 建议目录
 

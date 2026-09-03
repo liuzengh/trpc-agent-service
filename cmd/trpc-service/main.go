@@ -15,6 +15,8 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
@@ -22,6 +24,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/reply"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
@@ -224,13 +227,46 @@ func run() error {
 		_ = controlPlaneRepository.Close()
 		return fmt.Errorf("build Agent Worker: %w", err)
 	}
-	channelRegistry, err := channels.NewRegistry(channels.NewTestAdapter())
+	secretStore := secret.EnvStore{}
+	wecomAdapter, err := wecom.New(secretStore, nil)
+	if err != nil {
+		_ = agentQueue.Close()
+		_ = runtime.Close()
+		_ = gatewayIntake.Close()
+		_ = controlPlaneRepository.Close()
+		return fmt.Errorf("build WeCom Adapter: %w", err)
+	}
+	telegramAdapter, err := telegram.New(secretStore, nil)
+	if err != nil {
+		_ = agentQueue.Close()
+		_ = runtime.Close()
+		_ = gatewayIntake.Close()
+		_ = controlPlaneRepository.Close()
+		return fmt.Errorf("build Telegram Adapter: %w", err)
+	}
+	channelRegistry, err := channels.NewRegistry(
+		channels.NewTestAdapter(),
+		wecomAdapter,
+		telegramAdapter,
+	)
 	if err != nil {
 		_ = agentQueue.Close()
 		_ = runtime.Close()
 		_ = gatewayIntake.Close()
 		_ = controlPlaneRepository.Close()
 		return fmt.Errorf("build channel registry: %w", err)
+	}
+	callbackGateway, err := gateway.NewCallbackGateway(
+		controlPlaneRepository,
+		channelRegistry,
+		gatewayIntake,
+	)
+	if err != nil {
+		_ = agentQueue.Close()
+		_ = runtime.Close()
+		_ = gatewayIntake.Close()
+		_ = controlPlaneRepository.Close()
+		return fmt.Errorf("build callback Gateway: %w", err)
 	}
 	replySender, err := reply.New(
 		inboundJournal,
@@ -304,6 +340,7 @@ func run() error {
 	handlerOptions := []web.Option{
 		web.WithRouteResolver(routeResolver),
 		web.WithGatewayIntake(gatewayIntake),
+		web.WithCallbackGateway(callbackGateway),
 		web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
 		web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
 	}

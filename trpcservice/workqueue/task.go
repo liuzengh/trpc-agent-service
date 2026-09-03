@@ -15,6 +15,7 @@ type AgentTask struct {
 	UserID         string               `json:"user_id"`
 	SessionID      string               `json:"session_id"`
 	Text           string               `json:"text"`
+	ReplyTarget    string               `json:"reply_target"`
 	TurnSeq        int64                `json:"turn_seq"`
 	Attempt        int                  `json:"attempt"`
 }

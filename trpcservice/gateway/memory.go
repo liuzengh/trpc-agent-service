@@ -137,6 +137,7 @@ func (j *MemoryJournal) Accept(
 		UserID:         request.UserID,
 		SessionID:      request.SessionID,
 		Text:           request.Text,
+		ReplyTarget:    request.ReplyTarget,
 		TurnSeq:        result.TurnSeq,
 	}
 	outboxID := stableID("qout_", result.RequestID)
@@ -278,6 +279,7 @@ func (j *MemoryJournal) CompleteRun(
 				TenantID:         task.Scope.TenantID,
 				ChannelBindingID: task.Scope.ChannelBindingID,
 				Text:             result.Reply,
+				ReplyTarget:      task.ReplyTarget,
 			},
 			status:      "pending",
 			nextAttempt: time.Now(),
