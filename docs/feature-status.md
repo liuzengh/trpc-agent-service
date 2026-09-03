@@ -16,7 +16,7 @@
 | 能力 | 当前状态 | 已验证范围 | 尚未完成 |
 | --- | --- | --- | --- |
 | tRPC-Agent-Go LLMAgent / Runner / Event | 本地集成 | Mock Model、多轮 Session、Event 消费与关闭 | Graph/Chain/Parallel/Cycle 的平台化注册 |
-| OpenAI-compatible Model | 自动测试 | Model Factory、请求格式、错误传播 | 可用外部模型的成功调用和多租户真实凭据验证 |
+| OpenAI-compatible Model | 真实联调（开发环境） | `glm-5.3-flash`、Runner/LLMAgent、Redis 多轮 Session 与进程重启恢复 | 多租户不同模型、供应商限流/超时、流式响应和生产凭据 |
 | 多租户控制面 | 本地集成 | Tenant/App/Revision/Binding、PostgreSQL migration、路由隔离 | 企业 SSO/OIDC 和生产权限审计 |
 | Redis Session / Coordinator / Idempotency | 本地集成 | 跨 Runtime Session、租约、续租、幂等和 Worker 接管 | 生产 Redis Cluster/Sentinel 验证 |
 | PostgreSQL Inbox / Outbox / Background Job | 本地集成 | 事务写入、claim、重试、dead 状态和多进程 E2E | 高并发与长时间故障压测 |
