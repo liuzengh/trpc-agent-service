@@ -42,6 +42,25 @@ wait_http http://127.0.0.1:3200/ready
 wait_http http://127.0.0.1:9090/-/ready
 wait_http http://127.0.0.1:3000/api/health
 
+rules="$(curl -fsS http://127.0.0.1:9090/api/v1/rules)"
+if ! grep -q 'AgentRunFailureRatioHigh' <<<"$rules" ||
+  ! grep -q 'OTelCollectorScrapeDown' <<<"$rules"; then
+  echo "Prometheus did not load the Agent platform alert rules" >&2
+  exit 1
+fi
+
+dashboards=""
+for _ in $(seq 1 30); do
+  dashboards="$(curl -fsS -u admin:admin \
+    'http://127.0.0.1:3000/api/search?query=tRPC%20Agent%20Platform')"
+  grep -q 'trpc-agent-platform' <<<"$dashboards" && break
+  sleep 1
+done
+if ! grep -q 'trpc-agent-platform' <<<"$dashboards"; then
+  echo "Grafana did not provision the Agent platform dashboard" >&2
+  exit 1
+fi
+
 ./build.sh >/dev/null
 env \
   TRPC_AGENT_MODEL_PROVIDER=mock \
@@ -111,4 +130,4 @@ if ! grep -q 'tenant_id="tutorial-tenant"' "$METRIC_OUTPUT"; then
   exit 1
 fi
 
-echo "observability e2e passed: trace_id=$TRACE_ID service=$SERVICE_NAME"
+echo "observability e2e passed: trace_id=$TRACE_ID service=$SERVICE_NAME dashboard=trpc-agent-platform"

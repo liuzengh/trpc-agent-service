@@ -92,6 +92,7 @@ services:
     command: ["--config.file=/etc/prometheus/prometheus.yaml"]
     volumes:
       - ./deploy/compose/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ./deploy/compose/prometheus-rules.yaml:/etc/prometheus/rules/trpc-agent.yaml:ro
       - prometheus-data:/prometheus
     depends_on:
       - otel-collector
@@ -106,6 +107,8 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
       - ./deploy/compose/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./deploy/compose/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      - ./deploy/compose/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus

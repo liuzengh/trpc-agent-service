@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: trpc-agent-platform
+    orgId: 1
+    folder: Agent Platform
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

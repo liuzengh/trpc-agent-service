@@ -1,0 +1,103 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [{"expr": "sum by (tenant_id, run_status) (rate(agent_runs_total[$__rate_interval]))", "legendFormat": "{{tenant_id}} / {{run_status}}", "refId": "A"}],
+      "title": "Agent runs",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "id": 2,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [{"expr": "sum by (tenant_id) (rate(agent_runs_total{run_status=\"failed\"}[$__rate_interval])) / clamp_min(sum by (tenant_id) (rate(agent_runs_total[$__rate_interval])), 0.001)", "legendFormat": "{{tenant_id}}", "refId": "A"}],
+      "title": "Run failure ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "id": 3,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (tenant_id, le) (rate(agent_run_duration_seconds_bucket[$__rate_interval])))", "legendFormat": "{{tenant_id}}", "refId": "A"}],
+      "title": "Run latency p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+      "id": 4,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [{"expr": "sum by (tenant_id, channel_type) (rate(agent_inbound_messages_total[$__rate_interval]))", "legendFormat": "{{tenant_id}} / {{channel_type}}", "refId": "A"}],
+      "title": "Inbound messages",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+      "id": 5,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [{"expr": "sum by (tenant_id, channel_type, delivery_status) (rate(agent_reply_deliveries_total[$__rate_interval]))", "legendFormat": "{{tenant_id}} / {{channel_type}} / {{delivery_status}}", "refId": "A"}],
+      "title": "Reply deliveries",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+      "id": 6,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [{"expr": "sum by (tenant_id, channel_type) (rate(agent_idempotency_replays_total[$__rate_interval]))", "legendFormat": "{{tenant_id}} / {{channel_type}}", "refId": "A"}],
+      "title": "Idempotency replays",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "id": 7,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [
+        {"expr": "sum by (tenant_id) (rate(agent_model_prompt_tokens_total[$__rate_interval]))", "legendFormat": "{{tenant_id}} prompt", "refId": "A"},
+        {"expr": "sum by (tenant_id) (rate(agent_model_completion_tokens_total[$__rate_interval]))", "legendFormat": "{{tenant_id}} completion", "refId": "B"}
+      ],
+      "title": "Model tokens per second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 8,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [{"expr": "sum by (tenant_id) (increase(agent_model_cost_USD_total[$__range]))", "legendFormat": "{{tenant_id}}", "refId": "A"}],
+      "title": "Model cost in selected range",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 41,
+  "tags": ["trpc-agent", "multi-tenant"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "tRPC Agent Platform",
+  "uid": "trpc-agent-platform",
+  "version": 1
+}

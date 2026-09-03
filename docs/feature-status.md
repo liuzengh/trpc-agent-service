@@ -28,7 +28,7 @@
 | 微信公众号 / 微信客服 | 设计 | 数据模型与接入差异说明 | Adapter 代码和真实联调 |
 | Tool 治理与审批 | 自动测试 / 本地集成 | Tool 白名单、参数哈希审批、Journal、审计 | 真实业务 Tool 和真实 IM 审批 |
 | MCP | 设计 | 权限、密钥、超时和审计边界 | MCP Client/Server 的实际接入 |
-| OpenTelemetry | 本地集成 | traceparent 传播、Tempo HTTP/Session spans、租户级 metrics、Prometheus/Grafana 健康检查 | 正式 Dashboard、Alert Rule 和通知渠道 |
+| OpenTelemetry | 本地集成 | traceparent 传播、Tempo HTTP/Session spans、租户级 metrics、Grafana Dashboard、Prometheus Alert Rule | Alertmanager 和实际通知渠道 |
 | Secret 管理 | 已编码 | `env://` 和测试用 Static Store | Vault、KMS 或云 Secret Manager Adapter |
 | Docker Compose | 本地集成 | 依赖启动、镜像构建、非 root 运行 | 长时间稳定性验证 |
 | Kubernetes | 配置 | Deployment、HPA、PDB、NetworkPolicy YAML 校验 | 测试或生产集群部署 |

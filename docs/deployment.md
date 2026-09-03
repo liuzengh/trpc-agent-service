@@ -23,7 +23,7 @@ docker compose --profile observability up -d
 ./scripts/e2e-observability.sh
 ```
 
-脚本使用固定 W3C Trace 上下文发送 `/chat`，从 Tempo 查询 HTTP 与 Session spans，并检查 Collector 导出的租户级 inbound/run/reply metrics。验收结束后会停止本次应用进程和可观测容器，但不会删除数据卷。
+脚本使用固定 W3C Trace 上下文发送 `/chat`，从 Tempo 查询 HTTP 与 Session spans，检查 Collector 导出的租户级 inbound/run/reply metrics，并确认 Grafana Dashboard 与 Prometheus Alert Rule 已加载。验收结束后会停止本次应用进程和可观测容器，但不会删除数据卷。
 
 端口：OTLP gRPC 4317、OTLP HTTP 4318、Prometheus 9090、Tempo 3200、Grafana 3000、MinIO Console 9001、Qdrant REST 6333。Grafana 本地默认账号为 `admin/admin`，只用于开发环境。
 

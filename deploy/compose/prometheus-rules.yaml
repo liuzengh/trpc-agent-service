@@ -1,0 +1,63 @@
+groups:
+  - name: trpc-agent-platform
+    rules:
+      - alert: OTelCollectorScrapeDown
+        expr: up{job="otel-collector"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: OpenTelemetry Collector metrics endpoint is unavailable
+          description: Prometheus has failed to scrape the Collector for more than two minutes.
+
+      - alert: AgentRunFailureRatioHigh
+        expr: |
+          sum by (tenant_id) (rate(agent_runs_total{run_status="failed"}[5m]))
+          /
+          clamp_min(sum by (tenant_id) (rate(agent_runs_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent run failure ratio is above 5%
+          description: Tenant {{ $labels.tenant_id }} has sustained Agent run failures for ten minutes.
+
+      - alert: AgentRunP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (tenant_id, le) (rate(agent_run_duration_seconds_bucket[5m]))
+          ) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent run p95 latency is above 30 seconds
+          description: Tenant {{ $labels.tenant_id }} has sustained high Agent execution latency.
+
+      - alert: AgentReplyFailureRatioHigh
+        expr: |
+          sum by (tenant_id, channel_type) (
+            rate(agent_reply_deliveries_total{delivery_status="failed"}[5m])
+          )
+          /
+          clamp_min(
+            sum by (tenant_id, channel_type) (rate(agent_reply_deliveries_total[5m])),
+            0.001
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent reply failure ratio is above 5%
+          description: Tenant {{ $labels.tenant_id }} channel {{ $labels.channel_type }} has sustained delivery failures.
+
+      - alert: AgentIdempotencyReplaySpike
+        expr: sum by (tenant_id, channel_type) (rate(agent_idempotency_replays_total[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Duplicate inbound message rate is elevated
+          description: Tenant {{ $labels.tenant_id }} channel {{ $labels.channel_type }} is replaying more than five messages per second.
