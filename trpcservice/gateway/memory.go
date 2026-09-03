@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
 
@@ -130,18 +131,21 @@ func (j *MemoryJournal) Accept(
 	scope.RevisionID = conversation.revisionID
 	traceParent, traceState := outboundTraceHeaders(ctx)
 	task := workqueue.AgentTask{
-		InboundID:      result.InboundID,
-		RequestID:      result.RequestID,
-		ConversationID: result.ConversationID,
-		Scope:          scope,
-		MessageID:      request.ExternalMessageID,
-		UserID:         request.UserID,
-		SessionID:      request.SessionID,
-		Text:           request.Text,
-		ReplyTarget:    request.ReplyTarget,
-		TurnSeq:        result.TurnSeq,
-		TraceParent:    traceParent,
-		TraceState:     traceState,
+		InboundID:         result.InboundID,
+		RequestID:         result.RequestID,
+		ConversationID:    result.ConversationID,
+		Scope:             scope,
+		MessageID:         request.ExternalMessageID,
+		UserID:            request.UserID,
+		SessionID:         request.SessionID,
+		Text:              request.Text,
+		ReplyTarget:       request.ReplyTarget,
+		TurnSeq:           result.TurnSeq,
+		TraceParent:       traceParent,
+		TraceState:        traceState,
+		ApprovedTools:     append([]string(nil), request.ApprovedTools...),
+		ApprovedToolCalls: append([]governance.ApprovedToolCall(nil), request.ApprovedToolCalls...),
+		ApprovalID:        request.ApprovalID,
 	}
 	outboxID := stableID("qout_", result.RequestID)
 	j.outbox[outboxID] = &memoryQueueOutbox{

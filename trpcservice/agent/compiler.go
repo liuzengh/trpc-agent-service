@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
@@ -85,6 +86,7 @@ type RevisionCompiler struct {
 	group         singleflight.Group
 	toolCatalog   *platformtool.Catalog
 	auditWriter   audit.Writer
+	approvals     approval.Repository
 }
 
 type RevisionCompilerOption func(*RevisionCompiler)
@@ -98,6 +100,12 @@ func WithToolCatalog(catalog *platformtool.Catalog) RevisionCompilerOption {
 func WithAuditWriter(writer audit.Writer) RevisionCompilerOption {
 	return func(compiler *RevisionCompiler) {
 		compiler.auditWriter = writer
+	}
+}
+
+func WithApprovalRepository(repository approval.Repository) RevisionCompilerOption {
+	return func(compiler *RevisionCompiler) {
+		compiler.approvals = repository
 	}
 }
 
@@ -267,8 +275,33 @@ func (c *RevisionCompiler) RunPolicyOptions(
 		return nil, err
 	}
 	var recorder governance.DecisionRecorder
-	if c.auditWriter != nil {
+	if c.auditWriter != nil || c.approvals != nil {
 		recorder = func(ctx context.Context, decision governance.ToolDecision) error {
+			approvalID := ""
+			if decision.Action == "ask" && c.approvals != nil {
+				record, err := c.approvals.Request(ctx, approval.Request{
+					TenantID:         input.Scope.TenantID,
+					AppID:            input.Scope.AppID,
+					RevisionID:       input.Scope.RevisionID,
+					ChannelBindingID: input.Scope.ChannelBindingID,
+					RequestID:        input.RequestID,
+					MessageID:        input.MessageID,
+					UserID:           input.UserID,
+					SessionID:        input.SessionID,
+					ToolCallID:       decision.ToolCallID,
+					ToolName:         decision.ToolName,
+					ArgumentsHash:    decision.ArgumentsHash,
+					ResumeText:       input.Text,
+					ReplyTarget:      input.ReplyTarget,
+				})
+				if err != nil {
+					return fmt.Errorf("create tool approval: %w", err)
+				}
+				approvalID = record.ApprovalID
+			}
+			if c.auditWriter == nil {
+				return nil
+			}
 			return c.auditWriter.Record(ctx, audit.Event{
 				TenantID:         input.Scope.TenantID,
 				Channel:          input.Scope.ChannelType,
@@ -282,13 +315,21 @@ func (c *RevisionCompiler) RunPolicyOptions(
 				ToolName:         decision.ToolName,
 				Decision:         "tool_" + decision.Action,
 				Details: map[string]any{
-					"tool_call_id": decision.ToolCallID,
-					"reason":       decision.Reason,
+					"tool_call_id":   decision.ToolCallID,
+					"reason":         decision.Reason,
+					"arguments_hash": decision.ArgumentsHash,
+					"approval_id":    approvalID,
 				},
 			})
 		}
 	}
-	return governance.RunOptions(policy, input.UserID, input.ApprovedTools, recorder), nil
+	return governance.RunOptionsWithApprovals(
+		policy,
+		input.UserID,
+		input.ApprovedTools,
+		input.ApprovedToolCalls,
+		recorder,
+	), nil
 }
 
 func (c *RevisionCompiler) UsagePricing(

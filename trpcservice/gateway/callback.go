@@ -16,17 +16,31 @@ type CallbackGateway struct {
 	repository controlplane.Repository
 	registry   *channels.Registry
 	intake     *Intake
+	approvals  ApprovalDecisionHandler
+}
+
+type CallbackGatewayOption func(*CallbackGateway)
+
+func WithApprovalDecisionHandler(handler ApprovalDecisionHandler) CallbackGatewayOption {
+	return func(gateway *CallbackGateway) { gateway.approvals = handler }
 }
 
 func NewCallbackGateway(
 	repository controlplane.Repository,
 	registry *channels.Registry,
 	intake *Intake,
+	opts ...CallbackGatewayOption,
 ) (*CallbackGateway, error) {
 	if repository == nil || registry == nil || intake == nil {
 		return nil, fmt.Errorf("callback Gateway dependencies are required")
 	}
-	return &CallbackGateway{repository: repository, registry: registry, intake: intake}, nil
+	gateway := &CallbackGateway{repository: repository, registry: registry, intake: intake}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(gateway)
+		}
+	}
+	return gateway, nil
 }
 
 func (g *CallbackGateway) Handle(
@@ -65,6 +79,25 @@ func (g *CallbackGateway) Handle(
 			message.ExternalThreadID,
 			message.ChatType,
 		)
+		if g.approvals != nil {
+			handled, err := g.approvals.HandleApprovalDecision(ctx, ApprovalDecisionInput{
+				TenantID:          binding.TenantID,
+				ChannelType:       binding.ChannelType,
+				ChannelBindingID:  binding.ID,
+				ExternalMessageID: message.ExternalMessageID,
+				UserID:            userID,
+				SessionID:         sessionID,
+				ChatType:          message.ChatType,
+				Text:              message.Text,
+				ReplyTarget:       message.ReplyTarget,
+			})
+			if err != nil {
+				return channels.CallbackResult{}, fmt.Errorf("handle approval decision: %w", err)
+			}
+			if handled {
+				continue
+			}
+		}
 		if _, err := g.intake.Accept(ctx, IntakeRequest{
 			BindingKey:        binding.CallbackKey,
 			ExternalMessageID: message.ExternalMessageID,

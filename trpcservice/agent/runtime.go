@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -50,13 +51,15 @@ type ChatResult struct {
 
 // ChatInput is the trusted, transport-neutral input for one Agent turn.
 type ChatInput struct {
-	Scope         runtimecontext.Scope
-	MessageID     string
-	UserID        string
-	SessionID     string
-	Text          string
-	RequestID     string
-	ApprovedTools []string
+	Scope             runtimecontext.Scope
+	MessageID         string
+	UserID            string
+	SessionID         string
+	Text              string
+	RequestID         string
+	ApprovedTools     []string
+	ApprovedToolCalls []governance.ApprovedToolCall
+	ReplyTarget       string
 }
 
 // Runtime owns the Agent Runner and its platform state services.

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
@@ -299,5 +300,51 @@ func TestRevisionCompilerLoadsUsagePricing(t *testing.T) {
 	}
 	if cost := pricing.Cost(1_000_000, 500_000); cost != 7.5 {
 		t.Fatalf("cost=%v", cost)
+	}
+}
+
+func TestRevisionCompilerCreatesDurableApproval(t *testing.T) {
+	data := controlplane.DefaultBootstrapData()
+	data.Revisions[0].ToolPolicy = json.RawMessage(`{
+        "allowed_tools":["dangerous_demo"],
+        "dangerous_tools":["dangerous_demo"]
+    }`)
+	repository := controlplane.NewMemoryRepository(data)
+	approvals := approval.NewMemoryRepository()
+	t.Cleanup(func() {
+		_ = approvals.Close()
+		_ = repository.Close()
+	})
+	compiler, err := NewRevisionCompiler(
+		repository, NewTutorialModel(), false,
+		WithToolCatalog(platformtool.DefaultCatalog()),
+		WithApprovalRepository(approvals),
+	)
+	if err != nil {
+		t.Fatalf("new compiler: %v", err)
+	}
+	input := ChatInput{
+		Scope: runtimecontext.TutorialScope(), MessageID: "message-approval",
+		RequestID: "request-approval", UserID: "alice", SessionID: "session-approval",
+		Text: "perform dangerous action", ReplyTarget: "alice",
+	}
+	options, err := compiler.RunPolicyOptions(context.Background(), input)
+	if err != nil {
+		t.Fatalf("run policy options: %v", err)
+	}
+	runOptions := agentcore.NewRunOptions(options...)
+	decision, err := runOptions.ToolPermissionPolicy.CheckToolPermission(
+		context.Background(), &agenttool.PermissionRequest{
+			ToolName: "dangerous_demo", ToolCallID: "call-approval", Arguments: []byte(`{"ok":true}`),
+		},
+	)
+	if err != nil || decision.Action != agenttool.PermissionActionAsk {
+		t.Fatalf("decision=%+v err=%v", decision, err)
+	}
+	pending, err := approvals.ListPendingByRequest(
+		context.Background(), "tutorial-tenant", "request-approval",
+	)
+	if err != nil || len(pending) != 1 || pending[0].ToolName != "dangerous_demo" {
+		t.Fatalf("pending=%+v err=%v", pending, err)
 	}
 }

@@ -14,9 +14,47 @@ import (
 
 type callbackTestAdapter struct{}
 
+type approvalDecisionTestHandler struct{ calls int }
+
+func (h *approvalDecisionTestHandler) HandleApprovalDecision(
+	context.Context,
+	ApprovalDecisionInput,
+) (bool, error) {
+	h.calls++
+	return true, nil
+}
+
 func (callbackTestAdapter) Type() string { return "http" }
 func (callbackTestAdapter) Capabilities() channels.Capabilities {
 	return channels.Capabilities{MaxTextRunes: 8000}
+}
+
+func TestCallbackGatewayRoutesApprovalBeforeNormalIntake(t *testing.T) {
+	repository := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
+	journal := NewMemoryJournal()
+	t.Cleanup(func() {
+		_ = journal.Close()
+		_ = repository.Close()
+	})
+	resolver, _ := routing.NewControlPlaneResolver(repository)
+	intake, _ := NewIntake(resolver, journal)
+	registry, _ := channels.NewRegistry(callbackTestAdapter{})
+	approvals := &approvalDecisionTestHandler{}
+	callbackGateway, err := NewCallbackGateway(
+		repository, registry, intake, WithApprovalDecisionHandler(approvals),
+	)
+	if err != nil {
+		t.Fatalf("new callback Gateway: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/callbacks/http/tutorial-http", nil)
+	if _, err := callbackGateway.Handle(
+		context.Background(), "http", "tutorial-http", request,
+	); err != nil {
+		t.Fatalf("handle callback: %v", err)
+	}
+	if approvals.calls != 1 || len(journal.Tasks()) != 0 {
+		t.Fatalf("approval calls=%d tasks=%+v", approvals.calls, journal.Tasks())
+	}
 }
 func (callbackTestAdapter) Send(
 	context.Context,

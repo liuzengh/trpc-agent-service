@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
@@ -26,6 +27,9 @@ type InboundRequest struct {
 	ChatType          string
 	Text              string
 	ReplyTarget       string
+	ApprovedTools     []string
+	ApprovedToolCalls []governance.ApprovedToolCall
+	ApprovalID        string
 }
 
 // AcceptResult identifies the durable records created for an inbound message.

@@ -15,6 +15,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
 	adminservice "github.com/liuzengh/trpc-agent-service/trpcservice/admin"
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
@@ -172,6 +173,15 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build audit writer: %w", err)
 	}
+	approvalRepository, err := approval.NewForControlPlane(controlPlaneRepository)
+	if err != nil {
+		_ = auditWriter.Close()
+		_ = controlPlaneRepository.Close()
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build approval repository: %w", err)
+	}
 	routeResolver, err := routing.NewControlPlaneResolver(controlPlaneRepository)
 	if err != nil {
 		_ = controlPlaneRepository.Close()
@@ -209,6 +219,7 @@ func run() error {
 		modelConfig.Stream,
 		agentservice.WithToolCatalog(toolCatalog),
 		agentservice.WithAuditWriter(auditWriter),
+		agentservice.WithApprovalRepository(approvalRepository),
 	)
 	if err != nil {
 		_ = gatewayIntake.Close()
@@ -268,6 +279,7 @@ func run() error {
 		RetryDelay:  250 * time.Millisecond,
 		Audit:       auditWriter,
 		Metrics:     metricRecorder,
+		Approvals:   approvalRepository,
 	})
 	if err != nil {
 		_ = agentQueue.Close()
@@ -305,10 +317,23 @@ func run() error {
 		_ = controlPlaneRepository.Close()
 		return fmt.Errorf("build channel registry: %w", err)
 	}
+	approvalService, err := approval.NewService(
+		approvalRepository,
+		inboundJournal,
+		auditWriter,
+	)
+	if err != nil {
+		_ = agentQueue.Close()
+		_ = runtime.Close()
+		_ = gatewayIntake.Close()
+		_ = controlPlaneRepository.Close()
+		return fmt.Errorf("build approval service: %w", err)
+	}
 	callbackGateway, err := gateway.NewCallbackGateway(
 		controlPlaneRepository,
 		channelRegistry,
 		gatewayIntake,
+		gateway.WithApprovalDecisionHandler(approvalService),
 	)
 	if err != nil {
 		_ = agentQueue.Close()
@@ -389,6 +414,11 @@ func run() error {
 		fmt.Printf("Gateway HTTP server listening on %s\n", listenAddr)
 	}
 	defer func() {
+		if err := approvalRepository.Close(); err != nil {
+			log.Printf("close approval repository: %v", err)
+		}
+	}()
+	defer func() {
 		if err := auditWriter.Close(); err != nil {
 			log.Printf("close audit writer: %v", err)
 		}
@@ -421,6 +451,7 @@ func run() error {
 		web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
 		web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
 		web.WithReadinessCheck("audit", auditWriter.Ready),
+		web.WithReadinessCheck("approval", approvalRepository.Ready),
 	}
 	if adminHandler != nil {
 		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))

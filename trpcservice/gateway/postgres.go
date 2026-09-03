@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
 
@@ -161,18 +162,21 @@ INSERT INTO agent_run(
 	scope.RevisionID = pinnedRevisionID
 	traceParent, traceState := outboundTraceHeaders(ctx)
 	task := workqueue.AgentTask{
-		InboundID:      inboundID,
-		RequestID:      requestID,
-		ConversationID: conversationID,
-		Scope:          scope,
-		MessageID:      request.ExternalMessageID,
-		UserID:         request.UserID,
-		SessionID:      request.SessionID,
-		Text:           request.Text,
-		ReplyTarget:    request.ReplyTarget,
-		TurnSeq:        turnSeq,
-		TraceParent:    traceParent,
-		TraceState:     traceState,
+		InboundID:         inboundID,
+		RequestID:         requestID,
+		ConversationID:    conversationID,
+		Scope:             scope,
+		MessageID:         request.ExternalMessageID,
+		UserID:            request.UserID,
+		SessionID:         request.SessionID,
+		Text:              request.Text,
+		ReplyTarget:       request.ReplyTarget,
+		TurnSeq:           turnSeq,
+		TraceParent:       traceParent,
+		TraceState:        traceState,
+		ApprovedTools:     append([]string(nil), request.ApprovedTools...),
+		ApprovedToolCalls: append([]governance.ApprovedToolCall(nil), request.ApprovedToolCalls...),
+		ApprovalID:        request.ApprovalID,
 	}
 	taskJSON, err := json.Marshal(task)
 	if err != nil {

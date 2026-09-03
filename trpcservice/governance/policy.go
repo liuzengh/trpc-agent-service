@@ -5,6 +5,8 @@ package governance
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -27,13 +29,19 @@ type ToolPolicy struct {
 // Arguments are intentionally excluded so secrets from tool payloads do not
 // leak into the audit trail.
 type ToolDecision struct {
-	ToolName   string
-	ToolCallID string
-	Action     string
-	Reason     string
+	ToolName      string
+	ToolCallID    string
+	ArgumentsHash string
+	Action        string
+	Reason        string
 }
 
 type DecisionRecorder func(context.Context, ToolDecision) error
+
+type ApprovedToolCall struct {
+	ToolName      string `json:"tool_name"`
+	ArgumentsHash string `json:"arguments_hash"`
+}
 
 func ParseToolPolicy(raw json.RawMessage) (ToolPolicy, error) {
 	if len(raw) == 0 {
@@ -63,10 +71,24 @@ func RunOptions(
 	approvedTools []string,
 	recorders ...DecisionRecorder,
 ) []agentcore.RunOption {
+	return RunOptionsWithApprovals(policy, userID, approvedTools, nil, recorders...)
+}
+
+func RunOptionsWithApprovals(
+	policy ToolPolicy,
+	userID string,
+	approvedTools []string,
+	approvedCalls []ApprovedToolCall,
+	recorders ...DecisionRecorder,
+) []agentcore.RunOption {
 	allowed := stringSet(policy.AllowedTools)
 	dangerous := stringSet(policy.DangerousTools)
 	deniedUsers := stringSet(policy.DeniedUsers)
 	approved := stringSet(approvedTools)
+	approvedHashes := make(map[string]struct{}, len(approvedCalls))
+	for _, call := range approvedCalls {
+		approvedHashes[call.ToolName+"\x00"+call.ArgumentsHash] = struct{}{}
+	}
 	options := []agentcore.RunOption{
 		agentcore.WithToolFilter(func(_ context.Context, item agenttool.Tool) bool {
 			return item != nil && item.Declaration() != nil &&
@@ -87,7 +109,9 @@ func RunOptions(
 					decision = agenttool.DenyPermission("tool is not allowed by the Agent revision")
 				case policy.MaxToolCalls > 0 && calls.Add(1) > int64(policy.MaxToolCalls):
 					decision = agenttool.DenyPermission("tool call budget exceeded")
-				case contains(dangerous, request.ToolName) && !contains(approved, request.ToolName):
+				case contains(dangerous, request.ToolName) &&
+					!contains(approved, request.ToolName) &&
+					!approvedToolCall(approvedHashes, request):
 					decision = agenttool.AskPermission("explicit user approval is required")
 				default:
 					decision = agenttool.AllowPermission()
@@ -104,6 +128,8 @@ func RunOptions(
 				if request != nil {
 					toolDecision.ToolName = request.ToolName
 					toolDecision.ToolCallID = request.ToolCallID
+					digest := sha256.Sum256(request.Arguments)
+					toolDecision.ArgumentsHash = hex.EncodeToString(digest[:])
 				}
 				if err := recorder(ctx, toolDecision); err != nil {
 					return decision, fmt.Errorf("record tool permission decision: %w", err)
@@ -117,6 +143,15 @@ func RunOptions(
 		options = append(options, agentcore.WithMaxRunDuration(duration))
 	}
 	return options
+}
+
+func approvedToolCall(values map[string]struct{}, request *agenttool.PermissionRequest) bool {
+	if request == nil {
+		return false
+	}
+	digest := sha256.Sum256(request.Arguments)
+	_, ok := values[request.ToolName+"\x00"+hex.EncodeToString(digest[:])]
+	return ok
 }
 
 func stringSet(values []string) map[string]struct{} {

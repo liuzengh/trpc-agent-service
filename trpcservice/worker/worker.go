@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	agentruntime "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 	"go.opentelemetry.io/otel"
@@ -28,6 +31,7 @@ type Options struct {
 	RetryDelay  time.Duration
 	Audit       audit.Writer
 	Metrics     *platformmetrics.Recorder
+	Approvals   approval.Repository
 }
 
 // Worker processes at-least-once queue deliveries. Durable idempotency makes
@@ -83,18 +87,30 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
 	result, runErr := w.runtime.ChatWithScope(ctx, agentruntime.ChatInput{
-		Scope:     task.Scope,
-		MessageID: task.MessageID,
-		UserID:    task.UserID,
-		SessionID: task.SessionID,
-		Text:      task.Text,
-		RequestID: task.RequestID,
+		Scope:             task.Scope,
+		MessageID:         task.MessageID,
+		UserID:            task.UserID,
+		SessionID:         task.SessionID,
+		Text:              task.Text,
+		RequestID:         task.RequestID,
+		ApprovedTools:     append([]string(nil), task.ApprovedTools...),
+		ApprovedToolCalls: append([]governance.ApprovedToolCall(nil), task.ApprovedToolCalls...),
+		ReplyTarget:       task.ReplyTarget,
 	})
 	if runErr != nil {
 		w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "failed", time.Since(started))
 		failErr := w.journal.FailRun(ctx, task.RequestID, "agent_execution", runErr)
 		auditErr := w.recordAudit(ctx, task, gateway.RunResult{}, "run_failed", "agent_execution", started)
 		return true, w.retryOrAck(ctx, delivery, task, errors.Join(runErr, failErr, auditErr))
+	}
+	if w.opts.Approvals != nil {
+		pending, approvalErr := w.opts.Approvals.ListPendingByRequest(
+			ctx, task.Scope.TenantID, task.RequestID,
+		)
+		if approvalErr != nil {
+			return true, w.retryOrAck(ctx, delivery, task, approvalErr)
+		}
+		result.Reply = appendApprovalInstructions(result.Reply, pending)
 	}
 	if err := w.journal.CompleteRun(ctx, task, gateway.RunResult{
 		Reply:            result.Reply,
@@ -124,6 +140,23 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	return true, nil
+}
+
+func appendApprovalInstructions(reply string, records []approval.Record) string {
+	if len(records) == 0 {
+		return reply
+	}
+	var builder strings.Builder
+	builder.WriteString(strings.TrimSpace(reply))
+	for _, record := range records {
+		builder.WriteString("\n\n需要人工审批工具：")
+		builder.WriteString(record.ToolName)
+		builder.WriteString("\n批准请回复：批准 ")
+		builder.WriteString(record.ApprovalID)
+		builder.WriteString("\n拒绝请回复：拒绝 ")
+		builder.WriteString(record.ApprovalID)
+	}
+	return builder.String()
 }
 
 func (w *Worker) recordAudit(

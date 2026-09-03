@@ -2,6 +2,8 @@ package governance
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"testing"
 
@@ -71,5 +73,35 @@ func TestToolPermissionDecisionRecorder(t *testing.T) {
 	if recorded.ToolName != "echo" || recorded.ToolCallID != "call-1" ||
 		recorded.Action != "allow" {
 		t.Fatalf("recorded=%+v", recorded)
+	}
+}
+
+func TestDangerousApprovalIsBoundToArgumentsHash(t *testing.T) {
+	policy := ToolPolicy{
+		AllowedTools: []string{"dangerous"}, DangerousTools: []string{"dangerous"},
+	}
+	approvedArguments := []byte(`{"target":"record-a"}`)
+	digest := sha256.Sum256(approvedArguments)
+	approved := []ApprovedToolCall{{
+		ToolName: "dangerous", ArgumentsHash: hex.EncodeToString(digest[:]),
+	}}
+	runOptions := agentcore.NewRunOptions(RunOptionsWithApprovals(
+		policy, "alice", nil, approved,
+	)...)
+	decision, err := runOptions.ToolPermissionPolicy.CheckToolPermission(
+		context.Background(), &agenttool.PermissionRequest{
+			ToolName: "dangerous", Arguments: approvedArguments,
+		},
+	)
+	if err != nil || decision.Action != agenttool.PermissionActionAllow {
+		t.Fatalf("approved decision=%+v err=%v", decision, err)
+	}
+	decision, err = runOptions.ToolPermissionPolicy.CheckToolPermission(
+		context.Background(), &agenttool.PermissionRequest{
+			ToolName: "dangerous", Arguments: []byte(`{"target":"record-b"}`),
+		},
+	)
+	if err != nil || decision.Action != agenttool.PermissionActionAsk {
+		t.Fatalf("changed arguments decision=%+v err=%v", decision, err)
 	}
 }

@@ -36,9 +36,14 @@
 - PostgreSQL/InMemory 审计 Writer 与敏感字段递归脱敏；
 - inbound、run、tool permission、reply 和 Admin mutation 审计；
 - Runner Event token usage 去重汇总、Revision 单价和租户成本指标；
+- PostgreSQL/InMemory Tool Approval Repository 和十五分钟过期状态机；
+- 同租户、同 Channel Binding、同 IM 用户的审批身份校验；
+- approval decision 消息幂等、恢复任务和 resumed 水位；
+- 危险 Tool 批准绑定 `tool_name + arguments_hash`，参数变化重新审批；
+- 企业微信/Telegram 文本批准与拒绝命令；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是持久化审批记录、IM 确认交互，以及 Memory、Summary、Knowledge 和 Artifact。
+接下来的最近里程碑是 Memory、Summary、Knowledge、Artifact、Storage Router 和后台持久化 Job。
 
 ## 1. 建议目录
 

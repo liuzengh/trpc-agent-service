@@ -316,6 +316,8 @@ TRPC_AGENT_OTEL_SAMPLE_RATIO=1
 
 HTTP、Gateway、持久化任务、Worker 的 trace 传播，运行/Admin/Tool 审计，以及 token 与租户成本指标见 [OpenTelemetry、审计和成本链路](docs/getting-started.md#23-opentelemetry审计和成本链路)。模型价格通过 Revision 的 `model_config.prompt_cost_per_million` 和 `completion_cost_per_million` 配置。
 
+危险工具会创建可恢复的 `tool_approval`。企业微信或 Telegram 用户在原会话回复严格的 `批准 apr_xxx` / `拒绝 apr_xxx` 命令，平台会校验租户、Channel Binding、用户、有效期以及工具参数哈希，再生成幂等 continuation。详见 [可恢复的危险工具审批链路](docs/getting-started.md#24-可恢复的危险工具审批链路)。
+
 停止服务：
 
 ```bash

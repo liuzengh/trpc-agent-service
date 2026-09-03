@@ -2,10 +2,12 @@ package worker
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	agentruntime "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
@@ -69,5 +71,15 @@ func TestWorkerCompletesDurableRun(t *testing.T) {
 	if len(events) != 1 || events[0].Decision != "run_completed" ||
 		events[0].RequestID != accepted.RequestID {
 		t.Fatalf("audit events=%+v", events)
+	}
+}
+
+func TestAppendApprovalInstructions(t *testing.T) {
+	reply := appendApprovalInstructions("waiting", []approval.Record{{
+		ApprovalID: "apr_0123456789abcdef0123456789abcdef", ToolName: "dangerous_demo",
+	}})
+	if !strings.Contains(reply, "批准 apr_0123456789abcdef0123456789abcdef") ||
+		!strings.Contains(reply, "拒绝 apr_0123456789abcdef0123456789abcdef") {
+		t.Fatalf("reply=%q", reply)
 	}
 }

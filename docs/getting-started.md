@@ -2463,6 +2463,63 @@ agent.model.cost
 
 当前实现已经把 callback、Gateway、队列和 Worker 串成一个 trace。后续接入 Memory、Knowledge、Artifact 时，会在各 Storage Adapter 上继续创建读写 span；Reply Sender 的跨进程父上下文也会随 outbound 记录继续完善。
 
-## 24. 下一步
+## 24. 可恢复的危险工具审批链路
 
-下一阶段实现真正可恢复的危险工具审批记录和 IM 确认流程，然后接入 Memory、Summary、Knowledge、Artifact 与租户级 Storage Router。
+`PermissionActionAsk` 现在不再只是模型看到的一段错误。平台会创建持久化 `tool_approval`，把审批编号附加到 IM 回复，并把后续“批准/拒绝”消息路由到审批状态机。
+
+完整链路如下：
+
+```text
+模型请求 dangerous tool
+  → Tool PermissionPolicy 判断需要审批
+  → 写 tool_approval(status=pending)
+  → 本轮 Runner 正常结束
+  → Worker 查询本 request 的 pending approval
+  → 回复中附加 approval_id 和操作命令
+  → 用户在原 IM 会话回复“批准 apr_xxx”或“拒绝 apr_xxx”
+  → Channel Adapter 完成验签和身份标准化
+  → Approval Service 校验 tenant + binding + user
+  → approved/denied 状态原子更新
+  → 生成新的持久化 AgentTask
+  → approved 任务携带不可伪造的批准凭证
+  → Runner 继续执行或确认取消
+```
+
+支持的严格命令是：
+
+```text
+批准 apr_0123456789abcdef0123456789abcdef
+同意 apr_0123456789abcdef0123456789abcdef
+approve apr_0123456789abcdef0123456789abcdef
+拒绝 apr_0123456789abcdef0123456789abcdef
+deny apr_0123456789abcdef0123456789abcdef
+reject apr_0123456789abcdef0123456789abcdef
+```
+
+只有整条消息符合命令格式才会进入审批逻辑。普通聊天中出现“帮我 approve 一下”不会被误判。批准者必须是发起请求的同一个标准化 IM 用户，而且必须来自同一 Channel Binding；跨租户、跨企业微信账号或另一个 Telegram Bot 的审批都会返回身份不匹配。
+
+批准凭证不是只绑定工具名，而是绑定：
+
+```text
+tool_name + SHA-256(canonical tool arguments)
+```
+
+模型在恢复执行时如果更换参数，PermissionPolicy 会再次返回 `ask`，不会复用旧批准。数据库只保存参数哈希，不把可能含密钥和个人信息的完整工具参数写入审批表或审计日志。
+
+`tool_approval` 的主要状态为：
+
+```text
+pending → approved
+pending → denied
+pending → expired
+```
+
+默认十五分钟过期。`decision_message_id` 在 Channel Binding 内唯一，用来处理 IM 重复投递；第一次决策成功后，同方向重复消息会复用第一次决策消息创建的 continuation，反向决策则冲突。`resumed_at` 表示 continuation 已经可靠写入 Inbox/Outbox 链路。即使进程在“更新审批状态”后崩溃，IM 平台重投同一消息时也会用稳定 ID 再次执行幂等入站，不会产生两个有效 Tool 调用。
+
+当前文本确认流程对企业微信和 Telegram 都可用，且不依赖平台特有卡片。后续可以利用 Adapter 的 `SupportsCard` 能力增加按钮卡片，但按钮回调最终仍必须进入同一审批状态机，不能绕过身份、过期时间和参数哈希校验。
+
+离线 `TutorialModel` 不会主动生成 Tool Call；要端到端观察审批，需要使用支持 function calling 的真实模型，并在 Revision 中把 `dangerous_demo` 同时放入 `allowed_tools` 和 `dangerous_tools`。`dangerous_demo` 没有真实副作用，只用于安全验证。
+
+## 25. 下一步
+
+下一阶段接入 Memory、Summary、Knowledge、Artifact 与租户级 Storage Router，并让这些后台写入任务具备持久化队列、水位和迁移能力。
