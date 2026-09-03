@@ -2268,7 +2268,7 @@ go run ./cmd/trpc-service -role jobs
 
 ## 20. 企业微信和 Telegram Channel Adapter
 
-本节描述已经落地的 Adapter 代码路径。企业微信和 Telegram 当前通过本地模拟服务验证协议处理，尚未使用真实企业账号、Bot 和公网回调完成端到端联调；具体状态见 [`feature-status.md`](feature-status.md)。当前两个 Adapter 的出站能力都是文本消息，媒体 ID 解析不等于支持媒体发送。
+本节描述已经落地的 Adapter 代码路径。Telegram 已使用真实 Bot 和临时 Cloudflare HTTPS Tunnel 完成私聊三轮联调；企业微信仍是本地模拟协议测试，尚未使用真实企业账号完成端到端联调。具体状态见 [`feature-status.md`](feature-status.md)。当前两个 Adapter 的出站能力都是文本消息，媒体 ID 解析不等于支持媒体发送。
 
 统一回调地址：
 

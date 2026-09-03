@@ -24,7 +24,7 @@
 | Knowledge | 本地集成 | InMemory、Qdrant、切块、过滤和本地 Qdrant 集成 | 外部 Embedding 服务和远端 Qdrant 联调 |
 | Artifact | 本地集成 | InMemory、MinIO/S3-compatible、版本锁 | AWS S3 或其他云对象存储联调 |
 | 企业微信 | 自动测试 | URL 验证、签名、解密、文本入站、Token 获取、文本发送模拟 | 真实企业账号、公网回调、真实收发、媒体与卡片发送 |
-| Telegram | 自动测试 | Webhook Secret、Update 解析、Topic、文本发送模拟 | 真实 Bot、公网 Webhook、真实收发、编辑和媒体发送 |
+| Telegram | 真实联调（开发环境） | 真实 Bot、Cloudflare HTTPS Webhook、私聊三轮 Session、真实模型回复、Inbox/Run/Outbound 全部成功 | 固定域名、群聊/Topic、429/重投、编辑和媒体发送 |
 | 微信公众号 / 微信客服 | 设计 | 数据模型与接入差异说明 | Adapter 代码和真实联调 |
 | Tool 治理与审批 | 自动测试 / 本地集成 | Tool 白名单、参数哈希审批、Journal、审计 | 真实业务 Tool 和真实 IM 审批 |
 | MCP | 设计 | 权限、密钥、超时和审计边界 | MCP Client/Server 的实际接入 |
