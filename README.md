@@ -148,6 +148,7 @@
 - [数据同步、一致性和幂等策略](docs/data-consistency.md)
 - [多后端适配方案](docs/backend-adapters.md)
 - [企业微信、微信公众号和 Telegram 接入](docs/im-channels.md)
+- [Telegram 手动测试运行手册](docs/telegram-manual-runbook.md)
 - [治理、安全、监控、故障恢复和部署](docs/governance-operations.md)
 - [生产风险清单](docs/risks.md)
 - [代码实施路线和验收映射](docs/implementation-roadmap.md)

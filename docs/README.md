@@ -11,6 +11,7 @@
 | [data-consistency.md](data-consistency.md) | session 并发、event/state/summary 顺序、Memory 可见性、消息幂等和迁移策略 |
 | [backend-adapters.md](backend-adapters.md) | Session、Memory、Knowledge、Artifact 等多后端适配和选型 |
 | [im-channels.md](im-channels.md) | 企业微信、微信公众号和 Telegram 通道接入设计 |
+| [telegram-manual-runbook.md](telegram-manual-runbook.md) | Telegram 固定域名下的手动启动、停止、验证和排障 |
 | [governance-operations.md](governance-operations.md) | Plugin/Guardrail、审计、监控、密钥、故障恢复、容量和部署方案 |
 | [risks.md](risks.md) | 生产风险、触发条件、监控信号和缓解措施 |
 | [implementation-roadmap.md](implementation-roadmap.md) | 代码模块、迭代顺序、测试策略和验收映射 |

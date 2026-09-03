@@ -7,7 +7,7 @@
 | 通道 | 当前代码 | 验证层级 | 待完成 |
 | --- | --- | --- | --- |
 | 企业微信 | URL 验证、加密回调、文本解析、Token 缓存、应用文本发送 | `httptest` 模拟企业微信 API | 真实账号、公网回调、真实收发、媒体/卡片发送 |
-| Telegram | Webhook Secret、Update/Topic 解析、文本 `sendMessage` | 真实 Bot + Cloudflare Quick Tunnel 私聊三轮验收 | 固定域名、群聊/Topic、重投/限流、编辑/媒体发送 |
+| Telegram | Webhook Secret、Update/Topic 解析、文本 `sendMessage` | 固定域名下完成私聊、群聊、Topic、去重和 Webhook 恢复 | 真实 429、群白名单/require_mention、编辑/媒体发送 |
 | 微信公众号/微信客服 | 接入设计 | 文档评审 | Adapter 实现与真实联调 |
 
 OpenClaw 的 `Channel` 只有 `ID()` 和 `Run(ctx)`，适合示例和进程内组合。平台需要更明确的入站、回复和能力模型：
