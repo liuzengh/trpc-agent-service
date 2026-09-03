@@ -92,6 +92,34 @@ type BackendBinding struct {
 	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
+const (
+	MigrationPlanned    = "planned"
+	MigrationDualWrite  = "dual_write"
+	MigrationBackfill   = "backfill"
+	MigrationVerify     = "verify"
+	MigrationCutover    = "cutover"
+	MigrationCompleted  = "completed"
+	MigrationRollback   = "rollback"
+	MigrationRolledBack = "rolled_back"
+	MigrationFailed     = "failed"
+)
+
+type BackendMigration struct {
+	ID              string          `json:"migration_id"`
+	TenantID        string          `json:"tenant_id"`
+	AppID           string          `json:"app_id,omitempty"`
+	ResourceType    string          `json:"resource_type"`
+	SourceBindingID string          `json:"source_binding_id"`
+	TargetBindingID string          `json:"target_binding_id"`
+	State           string          `json:"state"`
+	Checkpoint      json.RawMessage `json:"checkpoint"`
+	Verification    json.RawMessage `json:"verification"`
+	RepairBacklog   int64           `json:"repair_backlog"`
+	Version         int64           `json:"version"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+}
+
 // BootstrapData is the initial control-plane snapshot for local development.
 type BootstrapData struct {
 	Tenants         []Tenant

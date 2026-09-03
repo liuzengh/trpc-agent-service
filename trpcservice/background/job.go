@@ -17,6 +17,8 @@ const (
 	JobMemoryExtract   = "memory_extract"
 	JobKnowledgeUpsert = "knowledge_upsert"
 	JobKnowledgeDelete = "knowledge_delete"
+	JobMemoryBackfill  = "memory_backfill"
+	JobMemoryVerify    = "memory_verify"
 )
 
 var (

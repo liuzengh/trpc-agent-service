@@ -16,3 +16,9 @@ type KnowledgeUpsertPayload struct {
 type KnowledgeDeletePayload struct {
 	DocumentID string `json:"document_id"`
 }
+
+type MemoryMigrationPayload struct {
+	MigrationID     string   `json:"migration_id"`
+	UserIDs         []string `json:"user_ids"`
+	ExpectedVersion int64    `json:"expected_version"`
+}

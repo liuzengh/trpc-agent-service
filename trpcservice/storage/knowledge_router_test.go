@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
@@ -68,5 +69,60 @@ func TestHashEmbedderDeterministic(t *testing.T) {
 		if first[index] != second[index] {
 			t.Fatal("hash embedding is not deterministic")
 		}
+	}
+}
+
+func TestKnowledgeRouterMigrationDualWrite(t *testing.T) {
+	data := controlplane.DefaultBootstrapData()
+	now := time.Now().UTC()
+	source := controlplane.BackendBinding{
+		ID: "knowledge-source", TenantID: "tutorial-tenant", AppID: "tutorial-app",
+		ResourceType: "knowledge", BackendType: "inmemory", MigrationState: "active",
+		Config: json.RawMessage(`{"dimensions":32}`), Version: 1,
+	}
+	data.BackendBindings = append(data.BackendBindings, source)
+	data.Revisions[0].KnowledgeConfig = json.RawMessage(`{
+        "enabled":true,"embedding":{"provider":"hash","dimensions":32}
+    }`)
+	data.Revisions[0].Checksum = controlplane.RevisionChecksum(data.Revisions[0])
+	repository := controlplane.NewMemoryRepository(data)
+	target := controlplane.BackendBinding{
+		ID: "knowledge-target", TenantID: "tutorial-tenant", AppID: "tutorial-app",
+		ResourceType: "knowledge", BackendType: "inmemory", MigrationState: "migration_target",
+		Config: json.RawMessage(`{"dimensions":32}`), Version: 1,
+	}
+	if err := repository.CreateBackendBinding(context.Background(), target); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if err := repository.CreateBackendMigration(context.Background(), controlplane.BackendMigration{
+		ID: "knowledge-migration", TenantID: "tutorial-tenant", AppID: "tutorial-app",
+		ResourceType: "knowledge", SourceBindingID: source.ID, TargetBindingID: target.ID,
+		State: controlplane.MigrationDualWrite, Checkpoint: json.RawMessage(`{}`),
+		Verification: json.RawMessage(`{}`), Version: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create migration: %v", err)
+	}
+	router, _ := NewKnowledgeRouter(repository, secret.StaticStore{})
+	t.Cleanup(func() {
+		_ = router.Close()
+		_ = repository.Close()
+	})
+	scope := runtimecontext.TutorialScope()
+	revision := data.Revisions[0]
+	if _, err := router.UpsertDocument(context.Background(), scope, revision, KnowledgeDocument{
+		ID: "migration-doc", Content: "dual written knowledge",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	config, _ := parseRevisionKnowledgeConfig(revision.KnowledgeConfig)
+	targetHandle, err := router.cachedHandle(context.Background(), scope, revision, config, target)
+	if err != nil {
+		t.Fatalf("target handle: %v", err)
+	}
+	result, err := targetHandle.knowledge.Search(
+		context.Background(), &knowledge.SearchRequest{Query: "dual written knowledge"},
+	)
+	if err != nil || result.Document == nil {
+		t.Fatalf("target result=%+v err=%v", result, err)
 	}
 }

@@ -20,6 +20,10 @@ type Repository interface {
 	GetChannelBinding(ctx context.Context, tenantID string, bindingID string) (ChannelBinding, error)
 	GetChannelBindingByCallbackKey(ctx context.Context, callbackKey string) (ChannelBinding, error)
 	ListBackendBindings(ctx context.Context, tenantID string, appID string) ([]BackendBinding, error)
+	GetBackendBinding(ctx context.Context, tenantID string, bindingID string) (BackendBinding, error)
+	GetBackendMigration(ctx context.Context, tenantID string, migrationID string) (BackendMigration, error)
+	GetActiveBackendMigration(ctx context.Context, tenantID string, appID string, resourceType string) (BackendMigration, error)
+	AdjustBackendMigrationRepair(ctx context.Context, tenantID string, migrationID string, delta int64) error
 	Ready(ctx context.Context) error
 	Close() error
 }
@@ -39,4 +43,14 @@ type MutableRepository interface {
 	) (AgentApp, error)
 	CreateChannelBinding(ctx context.Context, binding ChannelBinding) error
 	CreateBackendBinding(ctx context.Context, binding BackendBinding) error
+	CreateBackendMigration(ctx context.Context, migration BackendMigration) error
+	TransitionBackendMigration(
+		ctx context.Context,
+		tenantID string,
+		migrationID string,
+		nextState string,
+		expectedVersion int64,
+		checkpoint []byte,
+		verification []byte,
+	) (BackendMigration, error)
 }

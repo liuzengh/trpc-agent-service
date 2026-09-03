@@ -57,9 +57,14 @@
 - `jobs` 进程角色与跨进程 traceparent；
 - durable Summary、Memory Extraction 水位和 Knowledge Ingest/Delete；
 - Admin Job 查询与 dead job retry；
+- PostgreSQL Backend Migration 状态机、乐观锁与 active partial unique index；
+- Memory 源读双写、目标读反向双写、completed/rollback binding swap；
+- Memory 分用户 backfill/verify Job 与 canonical ID 校验；
+- Knowledge 在线双写与历史文档重新导入策略；
+- secondary failure repair backlog 与 verify 清零；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-接下来的最近里程碑是 Backend Binding 数据迁移、双写与回滚。
+接下来的最近里程碑是 tenant-scoped Session Router 与 Session 迁移。
 
 ## 1. 建议目录
 

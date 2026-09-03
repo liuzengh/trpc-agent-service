@@ -2834,6 +2834,83 @@ POST /admin/jobs/retry
 
 Job payload 保存 W3C `traceparent`，Processor 恢复父上下文后创建 `background.{job_type}` span，审计记录完成/失败、attempt、latency 和 error type。`context.Context` 取消会终止模型/Embedding 调用；状态 finalize 使用独立三秒 Context，尽量在进程退出前释放 claim 或记录失败。
 
-## 29. 下一步
+## 29. Backend Migration 状态机
 
-下一阶段实现 Backend Binding 数据迁移状态机：双写、回填、校验、切读、回滚和 repair backlog，并覆盖 Redis → PostgreSQL Memory/Session 与本地 → Qdrant Knowledge。
+平台不通过直接修改一个 Backend Binding 来切库，而是创建独立、带版本的 `backend_migration`：
+
+```text
+planned
+  → dual_write
+  → backfill
+  → verify
+  → cutover
+  → completed
+
+dual_write/backfill/verify/cutover
+  → rollback
+  → rolled_back
+
+任意运行阶段 → failed
+```
+
+Migration 固定 source/target binding。Source 必须是当前 `active`，Target 必须使用 `migration_target`；migration 期间数据库允许同一 app/resource 同时存在两条 binding，但 partial unique index 仍保证最多一个 `active`。
+
+管理接口：
+
+```text
+POST /admin/backend-migrations
+POST /admin/backend-migrations/get
+POST /admin/backend-migrations/transition
+POST /admin/backend-migrations/backfill-memory
+POST /admin/backend-migrations/verify-memory
+```
+
+所有 transition 都要求 `expected_version`。合法路径由 Admin Service 检查，跳过 backfill/verify 或两个管理员并发更新都会失败。进入 cutover 前，Migration 的 verification 必须包含 `passed=true`。
+
+Memory Router 根据状态实时改变读写策略：
+
+| 状态 | 读取 | 写入 |
+| --- | --- | --- |
+| `planned` | source | source |
+| `dual_write` / `backfill` / `verify` | source | source → target |
+| `cutover` | target | target → source |
+| `completed` | target（成为 active） | target |
+| `rollback` / `rolled_back` | source | source |
+
+切读后仍反向双写 source，给快速回滚留出窗口。`completed` transition 在同一 PostgreSQL 事务中把 source 标成 `retired`、target 标成 `active`；`rolled_back` 则恢复 source active。Router 使用 binding version 作为 cache key，因此状态完成后的新请求不会继续使用旧实例。
+
+Memory backfill 请求示例：
+
+```json
+{
+  "tenant_id": "tenant-a",
+  "migration_id": "migration-memory-01",
+  "operation_id": "batch-0001",
+  "user_ids": ["user-a", "user-b"]
+}
+```
+
+Backfill Job 从 source 读取用户全部有效 Memory，保留 fact/episode metadata 后用 canonical Add 写 target，再比较 source/target 的 ID、内容和数量。Verify Job 对指定用户集合再次比较；全部通过后由 Job Processor 自己把状态从 `backfill` 更新到 `verify` 并写 verification，操作者不需要手工伪造结果。
+
+Memory 和 Knowledge 的在线写都会在迁移阶段双写。Secondary 失败时当前调用返回可重试错误，同时 `repair_backlog` 原子加一；Background Job 或 Agent 消息重试依靠 canonical ID / document replacement 保持幂等。Verify 全部通过后 repair backlog 清零。`backend_migration` 查询会显示 checkpoint、verification、repair backlog、state 和 version。
+
+Knowledge 迁移对新 Upsert/Delete 实施同样的源读双写和目标读反向双写。历史 Knowledge 回填应从原始文档源重新提交 Knowledge Job，而不是从向量反推文本；这能同时重算新 Embedder/新维度。InMemory → Qdrant 或 Qdrant collection 迁移因此可以使用相同状态机。
+
+生产切换顺序：
+
+```text
+创建 migration_target
+→ planned 健康检查
+→ dual_write 观察 secondary 错误
+→ backfill 分批提交 user/document job
+→ verify，repair_backlog 必须为 0
+→ cutover，观察读延迟与命中率
+→ 保留反向双写回滚窗口
+→ completed
+```
+
+状态机、active binding swap、Memory 双写/切读、repair backlog 和 PostgreSQL 索引均有单测与真实 PostgreSQL 集成测试。
+
+## 30. 下一步
+
+下一阶段把 Session 从全局启动配置升级为 tenant-scoped Session Router，使租户也能分别选择 Redis/PostgreSQL，并把相同迁移状态机应用到 Session Event/State/Summary。

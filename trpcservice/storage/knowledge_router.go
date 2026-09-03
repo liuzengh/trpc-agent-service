@@ -42,10 +42,12 @@ type KnowledgeRouter struct {
 }
 
 type knowledgeHandle struct {
-	knowledge *scopedKnowledge
-	store     vectorstore.VectorStore
-	embedder  embedder.Embedder
-	config    revisionKnowledgeConfig
+	knowledge        *scopedKnowledge
+	store            vectorstore.VectorStore
+	embedder         embedder.Embedder
+	config           revisionKnowledgeConfig
+	secondary        *knowledgeHandle
+	onSecondaryError func(context.Context, error)
 }
 
 func NewKnowledgeRouter(
@@ -93,6 +95,27 @@ func (r *KnowledgeRouter) UpsertDocument(
 	if doc.ID == "" || doc.Content == "" {
 		return 0, errors.New("knowledge document ID and content are required")
 	}
+	chunks, err := upsertKnowledgeHandle(ctx, scope, handle, doc)
+	if err != nil {
+		return 0, err
+	}
+	if handle.secondary != nil {
+		if _, err := upsertKnowledgeHandle(ctx, scope, handle.secondary, doc); err != nil {
+			if handle.onSecondaryError != nil {
+				handle.onSecondaryError(ctx, err)
+			}
+			return 0, fmt.Errorf("secondary knowledge write: %w", err)
+		}
+	}
+	return chunks, nil
+}
+
+func upsertKnowledgeHandle(
+	ctx context.Context,
+	scope runtimecontext.Scope,
+	handle *knowledgeHandle,
+	doc KnowledgeDocument,
+) (int, error) {
 	if err := handle.store.DeleteByFilter(ctx, vectorstore.WithDeleteFilter(map[string]any{
 		"tenant_id": scope.TenantID, "app_id": scope.AppID, "source_document_id": doc.ID,
 	})); err != nil {
@@ -132,10 +155,24 @@ func (r *KnowledgeRouter) DeleteDocument(
 	if !enabled {
 		return errors.New("knowledge is disabled for this revision")
 	}
-	return handle.store.DeleteByFilter(ctx, vectorstore.WithDeleteFilter(map[string]any{
+	filter := map[string]any{
 		"tenant_id": scope.TenantID, "app_id": scope.AppID,
 		"source_document_id": strings.TrimSpace(documentID),
-	}))
+	}
+	if err := handle.store.DeleteByFilter(ctx, vectorstore.WithDeleteFilter(filter)); err != nil {
+		return err
+	}
+	if handle.secondary != nil {
+		if err := handle.secondary.store.DeleteByFilter(
+			ctx, vectorstore.WithDeleteFilter(filter),
+		); err != nil {
+			if handle.onSecondaryError != nil {
+				handle.onSecondaryError(ctx, err)
+			}
+			return fmt.Errorf("secondary knowledge delete: %w", err)
+		}
+	}
+	return nil
 }
 
 func (r *KnowledgeRouter) Ready(ctx context.Context) error {
@@ -243,22 +280,98 @@ func (r *KnowledgeRouter) handleFor(
 	if !revisionConfig.Enabled {
 		return nil, false, nil
 	}
+	migration, migrationErr := r.repository.GetActiveBackendMigration(
+		ctx, scope.TenantID, scope.AppID, knowledgeResourceType,
+	)
+	if migrationErr == nil {
+		return r.migrationHandle(ctx, scope, revision, revisionConfig, migration)
+	}
+	if !errors.Is(migrationErr, controlplane.ErrNotFound) {
+		return nil, false, migrationErr
+	}
 	binding, err := resolveBackendBinding(
 		ctx, r.repository, scope.TenantID, scope.AppID, knowledgeResourceType,
 	)
 	if err != nil {
 		return nil, false, err
 	}
+	handle, err := r.cachedHandle(ctx, scope, revision, revisionConfig, binding)
+	return handle, true, err
+}
+
+func (r *KnowledgeRouter) migrationHandle(
+	ctx context.Context,
+	scope runtimecontext.Scope,
+	revision controlplane.AgentRevision,
+	config revisionKnowledgeConfig,
+	migration controlplane.BackendMigration,
+) (*knowledgeHandle, bool, error) {
+	sourceBinding, err := r.repository.GetBackendBinding(
+		ctx, scope.TenantID, migration.SourceBindingID,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	source, err := r.cachedHandle(ctx, scope, revision, config, sourceBinding)
+	if err != nil {
+		return nil, false, err
+	}
+	if migration.State == controlplane.MigrationPlanned ||
+		migration.State == controlplane.MigrationRollback {
+		return source, true, nil
+	}
+	targetBinding, err := r.repository.GetBackendBinding(
+		ctx, scope.TenantID, migration.TargetBindingID,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	target, err := r.cachedHandle(ctx, scope, revision, config, targetBinding)
+	if err != nil {
+		return nil, false, err
+	}
+	switch migration.State {
+	case controlplane.MigrationDualWrite, controlplane.MigrationBackfill,
+		controlplane.MigrationVerify:
+		combined := *source
+		combined.secondary = target
+		combined.onSecondaryError = func(ctx context.Context, _ error) {
+			_ = r.repository.AdjustBackendMigrationRepair(
+				ctx, migration.TenantID, migration.ID, 1,
+			)
+		}
+		return &combined, true, nil
+	case controlplane.MigrationCutover:
+		combined := *target
+		combined.secondary = source
+		combined.onSecondaryError = func(ctx context.Context, _ error) {
+			_ = r.repository.AdjustBackendMigrationRepair(
+				ctx, migration.TenantID, migration.ID, 1,
+			)
+		}
+		return &combined, true, nil
+	default:
+		return nil, false, fmt.Errorf("unsupported active knowledge migration state %q", migration.State)
+	}
+}
+
+func (r *KnowledgeRouter) cachedHandle(
+	ctx context.Context,
+	scope runtimecontext.Scope,
+	revision controlplane.AgentRevision,
+	revisionConfig revisionKnowledgeConfig,
+	binding controlplane.BackendBinding,
+) (*knowledgeHandle, error) {
 	cacheKey := binding.ID + "\x00" + fmt.Sprint(binding.Version) + "\x00" + revision.Checksum
 	r.mu.RLock()
 	handle := r.handles[cacheKey]
 	closed := r.closed
 	r.mu.RUnlock()
 	if closed {
-		return nil, false, errors.New("knowledge router is closed")
+		return nil, errors.New("knowledge router is closed")
 	}
 	if handle != nil {
-		return handle, true, nil
+		return handle, nil
 	}
 	value, err, _ := r.group.Do(cacheKey, func() (any, error) {
 		r.mu.RLock()
@@ -282,9 +395,9 @@ func (r *KnowledgeRouter) handleFor(
 		return built, nil
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return value.(*knowledgeHandle), true, nil
+	return value.(*knowledgeHandle), nil
 }
 
 func (r *KnowledgeRouter) build(

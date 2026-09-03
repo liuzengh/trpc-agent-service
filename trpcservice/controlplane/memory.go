@@ -17,6 +17,7 @@ type MemoryRepository struct {
 	channels   map[string]ChannelBinding
 	channelIDs map[string]ChannelBinding
 	backends   []BackendBinding
+	migrations map[string]BackendMigration
 }
 
 // NewMemoryRepository builds a validated in-process snapshot.
@@ -28,6 +29,7 @@ func NewMemoryRepository(data BootstrapData) *MemoryRepository {
 		channels:   make(map[string]ChannelBinding),
 		channelIDs: make(map[string]ChannelBinding),
 		backends:   append([]BackendBinding(nil), data.BackendBindings...),
+		migrations: make(map[string]BackendMigration),
 	}
 	for _, tenant := range data.Tenants {
 		repository.tenants[tenant.ID] = cloneTenant(tenant)
@@ -160,6 +162,83 @@ func (r *MemoryRepository) ListBackendBindings(
 	return result, nil
 }
 
+func (r *MemoryRepository) GetBackendBinding(
+	ctx context.Context,
+	tenantID string,
+	bindingID string,
+) (BackendBinding, error) {
+	if err := r.check(ctx); err != nil {
+		return BackendBinding{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, binding := range r.backends {
+		if binding.TenantID == tenantID && binding.ID == bindingID {
+			return cloneBackendBinding(binding), nil
+		}
+	}
+	return BackendBinding{}, ErrNotFound
+}
+
+func (r *MemoryRepository) GetBackendMigration(
+	ctx context.Context,
+	tenantID string,
+	migrationID string,
+) (BackendMigration, error) {
+	if err := r.check(ctx); err != nil {
+		return BackendMigration{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	migration, ok := r.migrations[scopedKey(tenantID, migrationID)]
+	if !ok {
+		return BackendMigration{}, ErrNotFound
+	}
+	return cloneBackendMigration(migration), nil
+}
+
+func (r *MemoryRepository) GetActiveBackendMigration(
+	ctx context.Context,
+	tenantID string,
+	appID string,
+	resourceType string,
+) (BackendMigration, error) {
+	if err := r.check(ctx); err != nil {
+		return BackendMigration{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, migration := range r.migrations {
+		if migration.TenantID == tenantID && migration.AppID == appID &&
+			migration.ResourceType == resourceType && migrationActive(migration.State) {
+			return cloneBackendMigration(migration), nil
+		}
+	}
+	return BackendMigration{}, ErrNotFound
+}
+
+func (r *MemoryRepository) AdjustBackendMigrationRepair(
+	_ context.Context,
+	tenantID string,
+	migrationID string,
+	delta int64,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := scopedKey(tenantID, migrationID)
+	migration, ok := r.migrations[key]
+	if !ok {
+		return ErrNotFound
+	}
+	migration.RepairBacklog += delta
+	if migration.RepairBacklog < 0 {
+		migration.RepairBacklog = 0
+	}
+	migration.UpdatedAt = time.Now().UTC()
+	r.migrations[key] = migration
+	return nil
+}
+
 func (r *MemoryRepository) Ready(ctx context.Context) error {
 	return r.check(ctx)
 }
@@ -275,14 +354,88 @@ func (r *MemoryRepository) CreateBackendBinding(
 		}
 	}
 	for _, existing := range r.backends {
-		if existing.ID == binding.ID ||
-			(existing.TenantID == binding.TenantID && existing.AppID == binding.AppID &&
-				existing.ResourceType == binding.ResourceType) {
+		if existing.ID == binding.ID {
 			return ErrConflict
 		}
 	}
 	r.backends = append(r.backends, cloneBackendBinding(binding))
 	return nil
+}
+
+func (r *MemoryRepository) CreateBackendMigration(
+	_ context.Context,
+	migration BackendMigration,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return ErrRepositoryClosed
+	}
+	key := scopedKey(migration.TenantID, migration.ID)
+	if _, exists := r.migrations[key]; exists {
+		return ErrConflict
+	}
+	for _, existing := range r.migrations {
+		if existing.TenantID == migration.TenantID && existing.AppID == migration.AppID &&
+			existing.ResourceType == migration.ResourceType && migrationActive(existing.State) {
+			return ErrConflict
+		}
+	}
+	r.migrations[key] = cloneBackendMigration(migration)
+	return nil
+}
+
+func (r *MemoryRepository) TransitionBackendMigration(
+	_ context.Context,
+	tenantID string,
+	migrationID string,
+	nextState string,
+	expectedVersion int64,
+	checkpoint []byte,
+	verification []byte,
+) (BackendMigration, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := scopedKey(tenantID, migrationID)
+	migration, ok := r.migrations[key]
+	if !ok {
+		return BackendMigration{}, ErrNotFound
+	}
+	if migration.Version != expectedVersion {
+		return BackendMigration{}, ErrConflict
+	}
+	migration.State = nextState
+	migration.Version++
+	migration.UpdatedAt = time.Now().UTC()
+	if len(checkpoint) > 0 {
+		migration.Checkpoint = cloneJSON(checkpoint)
+	}
+	if len(verification) > 0 {
+		migration.Verification = cloneJSON(verification)
+	}
+	if nextState == MigrationCompleted || nextState == MigrationRolledBack {
+		for index := range r.backends {
+			binding := &r.backends[index]
+			switch binding.ID {
+			case migration.SourceBindingID:
+				if nextState == MigrationCompleted {
+					binding.MigrationState = "retired"
+				} else {
+					binding.MigrationState = "active"
+				}
+				binding.Version++
+			case migration.TargetBindingID:
+				if nextState == MigrationCompleted {
+					binding.MigrationState = "active"
+				} else {
+					binding.MigrationState = "migration_target"
+				}
+				binding.Version++
+			}
+		}
+	}
+	r.migrations[key] = migration
+	return cloneBackendMigration(migration), nil
 }
 
 func (r *MemoryRepository) check(ctx context.Context) error {
@@ -334,6 +487,16 @@ func cloneChannelBinding(value ChannelBinding) ChannelBinding {
 func cloneBackendBinding(value BackendBinding) BackendBinding {
 	value.Config = cloneJSON(value.Config)
 	return value
+}
+
+func cloneBackendMigration(value BackendMigration) BackendMigration {
+	value.Checkpoint = cloneJSON(value.Checkpoint)
+	value.Verification = cloneJSON(value.Verification)
+	return value
+}
+
+func migrationActive(state string) bool {
+	return state != MigrationCompleted && state != MigrationRolledBack && state != MigrationFailed
 }
 
 var _ Repository = (*MemoryRepository)(nil)

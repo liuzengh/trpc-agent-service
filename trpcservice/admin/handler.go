@@ -86,6 +86,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		value, err := h.service.CreateBackendBinding(r.Context(), input)
 		h.writeResult(w, http.StatusCreated, value, err)
+	case "/admin/backend-migrations":
+		var input controlplane.BackendMigration
+		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		value, err := h.service.CreateBackendMigration(r.Context(), input)
+		h.writeResult(w, http.StatusCreated, value, err)
+	case "/admin/backend-migrations/transition":
+		var input struct {
+			TenantID        string          `json:"tenant_id"`
+			MigrationID     string          `json:"migration_id"`
+			NextState       string          `json:"next_state"`
+			ExpectedVersion int64           `json:"expected_version"`
+			Checkpoint      json.RawMessage `json:"checkpoint"`
+			Verification    json.RawMessage `json:"verification"`
+		}
+		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		value, err := h.service.TransitionBackendMigration(
+			r.Context(), input.TenantID, input.MigrationID, input.NextState,
+			input.ExpectedVersion, input.Checkpoint, input.Verification,
+		)
+		h.writeResult(w, http.StatusOK, value, err)
+	case "/admin/backend-migrations/get":
+		var input struct {
+			TenantID    string `json:"tenant_id"`
+			MigrationID string `json:"migration_id"`
+		}
+		if !decodeAdmin(w, r, &input) {
+			return
+		}
+		value, err := h.service.repository.GetBackendMigration(
+			r.Context(), input.TenantID, input.MigrationID,
+		)
+		h.writeResult(w, http.StatusOK, value, err)
+	case "/admin/backend-migrations/backfill-memory":
+		h.handleMemoryMigrationJob(w, r, background.JobMemoryBackfill)
+	case "/admin/backend-migrations/verify-memory":
+		h.handleMemoryMigrationJob(w, r, background.JobMemoryVerify)
 	case "/admin/knowledge/documents":
 		var input KnowledgeDocumentInput
 		if !decodeAdmin(w, r, &input) {
@@ -140,6 +180,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		adminJSON(w, http.StatusNotFound, map[string]string{"error": "Admin route not found"})
 	}
+}
+
+func (h *Handler) handleMemoryMigrationJob(
+	w http.ResponseWriter,
+	r *http.Request,
+	jobType string,
+) {
+	var input struct {
+		TenantID    string   `json:"tenant_id"`
+		MigrationID string   `json:"migration_id"`
+		OperationID string   `json:"operation_id"`
+		UserIDs     []string `json:"user_ids"`
+	}
+	if !decodeAdmin(w, r, &input) {
+		return
+	}
+	value, err := h.service.SubmitMemoryMigrationJob(
+		r.Context(), input.TenantID, input.MigrationID,
+		jobType, input.OperationID, input.UserIDs,
+	)
+	h.writeResult(w, http.StatusAccepted, value, err)
 }
 
 func (h *Handler) authorized(r *http.Request) bool {

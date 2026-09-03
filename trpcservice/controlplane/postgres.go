@@ -204,6 +204,59 @@ ORDER BY (app_id IS NOT NULL) DESC, resource_type, binding_id`, tenantID, appID)
 	return result, nil
 }
 
+func (r *PostgresRepository) GetBackendBinding(
+	ctx context.Context,
+	tenantID string,
+	bindingID string,
+) (BackendBinding, error) {
+	return scanBackendBinding(r.db.QueryRowContext(ctx, `
+SELECT binding_id, tenant_id, COALESCE(app_id, ''), resource_type,
+       backend_type, config, COALESCE(secret_ref, ''), isolation_level,
+       migration_state, version, created_at, updated_at
+FROM backend_binding WHERE tenant_id=$1 AND binding_id=$2`, tenantID, bindingID))
+}
+
+func (r *PostgresRepository) GetBackendMigration(
+	ctx context.Context,
+	tenantID string,
+	migrationID string,
+) (BackendMigration, error) {
+	return scanBackendMigration(r.db.QueryRowContext(ctx, backendMigrationSelect+
+		` WHERE tenant_id=$1 AND migration_id=$2`, tenantID, migrationID))
+}
+
+func (r *PostgresRepository) GetActiveBackendMigration(
+	ctx context.Context,
+	tenantID string,
+	appID string,
+	resourceType string,
+) (BackendMigration, error) {
+	return scanBackendMigration(r.db.QueryRowContext(ctx, backendMigrationSelect+`
+WHERE tenant_id=$1 AND app_id IS NOT DISTINCT FROM NULLIF($2,'') AND resource_type=$3
+  AND state NOT IN ('completed','rolled_back','failed')
+ORDER BY created_at DESC LIMIT 1`, tenantID, appID, resourceType))
+}
+
+func (r *PostgresRepository) AdjustBackendMigrationRepair(
+	ctx context.Context,
+	tenantID string,
+	migrationID string,
+	delta int64,
+) error {
+	result, err := r.db.ExecContext(ctx, `
+UPDATE backend_migration
+SET repair_backlog=GREATEST(0,repair_backlog+$3),updated_at=now()
+WHERE tenant_id=$1 AND migration_id=$2`, tenantID, migrationID, delta)
+	if err != nil {
+		return fmt.Errorf("adjust backend migration repair backlog: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (r *PostgresRepository) Ready(ctx context.Context) error {
 	if r == nil || r.db == nil {
 		return ErrRepositoryClosed
@@ -339,6 +392,99 @@ INSERT INTO backend_binding(
 	return mapMutationError("create backend binding", err)
 }
 
+func (r *PostgresRepository) CreateBackendMigration(
+	ctx context.Context,
+	migration BackendMigration,
+) error {
+	var appID any
+	if migration.AppID != "" {
+		appID = migration.AppID
+	}
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO backend_migration(
+    migration_id,tenant_id,app_id,resource_type,source_binding_id,
+    target_binding_id,state,checkpoint,verification,repair_backlog,
+    version,created_at,updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13)`,
+		migration.ID, migration.TenantID, appID, migration.ResourceType,
+		migration.SourceBindingID, migration.TargetBindingID, migration.State,
+		string(migration.Checkpoint), string(migration.Verification), migration.RepairBacklog,
+		migration.Version, migration.CreatedAt, migration.UpdatedAt,
+	)
+	return mapMutationError("create backend migration", err)
+}
+
+func (r *PostgresRepository) TransitionBackendMigration(
+	ctx context.Context,
+	tenantID string,
+	migrationID string,
+	nextState string,
+	expectedVersion int64,
+	checkpoint []byte,
+	verification []byte,
+) (BackendMigration, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return BackendMigration{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
+UPDATE backend_migration
+SET state=$3,
+    checkpoint=COALESCE(NULLIF($4,'')::jsonb,checkpoint),
+    verification=COALESCE(NULLIF($5,'')::jsonb,verification),
+    version=version+1,updated_at=now()
+WHERE tenant_id=$1 AND migration_id=$2 AND version=$6`,
+		tenantID, migrationID, nextState, string(checkpoint), string(verification), expectedVersion,
+	)
+	if err != nil {
+		return BackendMigration{}, fmt.Errorf("transition backend migration: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return BackendMigration{}, err
+	}
+	if rows != 1 {
+		return BackendMigration{}, ErrConflict
+	}
+	var sourceBindingID, targetBindingID string
+	if err := tx.QueryRowContext(ctx, `
+SELECT source_binding_id,target_binding_id FROM backend_migration
+WHERE tenant_id=$1 AND migration_id=$2`, tenantID, migrationID).Scan(
+		&sourceBindingID, &targetBindingID,
+	); err != nil {
+		return BackendMigration{}, err
+	}
+	if nextState == MigrationCompleted {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE backend_binding SET migration_state='retired',version=version+1,updated_at=now()
+WHERE tenant_id=$1 AND binding_id=$2`, tenantID, sourceBindingID); err != nil {
+			return BackendMigration{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE backend_binding SET migration_state='active',version=version+1,updated_at=now()
+WHERE tenant_id=$1 AND binding_id=$2`, tenantID, targetBindingID); err != nil {
+			return BackendMigration{}, err
+		}
+	}
+	if nextState == MigrationRolledBack {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE backend_binding SET migration_state='active',version=version+1,updated_at=now()
+WHERE tenant_id=$1 AND binding_id=$2`, tenantID, sourceBindingID); err != nil {
+			return BackendMigration{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE backend_binding SET migration_state='migration_target',version=version+1,updated_at=now()
+WHERE tenant_id=$1 AND binding_id=$2`, tenantID, targetBindingID); err != nil {
+			return BackendMigration{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return BackendMigration{}, err
+	}
+	return r.GetBackendMigration(ctx, tenantID, migrationID)
+}
+
 func mapMutationError(operation string, err error) error {
 	if err == nil {
 		return nil
@@ -415,6 +561,40 @@ func scanRevision(row scanner) (AgentRevision, error) {
 	result.MemoryConfig = json.RawMessage(memoryConfig)
 	result.GuardrailConfig = json.RawMessage(guardrailConfig)
 	return result, nil
+}
+
+func scanBackendBinding(row scanner) (BackendBinding, error) {
+	var binding BackendBinding
+	var configJSON []byte
+	if err := row.Scan(
+		&binding.ID, &binding.TenantID, &binding.AppID, &binding.ResourceType,
+		&binding.BackendType, &configJSON, &binding.SecretRef, &binding.IsolationLevel,
+		&binding.MigrationState, &binding.Version, &binding.CreatedAt, &binding.UpdatedAt,
+	); err != nil {
+		return BackendBinding{}, mapNotFound("backend binding", err)
+	}
+	binding.Config = json.RawMessage(configJSON)
+	return binding, nil
+}
+
+const backendMigrationSelect = `SELECT migration_id,tenant_id,COALESCE(app_id,''),
+resource_type,source_binding_id,target_binding_id,state,checkpoint,verification,
+repair_backlog,version,created_at,updated_at FROM backend_migration`
+
+func scanBackendMigration(row scanner) (BackendMigration, error) {
+	var migration BackendMigration
+	var checkpoint, verification []byte
+	if err := row.Scan(
+		&migration.ID, &migration.TenantID, &migration.AppID, &migration.ResourceType,
+		&migration.SourceBindingID, &migration.TargetBindingID, &migration.State,
+		&checkpoint, &verification, &migration.RepairBacklog, &migration.Version,
+		&migration.CreatedAt, &migration.UpdatedAt,
+	); err != nil {
+		return BackendMigration{}, mapNotFound("backend migration", err)
+	}
+	migration.Checkpoint = json.RawMessage(checkpoint)
+	migration.Verification = json.RawMessage(verification)
+	return migration, nil
 }
 
 func mapNotFound(object string, err error) error {

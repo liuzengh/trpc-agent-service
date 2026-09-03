@@ -29,14 +29,15 @@ type ProcessorOptions struct {
 }
 
 type Processor struct {
-	jobs      Repository
-	control   controlplane.Repository
-	sessions  session.Service
-	memories  memory.Service
-	knowledge *platformstorage.KnowledgeRouter
-	extractor extractor.MemoryExtractor
-	audit     audit.Writer
-	options   ProcessorOptions
+	jobs           Repository
+	control        controlplane.Repository
+	sessions       session.Service
+	memories       memory.Service
+	memoryMigrator *platformstorage.MemoryRouter
+	knowledge      *platformstorage.KnowledgeRouter
+	extractor      extractor.MemoryExtractor
+	audit          audit.Writer
+	options        ProcessorOptions
 }
 
 func NewProcessor(
@@ -65,9 +66,14 @@ func NewProcessor(
 			memory.AddToolName: {},
 		})
 	}
+	memoryMigrator, ok := memories.(*platformstorage.MemoryRouter)
+	if !ok {
+		return nil, errors.New("background processor requires platform MemoryRouter")
+	}
 	return &Processor{
 		jobs: jobs, control: control, sessions: sessions, memories: memories,
-		knowledge: knowledgeRouter, extractor: memoryExtractor, audit: auditWriter,
+		memoryMigrator: memoryMigrator, knowledge: knowledgeRouter,
+		extractor: memoryExtractor, audit: auditWriter,
 		options: options,
 	}, nil
 }
@@ -147,6 +153,67 @@ func (p *Processor) process(ctx context.Context, job Job) error {
 			return err
 		}
 		return p.knowledge.DeleteDocument(ctx, scope, revision, payload.DocumentID)
+	case JobMemoryBackfill:
+		var payload MemoryMigrationPayload
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return err
+		}
+		for _, userID := range payload.UserIDs {
+			if _, err := p.memoryMigrator.BackfillUser(
+				ctx, job.TenantID, payload.MigrationID, userID,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	case JobMemoryVerify:
+		var payload MemoryMigrationPayload
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return err
+		}
+		results := make([]platformstorage.MemoryMigrationVerification, 0, len(payload.UserIDs))
+		passed := true
+		for _, userID := range payload.UserIDs {
+			result, err := p.memoryMigrator.VerifyUser(
+				ctx, job.TenantID, payload.MigrationID, userID,
+			)
+			if err != nil {
+				return err
+			}
+			results = append(results, result)
+			passed = passed && result.Passed
+		}
+		if !passed {
+			return errors.New("memory migration verification did not pass")
+		}
+		migration, err := p.control.GetBackendMigration(
+			ctx, job.TenantID, payload.MigrationID,
+		)
+		if err != nil {
+			return err
+		}
+		verification, err := json.Marshal(map[string]any{
+			"passed": true, "users": results,
+		})
+		if err != nil {
+			return err
+		}
+		mutable, ok := p.control.(controlplane.MutableRepository)
+		if !ok {
+			return errors.New("control plane cannot update migration verification")
+		}
+		if migration.RepairBacklog > 0 {
+			if err := p.control.AdjustBackendMigrationRepair(
+				ctx, job.TenantID, payload.MigrationID, -migration.RepairBacklog,
+			); err != nil {
+				return err
+			}
+		}
+		_, err = mutable.TransitionBackendMigration(
+			ctx, job.TenantID, payload.MigrationID, controlplane.MigrationVerify,
+			payload.ExpectedVersion, nil, verification,
+		)
+		return err
 	default:
 		return fmt.Errorf("unsupported background job type %q", job.Type)
 	}

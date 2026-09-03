@@ -492,6 +492,195 @@ func (s *Service) CreateBackendBinding(
 	return binding, nil
 }
 
+func (s *Service) CreateBackendMigration(
+	ctx context.Context,
+	migration controlplane.BackendMigration,
+) (controlplane.BackendMigration, error) {
+	if migration.ID == "" {
+		migration.ID = "migration-" + uuid.NewString()
+	}
+	if !identifierPattern.MatchString(migration.ID) ||
+		!identifierPattern.MatchString(migration.TenantID) ||
+		(migration.AppID != "" && !identifierPattern.MatchString(migration.AppID)) ||
+		migration.ResourceType == "" || migration.SourceBindingID == migration.TargetBindingID {
+		return controlplane.BackendMigration{}, invalidf("backend migration identity is invalid")
+	}
+	source, err := s.repository.GetBackendBinding(ctx, migration.TenantID, migration.SourceBindingID)
+	if err != nil {
+		return controlplane.BackendMigration{}, err
+	}
+	target, err := s.repository.GetBackendBinding(ctx, migration.TenantID, migration.TargetBindingID)
+	if err != nil {
+		return controlplane.BackendMigration{}, err
+	}
+	if source.AppID != migration.AppID || target.AppID != migration.AppID ||
+		source.ResourceType != migration.ResourceType || target.ResourceType != migration.ResourceType ||
+		source.MigrationState != "active" || target.MigrationState == "active" {
+		return controlplane.BackendMigration{}, invalidf("source and target backend bindings are incompatible")
+	}
+	now := time.Now().UTC()
+	migration.State = controlplane.MigrationPlanned
+	migration.Checkpoint = json.RawMessage(`{}`)
+	migration.Verification = json.RawMessage(`{}`)
+	migration.Version = 1
+	migration.CreatedAt = now
+	migration.UpdatedAt = now
+	if err := s.repository.CreateBackendMigration(ctx, migration); err != nil {
+		return controlplane.BackendMigration{}, err
+	}
+	if err := s.record(ctx, migration.TenantID, "admin_backend_migration_created", map[string]any{
+		"migration_id": migration.ID, "resource_type": migration.ResourceType,
+		"source_binding_id": migration.SourceBindingID,
+		"target_binding_id": migration.TargetBindingID,
+	}); err != nil {
+		return controlplane.BackendMigration{}, err
+	}
+	return migration, nil
+}
+
+func (s *Service) TransitionBackendMigration(
+	ctx context.Context,
+	tenantID string,
+	migrationID string,
+	nextState string,
+	expectedVersion int64,
+	checkpoint json.RawMessage,
+	verification json.RawMessage,
+) (controlplane.BackendMigration, error) {
+	current, err := s.repository.GetBackendMigration(ctx, tenantID, migrationID)
+	if err != nil {
+		return controlplane.BackendMigration{}, err
+	}
+	if !allowedMigrationTransition(current.State, nextState) {
+		return controlplane.BackendMigration{}, invalidf(
+			"backend migration cannot transition from %s to %s", current.State, nextState,
+		)
+	}
+	if len(checkpoint) > 0 {
+		if err := normalizeJSON(&checkpoint); err != nil {
+			return controlplane.BackendMigration{}, invalidf("migration checkpoint: %v", err)
+		}
+	}
+	if len(verification) > 0 {
+		if err := normalizeJSON(&verification); err != nil {
+			return controlplane.BackendMigration{}, invalidf("migration verification: %v", err)
+		}
+	}
+	if nextState == controlplane.MigrationCutover {
+		candidate := verification
+		if len(candidate) == 0 {
+			candidate = current.Verification
+		}
+		var result struct {
+			Passed bool `json:"passed"`
+		}
+		if json.Unmarshal(candidate, &result) != nil || !result.Passed {
+			return controlplane.BackendMigration{}, invalidf("cutover requires verification.passed=true")
+		}
+	}
+	updated, err := s.repository.TransitionBackendMigration(
+		ctx, tenantID, migrationID, nextState, expectedVersion, checkpoint, verification,
+	)
+	if err != nil {
+		return controlplane.BackendMigration{}, err
+	}
+	if err := s.record(ctx, tenantID, "admin_backend_migration_transitioned", map[string]any{
+		"migration_id": migrationID, "from": current.State,
+		"to": nextState, "version": updated.Version,
+	}); err != nil {
+		return controlplane.BackendMigration{}, err
+	}
+	return updated, nil
+}
+
+func allowedMigrationTransition(current string, next string) bool {
+	allowed := map[string]map[string]bool{
+		controlplane.MigrationPlanned: {
+			controlplane.MigrationDualWrite: true, controlplane.MigrationFailed: true,
+		},
+		controlplane.MigrationDualWrite: {
+			controlplane.MigrationBackfill: true, controlplane.MigrationRollback: true,
+			controlplane.MigrationFailed: true,
+		},
+		controlplane.MigrationBackfill: {
+			controlplane.MigrationVerify: true, controlplane.MigrationRollback: true,
+			controlplane.MigrationFailed: true,
+		},
+		controlplane.MigrationVerify: {
+			controlplane.MigrationCutover: true, controlplane.MigrationRollback: true,
+			controlplane.MigrationFailed: true,
+		},
+		controlplane.MigrationCutover: {
+			controlplane.MigrationCompleted: true, controlplane.MigrationRollback: true,
+			controlplane.MigrationFailed: true,
+		},
+		controlplane.MigrationRollback: {
+			controlplane.MigrationRolledBack: true, controlplane.MigrationFailed: true,
+		},
+	}
+	return allowed[current][next]
+}
+
+type MigrationJobResult struct {
+	JobID       string `json:"job_id"`
+	MigrationID string `json:"migration_id"`
+	JobType     string `json:"job_type"`
+	Duplicate   bool   `json:"duplicate"`
+}
+
+func (s *Service) SubmitMemoryMigrationJob(
+	ctx context.Context,
+	tenantID string,
+	migrationID string,
+	jobType string,
+	operationID string,
+	userIDs []string,
+) (MigrationJobResult, error) {
+	if s.jobs == nil {
+		return MigrationJobResult{}, invalidf("background jobs are unavailable")
+	}
+	if jobType != background.JobMemoryBackfill && jobType != background.JobMemoryVerify {
+		return MigrationJobResult{}, invalidf("unsupported memory migration job")
+	}
+	if !identifierPattern.MatchString(operationID) || len(userIDs) == 0 {
+		return MigrationJobResult{}, invalidf("operation_id and user_ids are required")
+	}
+	for _, userID := range userIDs {
+		if strings.TrimSpace(userID) == "" || len(userID) > 512 {
+			return MigrationJobResult{}, invalidf("memory migration user_id is invalid")
+		}
+	}
+	migration, err := s.repository.GetBackendMigration(ctx, tenantID, migrationID)
+	if err != nil {
+		return MigrationJobResult{}, err
+	}
+	if migration.ResourceType != "memory" || migration.State != controlplane.MigrationBackfill {
+		return MigrationJobResult{}, invalidf("memory migration must be in backfill state")
+	}
+	app, err := s.repository.GetAgentApp(ctx, tenantID, migration.AppID)
+	if err != nil {
+		return MigrationJobResult{}, err
+	}
+	payload, err := json.Marshal(background.MemoryMigrationPayload{
+		MigrationID: migration.ID, UserIDs: userIDs, ExpectedVersion: migration.Version,
+	})
+	if err != nil {
+		return MigrationJobResult{}, err
+	}
+	queued, err := s.jobs.Enqueue(ctx, background.EnqueueRequest{
+		TenantID: tenantID, AppID: migration.AppID, RevisionID: app.StableRevisionID,
+		Type: jobType, DedupeKey: migration.ID + ":" + operationID,
+		Payload: payload, TraceParent: background.TraceParent(ctx),
+	})
+	if err != nil {
+		return MigrationJobResult{}, err
+	}
+	return MigrationJobResult{
+		JobID: queued.Job.ID, MigrationID: migration.ID,
+		JobType: jobType, Duplicate: queued.Duplicate,
+	}, nil
+}
+
 func (s *Service) record(
 	ctx context.Context,
 	tenantID string,

@@ -33,6 +33,16 @@ type MemoryRouter struct {
 	group      singleflight.Group
 }
 
+type MemoryMigrationVerification struct {
+	MigrationID string   `json:"migration_id"`
+	UserID      string   `json:"user_id"`
+	SourceCount int      `json:"source_count"`
+	TargetCount int      `json:"target_count"`
+	Missing     []string `json:"missing,omitempty"`
+	Mismatched  []string `json:"mismatched,omitempty"`
+	Passed      bool     `json:"passed"`
+}
+
 func NewMemoryRouter(
 	repository controlplane.Repository,
 	secretStore secret.Store,
@@ -138,6 +148,130 @@ func (r *MemoryRouter) Ready(ctx context.Context) error {
 	return r.repository.Ready(ctx)
 }
 
+func (r *MemoryRouter) BackfillUser(
+	ctx context.Context,
+	tenantID string,
+	migrationID string,
+	userID string,
+) (MemoryMigrationVerification, error) {
+	migration, source, target, err := r.migrationServices(ctx, tenantID, migrationID)
+	if err != nil {
+		return MemoryMigrationVerification{}, err
+	}
+	appName := "t/" + migration.TenantID + "/a/" + migration.AppID
+	key := memory.UserKey{AppName: appName, UserID: userID}
+	entries, err := source.ReadMemories(ctx, key, 100000)
+	if err != nil {
+		return MemoryMigrationVerification{}, err
+	}
+	for _, entry := range entries {
+		if entry == nil || entry.Memory == nil {
+			continue
+		}
+		metadata := &memory.Metadata{
+			Kind: entry.Memory.Kind, EventTime: entry.Memory.EventTime,
+			Participants: append([]string(nil), entry.Memory.Participants...),
+			Location:     entry.Memory.Location,
+		}
+		if err := target.AddMemory(
+			ctx, key, entry.Memory.Memory, append([]string(nil), entry.Memory.Topics...),
+			memory.WithMetadata(metadata),
+		); err != nil {
+			return MemoryMigrationVerification{}, fmt.Errorf("backfill memory %q: %w", entry.ID, err)
+		}
+	}
+	return verifyMemoryServices(ctx, migration.ID, key, source, target)
+}
+
+func (r *MemoryRouter) VerifyUser(
+	ctx context.Context,
+	tenantID string,
+	migrationID string,
+	userID string,
+) (MemoryMigrationVerification, error) {
+	migration, source, target, err := r.migrationServices(ctx, tenantID, migrationID)
+	if err != nil {
+		return MemoryMigrationVerification{}, err
+	}
+	key := memory.UserKey{
+		AppName: "t/" + migration.TenantID + "/a/" + migration.AppID,
+		UserID:  userID,
+	}
+	return verifyMemoryServices(ctx, migration.ID, key, source, target)
+}
+
+func (r *MemoryRouter) migrationServices(
+	ctx context.Context,
+	tenantID string,
+	migrationID string,
+) (controlplane.BackendMigration, memory.Service, memory.Service, error) {
+	migration, err := r.repository.GetBackendMigration(ctx, tenantID, migrationID)
+	if err != nil {
+		return controlplane.BackendMigration{}, nil, nil, err
+	}
+	if migration.ResourceType != memoryResourceType {
+		return controlplane.BackendMigration{}, nil, nil, errors.New("migration is not for memory")
+	}
+	sourceBinding, err := r.repository.GetBackendBinding(ctx, tenantID, migration.SourceBindingID)
+	if err != nil {
+		return controlplane.BackendMigration{}, nil, nil, err
+	}
+	targetBinding, err := r.repository.GetBackendBinding(ctx, tenantID, migration.TargetBindingID)
+	if err != nil {
+		return controlplane.BackendMigration{}, nil, nil, err
+	}
+	source, err := r.cachedService(ctx, sourceBinding)
+	if err != nil {
+		return controlplane.BackendMigration{}, nil, nil, err
+	}
+	target, err := r.cachedService(ctx, targetBinding)
+	return migration, source, target, err
+}
+
+func verifyMemoryServices(
+	ctx context.Context,
+	migrationID string,
+	key memory.UserKey,
+	source memory.Service,
+	target memory.Service,
+) (MemoryMigrationVerification, error) {
+	sourceEntries, err := source.ReadMemories(ctx, key, 100000)
+	if err != nil {
+		return MemoryMigrationVerification{}, err
+	}
+	targetEntries, err := target.ReadMemories(ctx, key, 100000)
+	if err != nil {
+		return MemoryMigrationVerification{}, err
+	}
+	targetByID := make(map[string]*memory.Entry, len(targetEntries))
+	for _, entry := range targetEntries {
+		if entry != nil {
+			targetByID[entry.ID] = entry
+		}
+	}
+	result := MemoryMigrationVerification{
+		MigrationID: migrationID, UserID: key.UserID,
+		SourceCount: len(sourceEntries), TargetCount: len(targetEntries),
+	}
+	for _, sourceEntry := range sourceEntries {
+		if sourceEntry == nil {
+			continue
+		}
+		targetEntry := targetByID[sourceEntry.ID]
+		if targetEntry == nil {
+			result.Missing = append(result.Missing, sourceEntry.ID)
+			continue
+		}
+		if sourceEntry.Memory == nil || targetEntry.Memory == nil ||
+			sourceEntry.Memory.Memory != targetEntry.Memory.Memory {
+			result.Mismatched = append(result.Mismatched, sourceEntry.ID)
+		}
+	}
+	result.Passed = result.SourceCount == result.TargetCount &&
+		len(result.Missing) == 0 && len(result.Mismatched) == 0
+	return result, nil
+}
+
 func (r *MemoryRouter) Close() error {
 	if r == nil {
 		return nil
@@ -165,10 +299,86 @@ func (r *MemoryRouter) serviceFor(ctx context.Context, appName string) (memory.S
 	if err != nil {
 		return nil, err
 	}
+	migration, migrationErr := r.repository.GetActiveBackendMigration(
+		ctx, tenantID, appID, memoryResourceType,
+	)
+	if migrationErr == nil {
+		return r.migrationService(ctx, migration)
+	}
+	if !errors.Is(migrationErr, controlplane.ErrNotFound) {
+		return nil, migrationErr
+	}
 	binding, err := resolveBackendBinding(ctx, r.repository, tenantID, appID, memoryResourceType)
 	if err != nil {
 		return nil, err
 	}
+	return r.cachedService(ctx, binding)
+}
+
+func (r *MemoryRouter) migrationService(
+	ctx context.Context,
+	migration controlplane.BackendMigration,
+) (memory.Service, error) {
+	sourceBinding, err := r.repository.GetBackendBinding(
+		ctx, migration.TenantID, migration.SourceBindingID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	targetBinding, err := r.repository.GetBackendBinding(
+		ctx, migration.TenantID, migration.TargetBindingID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if sourceBinding.ResourceType != memoryResourceType ||
+		targetBinding.ResourceType != memoryResourceType ||
+		sourceBinding.AppID != migration.AppID || targetBinding.AppID != migration.AppID {
+		return nil, errors.New("memory migration binding scope mismatch")
+	}
+	source, err := r.cachedService(ctx, sourceBinding)
+	if err != nil {
+		return nil, err
+	}
+	if migration.State == controlplane.MigrationPlanned ||
+		migration.State == controlplane.MigrationRollback {
+		return source, nil
+	}
+	target, err := r.cachedService(ctx, targetBinding)
+	if err != nil {
+		return nil, err
+	}
+	switch migration.State {
+	case controlplane.MigrationDualWrite, controlplane.MigrationBackfill,
+		controlplane.MigrationVerify:
+		return &dualMemoryService{
+			primary: source, secondary: target,
+			onSecondaryError: r.repairRecorder(migration),
+		}, nil
+	case controlplane.MigrationCutover:
+		return &dualMemoryService{
+			primary: target, secondary: source,
+			onSecondaryError: r.repairRecorder(migration),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported active memory migration state %q", migration.State)
+	}
+}
+
+func (r *MemoryRouter) repairRecorder(
+	migration controlplane.BackendMigration,
+) func(context.Context, error) {
+	return func(ctx context.Context, _ error) {
+		_ = r.repository.AdjustBackendMigrationRepair(
+			ctx, migration.TenantID, migration.ID, 1,
+		)
+	}
+}
+
+func (r *MemoryRouter) cachedService(
+	ctx context.Context,
+	binding controlplane.BackendBinding,
+) (memory.Service, error) {
 	cacheKey := binding.ID + "\x00" + fmt.Sprint(binding.Version)
 	r.mu.RLock()
 	service := r.services[cacheKey]

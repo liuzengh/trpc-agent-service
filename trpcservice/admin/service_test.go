@@ -167,3 +167,67 @@ func TestAdminQueuesKnowledgeDocumentWhenJobsConfigured(t *testing.T) {
 		t.Fatalf("job=%+v err=%v", job, err)
 	}
 }
+
+func TestAdminBackendMigrationStateMachine(t *testing.T) {
+	repository := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
+	service, _ := New(repository)
+	target, err := service.CreateBackendBinding(context.Background(), controlplane.BackendBinding{
+		ID: "memory-target", TenantID: "tutorial-tenant", AppID: "tutorial-app",
+		ResourceType: "memory", BackendType: "inmemory",
+		MigrationState: "migration_target", Config: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	migration, err := service.CreateBackendMigration(context.Background(), controlplane.BackendMigration{
+		ID: "memory-migration", TenantID: "tutorial-tenant", AppID: "tutorial-app",
+		ResourceType: "memory", SourceBindingID: "tutorial-memory-backend",
+		TargetBindingID: target.ID,
+	})
+	if err != nil || migration.State != controlplane.MigrationPlanned {
+		t.Fatalf("migration=%+v err=%v", migration, err)
+	}
+	for _, next := range []string{
+		controlplane.MigrationDualWrite,
+		controlplane.MigrationBackfill,
+		controlplane.MigrationVerify,
+	} {
+		migration, err = service.TransitionBackendMigration(
+			context.Background(), migration.TenantID, migration.ID,
+			next, migration.Version, nil, nil,
+		)
+		if err != nil {
+			t.Fatalf("transition to %s: %v", next, err)
+		}
+	}
+	if _, err := service.TransitionBackendMigration(
+		context.Background(), migration.TenantID, migration.ID,
+		controlplane.MigrationCutover, migration.Version, nil, nil,
+	); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("cutover without verification error=%v", err)
+	}
+	migration, err = service.TransitionBackendMigration(
+		context.Background(), migration.TenantID, migration.ID,
+		controlplane.MigrationCutover, migration.Version, nil,
+		json.RawMessage(`{"passed":true,"source_count":1,"target_count":1}`),
+	)
+	if err != nil || migration.State != controlplane.MigrationCutover {
+		t.Fatalf("cutover=%+v err=%v", migration, err)
+	}
+	migration, err = service.TransitionBackendMigration(
+		context.Background(), migration.TenantID, migration.ID,
+		controlplane.MigrationCompleted, migration.Version, nil, nil,
+	)
+	if err != nil || migration.State != controlplane.MigrationCompleted {
+		t.Fatalf("complete=%+v err=%v", migration, err)
+	}
+	source, _ := repository.GetBackendBinding(
+		context.Background(), "tutorial-tenant", "tutorial-memory-backend",
+	)
+	activeTarget, _ := repository.GetBackendBinding(
+		context.Background(), "tutorial-tenant", target.ID,
+	)
+	if source.MigrationState != "retired" || activeTarget.MigrationState != "active" {
+		t.Fatalf("source=%+v target=%+v", source, activeTarget)
+	}
+}

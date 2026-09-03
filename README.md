@@ -329,6 +329,8 @@ Knowledge 根据 Revision 构建 InMemory 或 Qdrant Vector Store，支持 Hash/
 
 Summary、Memory Extraction、Knowledge Upsert/Delete 通过 PostgreSQL `background_job` 异步执行，支持 lease reclaim、幂等、指数退避、dead job 查询/重试和独立 `jobs` 角色。详见 [Durable Background Job](docs/getting-started.md#28-durable-background-job)。
 
+Backend Migration 通过 `planned → dual_write → backfill → verify → cutover → completed` 状态机执行，支持 Memory/Knowledge 在线双写、分批回填、强校验、repair backlog、乐观锁切换和回滚。详见 [Backend Migration 状态机](docs/getting-started.md#29-backend-migration-状态机)。
+
 停止服务：
 
 ```bash
