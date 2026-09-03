@@ -168,6 +168,10 @@ cd trpc-agent-service
 当前仓库包含一个不需要 API Key 的教学 Agent。发送第一轮消息：
 
 ```bash
+./start-mock.sh
+```
+
+```bash
 curl -sS -X POST http://127.0.0.1:8080/chat \
   -H 'Content-Type: application/json' \
   -d '{"binding_key":"tutorial-http","message_id":"readme-message-1","user_id":"alice","session_id":"demo","message":"我叫小明。"}'
@@ -197,6 +201,16 @@ OPENAI_API_KEY="你的 API Key"
 # 兼容服务可额外设置：
 OPENAI_BASE_URL="https://your-provider.example/v1"
 ```
+
+先单独检查模型凭据和连通性，再启动完整服务：
+
+```bash
+./check-model.sh
+./start-real.sh
+tail -f data/trpc-service.log
+```
+
+这两个脚本会清除当前终端中可能覆盖 `.env` 的旧模型环境变量，但不会打印 API Key。`check-model.sh` 只调用一次模型，不启动 PostgreSQL、Redis 或 Agent HTTP 服务。
 
 使用 Redis 保存 Session：
 

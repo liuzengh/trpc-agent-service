@@ -8,4 +8,5 @@ mkdir -p "$ROOT/bin"
 go build -o "$ROOT/bin/trpc-service" ./cmd/trpc-service
 go build -o "$ROOT/bin/trpc-migrate" ./cmd/trpc-migrate
 go build -o "$ROOT/bin/trpc-loadgen" ./cmd/trpc-loadgen
-echo "built: $ROOT/bin/trpc-service, trpc-migrate, trpc-loadgen"
+go build -o "$ROOT/bin/trpc-modelcheck" ./cmd/trpc-modelcheck
+echo "built: $ROOT/bin/trpc-service, trpc-migrate, trpc-loadgen, trpc-modelcheck"

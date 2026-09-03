@@ -28,6 +28,12 @@ HTTP 请求
 go run ./cmd/trpc-service
 ```
 
+也可以明确强制使用 Mock Model：
+
+```bash
+./start-mock.sh
+```
+
 看到下面的输出表示服务已经启动：
 
 ```text
@@ -99,6 +105,21 @@ TRPC_AGENT_MODEL_STREAM=false
 ```
 
 保存后重新运行 `go run ./cmd/trpc-service` 或 `./start.sh`。
+
+推荐先用独立脚本检查真实模型。它通过项目实际使用的 tRPC-Agent-Go OpenAI Model 发出一次最小请求，不启动其他平台依赖，也不会打印 API Key：
+
+```bash
+./check-model.sh
+```
+
+检查成功后后台启动真实模型服务：
+
+```bash
+./start-real.sh
+tail -f data/trpc-service.log
+```
+
+两个脚本都会先移除当前终端中可能覆盖 `.env` 的模型环境变量，再从 `.env` 重新加载配置。使用其他文件时设置 `TRPC_AGENT_ENV_FILE=/path/to/dev.env`。
 
 不要把真实 API Key 写进仓库、README 或启动参数。开发环境从环境变量读取，生产环境应由 Secret Manager 注入。OpenAI 官方文档也建议在服务端从环境变量或密钥管理服务加载 API Key。
 
