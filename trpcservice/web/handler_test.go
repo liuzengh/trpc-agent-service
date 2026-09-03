@@ -151,6 +151,21 @@ func TestHandlerReadinessFailure(t *testing.T) {
 	}
 }
 
+func TestHandlerAdditionalReadinessFailure(t *testing.T) {
+	handler := NewHandler(
+		&fakeChatService{},
+		WithReadinessCheck("control-plane", func(context.Context) error {
+			return errors.New("PostgreSQL is unavailable")
+		}),
+	)
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestHandlerMaintainsSessionAcrossRequests(t *testing.T) {
 	runtime := agentservice.NewDemoRuntime()
 	t.Cleanup(func() {

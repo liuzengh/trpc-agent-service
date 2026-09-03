@@ -15,6 +15,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
@@ -71,6 +72,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load idempotency config: %w", err)
 	}
+	controlPlaneConfig, err := config.LoadControlPlaneConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("load control-plane config: %w", err)
+	}
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
 	sessionService, err := platformstorage.NewSessionService(startupCtx, sessionConfig)
 	cancelStartup()
@@ -92,6 +97,15 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build idempotency store: %w", err)
 	}
+	startupCtx, cancelStartup = context.WithTimeout(context.Background(), 10*time.Second)
+	controlPlaneRepository, err := controlplane.New(startupCtx, controlPlaneConfig)
+	cancelStartup()
+	if err != nil {
+		_ = idempotencyStore.Close()
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build control-plane repository: %w", err)
+	}
 	runtime, err := agentservice.NewRuntimeWithServices(
 		selectedModel,
 		sessionService,
@@ -100,6 +114,7 @@ func run() error {
 		modelConfig.Stream,
 	)
 	if err != nil {
+		_ = controlPlaneRepository.Close()
 		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
 		_ = sessionService.Close()
@@ -128,7 +143,13 @@ func run() error {
 		idempotencyConfig.ProcessingTTL,
 		idempotencyConfig.CompletedTTL,
 	)
+	fmt.Printf("control-plane backend=%s\n", controlPlaneConfig.Backend)
 	fmt.Printf("tutorial chat server listening on %s\n", listenAddr)
+	defer func() {
+		if err := controlPlaneRepository.Close(); err != nil {
+			log.Printf("close control-plane repository: %v", err)
+		}
+	}()
 	defer func() {
 		if err := runtime.Close(); err != nil {
 			log.Printf("close agent runtime: %v", err)
@@ -136,8 +157,11 @@ func run() error {
 	}()
 
 	server := &http.Server{
-		Addr:              listenAddr,
-		Handler:           web.NewHandler(runtime),
+		Addr: listenAddr,
+		Handler: web.NewHandler(
+			runtime,
+			web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
+		),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,

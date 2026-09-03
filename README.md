@@ -235,6 +235,21 @@ Redis 接入后的启动装配、首轮 Session 创建、历史恢复、模型�
 
 `message_id` 去重、processing 等待、completed 结果复用和失败重试链路，见 [消息幂等接入后的运行链路](docs/getting-started.md#12-消息幂等接入后的运行链路)。
 
+使用 PostgreSQL 保存租户、Agent App、Revision 和 Channel Binding：
+
+```bash
+docker compose up -d postgres
+```
+
+```dotenv
+TRPC_AGENT_CONTROL_PLANE_BACKEND=postgres
+TRPC_AGENT_POSTGRES_URL=postgres://trpc_agent:trpc_agent_dev@127.0.0.1:5432/trpc_agent?sslmode=disable
+TRPC_AGENT_POSTGRES_AUTO_MIGRATE=true
+TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=true
+```
+
+启动、migration、bootstrap 和 readiness 链路见 [PostgreSQL 控制面接入后的启动链路](docs/getting-started.md#13-postgresql-控制面接入后的启动链路)。
+
 停止服务：
 
 ```bash

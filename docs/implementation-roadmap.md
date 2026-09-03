@@ -1,5 +1,20 @@
 # 实施路线和代码组织
 
+## 当前实施状态
+
+截至当前代码版本，已经完成：
+
+- 常驻 HTTP 服务、真实模型切换、优雅关闭和 readiness；
+- InMemory / Redis Session；
+- Local / Redis Session Coordinator、续租和 fencing token 传播；
+- Local / Redis `message_id` 幂等；
+- PostgreSQL 16 migration；
+- tenant、agent app、revision、channel/backend binding 控制面模型；
+- InMemory / PostgreSQL Control Plane Repository；
+- Redis 和 PostgreSQL Docker Compose 开发依赖。
+
+接下来的最近里程碑是把 HTTP Test Channel 改为通过 Channel Binding 解析 `tenant_id/app_id`，并将 Session、Coordinator 和 Idempotency 全部切换到 tenant-scoped key。
+
 ## 1. 建议目录
 
 现有目录可以继续使用，但需要补齐控制面、运行面和数据面的边界。建议逐步演进为：

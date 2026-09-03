@@ -39,13 +39,40 @@ type ChatService interface {
 type Handler struct {
 	chatService ChatService
 	maxBodySize int64
+	readiness   []readinessCheck
+}
+
+type readinessCheck struct {
+	name  string
+	check func(context.Context) error
+}
+
+// Option customizes the HTTP handler.
+type Option func(*Handler)
+
+// WithReadinessCheck adds a platform dependency to /readyz.
+func WithReadinessCheck(name string, check func(context.Context) error) Option {
+	return func(handler *Handler) {
+		if check == nil {
+			return
+		}
+		handler.readiness = append(handler.readiness, readinessCheck{
+			name:  strings.TrimSpace(name),
+			check: check,
+		})
+	}
 }
 
 // NewHandler creates a handler with health and chat endpoints.
-func NewHandler(chatService ChatService) http.Handler {
+func NewHandler(chatService ChatService, opts ...Option) http.Handler {
 	h := &Handler{
 		chatService: chatService,
 		maxBodySize: defaultMaxBodyBytes,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(h)
+		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.handleHealth)
@@ -70,6 +97,13 @@ func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
 		log.Printf("readiness check failed: %v", err)
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "service is not ready"})
 		return
+	}
+	for _, dependency := range h.readiness {
+		if err := dependency.check(ctx); err != nil {
+			log.Printf("readiness check %q failed: %v", dependency.name, err)
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "service is not ready"})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }

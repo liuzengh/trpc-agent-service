@@ -1873,28 +1873,90 @@ Runtime 关闭时会关闭 Idempotency Store，Store 会取消仍在执行的 At
 - 模型成功但 completed 写入失败时，Session 可能已经存在回复，而幂等记录最终会过期；需要运行 journal 或事务型 outbox 进一步收敛；
 - Tool 已产生外部副作用后再失败，必须由 Tool 自己支持业务幂等。
 
-## 13. 下一步
+## 13. PostgreSQL 控制面接入后的启动链路
 
-当前路径已经推进到：
+Session 保存聊天历史，Idempotency Store 保存消息执行结果；租户、Agent App、Revision 和 Channel Binding 属于另一类长期配置，因此新增 Control Plane Repository。
 
-```text
-真实 Model
-→ Redis Session
-→ Redis Session Coordinator
-→ Redis message_id 幂等
-```
-
-下一阶段应该建立最小租户和 Channel Binding，再接入企业微信 webhook：
+当前启动链路增加为：
 
 ```text
-企业微信 CorpID / AgentID
-→ Channel Binding
-→ tenant_id + agent_app_id
-→ 验签和消息解密
-→ 企业微信 MsgId 映射为 message_id
-→ 外部联系人 / 群聊映射为 session_id
-→ Idempotency + Coordinator + Runner
-→ 企业微信回复
+.env
+→ LoadControlPlaneConfigFromEnv
+→ controlplane.New
+    ├── inmemory：加载 tutorial bootstrap snapshot
+    └── postgres：打开连接池
+          → PostgreSQL Ping
+          → embedded migration
+          → 可选 tutorial bootstrap
+→ Repository.Ready
+→ HTTP Server
 ```
 
-这样企业微信入口从第一天就带租户和应用作用域，不需要先写一个单租户 Adapter、随后再整体重构。
+默认仍使用内存控制面，原有教程不需要 PostgreSQL：
+
+```dotenv
+TRPC_AGENT_CONTROL_PLANE_BACKEND=inmemory
+```
+
+使用 PostgreSQL：
+
+```bash
+docker compose up -d postgres
+```
+
+```dotenv
+TRPC_AGENT_CONTROL_PLANE_BACKEND=postgres
+TRPC_AGENT_POSTGRES_URL=postgres://trpc_agent:trpc_agent_dev@127.0.0.1:5432/trpc_agent?sslmode=disable
+TRPC_AGENT_POSTGRES_AUTO_MIGRATE=true
+TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=true
+```
+
+Migration 使用内嵌 SQL、事务和 PostgreSQL advisory lock。`schema_migration` 保存版本和 SHA-256 checksum；已经执行的 migration 文件如果被修改，启动会失败，而不是静默接受不同 schema。
+
+第一版 schema 已包含：
+
+```text
+tenant
+agent_app
+agent_revision
+backend_binding
+channel_binding
+external_identity
+conversation
+inbound_message
+agent_run
+outbound_message
+queue_outbox
+audit_log
+```
+
+Control Plane Repository 提供带 tenant scope 的读取接口：
+
+```text
+GetTenant
+GetAgentApp(tenant_id, app_id)
+GetRevision(tenant_id, revision_id)
+GetStableRevision(tenant_id, app_id)
+GetChannelBindingByCallbackKey
+ListBackendBindings(tenant_id, app_id)
+```
+
+PostgreSQL URL 不会写入启动日志。`/readyz` 除了检查 Runtime，还会调用 Repository `PingContext`；数据库断开后节点会退出就绪状态。
+
+## 14. 下一步
+
+下一阶段把当前固定的：
+
+```text
+tutorial-app + user_id + session_id
+```
+
+改成可信租户运行作用域：
+
+```text
+t/{tenant_id}/a/{app_id}
++ runtime_user_id
++ session_id
+```
+
+HTTP Test Channel 将通过 `channel_binding` 解析 tenant/app，Runtime 不再相信请求直接传入的租户标识。Session、Coordinator 和 Idempotency Key 都会加入租户与应用边界。
