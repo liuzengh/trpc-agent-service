@@ -167,7 +167,7 @@ cd trpc-agent-service
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/chat \
   -H 'Content-Type: application/json' \
-  -d '{"user_id":"alice","session_id":"demo","message":"我叫小明。"}'
+  -d '{"message_id":"readme-message-1","user_id":"alice","session_id":"demo","message":"我叫小明。"}'
 ```
 
 保持相同的 `user_id` 和 `session_id` 再问：
@@ -175,7 +175,7 @@ curl -sS -X POST http://127.0.0.1:8080/chat \
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/chat \
   -H 'Content-Type: application/json' \
-  -d '{"user_id":"alice","session_id":"demo","message":"我叫什么？"}'
+  -d '{"message_id":"readme-message-2","user_id":"alice","session_id":"demo","message":"我叫什么？"}'
 ```
 
 切换到真实 OpenAI-compatible 模型：
@@ -214,6 +214,13 @@ TRPC_AGENT_COORDINATOR_BACKEND=redis
 TRPC_AGENT_COORDINATOR_LEASE_TTL=30s
 TRPC_AGENT_COORDINATOR_RENEW_INTERVAL=10s
 TRPC_AGENT_COORDINATOR_RETRY_INTERVAL=50ms
+
+# 多 Worker 使用 redis；重试同一消息时必须复用 message_id。
+TRPC_AGENT_IDEMPOTENCY_BACKEND=redis
+TRPC_AGENT_IDEMPOTENCY_PROCESSING_TTL=2m
+TRPC_AGENT_IDEMPOTENCY_COMPLETED_TTL=24h
+TRPC_AGENT_IDEMPOTENCY_RENEW_INTERVAL=30s
+TRPC_AGENT_IDEMPOTENCY_POLL_INTERVAL=50ms
 ```
 
 依赖就绪检查：
@@ -225,6 +232,8 @@ curl -sS http://127.0.0.1:8080/readyz
 Redis 接入后的启动装配、首轮 Session 创建、历史恢复、模型消息构造和 Event 回写链路，见 [Redis Session 接入后的运行链路](docs/getting-started.md#10-redis-session-接入后的运行链路)。
 
 同 Session 串行、不同 Session 并行、Redis 租约、续租、安全释放和 fencing token 的链路，见 [Session Coordinator 接入后的运行链路](docs/getting-started.md#11-session-coordinator-接入后的运行链路)。
+
+`message_id` 去重、processing 等待、completed 结果复用和失败重试链路，见 [消息幂等接入后的运行链路](docs/getting-started.md#12-消息幂等接入后的运行链路)。
 
 停止服务：
 

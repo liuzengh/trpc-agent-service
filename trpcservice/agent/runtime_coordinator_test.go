@@ -11,6 +11,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -127,8 +128,37 @@ func TestNewRuntimeWithServicesRequiresCoordinator(t *testing.T) {
 		t.Fatalf("create session service: %v", err)
 	}
 	defer func() { _ = service.Close() }()
-	if _, err := NewRuntimeWithServices(NewTutorialModel(), service, nil, false); err == nil {
+	idempotencyStore := idempotency.NewLocalStore()
+	defer func() { _ = idempotencyStore.Close() }()
+	if _, err := NewRuntimeWithServices(
+		NewTutorialModel(),
+		service,
+		nil,
+		idempotencyStore,
+		false,
+	); err == nil {
 		t.Fatal("expected nil coordinator error")
+	}
+}
+
+func TestNewRuntimeWithServicesRequiresIdempotencyStore(t *testing.T) {
+	service, err := platformstorage.NewSessionService(context.Background(), config.SessionConfig{
+		Backend: config.SessionBackendInMemory,
+	})
+	if err != nil {
+		t.Fatalf("create session service: %v", err)
+	}
+	defer func() { _ = service.Close() }()
+	coordinator := coordination.NewLocalCoordinator()
+	defer func() { _ = coordinator.Close() }()
+	if _, err := NewRuntimeWithServices(
+		NewTutorialModel(),
+		service,
+		coordinator,
+		nil,
+		false,
+	); err == nil {
+		t.Fatal("expected nil idempotency store error")
 	}
 }
 
@@ -165,8 +195,16 @@ func newCoordinatedRedisRuntime(
 		_ = sessionService.Close()
 		t.Fatalf("create Redis coordinator for %s: %v", node, err)
 	}
-	runtime, err := NewRuntimeWithServices(selectedModel, sessionService, coordinator, false)
+	idempotencyStore := idempotency.NewLocalStore()
+	runtime, err := NewRuntimeWithServices(
+		selectedModel,
+		sessionService,
+		coordinator,
+		idempotencyStore,
+		false,
+	)
 	if err != nil {
+		_ = idempotencyStore.Close()
 		_ = coordinator.Close()
 		_ = sessionService.Close()
 		t.Fatalf("create runtime for %s: %v", node, err)

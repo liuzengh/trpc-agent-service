@@ -16,6 +16,7 @@ import (
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 )
@@ -66,6 +67,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load coordinator config: %w", err)
 	}
+	idempotencyConfig, err := config.LoadIdempotencyConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("load idempotency config: %w", err)
+	}
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
 	sessionService, err := platformstorage.NewSessionService(startupCtx, sessionConfig)
 	cancelStartup()
@@ -79,13 +84,23 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build session coordinator: %w", err)
 	}
+	startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
+	idempotencyStore, err := idempotency.New(startupCtx, idempotencyConfig)
+	cancelStartup()
+	if err != nil {
+		_ = sessionCoordinator.Close()
+		_ = sessionService.Close()
+		return fmt.Errorf("build idempotency store: %w", err)
+	}
 	runtime, err := agentservice.NewRuntimeWithServices(
 		selectedModel,
 		sessionService,
 		sessionCoordinator,
+		idempotencyStore,
 		modelConfig.Stream,
 	)
 	if err != nil {
+		_ = idempotencyStore.Close()
 		_ = sessionCoordinator.Close()
 		_ = sessionService.Close()
 		return fmt.Errorf("create agent runtime: %w", err)
@@ -106,6 +121,12 @@ func run() error {
 		coordinatorConfig.Backend,
 		coordinatorConfig.LeaseTTL,
 		coordinatorConfig.RenewInterval,
+	)
+	fmt.Printf(
+		"idempotency backend=%s processing_ttl=%s completed_ttl=%s\n",
+		idempotencyConfig.Backend,
+		idempotencyConfig.ProcessingTTL,
+		idempotencyConfig.CompletedTTL,
 	)
 	fmt.Printf("tutorial chat server listening on %s\n", listenAddr)
 	defer func() {

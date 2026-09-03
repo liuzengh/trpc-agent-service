@@ -35,6 +35,7 @@ trpc-agent-service 0.1.0
 model provider=mock name=tutorial-mock-model stream=false
 session backend=inmemory ttl=0s
 coordinator backend=local lease_ttl=30s renew_interval=10s
+idempotency backend=local processing_ttl=2m0s completed_ttl=24h0m0s
 tutorial chat server listening on :8080
 ```
 
@@ -138,6 +139,7 @@ TRPC_AGENT_MODEL_STREAM=true
 curl -sS -X POST http://127.0.0.1:8080/chat \
   -H 'Content-Type: application/json' \
   -d '{
+    "message_id": "tutorial-message-1",
     "user_id": "alice",
     "session_id": "demo",
     "message": "我叫小明。"
@@ -150,14 +152,17 @@ curl -sS -X POST http://127.0.0.1:8080/chat \
 {
   "reply": "你好，小明。我已经把这句话保存在当前 Session 中。",
   "request_id": "...",
+  "message_id": "tutorial-message-1",
   "user_id": "alice",
   "session_id": "demo",
-  "event_count": 7
+  "event_count": 7,
+  "replayed": false
 }
 ```
 
-这里有四个重要概念：
+这里有五个重要概念：
 
+- `message_id` 标识这一条外部消息，客户端重试时必须复用；
 - `message` 被转换成 `model.Message`；
 - `request_id` 表示本次 Runner 执行；
 - Runner 把用户消息和 Agent 回复写入 Session；
@@ -171,6 +176,7 @@ curl -sS -X POST http://127.0.0.1:8080/chat \
 curl -sS -X POST http://127.0.0.1:8080/chat \
   -H 'Content-Type: application/json' \
   -d '{
+    "message_id": "tutorial-message-2",
     "user_id": "alice",
     "session_id": "demo",
     "message": "我叫什么？"
@@ -183,9 +189,11 @@ curl -sS -X POST http://127.0.0.1:8080/chat \
 {
   "reply": "你叫小明。这个名字来自当前 Session 的历史消息。",
   "request_id": "...",
+  "message_id": "tutorial-message-2",
   "user_id": "alice",
   "session_id": "demo",
-  "event_count": 7
+  "event_count": 7,
+  "replayed": false
 }
 ```
 
@@ -199,6 +207,7 @@ TutorialModel 本身没有保存用户资料。它只检查 tRPC-Agent-Go 传给
 curl -sS -X POST http://127.0.0.1:8080/chat \
   -H 'Content-Type: application/json' \
   -d '{
+    "message_id": "tutorial-message-3",
     "user_id": "alice",
     "session_id": "another-session",
     "message": "我叫什么？"
@@ -210,8 +219,10 @@ curl -sS -X POST http://127.0.0.1:8080/chat \
 ```json
 {
   "reply": "我还不知道你的名字。你可以告诉我：我叫小明。",
+  "message_id": "tutorial-message-3",
   "user_id": "alice",
-  "session_id": "another-session"
+  "session_id": "another-session",
+  "replayed": false
 }
 ```
 
@@ -238,6 +249,7 @@ SessionID = HTTP 请求中的 session_id
 - `.env` 是在哪里读取的？
 - Mock Model 和真实模型在哪里切换？
 - `LLMAgent`、`Runner` 和 `Session` 是在哪里创建的？
+- 重复的 `message_id` 在哪里被拦截？
 - 同一个 Session 的并发请求在哪里协调？
 - `/chat` 收到 JSON 后，怎样进入 `runner.Run`？
 - 为什么 Runner 返回 Event channel，而不是直接返回字符串？
@@ -245,20 +257,23 @@ SessionID = HTTP 请求中的 session_id
 
 ### 6.1 先看整体分层
 
-当前实现分成六层：
+当前实现分成七层：
 
 ```text
 cmd/trpc-service
   负责启动、装配和关闭进程
 
 trpcservice/config
-  负责读取 .env 并校验模型、Session 配置
+  负责读取 .env 并校验模型、Session、Coordinator 和 Idempotency 配置
 
 trpcservice/storage
   负责创建和探测 InMemory / Redis Session Service
 
 trpcservice/coordination
   负责本地 Session 锁和 Redis 分布式租约
+
+trpcservice/idempotency
+  负责消息去重、执行中等待和结果复用
 
 trpcservice/web
   负责 HTTP、JSON 和参数校验
@@ -274,11 +289,13 @@ POST /chat
   ↓
 web.Handler.handleChat
   ↓
-agent.Runtime.Chat
+agent.Runtime.ChatWithMessageID
   ↓
-model.NewUserMessage
+IdempotencyStore.Begin
   ↓
 SessionCoordinator.Acquire
+  ↓
+model.NewUserMessage
   ↓
 runner.Run
   ↓
@@ -291,6 +308,8 @@ Runner Event channel
 collectChatResult
   ↓
 SessionLease.Release
+  ↓
+IdempotencyAttempt.Complete
   ↓
 chatResponse JSON
 ```
@@ -324,6 +343,8 @@ func main() {
 → 创建并探测 Session Service
 → 读取 Coordinator 配置
 → 创建并探测 Session Coordinator
+→ 读取 Idempotency 配置
+→ 创建并探测 Idempotency Store
 → 创建 Runtime
 → 创建 HTTP Handler
 → 启动 HTTP Server
@@ -539,12 +560,13 @@ runnerInstance := runner.NewRunner(
 | --- | --- |
 | `session.Service` | 保存用户消息、assistant 消息和会话状态 |
 | `coordination.Coordinator` | 保证同一个 Session 的完整 Agent turn 不会并发推进 |
+| `idempotency.Store` | 保证同一个外部 message ID 只执行一次并缓存结果 |
 | `LLMAgent` | 组织提示词、模型调用和将来的 Tool 循环 |
 | `runner.Runner` | 管理一次运行、Session 读写、request ID 和 Event 流 |
 
-这些类型都来自 tRPC-Agent-Go。我们写的 `Runtime` 是一层很薄的应用封装，把框架对象组合成 HTTP 层容易调用的 `Chat` 方法。
+`session.Service`、`LLMAgent` 和 `runner.Runner` 来自 tRPC-Agent-Go；Coordinator 和 Idempotency Store 是本项目新增的平台层。我们写的 `Runtime` 把这些组件组合成 HTTP 和未来 IM Channel 可以调用的应用服务。
 
-`sessionService` 和 `coordinator` 都由外部 Factory 注入。Session Service 可以是 InMemory 或 Redis；Coordinator 可以是本地按键锁或 Redis 分布式租约。LLMAgent、Runner 和 HTTP Handler 不需要为这些组合写不同业务逻辑。
+`sessionService`、`coordinator` 和 `idempotencyStore` 都由外部 Factory 注入。三者分别负责会话存储、同 Session 串行和同消息去重，不能互相替代。
 
 `tutorialAppName` 固定为 `tutorial-app`。完整 Session Key 是：
 
@@ -558,16 +580,19 @@ tutorial-app + user_id + session_id
 BuildModel
 + NewSessionService
 + NewCoordinator
++ idempotency.New
 + NewRuntimeWithServices
 ```
 
-因此 `.env` 可以分别选择真实模型、Session 后端和协调后端。
+因此 `.env` 可以分别选择真实模型、Session 后端、协调后端和幂等后端。
 
-### 6.9 一次 `Chat` 调用发生了什么
+### 6.9 一次 `ChatWithMessageID` 调用发生了什么
 
-HTTP 层最终调用 `Runtime.Chat`：
+HTTP 层最终调用 `Runtime.ChatWithMessageID`。它先进入幂等层；只有首次出现的 `message_id` 才会继续获取 Session Lease：
 
 ```go
+begin, err := r.idempotency.Begin(ctx, idempotencyKey, fingerprint)
+
 lease, err := r.coordinator.Acquire(ctx, coordination.Key{
     AppName:   tutorialAppName,
     UserID:    userID,
@@ -610,7 +635,7 @@ model.Message{
 10. 关闭 Event channel
 ```
 
-这些步骤主要由 tRPC-Agent-Go 完成。我们的 `Runtime.Chat` 没有手工查询 Session，也没有自己拼历史 messages，但会在调用 Runner 前获得 Session Lease，并在 Event channel 完全排空后释放。
+这些步骤主要由 tRPC-Agent-Go 完成。我们的 Runtime 没有手工查询 Session，也没有自己拼历史 messages，但会在外层完成消息幂等和 Session 协调。Runner 成功结束并释放 Lease 后，幂等层才把最终结果标记为 `completed`。
 
 锁的 Key 与 Session Key 一致：
 
@@ -667,6 +692,7 @@ POST /chat
 
 ```json
 {
+  "message_id": "message-001",
   "user_id": "alice",
   "session_id": "demo",
   "message": "你好"
@@ -681,8 +707,8 @@ POST /chat
 → 严格解析 JSON
 → 拒绝未知字段和多个 JSON 对象
 → 去除字符串首尾空格
-→ 检查 user_id、session_id、message
-→ 调用 ChatService.Chat
+→ 检查 message_id、user_id、session_id、message
+→ 调用 ChatService.ChatWithMessageID
 → 返回 chatResponse
 ```
 
@@ -690,8 +716,9 @@ HTTP 层只依赖一个小接口：
 
 ```go
 type ChatService interface {
-    Chat(
+    ChatWithMessageID(
         ctx context.Context,
+        messageID string,
         userID string,
         sessionID string,
         text string,
@@ -750,12 +777,12 @@ GET /healthz
   只说明 HTTP 进程仍然存活
 
 GET /readyz
-  会检查 Session Service 和 Session Coordinator
+  会检查 Session Service、Session Coordinator 和 Idempotency Store
 ```
 
-使用 Redis Session 或 Redis Coordinator 时，`/healthz` 可能仍返回正常，但 Redis 故障会让 `/readyz` 返回 `503`。部署平台应该根据 `/readyz` 决定是否继续把新请求发给该节点。
+使用 Redis Session、Redis Coordinator 或 Redis Idempotency Store 时，`/healthz` 可能仍返回正常，但 Redis 故障会让 `/readyz` 返回 `503`。部署平台应该根据 `/readyz` 决定是否继续把新请求发给该节点。
 
-readiness 检查使用两秒超时：Session Service 执行只读的 `ListAppStates`，Coordinator 执行本地状态检查或 Redis `PING`。它不会创建聊天 Session，也不会获取业务 Session Lease。
+readiness 检查使用两秒超时：Session Service 执行只读的 `ListAppStates`，Coordinator 和 Idempotency Store 执行本地状态检查或 Redis `PING`。它不会创建聊天 Session、消息记录或业务 Session Lease。
 
 ### 6.14 服务如何关闭
 
@@ -769,12 +796,13 @@ readiness 检查使用两秒超时：Session Service 执行只读的 `ListAppSta
 → Runtime.Close
 → Runner.Close
 → Session Coordinator.Close
+→ Idempotency Store.Close
 → Session Service.Close
 ```
 
 HTTP Shutdown 最多等待 10 秒。`Runtime.Close` 使用 `sync.Once`，重复调用不会重复关闭资源。
 
-正式启动路径由 `main.go` 创建 Session Service 和 Coordinator；`NewRuntimeWithServices` 成功后，Runtime 接管两者的生命周期并负责关闭。默认的 `NewRuntime` 便捷函数会创建 InMemory Session 和 Local Coordinator。后续引入数据库和消息队列时，也应明确每个连接由谁创建、何时转移所有权、最终由谁关闭。
+正式启动路径由 `main.go` 创建 Session Service、Coordinator 和 Idempotency Store；`NewRuntimeWithServices` 成功后，Runtime 接管它们的生命周期并负责关闭。默认的 `NewRuntime` 便捷函数会创建 InMemory Session、Local Coordinator 和 Local Idempotency Store。
 
 ### 6.15 哪些代码是我们写的，哪些是框架提供的
 
@@ -794,6 +822,8 @@ HTTP Shutdown 最多等待 10 秒。`Runtime.Close` 使用 `sync.Once`，重复�
 | Session 配置、Factory 和 readiness | 本项目 |
 | Local / Redis Session Coordinator | 本项目 |
 | Redis 租约 Lua、续租、安全释放和 fencing token | 本项目 |
+| Local / Redis Idempotency Store | 本项目 |
+| message ID 冲突检测、执行中等待和结果复用 | 本项目 |
 | Runtime 和 Event 聚合 | 本项目对框架的应用封装 |
 
 这就是目前阶段的主要成果：我们没有重写 Agent 框架，而是把 tRPC-Agent-Go 的 Model、LLMAgent、Runner、Session 和 Event 组织成了一条能通过 HTTP 实际调用、能切换真实模型、能验证多轮会话的最小链路。
@@ -806,11 +836,13 @@ HTTP Shutdown 最多等待 10 秒。`Runtime.Close` 使用 `sync.Once`，重复�
 2. [`trpcservice/agent/runtime.go`](../trpcservice/agent/runtime.go)：看 Runner 怎样被调用；
 3. [`trpcservice/coordination/coordinator.go`](../trpcservice/coordination/coordinator.go)：看 Coordinator 和 Lease 接口；
 4. [`trpcservice/coordination/local.go`](../trpcservice/coordination/local.go) 和 [`redis.go`](../trpcservice/coordination/redis.go)：看本地锁和 Redis 租约；
-5. [`trpcservice/storage/session.go`](../trpcservice/storage/session.go)：看 Session 后端怎样切换；
-6. [`trpcservice/agent/mock_model.go`](../trpcservice/agent/mock_model.go)：看 Model 接口如何实现；
-7. [`trpcservice/agent/model_factory.go`](../trpcservice/agent/model_factory.go)：看真实模型怎样替换 Mock；
-8. [`trpcservice/config/model.go`](../trpcservice/config/model.go)、[`session.go`](../trpcservice/config/session.go) 和 [`coordinator.go`](../trpcservice/config/coordinator.go)：看环境变量如何变成配置；
-9. [`cmd/trpc-service/main.go`](../cmd/trpc-service/main.go)：最后看所有组件如何装配和关闭。
+5. [`trpcservice/idempotency/store.go`](../trpcservice/idempotency/store.go)：看消息幂等接口和状态；
+6. [`trpcservice/idempotency/local.go`](../trpcservice/idempotency/local.go) 和 [`redis.go`](../trpcservice/idempotency/redis.go)：看本地与跨节点去重；
+7. [`trpcservice/storage/session.go`](../trpcservice/storage/session.go)：看 Session 后端怎样切换；
+8. [`trpcservice/agent/mock_model.go`](../trpcservice/agent/mock_model.go)：看 Model 接口如何实现；
+9. [`trpcservice/agent/model_factory.go`](../trpcservice/agent/model_factory.go)：看真实模型怎样替换 Mock；
+10. [`trpcservice/config`](../trpcservice/config)：看环境变量如何变成配置；
+11. [`cmd/trpc-service/main.go`](../cmd/trpc-service/main.go)：最后看所有组件如何装配和关闭。
 
 不要一开始深入 tRPC-Agent-Go 的所有内部实现。先沿着上面的文件跟完一条请求，再根据兴趣进入框架源码。
 
@@ -831,6 +863,8 @@ HTTP 参数和响应测试在 [`trpcservice/web/handler_test.go`](../trpcservice
 
 Session 协调测试在 [`trpcservice/coordination`](../trpcservice/coordination) 和 [`runtime_coordinator_test.go`](../trpcservice/agent/runtime_coordinator_test.go)，覆盖同 Session 串行、不同 Session 并行、跨 Runtime 互斥、租约续期、租约丢失、TTL 恢复和请求取消后的锁释放。
 
+消息幂等测试在 [`trpcservice/idempotency`](../trpcservice/idempotency) 和 [`runtime_idempotency_test.go`](../trpcservice/agent/runtime_idempotency_test.go)，覆盖并发重复消息、跨 Runtime 去重、完成结果复用、内容冲突、失败重试、processing TTL 和续期。
+
 也可以运行 race test：
 
 ```bash
@@ -844,6 +878,7 @@ go test -race ./...
 - InMemory Session 重启后仍会丢失；Redis Session 已支持重启持久化和跨实例共享；
 - 默认 Mock Model 只识别几种固定句式，真实模型需要自行配置凭据；
 - 已支持本地按 Session 并行和 Redis 分布式租约，但 fencing token 还没有在 Session 存储写入边界强制校验；
+- 已支持基于 `message_id` 的本地和 Redis 幂等，但 completed 结果过期后再次收到同一消息仍会重新执行；
 - 已有 Redis Session，但没有 PostgreSQL、消息队列或运行 journal；
 - 没有租户和 Agent revision；
 - 没有企业微信或 Telegram 回调；
@@ -912,8 +947,8 @@ runner.Runner
 
 因此切换 Session 后端不会改变下面这些代码：
 
-- HTTP Handler 仍然调用 `Runtime.Chat`；
-- `Runtime.Chat` 仍然调用 `runner.Run`；
+- HTTP Handler 仍然调用 Runtime 应用服务；
+- 首次消息经过幂等和 Coordinator 后仍然调用 `runner.Run`；
 - LLMAgent 和 Model 不需要知道 Redis 地址；
 - Event channel 的消费方式不变；
 - HTTP 响应结构不变。
@@ -987,16 +1022,23 @@ runner.NewRunner(
 
 ```json
 {
+  "message_id": "redis-message-1",
   "user_id": "alice",
   "session_id": "redis-demo",
   "message": "我叫小明。"
 }
 ```
 
-HTTP Handler 完成 JSON 校验后调用：
+HTTP Handler 完成 JSON 校验后调用 Runtime；Runtime 的幂等检查确认这是首次消息，随后进入实际 Agent turn：
 
 ```go
-Runtime.Chat(ctx, "alice", "redis-demo", "我叫小明。")
+Runtime.ChatWithMessageID(
+    ctx,
+    "redis-message-1",
+    "alice",
+    "redis-demo",
+    "我叫小明。",
+)
 ```
 
 Runtime 把文本转换成 `model.Message`，然后进入：
@@ -1420,7 +1462,7 @@ Agent 调用可能超过初始 Lease TTL，例如模型响应较慢或 Tool 执�
 
 ### 11.6 Runtime 为什么要排空 Event 后再释放
 
-[`Runtime.Chat`](../trpcservice/agent/runtime.go) 的实际结构是：
+[`Runtime.runChatTurn`](../trpcservice/agent/runtime.go) 中 Coordinator 包裹 Runner 的实际结构是：
 
 ```text
 Acquire Lease
@@ -1473,7 +1515,8 @@ Retry Interval = 50ms
 GET /readyz
   → Session Service readiness
   → Coordinator readiness
-  → 两者都成功才返回 200
+  → Idempotency Store readiness
+  → 三者都成功才返回 200
 ```
 
 服务关闭顺序是：
@@ -1484,6 +1527,7 @@ HTTP Server 停止接收请求
 → Runtime.Close
 → Runner.Close
 → Coordinator.Close
+→ Idempotency Store.Close
 → Session Service.Close
 ```
 
@@ -1509,26 +1553,348 @@ Coordinator Close 会拒绝新的 Acquire，并取消仍存活的 Lease Context�
 
 这使 Worker 水平扩展具备了基本的会话执行边界。但在 fencing token 真正接入 Session 写入校验之前，极端暂停恢复场景仍不能视为严格解决。
 
-## 12. 下一步
+## 12. 消息幂等接入后的运行链路
+
+外部系统不能假设一次 HTTP 投递只会到达一次。客户端可能因为响应超时主动重试，IM 平台也可能在没有及时收到确认时重复推送同一条消息。如果没有幂等层，两次投递会分别调用模型并向 Session 追加两轮 Event。
+
+加入 Idempotency Store 后，完整链路变成：
+
+```text
+HTTP / IM 消息
+  → message_id + 消息内容指纹
+  → IdempotencyStore.Begin
+      ├── started：本请求成为执行者
+      ├── processing：等待当前执行者
+      └── completed：直接复用历史结果
+  → SessionCoordinator.Acquire
+  → Runner.Run
+  → 排空 Event channel
+  → SessionLease.Release
+  → IdempotencyAttempt.Complete
+  → 返回 reply + request_id + replayed
+```
+
+### 12.1 `message_id` 和 `request_id` 不是一回事
+
+现在 `/chat` 要求调用方提供 `message_id`：
+
+```json
+{
+  "message_id": "wecom-msg-10001",
+  "user_id": "alice",
+  "session_id": "demo",
+  "message": "你好"
+}
+```
+
+两个 ID 的来源和作用不同：
+
+| 字段 | 产生方 | 作用 |
+| --- | --- | --- |
+| `message_id` | HTTP 客户端或 IM 平台 | 标识同一条外部消息，重试时必须保持不变 |
+| `request_id` | tRPC-Agent-Go Runner | 标识实际发生的一次 Agent 执行 |
+
+首次执行时会产生新的 `request_id`。重复提交相同 `message_id` 时不会创建新 Runner 执行，而是返回第一次保存的 `request_id`。
+
+幂等 Key 当前由四部分组成：
+
+```text
+AppName + UserID + SessionID + MessageID
+```
+
+因此同一个外部 ID 可以安全地出现在另一个 Session。进入多租户阶段后，还会在最外层加入 `tenant_id` 和 `channel`。
+
+### 12.2 为什么还要保存消息指纹
+
+只有 `message_id` 不足以判断请求是否真的相同。调用方可能错误地复用 ID：
+
+```text
+message_id = 100，message = "查询订单 A"
+message_id = 100，message = "删除订单 B"
+```
+
+如果直接返回第一条消息的缓存，错误会被隐藏。因此 Runtime 会对规范化后的消息正文计算 SHA-256：
+
+```text
+message
+  → trim spaces
+  → SHA-256
+  → fingerprint
+```
+
+同一幂等 Key 对应的 fingerprint 不一致时，Store 返回 `ErrKeyConflict`，HTTP 层映射为 `409 Conflict`。Redis Key 本身也使用作用域字段的 SHA-256，不把用户 ID、Session ID 和消息 ID 以明文写入 Key 名。
+
+### 12.3 启动时怎样装配 Idempotency Store
+
+启动链路新增一段：
+
+```text
+.env
+  → config.LoadIdempotencyConfigFromEnv
+  → idempotency.New
+      ├── LocalStore
+      └── RedisStore
+  → Store.Ready
+  → agent.NewRuntimeWithServices
+```
+
+本地默认配置是：
+
+```dotenv
+TRPC_AGENT_IDEMPOTENCY_BACKEND=local
+```
+
+多 Worker 使用 Redis：
+
+```dotenv
+TRPC_AGENT_IDEMPOTENCY_BACKEND=redis
+TRPC_AGENT_IDEMPOTENCY_PROCESSING_TTL=2m
+TRPC_AGENT_IDEMPOTENCY_COMPLETED_TTL=24h
+TRPC_AGENT_IDEMPOTENCY_RENEW_INTERVAL=30s
+TRPC_AGENT_IDEMPOTENCY_POLL_INTERVAL=50ms
+```
+
+Redis Store 复用 `REDIS_URL` 和 `REDIS_KEY_PREFIX`，使用独立的命名空间：
+
+```text
+<prefix>:idempotency:message:<sha256>
+```
+
+Local Store 适合单进程开发；多个 Worker 必须使用 Redis，否则每个进程只能看到自己的幂等记录。
+
+### 12.4 `Begin` 的三个分支
+
+Runtime 首先调用：
+
+```go
+begin, err := r.idempotency.Begin(ctx, key, fingerprint)
+```
+
+Store 会返回三个状态之一。
+
+`BeginStarted` 表示记录不存在，当前请求原子地创建了 `processing` 记录，并获得一个 `Attempt`：
+
+```text
+不存在
+  → processing
+  → 当前请求获得 Attempt
+```
+
+只有这个分支可以继续获取 Session Lease 和调用 Runner。
+
+`BeginProcessing` 表示另一个请求正在处理相同消息。当前请求不会调用模型，而是进入 `Store.Wait`。
+
+`BeginCompleted` 表示第一次执行已经成功，Store 直接返回缓存的 `reply`、`request_id` 和 `event_count`。
+
+Redis 的“检查不存在并创建 processing”在一个 Lua 脚本中完成，两个 Worker 同时收到同一消息时，只有一个能得到 `BeginStarted`。
+
+### 12.5 为什么幂等检查必须在 Session Coordinator 前面
+
+当前顺序是：
+
+```text
+Idempotency Begin
+→ Session Coordinator Acquire
+→ Runner
+```
+
+假如反过来：
+
+```text
+Session Coordinator Acquire
+→ Idempotency Begin
+```
+
+重复 webhook 虽然最终可能不会执行模型，但会先进入同一个 Session 的锁等待队列，占用连接和等待时间。更糟糕的实现甚至可能让它们获得锁后依次重复执行。
+
+先做消息幂等，可以在最外层把重复请求分流：
+
+```text
+首次消息 → Coordinator → Runner
+重复消息 → Wait 或 Replay
+```
+
+Coordinator 解决“一个 Session 同一时刻只能推进一轮”，Idempotency Store 解决“一条外部消息最多产生一轮”。
+
+### 12.6 processing Attempt 怎样覆盖长时间执行
+
+首次请求拿到的 `Attempt` 包含自己的 context。Runtime 使用这个 context 继续获取 Session Lease：
+
+```text
+Idempotency Attempt Context
+  → Session Coordinator
+  → Runner
+  → LLMAgent
+  → Model / Tool
+```
+
+Redis processing 记录带 TTL，防止 Worker 崩溃后永远停留在处理中。同时 Attempt 会启动续期 goroutine：
+
+```text
+每隔 RenewInterval
+  → 比较 Redis 中的完整 processing 记录
+  → 仍由当前 owner 持有：刷新 ProcessingTTL
+  → 记录消失或 owner 改变：取消 Attempt Context
+  → Redis 访问失败：取消 Attempt Context
+```
+
+续期采用“无法证明所有权就停止”的策略。如果幂等记录丢失，本轮 Runner 会收到 context cancellation，避免两个 Worker 在未知状态下继续执行同一消息。
+
+Worker 直接崩溃时续期停止，`ProcessingTTL` 到期后记录自动消失。后续重复投递再次执行 `Begin`，可以成为新的执行者。
+
+### 12.7 成功时为什么保存完整结果
+
+Runner 完成、Event channel 排空并释放 Session Lease 后，Runtime 调用：
+
+```go
+attempt.Complete(ctx, idempotency.Result{
+    Reply:      result.Reply,
+    RequestID:  result.RequestID,
+    EventCount: result.EventCount,
+})
+```
+
+Redis 使用 compare-and-replace Lua 脚本：只有 Redis 中的 processing JSON 仍与当前 Attempt 完全相同，才能替换成 completed。
+
+```text
+processing(owner=A, fingerprint=F)
+  → completed(fingerprint=F, result=R)
+```
+
+completed 记录保存 `CompletedTTL`，当前默认 24 小时。在这段时间内，重复请求直接返回完全相同的业务结果，其中 `replayed=true`。
+
+保存结果而不是只保存“处理过”有两个原因：
+
+- 同步 HTTP 重试仍然需要拿到答案；
+- IM Adapter 可以判断第一次发送失败后是否复用原回答，而不必重新调用模型。
+
+### 12.8 失败时为什么删除 processing
+
+如果 Coordinator、Runner、Model 或 Tool 返回错误，Runtime 调用：
+
+```go
+attempt.Fail(ctx)
+```
+
+Redis 使用 compare-and-delete，只有原 owner 才能删除 processing。删除后，正在等待的重复请求会发现记录不存在，重新执行 `Begin`，其中一个请求成为新的执行者。
+
+```text
+首次执行失败
+  → 删除 processing
+  → 等待者重新 Begin
+  → 允许重新执行
+```
+
+这表示当前语义是“成功结果去重，失败允许重试”。如果外部工具包含不可逆副作用，未来还需要工具级幂等键，不能只依赖消息层删除失败记录。
+
+### 12.9 正在处理的重复请求怎样等待
+
+Local Store 使用每条记录的 `done` channel 唤醒等待者；Redis Store 按 `PollInterval` 读取共享记录：
+
+```text
+processing → 继续等待
+completed  → 返回缓存结果
+不存在     → 返回 ErrRetry，Runtime 重新 Begin
+fingerprint 不同 → ErrKeyConflict
+```
+
+等待使用重复请求自己的 HTTP context。客户端断开时只有这个等待者退出，不会取消真正拥有 Attempt 的首次请求。
+
+如果两个节点几乎同时收到同一消息：
+
+```text
+节点 A：BeginStarted → 调用一次模型 → Complete
+节点 B：BeginProcessing → Wait → 读取 A 的 completed 结果
+```
+
+节点 B 返回的 `request_id` 与节点 A 相同，并标记 `replayed=true`。
+
+### 12.10 HTTP 响应怎样表示重放
+
+首次执行返回：
+
+```json
+{
+  "reply": "...",
+  "request_id": "runner-request-1",
+  "message_id": "wecom-msg-10001",
+  "user_id": "alice",
+  "session_id": "demo",
+  "event_count": 7,
+  "replayed": false
+}
+```
+
+使用相同内容和相同 `message_id` 再次请求，响应中的 `reply`、`request_id` 和 `event_count` 保持不变，只是：
+
+```json
+{"replayed": true}
+```
+
+如果同一个 `message_id` 携带不同内容，返回：
+
+```text
+HTTP 409 Conflict
+```
+
+这比静默返回旧结果更容易发现上游 ID 生成错误。
+
+### 12.11 readiness 和关闭顺序
+
+`/readyz` 现在检查三个有状态组件：
+
+```text
+Session Service
+→ Session Coordinator
+→ Idempotency Store
+→ 全部正常才返回 200
+```
+
+Redis Idempotency Store 的 readiness 使用 `PING`。如果幂等 Redis 不可用，节点不会绕过幂等继续调用模型，而是返回不可用。
+
+Runtime 关闭时会关闭 Idempotency Store，Store 会取消仍在执行的 Attempt Context 和等待请求，续期 goroutine 随之退出。
+
+### 12.12 当前幂等边界
+
+当前实现已经保证：
+
+```text
+同一进程重复消息只执行一次
+多个 Worker 重复消息只执行一次
+执行中的重复请求等待首次结果
+完成后的重复请求复用原结果
+失败或 processing 超时后允许重新执行
+```
+
+仍需注意：
+
+- completed 记录超过 TTL 后，同一消息再次到达会被视为新消息；
+- 消息正文指纹暂时只覆盖文本，未来图片、文件和卡片需要加入规范化 payload；
+- 模型成功但 completed 写入失败时，Session 可能已经存在回复，而幂等记录最终会过期；需要运行 journal 或事务型 outbox 进一步收敛；
+- Tool 已产生外部副作用后再失败，必须由 Tool 自己支持业务幂等。
+
+## 13. 下一步
 
 当前路径已经推进到：
 
 ```text
-InMemory Session
+真实 Model
 → Redis Session
-→ Local Session Coordinator
-→ Redis 分布式租约
-→ fencing token 生成和传播
+→ Redis Session Coordinator
+→ Redis message_id 幂等
 ```
 
-下一阶段是请求幂等，先为 HTTP 请求定义 `message_id` / `idempotency_key`，再复用于企业微信等 IM 平台的消息 ID：
+下一阶段应该建立最小租户和 Channel Binding，再接入企业微信 webhook：
 
 ```text
-收到 message_id
-→ Redis 幂等记录不存在：标记 processing
-→ 执行 Session Coordinator + Runner
-→ 保存 completed 结果
-→ 重复 message_id：返回已有结果，不重复调用模型
+企业微信 CorpID / AgentID
+→ Channel Binding
+→ tenant_id + agent_app_id
+→ 验签和消息解密
+→ 企业微信 MsgId 映射为 message_id
+→ 外部联系人 / 群聊映射为 session_id
+→ Idempotency + Coordinator + Runner
+→ 企业微信回复
 ```
 
-Coordinator 解决“同一 Session 同时只能执行一轮”，幂等层解决“同一条外部消息只能执行一次”。这两者组合后，才适合开始接入会重复投递 webhook 的企业微信 Channel Adapter。
+这样企业微信入口从第一天就带租户和应用作用域，不需要先写一个单租户 Adapter、随后再整体重构。

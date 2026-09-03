@@ -2,13 +2,17 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -18,9 +22,10 @@ import (
 )
 
 const (
-	tutorialAppName     = "tutorial-app"
-	tutorialAgentName   = "tutorial-agent"
-	leaseReleaseTimeout = 2 * time.Second
+	tutorialAppName            = "tutorial-app"
+	tutorialAgentName          = "tutorial-agent"
+	leaseReleaseTimeout        = 2 * time.Second
+	idempotencyFinalizeTimeout = 2 * time.Second
 )
 
 // ChatResult is the transport-neutral result of one tutorial chat turn.
@@ -28,13 +33,16 @@ type ChatResult struct {
 	Reply      string
 	RequestID  string
 	EventCount int
+	MessageID  string
+	Replayed   bool
 }
 
-// Runtime owns the Agent Runner, Session service and Session coordinator.
+// Runtime owns the Agent Runner and its platform state services.
 type Runtime struct {
 	runner         runner.Runner
 	sessionService session.Service
 	coordinator    coordination.Coordinator
+	idempotency    idempotency.Store
 	closeOnce      sync.Once
 	closeErr       error
 }
@@ -44,13 +52,16 @@ type Runtime struct {
 func NewRuntime(selectedModel model.Model, stream bool) (*Runtime, error) {
 	sessionService := inmemory.NewSessionService()
 	coordinator := coordination.NewLocalCoordinator()
+	idempotencyStore := idempotency.NewLocalStore()
 	runtime, err := NewRuntimeWithServices(
 		selectedModel,
 		sessionService,
 		coordinator,
+		idempotencyStore,
 		stream,
 	)
 	if err != nil {
+		_ = idempotencyStore.Close()
 		_ = coordinator.Close()
 		_ = sessionService.Close()
 		return nil, err
@@ -67,25 +78,29 @@ func NewRuntimeWithSession(
 	stream bool,
 ) (*Runtime, error) {
 	coordinator := coordination.NewLocalCoordinator()
+	idempotencyStore := idempotency.NewLocalStore()
 	runtime, err := NewRuntimeWithServices(
 		selectedModel,
 		sessionService,
 		coordinator,
+		idempotencyStore,
 		stream,
 	)
 	if err != nil {
+		_ = idempotencyStore.Close()
 		_ = coordinator.Close()
 		return nil, err
 	}
 	return runtime, nil
 }
 
-// NewRuntimeWithServices creates an LLMAgent with caller-provided Session and
-// coordination services. Runtime owns both services after a successful call.
+// NewRuntimeWithServices creates an LLMAgent with caller-provided platform
+// services. Runtime owns all services after a successful call.
 func NewRuntimeWithServices(
 	selectedModel model.Model,
 	sessionService session.Service,
 	coordinator coordination.Coordinator,
+	idempotencyStore idempotency.Store,
 	stream bool,
 ) (*Runtime, error) {
 	if selectedModel == nil {
@@ -96,6 +111,9 @@ func NewRuntimeWithServices(
 	}
 	if coordinator == nil {
 		return nil, errors.New("session coordinator is required")
+	}
+	if idempotencyStore == nil {
+		return nil, errors.New("idempotency store is required")
 	}
 	agentInstance := llmagent.New(
 		tutorialAgentName,
@@ -116,6 +134,7 @@ func NewRuntimeWithServices(
 		),
 		sessionService: sessionService,
 		coordinator:    coordinator,
+		idempotency:    idempotencyStore,
 	}, nil
 }
 
@@ -128,25 +147,45 @@ func NewDemoRuntime() *Runtime {
 	return runtime
 }
 
-// Chat runs one user turn and drains the complete Runner event stream.
+// Chat runs a non-retriable caller turn with a generated message ID. HTTP and
+// IM adapters should use ChatWithMessageID so retries reuse the external ID.
 func (r *Runtime) Chat(
 	ctx context.Context,
 	userID string,
 	sessionID string,
 	text string,
-) (result ChatResult, err error) {
+) (ChatResult, error) {
+	return r.ChatWithMessageID(ctx, uuid.NewString(), userID, sessionID, text)
+}
+
+// ChatWithMessageID runs one idempotent user turn and drains the complete
+// Runner event stream.
+func (r *Runtime) ChatWithMessageID(
+	ctx context.Context,
+	messageID string,
+	userID string,
+	sessionID string,
+	text string,
+) (ChatResult, error) {
 	if r == nil || r.runner == nil {
 		return ChatResult{}, errors.New("agent runtime is not initialized")
 	}
 	if r.coordinator == nil {
 		return ChatResult{}, errors.New("session coordinator is not initialized")
 	}
+	if r.idempotency == nil {
+		return ChatResult{}, errors.New("idempotency store is not initialized")
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	messageID = strings.TrimSpace(messageID)
 	userID = strings.TrimSpace(userID)
 	sessionID = strings.TrimSpace(sessionID)
 	text = strings.TrimSpace(text)
+	if messageID == "" {
+		return ChatResult{}, errors.New("message_id is required")
+	}
 	if userID == "" {
 		return ChatResult{}, errors.New("user_id is required")
 	}
@@ -157,6 +196,98 @@ func (r *Runtime) Chat(
 		return ChatResult{}, errors.New("message is required")
 	}
 
+	key := idempotency.Key{
+		AppName:   tutorialAppName,
+		UserID:    userID,
+		SessionID: sessionID,
+		MessageID: messageID,
+	}
+	fingerprint := messageFingerprint(text)
+	for {
+		begin, err := r.idempotency.Begin(ctx, key, fingerprint)
+		if err != nil {
+			return ChatResult{}, fmt.Errorf("begin idempotent chat: %w", err)
+		}
+		switch begin.Status {
+		case idempotency.BeginCompleted:
+			return chatResultFromIdempotency(messageID, begin.Result, true), nil
+		case idempotency.BeginProcessing:
+			cached, waitErr := r.idempotency.Wait(ctx, key, fingerprint)
+			if errors.Is(waitErr, idempotency.ErrRetry) {
+				continue
+			}
+			if waitErr != nil {
+				return ChatResult{}, fmt.Errorf("wait for idempotent chat: %w", waitErr)
+			}
+			return chatResultFromIdempotency(messageID, cached, true), nil
+		case idempotency.BeginStarted:
+			if begin.Attempt == nil {
+				return ChatResult{}, errors.New("idempotency store returned a nil attempt")
+			}
+			return r.executeIdempotentChat(
+				ctx,
+				begin.Attempt,
+				messageID,
+				userID,
+				sessionID,
+				text,
+			)
+		default:
+			return ChatResult{}, fmt.Errorf(
+				"idempotency store returned unknown status %d",
+				begin.Status,
+			)
+		}
+	}
+}
+
+func (r *Runtime) executeIdempotentChat(
+	requestCtx context.Context,
+	attempt idempotency.Attempt,
+	messageID string,
+	userID string,
+	sessionID string,
+	text string,
+) (ChatResult, error) {
+	result, runErr := r.runChatTurn(
+		attempt.Context(),
+		userID,
+		sessionID,
+		text,
+	)
+	finalizeCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(requestCtx),
+		idempotencyFinalizeTimeout,
+	)
+	defer cancel()
+	if runErr != nil {
+		failErr := attempt.Fail(finalizeCtx)
+		if failErr != nil {
+			return ChatResult{}, errors.Join(
+				runErr,
+				fmt.Errorf("fail idempotent chat: %w", failErr),
+			)
+		}
+		return ChatResult{}, runErr
+	}
+	cached := idempotency.Result{
+		Reply:      result.Reply,
+		RequestID:  result.RequestID,
+		EventCount: result.EventCount,
+	}
+	if err := attempt.Complete(finalizeCtx, cached); err != nil {
+		return ChatResult{}, fmt.Errorf("complete idempotent chat: %w", err)
+	}
+	result.MessageID = messageID
+	return result, nil
+}
+
+func (r *Runtime) runChatTurn(
+	ctx context.Context,
+	userID string,
+	sessionID string,
+	text string,
+) (result ChatResult, err error) {
 	lease, err := r.coordinator.Acquire(ctx, coordination.Key{
 		AppName:   tutorialAppName,
 		UserID:    userID,
@@ -201,7 +332,26 @@ func (r *Runtime) Chat(
 	return result, nil
 }
 
-// Ready checks whether the Session service and coordinator are available.
+func chatResultFromIdempotency(
+	messageID string,
+	result idempotency.Result,
+	replayed bool,
+) ChatResult {
+	return ChatResult{
+		Reply:      result.Reply,
+		RequestID:  result.RequestID,
+		EventCount: result.EventCount,
+		MessageID:  messageID,
+		Replayed:   replayed,
+	}
+}
+
+func messageFingerprint(text string) string {
+	digest := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(digest[:])
+}
+
+// Ready checks whether all state services required for a chat are available.
 func (r *Runtime) Ready(ctx context.Context) error {
 	if r == nil || r.sessionService == nil {
 		return errors.New("session service is not initialized")
@@ -214,6 +364,12 @@ func (r *Runtime) Ready(ctx context.Context) error {
 	}
 	if err := r.coordinator.Ready(ctx); err != nil {
 		return fmt.Errorf("session coordinator is not ready: %w", err)
+	}
+	if r.idempotency == nil {
+		return errors.New("idempotency store is not initialized")
+	}
+	if err := r.idempotency.Ready(ctx); err != nil {
+		return fmt.Errorf("idempotency store is not ready: %w", err)
 	}
 	return nil
 }
@@ -270,7 +426,7 @@ func collectChatResult(
 	return result, nil
 }
 
-// Close releases the Runner and the Session service owned by Runtime.
+// Close releases the Runner and all platform services owned by Runtime.
 func (r *Runtime) Close() error {
 	if r == nil {
 		return nil
@@ -284,11 +440,20 @@ func (r *Runtime) Close() error {
 		if r.coordinator != nil {
 			coordinatorErr = r.coordinator.Close()
 		}
+		var idempotencyErr error
+		if r.idempotency != nil {
+			idempotencyErr = r.idempotency.Close()
+		}
 		var sessionErr error
 		if r.sessionService != nil {
 			sessionErr = r.sessionService.Close()
 		}
-		r.closeErr = errors.Join(runnerErr, coordinatorErr, sessionErr)
+		r.closeErr = errors.Join(
+			runnerErr,
+			coordinatorErr,
+			idempotencyErr,
+			sessionErr,
+		)
 	})
 	return r.closeErr
 }

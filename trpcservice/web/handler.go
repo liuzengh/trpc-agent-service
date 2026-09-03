@@ -11,10 +11,12 @@ import (
 	"time"
 
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 )
 
 const (
 	defaultMaxBodyBytes = 32 << 10
+	maxMessageIDLength  = 256
 	maxUserIDLength     = 128
 	maxSessionIDLength  = 256
 	maxMessageLength    = 8 << 10
@@ -22,8 +24,9 @@ const (
 
 // ChatService is the small boundary between the HTTP layer and Agent runtime.
 type ChatService interface {
-	Chat(
+	ChatWithMessageID(
 		ctx context.Context,
+		messageID string,
 		userID string,
 		sessionID string,
 		text string,
@@ -72,6 +75,7 @@ func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 type chatRequest struct {
+	MessageID string `json:"message_id"`
 	UserID    string `json:"user_id"`
 	SessionID string `json:"session_id"`
 	Message   string `json:"message"`
@@ -80,9 +84,11 @@ type chatRequest struct {
 type chatResponse struct {
 	Reply      string `json:"reply"`
 	RequestID  string `json:"request_id,omitempty"`
+	MessageID  string `json:"message_id"`
 	UserID     string `json:"user_id"`
 	SessionID  string `json:"session_id"`
 	EventCount int    `json:"event_count"`
+	Replayed   bool   `json:"replayed"`
 }
 
 type errorResponse struct {
@@ -114,6 +120,7 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
+	request.MessageID = strings.TrimSpace(request.MessageID)
 	request.UserID = strings.TrimSpace(request.UserID)
 	request.SessionID = strings.TrimSpace(request.SessionID)
 	request.Message = strings.TrimSpace(request.Message)
@@ -122,14 +129,21 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.chatService.Chat(
+	result, err := h.chatService.ChatWithMessageID(
 		r.Context(),
+		request.MessageID,
 		request.UserID,
 		request.SessionID,
 		request.Message,
 	)
 	if err != nil {
 		log.Printf("chat failed: %v", err)
+		if errors.Is(err, idempotency.ErrKeyConflict) {
+			writeJSON(w, http.StatusConflict, errorResponse{
+				Error: "message_id was already used for different content",
+			})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "agent execution failed"})
 		return
 	}
@@ -137,14 +151,20 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, chatResponse{
 		Reply:      result.Reply,
 		RequestID:  result.RequestID,
+		MessageID:  result.MessageID,
 		UserID:     request.UserID,
 		SessionID:  request.SessionID,
 		EventCount: result.EventCount,
+		Replayed:   result.Replayed,
 	})
 }
 
 func validateChatRequest(request chatRequest) error {
 	switch {
+	case request.MessageID == "":
+		return errors.New("message_id is required")
+	case len(request.MessageID) > maxMessageIDLength:
+		return errors.New("message_id is too long")
 	case request.UserID == "":
 		return errors.New("user_id is required")
 	case len(request.UserID) > maxUserIDLength:
