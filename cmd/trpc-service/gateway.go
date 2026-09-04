@@ -11,9 +11,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/channels/feishu"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/channels/wecom"
 )
 
 // buildAdapter satisfies channels.AdapterBuilder.

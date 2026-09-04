@@ -1,3 +1,0 @@
-# Shell scripts must stay LF on checkout: CRLF line terminators break bash
-# (`\r` becomes part of tokens). Everything else follows core.autocrlf.
-*.sh text eol=lf

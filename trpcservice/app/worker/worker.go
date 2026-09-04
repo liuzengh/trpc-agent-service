@@ -1,0 +1,640 @@
+// Package worker consumes inbound messages from the bus, runs the bound
+// agent via the tRPC-Agent-Go runner, and records the reply in the MySQL
+// outbox. Idempotency (Redis fast path + MySQL marker in the outbox
+// transaction) and the per-session Redis lock keep redeliveries and
+// concurrent workers safe.
+package worker
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/chat"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/knowledge"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/skill"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tool"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/bus"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"trpc.group/trpc-go/trpc-agent-go/artifact"
+	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/runner"
+	fwtool "trpc.group/trpc-go/trpc-agent-go/tool"
+)
+
+// tracer names the platform's worker spans.
+var tracer = otel.Tracer("trpc-agent-service/worker")
+
+// withTraceID attaches the given trace id to ctx, so spans started on it join
+// the trace the IM gateway stamped on the message.
+func withTraceID(ctx context.Context, traceID string) context.Context {
+	if traceID == "" {
+		return ctx
+	}
+	tid, err := trace.TraceIDFromHex(traceID)
+	if err != nil {
+		return ctx
+	}
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    tid,
+		TraceFlags: trace.FlagsSampled,
+	})
+	return trace.ContextWithSpanContext(ctx, sc)
+}
+
+// Consumer group on stream:inbound shared by all worker nodes.
+const Group = "workers"
+
+// runTimeout bounds one agent turn end-to-end. A turn may issue several model
+// calls (tool loop), each individually capped by the model HTTP timeout; this
+// is the outer budget that prevents a pathological turn from blocking the IM
+// user indefinitely. Default is generous enough for a deep reasoning model.
+const runTimeout = 300 * time.Second
+
+// StateBus is the bus plus the cross-node session state the worker relies on;
+// bus.RedisBus satisfies it.
+type StateBus interface {
+	bus.Bus
+	// Idempotent atomically claims msgKey (SetNX): true = first claim, false =
+	// already processed. ClearIdem releases the claim so a failed attempt can
+	// be retried on redelivery.
+	Idempotent(ctx context.Context, msgKey string) (bool, error)
+	ClearIdem(ctx context.Context, msgKey string) error
+	SeenIdem(ctx context.Context, msgKey string) (bool, error)
+	MarkIdem(ctx context.Context, msgKey string) error
+	Route(ctx context.Context, tenantID, sessionID string) (string, error)
+	SetRoute(ctx context.Context, tenantID, sessionID, agentID string) error
+	LockSession(ctx context.Context, tenantID, sessionID, token string) (bool, error)
+	UnlockSession(ctx context.Context, tenantID, sessionID, token string) error
+	// RefreshLock extends the session lock TTL when token still owns it; a
+	// long approval wait must not let the lock expire under the worker.
+	RefreshLock(ctx context.Context, tenantID, sessionID, token string) (bool, error)
+	// Approval state: at most one pending human approval per session.
+	SetPendingApproval(ctx context.Context, tenantID, sessionID, payload string, ttl time.Duration) error
+	PendingApproval(ctx context.Context, tenantID, sessionID string) (string, error)
+	ClearPendingApproval(ctx context.Context, tenantID, sessionID string) error
+	ResolveApproval(ctx context.Context, tenantID, sessionID, decision string) error
+	ApprovalResult(ctx context.Context, tenantID, sessionID string) (string, error)
+}
+
+// ToolSource resolves a registered tool id to its runtime implementation.
+type ToolSource func(id string) (fwtool.Tool, bool)
+
+// Worker turns inbound messages into agent replies.
+type Worker struct {
+	bus       StateBus
+	agents    *agent.Manager
+	tools     *tool.Registry
+	toolSrc   ToolSource
+	outbox    *bus.Outbox
+	sessions  *storage.Router    // optional: per-tenant session backend
+	knowledge *knowledge.Manager // optional: KB search tools
+	skills    *skill.Manager     // optional: mounted skills -> instruction splice
+	auditor   audit.Recorder     // optional: audit log
+	artifacts artifact.Service   // optional: code-execution artifacts (MinIO)
+	ledger    chat.Ledger        // optional: business conversation ledger
+
+	tenants TenantSource                                              // optional: tenant governance config source
+	usage   func(ctx context.Context, tenantID string) (int64, error) // optional: token meter for budget checks
+}
+
+// New assembles a worker. sessions, kbs, skills, auditor, artifacts and
+// ledger may be nil (no multi-turn persistence / no knowledge bases / no
+// skills / no audit / no artifact persistence / no chat ledger).
+func New(b StateBus, agents *agent.Manager, tools *tool.Registry, toolSrc ToolSource, outbox *bus.Outbox, sessions *storage.Router, kbs *knowledge.Manager, skills *skill.Manager, auditor audit.Recorder, artifacts artifact.Service, ledger chat.Ledger) *Worker {
+	return &Worker{bus: b, agents: agents, tools: tools, toolSrc: toolSrc, outbox: outbox, sessions: sessions, knowledge: kbs, skills: skills, auditor: auditor, artifacts: artifacts, ledger: ledger}
+}
+
+// SetGovernance wires the per-tenant governance source and the token meter
+// used for budget checks. tenants may be nil (governance disabled — safe
+// defaults apply); usage may be nil (budget never enforced even if a tenant
+// configures a quota).
+func (w *Worker) SetGovernance(tenants TenantSource, usage func(ctx context.Context, tenantID string) (int64, error)) {
+	w.tenants = tenants
+	w.usage = usage
+}
+
+// Run joins the consumer group and blocks until ctx is done. The consumer name
+// is unique per process so XAUTOCLAIM can tell dead consumers apart.
+func (w *Worker) Run(ctx context.Context) error {
+	host, _ := os.Hostname()
+	consumer := fmt.Sprintf("%s-%d", host, os.Getpid())
+	return w.bus.ConsumeInbound(ctx, Group, consumer, w.handle)
+}
+
+// handle processes one inbound message. An error leaves the message pending
+// for redelivery; nil acks it.
+func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
+	if m == nil || m.ID == "" || m.Content == nil {
+		return nil // malformed envelope: ack and drop
+	}
+	metrics.InboundMessage(ctx, m.TenantID, m.Channel)
+
+	// Atomic dedup (Redis SetNX): the first claim wins, so concurrent
+	// redeliveries of the same message are dropped before any work. The old
+	// SeenIdem-check + MarkIdem-commit left a window where redeliveries passed
+	// the check and each wrote an audit row.
+	first, err := w.bus.Idempotent(ctx, m.ID)
+	if err != nil {
+		return err // transient Redis error: retry later
+	}
+	if !first {
+		return nil // duplicate redelivery
+	}
+	// fail releases the idempotency claim so a transient failure is retried on
+	// redelivery, rather than being silently dropped.
+	fail := func(err error) error {
+		_ = w.bus.ClearIdem(ctx, m.ID)
+		return err
+	}
+
+	// A human approval reply resolves the pending approval of the session.
+	// This runs BEFORE the session lock is taken: while an agent turn is
+	// blocked waiting for the decision, its own reply must still get through.
+	if handled, err := w.tryResolveApproval(ctx, m); err != nil {
+		return fail(err)
+	} else if handled {
+		return nil // consumed as an approval decision, not an agent turn
+	}
+
+	agentID := m.AgentID
+	if agentID == "" {
+		var err error
+		agentID, err = w.bus.Route(ctx, m.TenantID, m.SessionID)
+		if err != nil {
+			return fail(err)
+		}
+		if agentID == "" {
+			// No agent bound for this session and none on the message: a
+			// configuration gap, not a transient failure. Drop.
+			slog.Warn("worker: no agent bound, dropping message", "tenant", m.TenantID, "session", m.SessionID)
+			return nil
+		}
+	} else {
+		if err := w.bus.SetRoute(ctx, m.TenantID, m.SessionID, agentID); err != nil {
+			return fail(err)
+		}
+	}
+
+	// Resolve the tenant's governance snapshot once per message and share it
+	// with run via the context, so the IM allow-list (here) and the budget /
+	// tool whitelist / approval-union / redaction checks (run) agree.
+	policy := w.resolveTenantPolicy(ctx, m.TenantID)
+	ctx = withTenantPolicy(ctx, policy)
+
+	// IM user permission gate: deny unauthorized IM users before any work. A
+	// denial is a policy outcome (drop), not a transient failure (no retry).
+	// The allow-list applies to IM-originated messages only; platform console
+	// (admin) traffic is authenticated by the platform, not a tenant policy.
+	if !policy.imUserAllowed(m.Channel, m.UserID) {
+		slog.Warn("worker: IM user not allowed, dropping message", "tenant", m.TenantID, "user", m.UserID)
+		return nil
+	}
+
+	// Serialize handling of one session across nodes.
+	token := uuid.NewString()
+	ok, err := w.bus.LockSession(ctx, m.TenantID, m.SessionID, token)
+	if err != nil {
+		return fail(err)
+	}
+	if !ok {
+		return fail(fmt.Errorf("worker: session %s busy", m.SessionID)) // stays pending, retried
+	}
+	defer func() {
+		_ = w.bus.UnlockSession(ctx, m.TenantID, m.SessionID, token)
+	}()
+
+	start := time.Now()
+	reply, toolNames, tokens, err := w.run(ctx, agentID, m, token)
+	dur := time.Since(start)
+	if err != nil {
+		metrics.AgentError(ctx, m.TenantID, agentID)
+		w.recordAudit(m, agentID, audit.DecisionFailed, dur, err, nil, 0)
+		return fail(err) // transient (LLM/tool failure): redeliver and retry
+	}
+	metrics.AgentRun(ctx, m.TenantID, agentID, dur)
+	w.recordAudit(m, agentID, audit.DecisionExecuted, dur, nil, toolNames, tokens)
+	if reply == nil {
+		return nil // nothing to send back
+	}
+
+	if err := w.outbox.Append(ctx, reply, m.ID); err != nil {
+		if errors.Is(err, bus.ErrDuplicateIdem) {
+			return nil // already processed before a crash: ack
+		}
+		return fail(err)
+	}
+	w.recordLedger(ctx, m, agentID, reply)
+	return nil
+}
+
+// recordLedger writes the USER + ASSISTANT rows of the finished turn into the
+// business conversation ledger, best-effort: a ledger failure must never fail
+// or retry the reply flow (redelivery is idempotent by message_id).
+func (w *Worker) recordLedger(ctx context.Context, m *bus.Message, agentID string, reply *bus.Message) {
+	if w.ledger == nil || m == nil || m.Content == nil || reply == nil || reply.Content == nil {
+		return
+	}
+	turn := chat.Turn{
+		TenantID:   m.TenantID,
+		AgentID:    agentID,
+		SessionID:  m.SessionID,
+		MemberID:   m.UserID,
+		Channel:    m.Channel,
+		UserMsgID:  m.ID,
+		UserText:   m.Content.Content,
+		ReplyMsgID: reply.ID,
+		ReplyText:  reply.Content.Content,
+		TurnID:     uuid.NewString(),
+		TurnTS:     time.Now().UnixMilli(),
+	}
+	if err := w.ledger.RecordTurn(ctx, turn); err != nil {
+		slog.Warn("worker: chat ledger write failed (best-effort)", "session", m.SessionID, "err", err)
+	}
+}
+
+// recordAudit writes one audit entry for an agent run, when an auditor is
+// wired. AgentName carries the agent id (the worker resolves only the id; the
+// durable agent name lives in the management domain). ToolName lists the tools
+// the turn actually invoked (comma-joined); Cost carries the turn's token
+// consumption (token count, not currency — no price table).
+func (w *Worker) recordAudit(m *bus.Message, agentID, decision string, dur time.Duration, runErr error, toolNames []string, tokens int64) {
+	if w.auditor == nil {
+		return
+	}
+	entry := audit.Entry{
+		TenantID:  m.TenantID,
+		Channel:   m.Channel,
+		UserID:    m.UserID,
+		SessionID: m.SessionID,
+		AgentName: agentID,
+		ToolName:  strings.Join(toolNames, ","),
+		Decision:  decision,
+		Latency:   dur,
+		Cost:      float64(tokens),
+		TraceID:   m.TraceID,
+	}
+	if runErr != nil {
+		entry.ErrorType = classifyRunError(runErr)
+	}
+	w.auditor.Record(entry)
+}
+
+// classifyRunError maps a run error to a coarse audit error class. Raw error
+// text (which may embed request internals) never reaches the audit trail
+// verbatim; the full error remains available in operational logs.
+func classifyRunError(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	default:
+		return "run_error"
+	}
+}
+
+// run builds the agent from its current runtime profile and executes one turn.
+// lockToken is the session lock the worker holds; a pending human approval
+// refreshes it while waiting.
+func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockToken string) (*bus.Message, []string, int64, error) {
+	// Share the trace id the IM gateway stamped on the message, so the
+	// agent.run span (and its Runner/Tool/Session children) join the same
+	// trace as im.callback / im.reply in Jaeger.
+	ctx = withTraceID(ctx, m.TraceID)
+	ctx, span := tracer.Start(ctx, "agent.run",
+		trace.WithAttributes(
+			attribute.String("tenant_id", m.TenantID),
+			attribute.String("agent_id", agentID),
+			attribute.String("session_id", m.SessionID),
+			attribute.String("channel", m.Channel),
+			attribute.String("trace_id", m.TraceID),
+		),
+	)
+	defer span.End()
+
+	// Resolve the profile once: tools / KB tools / skill instruction all hang
+	// off it, so the worker avoids re-reading the store per concern.
+	profile, err := w.agents.Resolve(ctx, agentID)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
+	// Tenant token budget: reject the turn before spending any model/tool
+	// cost. The quota comes from the tenant's governance snapshot; a meter
+	// failure logs and lets the turn proceed (availability over strictness).
+	policy := tenantPolicyFrom(ctx)
+	exceeded, err := budgetExceeded(ctx, policy.TokenQuota, m.TenantID, w.usage)
+	if err != nil {
+		slog.Warn("worker: budget check failed", "tenant", m.TenantID, "err", err)
+	} else if exceeded {
+		return nil, nil, 0, fmt.Errorf("worker: tenant %s token budget exceeded", m.TenantID)
+	}
+
+	tools, approvalToolNames := w.toolsFromProfile(ctx, agentID, profile, policy)
+	tools = append(tools, w.resolveKnowledgeTools(ctx, agentID)...)
+	// usedSkillIDs reports which mounted skills were actually injected this
+	// turn (loaded with content); the usage meter counts only those as "used".
+	instruction, usedSkillIDs := w.skillInstruction(ctx, profile)
+	ag, err := w.agents.BuildFromProfile(ctx, agentID, profile, tools, instruction)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
+	// A human approval plugin pauses tool calls that the profile marked for
+	// approval (plus the tenant's force-approval union, resolved inside
+	// toolsFromProfile). Built per turn because the tool-name set follows the
+	// profile and tenant policy.
+	plugin := w.approvalPlugin(ctx, m, approvalToolNames, lockToken)
+
+	var opts []runner.Option
+	if plugin != nil {
+		opts = append(opts, runner.WithPlugins(plugin))
+	}
+	// The model timer brackets every model call of this turn so the platform
+	// can report model latency separately from the end-to-end run duration.
+	timer := newModelTimer()
+	opts = append(opts, runner.WithPlugins(timer))
+	// Sensitive-data redaction runs by default so tool args/results never
+	// reach the model or audit log verbatim; a tenant may opt out.
+	if p := redactionPlugin(policy); p != nil {
+		opts = append(opts, runner.WithPlugins(p))
+	}
+	var artMeter *artifactUsage
+	if w.artifacts != nil {
+		// Count artifact saves for the usage meter while forwarding every
+		// operation to the real service.
+		artMeter = &artifactUsage{inner: w.artifacts}
+		opts = append(opts, runner.WithArtifactService(artMeter))
+	}
+	if w.sessions != nil {
+		// Time the shared session-backend access; a slow backend shows up as
+		// platform.session_latency and is tenant-partitioned.
+		sessStart := time.Now()
+		s, err := w.sessions.Sessions(ctx, m.TenantID)
+		metrics.SessionLatency(ctx, m.TenantID, time.Since(sessStart))
+		if err != nil {
+			slog.Warn("worker: session backend unavailable, running stateless",
+				"tenant", m.TenantID, "err", err)
+		} else {
+			opts = append(opts, runner.WithSessionService(s.Service()))
+		}
+	}
+
+	r := runner.NewRunner(m.TenantID, ag, opts...)
+	defer func() { _ = r.Close() }()
+
+	// Bound the whole turn so a hung model/tool cannot stall the worker (the
+	// IM user waits on this). The per-model HTTP timeout already caps a single
+	// request; this is the end-to-end budget for a multi-call turn.
+	runCtx, cancel := context.WithTimeout(ctx, runTimeout)
+	defer cancel()
+
+	events, err := r.Run(runCtx, m.UserID, m.SessionID, *m.Content)
+	// Record model latency even when the run failed: model calls did happen
+	// and a timeout spike is exactly what the metric should surface.
+	if md := timer.Duration(); md > 0 {
+		metrics.ModelCallDuration(ctx, m.TenantID, agentID, md)
+	}
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("worker: run agent %q: %w", agentID, err)
+	}
+	text, tokens, toolNames, toolDur, toolCalls, err := finalTextWithUsage(events)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	metrics.TokenUsage(ctx, m.TenantID, tokens)
+	// Per-tenant cost: the platform meters cost in tokens (no price table),
+	// so the counter value equals this turn's token consumption.
+	metrics.TenantCost(ctx, m.TenantID, float64(tokens))
+	if toolDur > 0 {
+		metrics.ToolCallDuration(ctx, m.TenantID, agentID, toolDur)
+	}
+	// Usage metering: token + tool + sandbox(code-exec) + artifact(saves) +
+	// skill(injected SKILL.md count). Only positive dimensions are written,
+	// each idempotent on m.ID + ":" + dimension.
+	var artSaves int32
+	if artMeter != nil {
+		artSaves = artMeter.count()
+	}
+	w.recordUsage(ctx, m, agentID, buildUsageEntries(m, agentID, tokens, toolCalls, usedSkillIDs, artSaves))
+	if text == "" {
+		return nil, nil, 0, nil
+	}
+	reply := model.NewAssistantMessage(text)
+
+	return &bus.Message{
+		ID:        uuid.NewString(),
+		TraceID:   m.TraceID,
+		TenantID:  m.TenantID,
+		AgentID:   agentID,
+		SessionID: m.SessionID,
+		Channel:   m.Channel,
+		UserID:    m.UserID,
+		Content:   &reply,
+		ReplyTo:   m.ID,
+	}, toolNames, tokens, nil
+}
+
+// toolsFromProfile returns the tool implementations the agent may use (the
+// profile's tool ids intersected with the RBAC grants and the tenant's tool
+// whitelist) plus the set of tool names whose calls need human approval.
+// Approval is triggered by any of the three rails: the tool is listed in
+// profile.ApprovalToolIDs, in the tenant's force-approval set, or its
+// definition is risk_level=high.
+func (w *Worker) toolsFromProfile(ctx context.Context, agentID string, profile agent.RuntimeProfile, policy *tenantPolicy) ([]fwtool.Tool, map[string]bool) {
+	if len(profile.ToolIDs) == 0 || w.toolSrc == nil || w.tools == nil {
+		return nil, nil
+	}
+	if policy == nil {
+		policy = defaultTenantPolicy()
+	}
+	manuallyApproved := make(map[string]bool, len(profile.ApprovalToolIDs))
+	for _, id := range profile.ApprovalToolIDs {
+		manuallyApproved[id] = true
+	}
+	var out []fwtool.Tool
+	approvalNames := make(map[string]bool)
+	for _, id := range profile.ToolIDs {
+		allowed, err := w.tools.IsAllowed(ctx, agentID, id)
+		if err != nil {
+			slog.Warn("worker: RBAC check failed, skipping tool", "agent", agentID, "tool", id, "err", err)
+			continue
+		}
+		if !allowed {
+			continue
+		}
+		// Tenant whitelist (static tools only): knowledge_search tools are
+		// appended by resolveKnowledgeTools and never restricted here.
+		if !policy.toolAllowed(id) {
+			continue
+		}
+		// Resolve the tool definition (risk level) BEFORE mounting: a missing
+		// definition drops the tool rather than mounting it without its
+		// approval gate. A high-risk / force-approved tool that mounted
+		// without its approval entry would otherwise execute ungoverned.
+		def, err := w.tools.Get(ctx, id)
+		if err != nil {
+			slog.Warn("worker: tool definition unavailable, skipping tool", "agent", agentID, "tool", id, "err", err)
+			continue
+		}
+		t, ok := w.toolSrc(id)
+		if !ok {
+			continue
+		}
+		out = append(out, t)
+		_, forced := policy.ForceApproval[id]
+		if manuallyApproved[id] || forced || def.RiskLevel == tool.RiskHigh {
+			approvalNames[def.Name] = true
+		}
+	}
+	return out, approvalNames
+}
+
+// resolveKnowledgeTools returns one search tool per KB mounted on the agent's
+// profile. The first tool keeps the framework's default name; extra KBs get
+// numbered names so the LLM can address them separately.
+func (w *Worker) resolveKnowledgeTools(ctx context.Context, agentID string) []fwtool.Tool {
+	if w.knowledge == nil {
+		return nil
+	}
+	profile, err := w.agents.Resolve(ctx, agentID)
+	if err != nil || len(profile.KnowledgeIDs) == 0 {
+		return nil
+	}
+	var out []fwtool.Tool
+	for i, kbID := range profile.KnowledgeIDs {
+		name := "knowledge_search"
+		if i > 0 {
+			name = fmt.Sprintf("knowledge_search_%d", i+1)
+		}
+		t, err := w.knowledge.SearchTool(ctx, kbID, name)
+		if err != nil {
+			// A missing KB must not take down the whole agent run.
+			slog.Warn("worker: knowledge tool unavailable", "kb", kbID, "err", err)
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// skillInstruction splices the text of the skills mounted on the agent's
+// profile into an instruction fragment appended to the system prompt. Each
+// skill renders its SKILL.md body, or its prompt_template when the body is
+// empty. When skills are not wired (nil) the result is empty. It also returns
+// the ids of the skills actually injected (loaded, published and non-empty),
+// which the usage meter reports as the turn's skill dimension — a skill is
+// "used" when its SKILL.md shapes the turn, not merely mounted.
+func (w *Worker) skillInstruction(ctx context.Context, profile agent.RuntimeProfile) (string, []string) {
+	if w.skills == nil || len(profile.SkillIDs) == 0 {
+		return "", nil
+	}
+	loaded, err := w.skills.LoadByIDs(ctx, profile.SkillIDs)
+	if err != nil {
+		slog.Warn("worker: skill load failed", "err", err)
+		return "", nil
+	}
+	var b strings.Builder
+	injected := make([]string, 0, len(loaded))
+	for _, s := range loaded {
+		text := s.ContentMD
+		if text == "" {
+			text = s.PromptTemplate
+		}
+		if text == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n===== Skill: %s (v%d) =====\n%s\n===== End Skill: %s =====\n",
+			s.Code, s.Version, text, s.Code)
+		injected = append(injected, s.SkillID)
+	}
+	return b.String(), injected
+}
+
+// finalTextWithUsage extracts the last non-partial assistant text, the summed
+// token usage, the distinct tool names invoked (in order), the per-tool call
+// counts (including repeats), and the total tool-call latency (first tool
+// call to last tool response), from the event stream. A nil *event.Event is
+// skipped (the channel may close early).
+func finalTextWithUsage(events <-chan *event.Event) (string, int64, []string, time.Duration, map[string]int, error) {
+	var last string
+	var tokens int64
+	var toolNames []string
+	var toolStart, toolEnd time.Time
+	seen := make(map[string]struct{})
+	toolCalls := make(map[string]int)
+
+	// recordToolCall counts one tool-call request: names deduped in order,
+	// with repeat counts so the usage meter reports real invocation counts.
+	// Tool calls sit on Message.ToolCalls (non-streaming responses) or on
+	// Delta.ToolCalls (streaming adapters); the framework reads both (see
+	// model.Response.GetToolCallIDs), so the worker must too — otherwise a
+	// streaming model's calls never reach the tool usage dimension.
+	recordToolCall := func(tc model.ToolCall, ts time.Time) {
+		if tc.Function.Name == "" {
+			return
+		}
+		toolCalls[tc.Function.Name]++
+		if _, ok := seen[tc.Function.Name]; !ok {
+			seen[tc.Function.Name] = struct{}{}
+			toolNames = append(toolNames, tc.Function.Name)
+		}
+		if toolStart.IsZero() {
+			toolStart = ts
+		}
+	}
+
+	for evt := range events {
+		if evt == nil {
+			continue
+		}
+		if evt.Error != nil {
+			return "", tokens, toolNames, 0, nil, fmt.Errorf("worker: agent error: %s", evt.Error.Message)
+		}
+		if evt.Usage != nil {
+			tokens += int64(evt.Usage.PromptTokens + evt.Usage.CompletionTokens)
+		}
+		// Collect tool-call names from the assistant message(s) requesting
+		// them, covering both response shapes (see recordToolCall).
+		for _, c := range evt.Choices {
+			for _, tc := range c.Message.ToolCalls {
+				recordToolCall(tc, evt.Timestamp)
+			}
+			for _, tc := range c.Delta.ToolCalls {
+				recordToolCall(tc, evt.Timestamp)
+			}
+		}
+		if evt.IsToolCallResponse() && toolEnd.IsZero() {
+			toolEnd = evt.Timestamp
+		}
+		if evt.IsPartial || evt.IsToolCallResponse() {
+			continue
+		}
+		for _, c := range evt.Choices {
+			if c.Message.Role == model.RoleAssistant && c.Message.Content != "" {
+				last = c.Message.Content
+			}
+		}
+	}
+	var toolDur time.Duration
+	if !toolStart.IsZero() && toolEnd.After(toolStart) {
+		toolDur = toolEnd.Sub(toolStart)
+	}
+	return last, tokens, toolNames, toolDur, toolCalls, nil
+}

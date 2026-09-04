@@ -4,34 +4,43 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/bus"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/chat"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledge"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/llm"
-	srvlog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/skill"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/tool"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/workspace"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/app/web"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/app/worker"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/knowledge"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/llm"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/skill"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tenant"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tool"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/bus"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/health"
+	srvlog "github.com/liuzengh/trpc-agent-service/trpcservice/infra/log"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/secret"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/agentstore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/bindingstore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/knowledgestore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/ledgerstore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/llmstore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/skillstore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/tenantstore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/toolstore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/workspace"
 
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
 	fmetric "trpc.group/trpc-go/trpc-agent-go/telemetry/metric"
@@ -65,6 +74,12 @@ func main() {
 	cleanupTelemetry := setupTelemetry(cfg.Telemetry, logger)
 	defer cleanupTelemetry()
 
+	// Signal-driven shutdown: SIGINT/SIGTERM cancels every background loop
+	// (worker consumer, outbox dispatcher, IM gateway) and lets the HTTP
+	// server drain before the deferred audit/telemetry cleanup runs.
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", health.Handler())
 
@@ -84,12 +99,12 @@ func main() {
 	var kbMgr *knowledge.Manager
 	var skillMgr *skill.Manager
 	if db != nil {
-		reg = llm.NewMySQLRegistry(db, nil)
-		tenantMgr = tenant.NewMySQLManager(db)
-		agentMgr = agent.NewMySQLManager(db, reg)
-		toolReg = tool.NewMySQLRegistry(db)
-		kbMgr = knowledge.NewMySQLManager(db, vectorStoreFactory(cfg), knowledge.RegistryEmbedderFactory(reg))
-		skillMgr = skill.NewMySQLManager(db)
+		reg = llmstore.NewMySQLRegistry(db, nil)
+		tenantMgr = tenantstore.NewMySQLManager(db)
+		agentMgr = agentstore.NewMySQLManager(db, reg)
+		toolReg = toolstore.NewMySQLRegistry(db)
+		kbMgr = knowledgestore.NewMySQLManager(db, vectorStoreFactory(cfg), knowledge.RegistryEmbedderFactory(reg))
+		skillMgr = skillstore.NewMySQLManager(db)
 	} else {
 		reg = llm.NewRegistry(nil)
 		tenantMgr = tenant.NewManager()
@@ -116,7 +131,7 @@ func main() {
 	// independent of the worker.
 	var bindStore channels.BindingStore
 	if db != nil {
-		bindStore = channels.NewMySQLBindingStore(db)
+		bindStore = bindingstore.NewMySQLBindingStore(db)
 	} else {
 		bindStore = channels.NewMemBindingStore()
 	}
@@ -142,8 +157,10 @@ func main() {
 		secretStore = secret.NewMemStore()
 	}
 	// Models resolve APIKeyRef via the credential store (nil store keeps the
-	// legacy plaintext APIKey path).
+	// legacy plaintext APIKey path). The same store receives plaintext API
+	// keys at write time so plaintext never reaches the durable endpoint row.
 	reg.SetKeySource(secretStore)
+	reg.SetKeySink(secretStore)
 
 	web.NewTenantAPI(tenantMgr).Register(mux)
 	agentAPI := web.NewAgentAPI(agentMgr)
@@ -201,37 +218,36 @@ func main() {
 			web.NewChatAPI(rb).Register(mux)
 			// Business conversation ledger writes every turn (USER+ASSISTANT)
 			// for the session-history API; it shares the worker's MySQL.
-			ledger := chat.NewMySQLLedger(db)
+			ledger := ledgerstore.NewMySQLLedger(db)
 			web.NewChatHistoryAPI(ledger).Register(mux)
 			w := worker.New(rb, agentMgr, toolReg, builtinToolSource, outbox, dss.Router, dss.Knowledge, skillMgr, dss.Auditor, dss.Artifacts, ledger)
-			// Tenant governance: token budget (default 1M tokens, metered from
-			// usage_records) + IM user permission (default-open; wire an
-			// allow-list here when required).
-			var budget *governance.Budget
+			// Tenant governance: per-tenant quota + audit_policy come from the
+			// tenants table (configured in the tenant UI); budgets apply only
+			// when a tenant sets quota.token_quota > 0. The token meter reads
+			// usage_records when the audit recorder is wired; without it no
+			// budget is ever enforced.
+			var usageFn func(ctx context.Context, tenantID string) (int64, error)
 			if auditRec != nil {
-				budget = &governance.Budget{
-					QuotaTokens: 1_000_000,
-					Usage: func(ctx context.Context, tenantID string) (int64, error) {
-						sums, err := auditRec.UsageSummary(ctx, audit.UsageQuery{TenantID: tenantID, Dimension: audit.UsageDimensionToken})
-						if err != nil {
-							return 0, err
-						}
-						var total int64
-						for _, s := range sums {
-							total += int64(s.Total)
-						}
-						return total, nil
-					},
+				usageFn = func(ctx context.Context, tenantID string) (int64, error) {
+					sums, err := auditRec.UsageSummary(ctx, audit.UsageQuery{TenantID: tenantID, Dimension: audit.UsageDimensionToken})
+					if err != nil {
+						return 0, err
+					}
+					var total int64
+					for _, s := range sums {
+						total += int64(s.Total)
+					}
+					return total, nil
 				}
 			}
-			w.SetGovernance(budget, nil)
+			w.SetGovernance(tenantMgr, usageFn)
 			go func() {
-				if err := w.Run(context.Background()); err != nil {
+				if err := w.Run(runCtx); err != nil {
 					logger.Error("worker stopped", "err", err)
 				}
 			}()
 			go func() {
-				if err := outbox.Run(context.Background(), rb, time.Second); err != nil {
+				if err := outbox.Run(runCtx, rb, time.Second); err != nil {
 					logger.Error("outbox dispatcher stopped", "err", err)
 				}
 			}()
@@ -239,12 +255,22 @@ func main() {
 			// each bound account at startup; ChannelAPI reconciles live
 			// adapters on every binding create/delete.
 			imMgr := channels.NewManager(rb, bindStore, secretStore, buildAdapter)
+			if cfg.RateLimit.Enable && cfg.Redis.URL != "" {
+				// Inbound rate limiting shares the bus's Redis so the limit
+				// holds across gateway nodes; a limiter error fails open.
+				if rcli, err := bus.NewRedisFromURL(cfg.Redis.URL); err != nil {
+					logger.Error("rate limiter unavailable, inbound limiting disabled", "err", err)
+				} else {
+					imMgr.SetRateLimiter(channels.NewRedisRateLimiter(rcli.Client(), cfg.RateLimit.PerMinute, time.Minute))
+					logger.Info("IM inbound rate limiting enabled", "per_minute", cfg.RateLimit.PerMinute)
+				}
+			}
 			channelAPI.SetManager(imMgr)
 			if err := imMgr.Reload(context.Background()); err != nil {
 				logger.Error("IM gateway reload failed", "err", err)
 			}
 			go func() {
-				if err := imMgr.Run(context.Background()); err != nil {
+				if err := imMgr.Run(runCtx); err != nil {
 					logger.Error("IM gateway stopped", "err", err)
 				}
 			}()
@@ -253,9 +279,23 @@ func main() {
 	}
 
 	logger.Info("starting server", "addr", cfg.Server.HTTPAddr, "role", cfg.Role)
-	if err := http.ListenAndServe(cfg.Server.HTTPAddr, web.CORS(mux)); err != nil {
-		logger.Error("server stopped", "err", err)
-		os.Exit(1)
+	srv := &http.Server{Addr: cfg.Server.HTTPAddr, Handler: web.CORS(mux)}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) && runCtx.Err() == nil {
+			logger.Error("server stopped", "err", err)
+			os.Exit(1)
+		}
+	case <-runCtx.Done():
+		logger.Info("shutting down: signal received")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("http server drain", "err", err)
+		}
 	}
 }
 
@@ -310,7 +350,7 @@ func vectorStoreFactory(cfg *config.Config) knowledge.VectorStoreFactory {
 		slog.Warn("milvus address not configured, knowledge bases stay in memory")
 		return knowledge.InMemoryVectorStoreFactory()
 	}
-	return knowledge.MilvusVectorStoreFactory(cfg.Milvus.Address, cfg.Milvus.Username, cfg.Milvus.Password)
+	return knowledgestore.MilvusVectorStoreFactory(cfg.Milvus.Address, cfg.Milvus.Username, cfg.Milvus.Password)
 }
 
 // builtinToolSource resolves built-in tool ids to their implementations.

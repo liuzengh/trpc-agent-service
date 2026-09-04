@@ -17,12 +17,17 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/mysql"
 
-	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledge"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/llm"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/tool"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/knowledge"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/llm"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tenant"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tool"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/agentstore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/knowledgestore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/llmstore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/tenantstore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/toolstore"
 
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/embedder"
 )
@@ -87,16 +92,16 @@ func openManagers(t *testing.T) *managers {
 		t.Fatalf("open mysql: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	kbs := knowledge.NewMySQLManager(db,
+	kbs := knowledgestore.NewMySQLManager(db,
 		knowledge.InMemoryVectorStoreFactory(),
 		func(_ context.Context, _ *knowledge.KnowledgeBase) (embedder.Embedder, error) {
 			return nil, errors.New("no embedder in metadata tests")
 		})
 	return &managers{
-		tenants: tenant.NewMySQLManager(db),
-		agents:  agent.NewMySQLManager(db, llm.NewMySQLRegistry(db, nil)),
-		llm:     llm.NewMySQLRegistry(db, nil),
-		tools:   tool.NewMySQLRegistry(db),
+		tenants: tenantstore.NewMySQLManager(db),
+		agents:  agentstore.NewMySQLManager(db, llmstore.NewMySQLRegistry(db, nil)),
+		llm:     llmstore.NewMySQLRegistry(db, nil),
+		tools:   toolstore.NewMySQLRegistry(db),
 		kbs:     kbs,
 	}
 }
@@ -138,7 +143,7 @@ func TestEndpointMySQLPersistence(t *testing.T) {
 
 	ep := llm.Endpoint{
 		ID: "e-1", Scope: llm.ScopeTenant, TenantID: "t-1", Name: "main",
-		Provider: "anthropic", BaseURL: "https://api.x", ModelName: "claude", APIKey: "secret",
+		Provider: "anthropic", BaseURL: "https://api.x", ModelName: "claude", APIKeyRef: "secret-ref",
 	}
 	if err := m.llm.Create(ctx, ep); err != nil {
 		t.Fatalf("create: %v", err)
@@ -151,7 +156,7 @@ func TestEndpointMySQLPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get after restart: %v", err)
 	}
-	if got.Provider != "anthropic" || got.APIKey != "secret" || got.TenantID != "t-1" {
+	if got.Provider != "anthropic" || got.APIKeyRef != "secret-ref" || got.TenantID != "t-1" {
 		t.Errorf("endpoint round-trip mismatch: %+v", got)
 	}
 
