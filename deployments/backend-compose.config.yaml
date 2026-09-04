@@ -1,0 +1,32 @@
+# Backend configuration used by docker compose (mounted over the image default
+# at /etc/trpc-service/config.yaml). Hostnames are compose service names.
+# Secrets never live in this file: the MySQL DSN is injected from the compose
+# environment (see deployments/.env TRPC_MYSQL_DSN) and ${...} is expanded at
+# load time.
+server:
+  http_addr: ":8080"
+log:
+  level: "info"
+role: "all"
+
+mysql:
+  dsn: "${TRPC_MYSQL_DSN}"
+
+redis:
+  url: "redis://redis:6379/0"
+
+milvus:
+  address: "milvus:19530"
+  username: ""
+  password: ""
+
+minio:
+  endpoint: "artifact-minio:9000"
+  access_key: "artifactadmin"
+  secret_key: "artifactadmin"
+  bucket: "artifacts"
+  use_ssl: false
+
+telemetry:
+  otlp_endpoint: "otel-collector:4317"
+  service_name: "trpc-agent-service"

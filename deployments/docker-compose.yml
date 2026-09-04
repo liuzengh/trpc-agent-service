@@ -1,0 +1,204 @@
+# Multi-tenant Agent platform — full local stack.
+# Usage: cp .env.example .env && docker compose up -d --build
+# Ports: frontend :5173, backend :8080, mysql :3307, redis :6379,
+#        minio :9000/:9001, artifact-minio :9002/:9003, milvus :19530/:9091.
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-trpc123}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-trpc_agent_service}
+      TZ: Asia/Shanghai
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "${MYSQL_PORT:-3307}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # Numbered init scripts run in order on first boot.
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-trpc123}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---- Milvus standalone (etcd + minio + milvus) ----
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    restart: unless-stopped
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd-data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    restart: unless-stopped
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus:
+    # 2.5+ required: BM25 full-text search used by the platform KB pipeline.
+    image: milvusdb/milvus:v2.5.6
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET_NAME: milvus
+      MINIO_USE_SSL: "false"
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus-data:/var/lib/milvus
+    depends_on:
+      - etcd
+      - minio
+
+  # ---- Artifact object storage (MinIO, S3 protocol) ----
+  artifact-minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    restart: unless-stopped
+    environment:
+      MINIO_ACCESS_KEY: ${ARTIFACT_MINIO_USER:-artifactadmin}
+      MINIO_SECRET_KEY: ${ARTIFACT_MINIO_PASSWORD:-artifactadmin}
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    volumes:
+      - artifact-minio-data:/data
+    command: minio server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ---- Application backend ----
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # The platform reads a single YAML config file; the credential-store
+    # master key is injected via env (TRPC_SECRET_MASTER_KEY) so it never
+    # lands in the mounted config in plaintext.
+    environment:
+      TRPC_SECRET_MASTER_KEY: ${TRPC_SECRET_MASTER_KEY:-dev-master-key-change-me}
+      # MySQL DSN is injected via env (never committed); the mounted config
+      # references it as ${TRPC_MYSQL_DSN} and expands it at load time.
+      TRPC_MYSQL_DSN: ${TRPC_MYSQL_DSN:-root:trpc123@tcp(mysql:3306)/trpc_agent_service?parseTime=true&multiStatements=true}
+    volumes:
+      - ./backend-compose.config.yaml:/etc/trpc-service/config.yaml:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_started
+      artifact-minio:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # ---- Observability: OTLP collector -> Jaeger (traces) + Prometheus (metrics)
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    restart: unless-stopped
+    command: ["--config", "/etc/otel/config.yaml"]
+    volumes:
+      - ../configs/otel-collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317" # otlp grpc (backend/worker)
+      - "4318:4318" # otlp http
+      - "8889:8889" # prometheus exporter scrape endpoint
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+
+  # ---- Frontend (nginx serving SPA + /api proxy) ----
+  frontend:
+    build:
+      context: ../front
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: /api
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql-data:
+  redis-data:
+  etcd-data:
+  minio-data:
+  milvus-data:
+  artifact-minio-data:
+  prometheus-data:
