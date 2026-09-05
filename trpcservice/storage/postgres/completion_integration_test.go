@@ -95,7 +95,7 @@ func atomicCompletionRequest(delivery queue.Delivery, lease storage.Lease, resul
 			JobID: delivery.Job.JobID, ExecutionID: delivery.Job.ExecutionID,
 			TenantID: delivery.Job.Tenant.TenantID, SessionID: delivery.Job.Tenant.SessionID,
 			OwnerID: lease.OwnerID, Epoch: lease.Epoch, FenceToken: lease.FenceToken,
-			ResultJSON: []byte(resultJSON),
+			ResultJSON: []byte(resultJSON), ConfigVersion: delivery.Job.Tenant.ConfigVersion,
 		},
 		Delivery: storage.DeliveryAckRecord{
 			TenantID: delivery.Job.Tenant.TenantID, JobID: delivery.Job.JobID,
@@ -123,7 +123,7 @@ func atomicCompletionRequestWithOutbox(delivery queue.Delivery, lease storage.Le
 		panic(err)
 	}
 	request.Outbox = &storage.OutboxMessage{
-		TenantID: request.Commit.TenantID, ID: "reply-" + request.Commit.ExecutionID,
+		TenantID: request.Commit.TenantID, ConfigVersion: request.Commit.ConfigVersion, ID: "reply-" + request.Commit.ExecutionID,
 		Kind: "agent.reply", AggregateID: request.Commit.ExecutionID,
 		DedupKey: request.Commit.TenantID + "|" + request.Commit.ExecutionID + "|agent.reply", Payload: payload,
 	}
@@ -277,6 +277,16 @@ func TestPostgresAtomicCompletionWithOutboxCommitsAllFacts(t *testing.T) {
 	status, attempt, lockedBy, payload := completionOutboxState(t, f)
 	if status != string(storage.OutboxPending) || attempt != 1 || lockedBy != "" || !equalJSON(payload, f.request.Outbox.Payload) {
 		t.Fatalf("unexpected reply outbox status=%s attempt=%d locked_by=%q payload=%s", status, attempt, lockedBy, payload)
+	}
+	var resultVersion, outboxVersion int64
+	if err := f.store.pool.QueryRow(f.ctx, `SELECT config_version FROM execution_result WHERE tenant_id=$1 AND execution_id=$2`, f.tenant.TenantID, f.job.ExecutionID).Scan(&resultVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.pool.QueryRow(f.ctx, `SELECT config_version FROM outbox_message WHERE tenant_id=$1 AND outbox_id=$2`, f.tenant.TenantID, "reply-"+f.job.ExecutionID).Scan(&outboxVersion); err != nil {
+		t.Fatal(err)
+	}
+	if resultVersion != f.request.Commit.ConfigVersion || outboxVersion != f.request.Commit.ConfigVersion {
+		t.Fatalf("durable config versions result=%d outbox=%d commit=%d", resultVersion, outboxVersion, f.request.Commit.ConfigVersion)
 	}
 	queueStatus, activeDelivery, lastDelivery := completionQueueStatus(t, f)
 	if queueStatus != "acked" || activeDelivery != "" || lastDelivery != f.delivery.DeliveryID {
@@ -486,6 +496,17 @@ func TestPostgresAtomicCompletionUnknownOutcomeReconcilesThreeFacts(t *testing.T
 		if err := f.coordinator.CommitResultAndAck(f.ctx, f.request); err != nil {
 			t.Fatalf("idempotent retry after all committed=%v", err)
 		}
+	}
+}
+
+func TestPostgresAtomicCompletionRejectsConfigVersionMismatch(t *testing.T) {
+	f := newAtomicCompletionFixture(t, time.Second, 2*time.Second)
+	f.request = atomicCompletionRequestWithOutbox(f.delivery, f.lease, `{"text":"versioned"}`)
+	f.request.Commit.ConfigVersion++
+	// The reply outbox still carries the queue's config version, so the request
+	// is internally inconsistent and must fail closed as a write conflict.
+	if err := f.coordinator.CommitResultAndAck(f.ctx, f.request); !errors.Is(err, storage.ErrConflict) {
+		t.Fatalf("config version mismatch=%v", err)
 	}
 }
 

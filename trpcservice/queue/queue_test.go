@@ -41,7 +41,7 @@ func validTestJob(clock *testClock) AgentJob {
 	return AgentJob{
 		SchemaVersion: SchemaVersion, JobID: "job-a", ExecutionID: "execution-a",
 		Tenant:    TenantContextDTOFromContext(tc),
-		Agent:     AgentRefDTO{TenantID: "tenant-a", AgentAppID: "agent-a", Version: 3},
+		Agent:     AgentRefDTO{TenantID: "tenant-a", AgentAppID: "agent-a", Version: 7},
 		Message:   MessageDTO{ID: "message-a", Role: "user", Content: "hello", CreatedAt: clock.Now()},
 		Trace:     TraceContextDTO{TraceID: "trace-a", RequestID: "request-a", MessageID: "message-a", ExecutionID: "execution-a"},
 		CreatedAt: clock.Now(), Deadline: clock.Now().Add(time.Hour), Attempt: 1,
@@ -94,6 +94,16 @@ func TestAgentJobJSONRoundTripAndDTORestore(t *testing.T) {
 	if q == nil {
 		t.Fatal("test queue was not constructed")
 	}
+}
+
+func TestAgentJobRejectsConfigVersionMismatch(t *testing.T) {
+	q, clock := newTestQueue()
+	job := validTestJob(clock)
+	job.Agent.Version++
+	if err := job.ValidateAt(clock.Now(), 2*time.Hour); !errors.Is(err, ErrInvalidJob) {
+		t.Fatalf("config version mismatch error=%v", err)
+	}
+	_ = q
 }
 
 func TestAgentJobHistoryLimitsAndSchemaVersion(t *testing.T) {

@@ -48,6 +48,9 @@ type ExecutionCommitRecord struct {
 	Epoch       Epoch
 	FenceToken  uint64
 	ResultJSON  []byte
+	// ConfigVersion is the additive P1-08 durability field: the immutable
+	// config version of the executed job. Zero means unknown/legacy.
+	ConfigVersion int64
 }
 
 // pi-lens-ignore: DuplicateDecl
@@ -63,6 +66,9 @@ type ExecutionResultRecord struct {
 	ResultVersion int64
 	ResultJSON    []byte
 	CommittedAt   time.Time
+	// ConfigVersion is the immutable configuration version used by the job.
+	// Zero preserves compatibility with legacy result rows.
+	ConfigVersion int64
 }
 
 // ExecutionResultRepository is the P0-09A durable commit boundary used by the

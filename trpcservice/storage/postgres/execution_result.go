@@ -18,10 +18,10 @@ import (
 const executionCommitInsert = `
 INSERT INTO execution_result (
     tenant_id, execution_id, job_id, session_id, owner_id, epoch, fence_token,
-    status, result_version, result_json, committed_at
+    status, result_version, result_json, committed_at, config_version
 )
 SELECT $1, $2, $3, $4, l.owner_id, l.epoch, l.fencing_token,
-       'succeeded', 1, $8::jsonb, clock_timestamp()
+       'succeeded', 1, $8::jsonb, clock_timestamp(), $9
 FROM session AS s
 JOIN session_lease AS l
   ON l.tenant_id = s.tenant_id AND l.session_id = s.session_id
@@ -36,7 +36,7 @@ ON CONFLICT DO NOTHING
 
 const executionCommitExisting = `
 SELECT job_id, execution_id, tenant_id, session_id, owner_id, epoch, fence_token,
-       status, result_version, result_json, committed_at
+       status, result_version, result_json, committed_at, config_version
 FROM execution_result
 WHERE tenant_id = $1 AND (execution_id = $2 OR job_id = $3)
 LIMIT 1
@@ -87,6 +87,7 @@ func (r *ExecutionResultRepository) CommitExecution(ctx context.Context, record 
 		record.Epoch,
 		record.FenceToken,
 		string(record.ResultJSON),
+		nullableConfigVersion(record.ConfigVersion),
 	)
 	if err != nil {
 		return commitError("insert execution result", err)
@@ -124,9 +125,10 @@ func (r *ExecutionResultRepository) GetExecutionResult(ctx context.Context, tc t
 		return storage.ExecutionResultRecord{}, storage.ErrInvalidArgument
 	}
 	var record storage.ExecutionResultRecord
+	var configVersion *int64
 	err := r.pool.QueryRow(ctx, `
 SELECT job_id, execution_id, tenant_id, session_id, owner_id, epoch, fence_token,
-       status, result_version, result_json, committed_at
+       status, result_version, result_json, committed_at, config_version
 FROM execution_result
 WHERE tenant_id = $1 AND job_id = $2 AND execution_id = $3
 `, tc.TenantID, jobID, executionID).Scan(
@@ -141,12 +143,16 @@ WHERE tenant_id = $1 AND job_id = $2 AND execution_id = $3
 		&record.ResultVersion,
 		&record.ResultJSON,
 		&record.CommittedAt,
+		&configVersion,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return storage.ExecutionResultRecord{}, storage.ErrNotFound
 	}
 	if err != nil {
 		return storage.ExecutionResultRecord{}, commitError("read execution result", err)
+	}
+	if configVersion != nil {
+		record.ConfigVersion = *configVersion
 	}
 	return record, nil
 }
@@ -160,6 +166,7 @@ const (
 
 func (r *ExecutionResultRepository) resolveExistingOrFence(ctx context.Context, tx pgx.Tx, record storage.ExecutionCommitRecord) (commitOutcome, error) {
 	var existing storage.ExecutionResultRecord
+	var existingConfigVersion *int64
 	err := tx.QueryRow(ctx, executionCommitExisting, record.TenantID, record.ExecutionID, record.JobID).Scan(
 		&existing.JobID,
 		&existing.ExecutionID,
@@ -172,14 +179,18 @@ func (r *ExecutionResultRepository) resolveExistingOrFence(ctx context.Context, 
 		&existing.ResultVersion,
 		&existing.ResultJSON,
 		&existing.CommittedAt,
+		&existingConfigVersion,
 	)
 	if err == nil {
+		if existingConfigVersion != nil {
+			existing.ConfigVersion = *existingConfigVersion
+		}
 		sameExecution := existing.JobID == record.JobID && existing.ExecutionID == record.ExecutionID &&
 			existing.TenantID == record.TenantID && existing.SessionID == record.SessionID
 		if sameExecution && (existing.OwnerID != record.OwnerID || existing.Epoch != record.Epoch || existing.FenceToken != record.FenceToken) {
 			return commitConflict, commitError("execution fence rejected by existing result", storage.ErrFenceRejected)
 		}
-		if sameExecution && existing.Status == "succeeded" && equalJSON(existing.ResultJSON, record.ResultJSON) {
+		if sameExecution && existing.Status == "succeeded" && existing.ConfigVersion == record.ConfigVersion && equalJSON(existing.ResultJSON, record.ResultJSON) {
 			return commitIdempotent, nil
 		}
 		return commitConflict, nil
@@ -224,6 +235,13 @@ func (r *ExecutionResultRepository) resolveExistingOrFence(ctx context.Context, 
 		return commitConflict, commitError("execution fence rejected", storage.ErrFenceRejected)
 	}
 	return commitConflict, commitError("execution commit did not affect a row", storage.ErrFenceRejected)
+}
+
+func nullableConfigVersion(version int64) any {
+	if version < 1 {
+		return nil
+	}
+	return version
 }
 
 func equalJSON(left, right []byte) bool {

@@ -36,6 +36,24 @@ func TestValidateRepositoryCommitRejectsMismatchedExecutionIdentity(t *testing.T
 	}
 }
 
+func TestValidateRepositoryCommitRejectsConfigVersionMismatch(t *testing.T) {
+	commit := validRepositoryCommitForTest()
+	commit.Job.Tenant.ConfigVersion++
+	if err := validateRepositoryCommit(commit); !errors.Is(err, storage.ErrTenantMismatch) {
+		t.Fatalf("job config version mismatch error=%v", err)
+	}
+	commit = validRepositoryCommitForTest()
+	commit.Job.Agent.Version++
+	if err := validateRepositoryCommit(commit); !errors.Is(err, storage.ErrTenantMismatch) {
+		t.Fatalf("agent config version mismatch error=%v", err)
+	}
+	commit = validRepositoryCommitForTest()
+	commit.Input.TenantContext.ConfigVersion++
+	if err := validateRepositoryCommit(commit); !errors.Is(err, storage.ErrTenantMismatch) {
+		t.Fatalf("input config version mismatch error=%v", err)
+	}
+}
+
 func TestValidateRepositoryCommitRejectsTenantAndFenceMismatch(t *testing.T) {
 	commit := validRepositoryCommitForTest()
 	commit.TenantID = "different-tenant"
@@ -51,8 +69,8 @@ func TestValidateRepositoryCommitRejectsTenantAndFenceMismatch(t *testing.T) {
 
 func validRepositoryCommitForTest() ExecutionCommit {
 	now := time.Now().UTC()
-	tc := tenant.TenantContext{TenantID: "tenant-sink", BindingID: "binding-sink", SessionID: "session-sink", RequestID: "request-sink", MessageID: "message-sink", TraceID: "trace-sink", Channel: "web", ExternalUser: "user-sink"}
-	job := queue.AgentJob{JobID: "job-sink", ExecutionID: "execution-sink", Tenant: queue.TenantContextDTOFromContext(tc)}
+	tc := tenant.TenantContext{TenantID: "tenant-sink", AgentAppID: "agent-sink", BindingID: "binding-sink", SessionID: "session-sink", RequestID: "request-sink", MessageID: "message-sink", TraceID: "trace-sink", Channel: "web", ExternalUser: "user-sink", ConfigVersion: 7, BackendPolicy: tenant.BackendPolicy{Session: "memory", Memory: "memory", Vector: "none", Object: "none"}}
+	job := queue.AgentJob{JobID: "job-sink", ExecutionID: "execution-sink", Tenant: queue.TenantContextDTOFromContext(tc), Agent: queue.AgentRefDTO{TenantID: tc.TenantID, AgentAppID: tc.AgentAppID, Version: tc.ConfigVersion}}
 	lease := storage.Lease{TenantID: tc.TenantID, SessionID: tc.SessionID, ResourceID: tc.SessionID, OwnerID: "owner-sink", Epoch: 2, FenceToken: 7, ExpiresAt: now.Add(time.Minute)}
 	return ExecutionCommit{
 		JobID: job.JobID, ExecutionID: job.ExecutionID, TenantID: tc.TenantID, SessionID: tc.SessionID,
@@ -68,7 +86,7 @@ func TestAtomicCompletionRequestForIncludesDurableReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.Outbox == nil || request.Outbox.TenantID != commit.TenantID || request.Outbox.AggregateID != commit.ExecutionID || request.Outbox.DedupKey != "tenant-sink|execution-sink|agent.reply" {
+	if request.Outbox == nil || request.Outbox.TenantID != commit.TenantID || request.Outbox.AggregateID != commit.ExecutionID || request.Outbox.DedupKey != "tenant-sink|execution-sink|agent.reply" || request.Outbox.ConfigVersion != commit.TenantContext.ConfigVersion || request.Commit.ConfigVersion != commit.TenantContext.ConfigVersion {
 		t.Fatalf("request did not carry durable reply: %+v", request)
 	}
 	var payload ReplyOutboxPayload

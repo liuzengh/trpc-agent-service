@@ -100,6 +100,9 @@ func (r *OutboxRepository) Enqueue(ctx context.Context, tc tenant.TenantContext,
 	if value.TenantID != tc.TenantID {
 		return storage.ErrTenantMismatch
 	}
+	if value.ConfigVersion != 0 && value.ConfigVersion != tc.ConfigVersion {
+		return storage.ErrTenantMismatch
+	}
 	payload := value.Payload
 	if len(payload) == 0 {
 		payload = []byte("{}")
@@ -114,6 +117,16 @@ func (r *OutboxRepository) Enqueue(ctx context.Context, tc tenant.TenantContext,
 	if value.DedupKey != "" {
 		dedupKey = value.DedupKey
 	}
+	// P1-08 additive: the reply outbox retains the job's immutable config
+	// version. Zero (legacy or unknown) is stored as NULL and decodes as 0.
+	configVersion := value.ConfigVersion
+	if configVersion == 0 {
+		configVersion = tc.ConfigVersion
+	}
+	var configVersionAny any
+	if configVersion > 0 {
+		configVersionAny = configVersion
+	}
 
 	tx, err := r.beginTx(ctx)
 	if err != nil {
@@ -123,12 +136,12 @@ func (r *OutboxRepository) Enqueue(ctx context.Context, tc tenant.TenantContext,
 	result, err := tx.Exec(ctx, `
 INSERT INTO outbox_message (
     tenant_id, outbox_id, kind, aggregate_id, dedup_key, payload,
-    status, attempt, next_attempt_at, created_at, updated_at
+    status, attempt, next_attempt_at, created_at, updated_at, config_version
 ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', 1,
           COALESCE($7::timestamptz, clock_timestamp()),
-          clock_timestamp(), clock_timestamp())
+          clock_timestamp(), clock_timestamp(), $8)
 ON CONFLICT DO NOTHING`,
-		value.TenantID, value.ID, value.Kind, value.AggregateID, dedupKey, payload, nextAttempt)
+		value.TenantID, value.ID, value.Kind, value.AggregateID, dedupKey, payload, nextAttempt, configVersionAny)
 	if err != nil {
 		return outboxDBError("enqueue", err)
 	}
@@ -236,7 +249,8 @@ WHERE message.tenant_id=$1 AND message.outbox_id=candidates.outbox_id
 RETURNING message.tenant_id, message.outbox_id, message.kind, message.aggregate_id,
           message.dedup_key, message.payload, message.status, message.attempt,
           message.next_attempt_at, message.locked_by, message.locked_until,
-          message.last_error, message.created_at, message.updated_at`,
+          message.last_error, message.created_at, message.updated_at,
+          message.config_version`,
 		tc.TenantID, limit, workerID, durationMicros(r.lockDuration))
 	if err != nil {
 		return nil, outboxDBError("claim batch", err)
@@ -464,11 +478,15 @@ func scanOutboxMessage(row interface{ Scan(...any) error }) (storage.OutboxMessa
 	var dedupKey, lockedBy, lastError *string
 	var lockedUntil *time.Time
 	var payload []byte
+	var configVersion *int64
 	if err := row.Scan(
 		&value.TenantID, &value.ID, &value.Kind, &value.AggregateID, &dedupKey, &payload, &status,
 		&value.Attempt, &value.NextAttempt, &lockedBy, &lockedUntil, &lastError,
-		&value.CreatedAt, &value.UpdatedAt); err != nil {
+		&value.CreatedAt, &value.UpdatedAt, &configVersion); err != nil {
 		return storage.OutboxMessage{}, err
+	}
+	if configVersion != nil {
+		value.ConfigVersion = *configVersion
 	}
 	value.DedupKey = optionalString(dedupKey)
 	value.Payload = append([]byte(nil), payload...)

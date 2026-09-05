@@ -22,14 +22,15 @@ import (
 // composed with ModeNone are both safe: spans and metrics go to no-op
 // providers and nothing is exported.
 type Runtime struct {
-	config         Config
-	tracerProvider *sdktrace.TracerProvider
-	meterProvider  *sdkmetric.MeterProvider
-	tracer         trace.Tracer
-	meter          Metrics
-	logger         *Logger
-	shutdownOnce   sync.Once
-	shutdownErr    error
+	config            Config
+	tracerProvider    *sdktrace.TracerProvider
+	meterProvider     *sdkmetric.MeterProvider
+	tracer            trace.Tracer
+	meter             Metrics
+	logger            *Logger
+	configInstruments configInstruments
+	shutdownOnce      sync.Once
+	shutdownErr       error
 }
 
 // Compose builds the runtime. ModeNone never builds exporters or starts
@@ -96,6 +97,7 @@ func Compose(ctx context.Context, config Config, logger *Logger) (*Runtime, erro
 	runtime.meterProvider = meterProvider
 	runtime.tracer = tracerProvider.Tracer(defaultServiceName)
 	runtime.meter = newOtelMetrics(meterProvider)
+	runtime.configInstruments = newConfigInstruments(meterProvider)
 	return runtime, nil
 }
 
@@ -188,6 +190,7 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 func NewRuntimeForTest(tracerProvider *sdktrace.TracerProvider, meterProvider *sdkmetric.MeterProvider) *Runtime {
 	runtime := &Runtime{config: Config{Mode: ModeOTLP, FlushTimeout: 10 * time.Second}, tracer: tracerProvider.Tracer(defaultServiceName)}
 	runtime.meter = newOtelMetrics(meterProvider)
+	runtime.configInstruments = newConfigInstruments(meterProvider)
 	runtime.tracerProvider = tracerProvider
 	runtime.meterProvider = meterProvider
 	return runtime

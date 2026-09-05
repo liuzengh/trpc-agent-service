@@ -152,7 +152,7 @@ func (j AgentJob) ValidateAt(now time.Time, maxAge time.Duration) error {
 	if !validID(j.Tenant.TenantID) || !validID(j.Tenant.AgentAppID) || !validID(j.Tenant.BindingID) {
 		return fmt.Errorf("%w: tenant IDs are required", ErrInvalidJob)
 	}
-	if j.Agent.TenantID != j.Tenant.TenantID || j.Agent.AgentAppID != j.Tenant.AgentAppID || j.Agent.Version < 1 {
+	if j.Agent.TenantID != j.Tenant.TenantID || j.Agent.AgentAppID != j.Tenant.AgentAppID || j.Agent.Version < 1 || j.Agent.Version != j.Tenant.ConfigVersion {
 		return fmt.Errorf("%w: agent reference does not match tenant context", ErrInvalidJob)
 	}
 	if j.Trace.TraceID != j.Tenant.TraceID || j.Trace.RequestID != j.Tenant.RequestID || j.Trace.MessageID != j.Tenant.MessageID || j.Trace.ExecutionID != j.ExecutionID {

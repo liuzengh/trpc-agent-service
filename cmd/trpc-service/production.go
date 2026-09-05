@@ -17,6 +17,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/lark"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/configpub"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/execution"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/outbox"
@@ -456,8 +457,19 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 	if err != nil {
 		return nil, errors.New("tenant metadata repository initialization failed")
 	}
-	resolver := tenant.RegistryResolver{Registry: metadataRegistry, SecretResolver: config.secretResolver}
+	resolver := tenant.TenantResolver(tenant.RegistryResolver{Registry: metadataRegistry, SecretResolver: config.secretResolver})
 	identityResolver := tenant.RepositoryIdentityResolver{Repository: metadataRegistry}
+	// P1-08 additive, disabled by default: durable configuration publication
+	// composition. When enabled it decorates tenant resolution with rollout
+	// assignment and swaps agent resolution to immutable revision snapshots.
+	configCompositionRuntime, configCompositionErr := newConfigComposition(pool, telemetryRuntime)
+	if configCompositionErr != nil {
+		pool.Close()
+		return nil, configCompositionErr
+	}
+	if configCompositionRuntime != nil {
+		resolver = assignmentResolver{inner: resolver, co: configCompositionRuntime.coordinator}
+	}
 	defer func() {
 		if closeOnError {
 			pool.Close()
@@ -513,6 +525,19 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 	if err != nil {
 		return nil, errors.New("executor initialization failed")
 	}
+	resolveAgent := worker.AgentResolver(bootstrapAgentResolver{resolver: bootstrapResolver})
+	if configCompositionRuntime != nil {
+		// P1-08 enabled: the worker resolves the agent spec from the job's
+		// immutable config revision and never from the active configuration.
+		resolveAgent = configSnapshotAgentResolver{
+			inner: configpub.SnapshotAgentResolver{
+				Co:            configCompositionRuntime.coordinator,
+				Registry:      metadataRegistry,
+				ModelProvider: env("MODEL", "openai"),
+			},
+			fallback: bootstrapResolver.agentSpec,
+		}
+	}
 	workerConfig := worker.Config{
 		WorkerID:           config.ownerID,
 		Concurrency:        4,
@@ -522,7 +547,7 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 		CleanupTimeout:     lifecycleDuration("WORKER_CLEANUP_TIMEOUT", 5*time.Second),
 		LeaseRenewInterval: 0,
 		RetryDelay:         lifecycleDuration("WORKER_RETRY_DELAY", 5*time.Second),
-		ResolveAgent:       bootstrapAgentResolver{resolver: bootstrapResolver},
+		ResolveAgent:       resolveAgent,
 	}
 	if dependencies.Telemetry != nil {
 		workerConfig.Telemetry = dependencies.Telemetry
@@ -604,7 +629,21 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 	if dependencies.Telemetry != nil {
 		asyncGateway.WithTelemetry(dependencies.Telemetry)
 	}
-	ingress, err := gateway.NewIngress(gateway.IngressConfig{Claims: coordination, Gateway: asyncGateway, Resolver: resolver, Identity: identityResolver, Audit: metadataRegistry, ResolveAgent: bootstrapResolver.agentSpec, Adapters: adapters, OwnerID: config.ownerID})
+	ingressResolveAgent := bootstrapResolver.agentSpec
+	if configCompositionRuntime != nil {
+		// P1-08 enabled: the ingress resolves the agent spec from the assigned
+		// immutable revision snapshot.
+		snapshotResolver := configSnapshotAgentResolver{
+			inner: configpub.SnapshotAgentResolver{
+				Co:            configCompositionRuntime.coordinator,
+				Registry:      metadataRegistry,
+				ModelProvider: env("MODEL", "openai"),
+			},
+			fallback: bootstrapResolver.agentSpec,
+		}
+		ingressResolveAgent = snapshotResolver.ResolveForIngress
+	}
+	ingress, err := gateway.NewIngress(gateway.IngressConfig{Claims: coordination, Gateway: asyncGateway, Resolver: resolver, Identity: identityResolver, Audit: metadataRegistry, ResolveAgent: ingressResolveAgent, Adapters: adapters, OwnerID: config.ownerID})
 	if err != nil {
 		return nil, errors.New("webhook ingress initialization failed")
 	}

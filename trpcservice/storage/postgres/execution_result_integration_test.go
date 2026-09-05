@@ -16,7 +16,7 @@ func executionCommitRecordForLease(tc tenant.TenantContext, sessionID string, le
 	return storage.ExecutionCommitRecord{
 		JobID: jobID, ExecutionID: executionID, TenantID: tc.TenantID, SessionID: sessionID,
 		OwnerID: lease.OwnerID, Epoch: lease.Epoch, FenceToken: lease.FenceToken,
-		ResultJSON: []byte(fmt.Sprintf(`{"text":%q}`, text)),
+		ResultJSON: []byte(fmt.Sprintf(`{"text":%q}`, text)), ConfigVersion: tc.ConfigVersion,
 	}
 }
 
@@ -38,7 +38,7 @@ func TestPostgresExecutionCommitValidAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.OwnerID != lease.OwnerID || got.Epoch != lease.Epoch || got.FenceToken != lease.FenceToken || got.Status != "succeeded" || got.ResultVersion != 1 || !equalJSON(got.ResultJSON, record.ResultJSON) {
+	if got.OwnerID != lease.OwnerID || got.Epoch != lease.Epoch || got.FenceToken != lease.FenceToken || got.Status != "succeeded" || got.ResultVersion != 1 || got.ConfigVersion != record.ConfigVersion || !equalJSON(got.ResultJSON, record.ResultJSON) {
 		t.Fatalf("persisted result=%+v", got)
 	}
 	if err := repository.CommitExecution(ctx, record); err != nil {

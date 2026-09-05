@@ -196,6 +196,10 @@ P0-09G-B2 已完成 Telegram Sender/Adapter real boundary：固定 `https://api.
 
 Tool 执行前按 TenantContext 和 Agent Release 的 Tool Policy 做白名单、参数 schema、用户权限和预算检查。危险操作需要审批 token，首个生产版本默认关闭任意 Shell/代码执行。Guardrail 覆盖模型输入、Tool 参数、Tool 输出和最终回复；日志/Trace/Audit 只保留脱敏摘要、hash、长度和决策。
 
+## 9A. P1-08 配置发布边界
+
+P1-08 使用 PostgreSQL 作为 tenant configuration revision、rollout、operation idempotency 和历史状态的唯一事实源。revision 内容 immutable，状态转换和单 active invariant 由 repository transaction、CAS 和 database guards 共同保护。managed tenant 的 canary assignment 基于 tenant identity 的 deterministic bucket；ingress、queue、worker、execution、completion 和 reply outbox 共享同一 `ConfigVersion`，旧 nullable rows 保持兼容。`CONFIGPUB_ENABLED` 默认关闭；Redis/Docker/production binary integration gates 已在真实 disposable fixture 矩阵中通过，默认关闭行为保持不变。
+
 ## 10. 可观测性与安全
 
 Trace 至少覆盖入口、Claim、Lease、Runner、模型调用、Tool、Session/Memory 读写、Outbox 和 IM 发送。指标使用低基数标签；外部用户、Session 和 message ID 不作为无限增长的 metric label。最低指标集包括入口量、Claim、Lease、Agent/Tool、模型成本、存储延迟、Outbox retry/DLQ、IM 发送结果、限流拒绝和 Worker 并发。

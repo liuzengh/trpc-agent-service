@@ -181,6 +181,11 @@ type OutboxMessage struct {
 	LastError   string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// ConfigVersion is the additive P1-08 durability field: the immutable
+	// config version of the job that produced this message. Zero means the
+	// row predates the field or the version was unknown; old rows decode
+	// unchanged.
+	ConfigVersion int64
 }
 
 type OutboxRepository interface {

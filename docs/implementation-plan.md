@@ -95,7 +95,7 @@ README/ARCHITECTURE 明确 Object Storage 是平台目标能力；本轮已完�
 | P1-05 | Tool Policy、Guardrail、Approval/Budget 边界和统一脱敏 | `verified (functional Tool Policy/Guardrail boundary)`；Approval、durable policy/approval/budget/audit persistence、token/cost/billing deferred |
 | P1-06 | Memory、Summary 和 Milvus Vector Index | 计划中，未开始 |
 | P1-07 | OTel、Metrics 和结构化日志 | 未开始 |
-| P1-08 | 配置发布、灰度和回滚 | 未开始 |
+| P1-08 | 配置发布、灰度和回滚 | verified（真实 PostgreSQL/Redis/Docker integration matrix 已通过；production rollout 未部署） |
 | P1-09 | Docker Compose 和运行文档 | 未开始 |
 | P2-01 至 P2-04 | RLS、恢复、容量、安全、压力和发布运维 | 未开始 |
 

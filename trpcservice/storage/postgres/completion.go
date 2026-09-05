@@ -29,7 +29,7 @@ FOR UPDATE`
 
 	completionResultSelect = `
 SELECT job_id, execution_id, tenant_id, session_id, owner_id, epoch,
-       fence_token, status, result_version, result_json, committed_at
+       fence_token, status, result_version, result_json, committed_at, config_version
 FROM execution_result
 WHERE tenant_id = $1 AND (execution_id = $2 OR job_id = $3)
 LIMIT 1`
@@ -37,15 +37,15 @@ LIMIT 1`
 	completionResultInsert = `
 INSERT INTO execution_result (
     tenant_id, execution_id, job_id, session_id, owner_id, epoch, fence_token,
-    status, result_version, result_json, committed_at
+    status, result_version, result_json, committed_at, config_version
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'succeeded', 1, $8::jsonb, clock_timestamp())
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'succeeded', 1, $8::jsonb, clock_timestamp(), $9)
 ON CONFLICT DO NOTHING`
 
 	completionOutboxSelect = `
 SELECT tenant_id, outbox_id, kind, aggregate_id, dedup_key, payload, status,
        attempt, next_attempt_at, locked_by, locked_until, last_error,
-       created_at, updated_at
+       created_at, updated_at, config_version
 FROM outbox_message
 WHERE tenant_id = $1 AND (outbox_id = $2 OR dedup_key = $3)
 ORDER BY (outbox_id = $2) DESC
@@ -55,9 +55,9 @@ FOR UPDATE`
 	completionOutboxInsert = `
 INSERT INTO outbox_message (
     tenant_id, outbox_id, kind, aggregate_id, dedup_key, payload,
-    status, attempt, next_attempt_at, created_at, updated_at
+    status, attempt, next_attempt_at, created_at, updated_at, config_version
 ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'pending', 1,
-          clock_timestamp(), clock_timestamp(), clock_timestamp())
+          clock_timestamp(), clock_timestamp(), clock_timestamp(), $7)
 ON CONFLICT DO NOTHING`
 
 	completionQueueAck = `
@@ -135,6 +135,12 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 		return err
 	}
 	request = cloneCompletionRequest(request)
+	// Older callers may omit the additive outbox field. Normalize it from the
+	// commit before any idempotency comparison or insert so both durable facts
+	// retain one immutable configuration version.
+	if request.Outbox != nil && request.Outbox.ConfigVersion == 0 {
+		request.Outbox.ConfigVersion = request.Commit.ConfigVersion
+	}
 	conn, err := c.pool.Acquire(ctx)
 	if err != nil {
 		return completionDBError("acquire transaction connection", err)
@@ -230,6 +236,10 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 			return completionPartial("execution result is committed without the requested outbox")
 		}
 	} else {
+		var configVersionAny any
+		if request.Commit.ConfigVersion > 0 {
+			configVersionAny = request.Commit.ConfigVersion
+		}
 		result, err := tx.Exec(ctx, completionResultInsert,
 			request.Commit.TenantID,
 			request.Commit.ExecutionID,
@@ -239,6 +249,7 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 			lease.epoch,
 			lease.fenceToken,
 			string(request.Commit.ResultJSON),
+			configVersionAny,
 		)
 		if err != nil {
 			return completionDBError("insert execution result", err)
@@ -254,9 +265,18 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 		}
 	}
 	if request.Outbox != nil {
+		outboxConfigVersion := request.Outbox.ConfigVersion
+		if outboxConfigVersion == 0 {
+			outboxConfigVersion = request.Commit.ConfigVersion
+		}
+		var outboxConfigVersionAny any
+		if outboxConfigVersion > 0 {
+			outboxConfigVersionAny = outboxConfigVersion
+		}
 		result, err := tx.Exec(ctx, completionOutboxInsert,
 			request.Outbox.TenantID, request.Outbox.ID, request.Outbox.Kind,
-			request.Outbox.AggregateID, request.Outbox.DedupKey, string(request.Outbox.Payload))
+			request.Outbox.AggregateID, request.Outbox.DedupKey, string(request.Outbox.Payload),
+			outboxConfigVersionAny)
 		if err != nil {
 			return completionDBError("insert reply outbox", err)
 		}
@@ -302,11 +322,12 @@ func readCompletionOutbox(ctx context.Context, tx completionQueryer, request sto
 	var dedupKey, lockedBy, lastError *string
 	var lockedUntil *time.Time
 	var payload []byte
+	var configVersion *int64
 	err := tx.QueryRow(ctx, completionOutboxSelect,
 		request.Outbox.TenantID, request.Outbox.ID, request.Outbox.DedupKey).Scan(
 		&value.TenantID, &value.ID, &value.Kind, &value.AggregateID, &dedupKey, &payload, &status,
 		&value.Attempt, &value.NextAttempt, &lockedBy, &lockedUntil, &lastError,
-		&value.CreatedAt, &value.UpdatedAt)
+		&value.CreatedAt, &value.UpdatedAt, &configVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return storage.OutboxMessage{}, false, nil
 	}
@@ -321,13 +342,18 @@ func readCompletionOutbox(ctx context.Context, tx completionQueryer, request sto
 		value.LockedUntil = *lockedUntil
 	}
 	value.LastError = optionalString(lastError)
+	if configVersion != nil {
+		value.ConfigVersion = *configVersion
+	}
 	return value, true, nil
 }
 
 func sameCompletionOutbox(existing, requested storage.OutboxMessage) bool {
 	return existing.TenantID == requested.TenantID && existing.ID == requested.ID &&
 		existing.Kind == requested.Kind && existing.AggregateID == requested.AggregateID &&
-		existing.DedupKey == requested.DedupKey && equalJSON(existing.Payload, requested.Payload)
+		existing.DedupKey == requested.DedupKey &&
+		existing.ConfigVersion == requested.ConfigVersion &&
+		equalJSON(existing.Payload, requested.Payload)
 }
 
 type completionLeaseState struct {
@@ -398,9 +424,14 @@ func lockCompletionQueue(ctx context.Context, tx pgx.Tx, request storage.AtomicC
 	var stored struct {
 		JobID     string `json:"job_id"`
 		Execution string `json:"execution_id"`
-		Tenant    struct {
-			TenantID  string `json:"tenant_id"`
-			SessionID string `json:"session_id"`
+		Agent     struct {
+			TenantID string `json:"tenant_id"`
+			Version  int64  `json:"version"`
+		} `json:"agent"`
+		Tenant struct {
+			TenantID      string `json:"tenant_id"`
+			SessionID     string `json:"session_id"`
+			ConfigVersion int64  `json:"config_version"`
 		} `json:"tenant"`
 	}
 	if err := json.Unmarshal(state.payload, &stored); err != nil {
@@ -415,20 +446,34 @@ func lockCompletionQueue(ctx context.Context, tx pgx.Tx, request storage.AtomicC
 	if stored.Tenant.SessionID != request.Delivery.SessionID || request.Commit.SessionID != stored.Tenant.SessionID {
 		return completionQueueState{}, storage.ErrInvalidDelivery
 	}
+	// New queue payloads carry both projections of ConfigVersion. A completion
+	// request with a missing or different version must not commit facts for a
+	// different immutable runtime snapshot. Zero remains accepted only for
+	// legacy payloads that predate P1-08.
+	if stored.Tenant.ConfigVersion > 0 && request.Commit.ConfigVersion != stored.Tenant.ConfigVersion {
+		return completionQueueState{}, storage.ErrTenantMismatch
+	}
+	if stored.Agent.Version > 0 && request.Commit.ConfigVersion != stored.Agent.Version {
+		return completionQueueState{}, storage.ErrTenantMismatch
+	}
 	return state, nil
 }
 
 func readCompletionResult(ctx context.Context, tx pgx.Tx, request storage.AtomicCompletionRequest) (storage.ExecutionResultRecord, bool, error) {
 	var record storage.ExecutionResultRecord
+	var configVersion *int64
 	err := tx.QueryRow(ctx, completionResultSelect, request.Commit.TenantID, request.Commit.ExecutionID, request.Commit.JobID).Scan(
 		&record.JobID, &record.ExecutionID, &record.TenantID, &record.SessionID,
 		&record.OwnerID, &record.Epoch, &record.FenceToken, &record.Status,
-		&record.ResultVersion, &record.ResultJSON, &record.CommittedAt)
+		&record.ResultVersion, &record.ResultJSON, &record.CommittedAt, &configVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return storage.ExecutionResultRecord{}, false, nil
 	}
 	if err != nil {
 		return storage.ExecutionResultRecord{}, false, completionDBError("read execution result", err)
+	}
+	if configVersion != nil {
+		record.ConfigVersion = *configVersion
 	}
 	return record, true, nil
 }
@@ -439,6 +484,7 @@ func sameCompletionResult(existing storage.ExecutionResultRecord, request storag
 		existing.TenantID == request.Commit.TenantID &&
 		existing.SessionID == request.Commit.SessionID &&
 		existing.Status == "succeeded" &&
+		existing.ConfigVersion == request.Commit.ConfigVersion &&
 		equalJSON(existing.ResultJSON, request.Commit.ResultJSON)
 }
 
@@ -570,6 +616,9 @@ func validateAtomicCompletionRequest(ctx context.Context, request storage.Atomic
 	outbox := request.Outbox
 	if outbox.TenantID != commit.TenantID {
 		return storage.ErrTenantMismatch
+	}
+	if outbox.ConfigVersion != 0 && commit.ConfigVersion != 0 && outbox.ConfigVersion != commit.ConfigVersion {
+		return completionConflict("reply outbox configuration version conflicts with execution")
 	}
 	if outbox.AggregateID != commit.ExecutionID || outbox.DedupKey == "" {
 		return completionConflict("reply outbox aggregate or dedup identity does not match execution")

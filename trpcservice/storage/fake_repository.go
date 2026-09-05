@@ -345,6 +345,12 @@ func (f *FakeRepository) Enqueue(ctx context.Context, tc tenant.TenantContext, v
 	if err := sameTenant(tc.TenantID, value.TenantID); err != nil {
 		return err
 	}
+	if value.ConfigVersion != 0 && value.ConfigVersion != tc.ConfigVersion {
+		return ErrTenantMismatch
+	}
+	if value.ConfigVersion == 0 {
+		value.ConfigVersion = tc.ConfigVersion
+	}
 	if len(value.Payload) == 0 {
 		value.Payload = []byte("{}")
 	} else {
@@ -528,6 +534,9 @@ func (f *FakeAtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context
 		return err
 	}
 	request = cloneFakeAtomicRequest(request)
+	if request.Outbox != nil && request.Outbox.ConfigVersion == 0 {
+		request.Outbox.ConfigVersion = request.Commit.ConfigVersion
+	}
 	resultKey := request.Commit.TenantID + "\x00" + request.Commit.ExecutionID
 	outboxKeyValue := ""
 	if request.Outbox != nil {
@@ -584,6 +593,7 @@ func (f *FakeAtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context
 		OwnerID: request.Commit.OwnerID, Epoch: request.Commit.Epoch,
 		FenceToken: request.Commit.FenceToken, Status: "succeeded", ResultVersion: 1,
 		ResultJSON: append([]byte(nil), request.Commit.ResultJSON...), CommittedAt: now,
+		ConfigVersion: request.Commit.ConfigVersion,
 	}
 	f.deliveries[resultKey] = request.Delivery.DeliveryID
 	if request.Outbox != nil {
@@ -621,6 +631,9 @@ func validateFakeAtomicRequest(request AtomicCompletionRequest) error {
 	if request.Outbox.TenantID != commit.TenantID {
 		return ErrTenantMismatch
 	}
+	if request.Outbox.ConfigVersion != 0 && commit.ConfigVersion != 0 && request.Outbox.ConfigVersion != commit.ConfigVersion {
+		return ErrConflict
+	}
 	if request.Outbox.AggregateID != commit.ExecutionID || request.Outbox.DedupKey == "" {
 		return ErrConflict
 	}
@@ -651,12 +664,12 @@ func cloneFakeAtomicRequest(request AtomicCompletionRequest) AtomicCompletionReq
 func sameFakeResult(existing ExecutionResultRecord, request AtomicCompletionRequest) bool {
 	return existing.JobID == request.Commit.JobID && existing.ExecutionID == request.Commit.ExecutionID &&
 		existing.TenantID == request.Commit.TenantID && existing.SessionID == request.Commit.SessionID &&
-		existing.Status == "succeeded" && equalFakeJSON(existing.ResultJSON, request.Commit.ResultJSON)
+		existing.Status == "succeeded" && existing.ConfigVersion == request.Commit.ConfigVersion && equalFakeJSON(existing.ResultJSON, request.Commit.ResultJSON)
 }
 
 func sameFakeOutbox(existing, request OutboxMessage) bool {
 	return existing.TenantID == request.TenantID && existing.ID == request.ID && existing.Kind == request.Kind &&
-		existing.AggregateID == request.AggregateID && existing.DedupKey == request.DedupKey && equalFakeJSON(existing.Payload, request.Payload)
+		existing.AggregateID == request.AggregateID && existing.DedupKey == request.DedupKey && existing.ConfigVersion == request.ConfigVersion && equalFakeJSON(existing.Payload, request.Payload)
 }
 
 func equalFakeJSON(left, right []byte) bool {

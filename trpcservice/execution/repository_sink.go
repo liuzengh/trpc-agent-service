@@ -56,12 +56,13 @@ func BuildReplyOutboxMessage(commit ExecutionCommit) (storage.OutboxMessage, err
 		return storage.OutboxMessage{}, fmt.Errorf("execution: marshal reply outbox: %w", err)
 	}
 	message := storage.OutboxMessage{
-		TenantID:    commit.TenantID,
-		ID:          "reply-" + commit.ExecutionID,
-		Kind:        ReplyOutboxKind,
-		AggregateID: commit.ExecutionID,
-		DedupKey:    replyDedupKey(commit.TenantID, commit.ExecutionID),
-		Payload:     encoded,
+		TenantID:      commit.TenantID,
+		ID:            "reply-" + commit.ExecutionID,
+		Kind:          ReplyOutboxKind,
+		AggregateID:   commit.ExecutionID,
+		DedupKey:      replyDedupKey(commit.TenantID, commit.ExecutionID),
+		Payload:       encoded,
+		ConfigVersion: commit.TenantContext.ConfigVersion,
 	}
 	if err := storage.ValidateOutboxMessage(message); err != nil {
 		return storage.OutboxMessage{}, err
@@ -103,14 +104,15 @@ func (s *RepositorySink) Commit(ctx context.Context, commit ExecutionCommit) err
 		return fmt.Errorf("execution: marshal result: %w", err)
 	}
 	return s.Repository.CommitExecution(ctx, storage.ExecutionCommitRecord{
-		JobID:       commit.JobID,
-		ExecutionID: commit.ExecutionID,
-		TenantID:    commit.TenantID,
-		SessionID:   commit.SessionID,
-		OwnerID:     commit.OwnerID,
-		Epoch:       commit.Epoch,
-		FenceToken:  commit.FenceToken,
-		ResultJSON:  resultJSON,
+		JobID:         commit.JobID,
+		ExecutionID:   commit.ExecutionID,
+		TenantID:      commit.TenantID,
+		SessionID:     commit.SessionID,
+		OwnerID:       commit.OwnerID,
+		Epoch:         commit.Epoch,
+		FenceToken:    commit.FenceToken,
+		ResultJSON:    resultJSON,
+		ConfigVersion: commit.TenantContext.ConfigVersion,
 	})
 }
 
@@ -154,6 +156,8 @@ func AtomicCompletionRequestFor(commit ExecutionCommit, delivery queue.Delivery)
 			Epoch:       commit.Epoch,
 			FenceToken:  commit.FenceToken,
 			ResultJSON:  resultJSON,
+			// P1-08 additive: retain the job's immutable config version.
+			ConfigVersion: commit.TenantContext.ConfigVersion,
 		},
 		// pi-lens-ignore: UndeclaredImportedName
 		Delivery: storage.DeliveryAckRecord{
@@ -184,6 +188,12 @@ func validateRepositoryCommit(commit ExecutionCommit) error {
 		return storage.ErrFenceRejected
 	}
 	if commit.Input.TenantContext.TenantID != commit.TenantID || commit.Input.TenantContext.SessionID != commit.SessionID {
+		return storage.ErrTenantMismatch
+	}
+	if commit.TenantContext.ConfigVersion < 1 ||
+		commit.Job.Tenant.ConfigVersion != commit.TenantContext.ConfigVersion ||
+		commit.Job.Agent.Version != commit.TenantContext.ConfigVersion ||
+		commit.Input.TenantContext.ConfigVersion != commit.TenantContext.ConfigVersion {
 		return storage.ErrTenantMismatch
 	}
 	return nil
