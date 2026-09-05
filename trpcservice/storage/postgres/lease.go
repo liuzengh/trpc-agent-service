@@ -20,6 +20,9 @@ func (s *CoordinationStore) Acquire(ctx context.Context, tc tenant.TenantContext
 		return storage.Lease{}, e
 	}
 	defer tx.Rollback(ctx)
+	if e = SetTenantContext(ctx, tx, tc.TenantID); e != nil {
+		return storage.Lease{}, e
+	}
 	if _, e = tx.Exec(ctx, `SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'`); e != nil {
 		return storage.Lease{}, e
 	}
@@ -78,6 +81,9 @@ func (s *CoordinationStore) Renew(ctx context.Context, tc tenant.TenantContext, 
 		return l, e
 	}
 	defer tx.Rollback(ctx)
+	if e = SetTenantContext(ctx, tx, tc.TenantID); e != nil {
+		return l, e
+	}
 	if _, e = tx.Exec(ctx, `SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'`); e != nil {
 		return l, e
 	}
@@ -111,6 +117,9 @@ func (s *CoordinationStore) Release(ctx context.Context, tc tenant.TenantContext
 		return e
 	}
 	defer tx.Rollback(ctx)
+	if e = SetTenantContext(ctx, tx, tc.TenantID); e != nil {
+		return e
+	}
 	if _, e = tx.Exec(ctx, `SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'`); e != nil {
 		return e
 	}
@@ -139,6 +148,9 @@ func (s *CoordinationStore) Validate(ctx context.Context, tc tenant.TenantContex
 		return e
 	}
 	defer tx.Rollback(ctx)
+	if e = SetTenantContext(ctx, tx, tc.TenantID); e != nil {
+		return e
+	}
 	if _, e = tx.Exec(ctx, `SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'`); e != nil {
 		return e
 	}

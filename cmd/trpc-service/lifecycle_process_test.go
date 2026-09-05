@@ -196,6 +196,7 @@ func gdFreeHTTPAddr(t *testing.T) string {
 func gdChildEnv(f *productionTestFixture, addr, modelURL, providerURL, owner string) []string {
 	overrides := map[string]string{
 		"DATABASE_URL":                os.Getenv("TEST_DATABASE_URL"),
+		"DATABASE_RUNTIME_URL":        f.runtimeURL,
 		"DATABASE_SCHEMA":             f.schema,
 		"MIGRATIONS_DIR":              filepath.Join(gdRepoRootForEnv(), "migrations"),
 		"HTTP_ADDR":                   addr,

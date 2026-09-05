@@ -56,6 +56,9 @@ func (r *ArtifactMetadataRepository) Create(ctx context.Context, tc tenant.Tenan
 	if err != nil {
 		return artifactDBError(err)
 	}
+	if err = SetTenantContext(ctx, tx, tc.TenantID); err != nil {
+		return artifactDBError(err)
+	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'`); err != nil {
 		return artifactDBError(err)
@@ -128,6 +131,9 @@ func (r *ArtifactMetadataRepository) MarkReady(ctx context.Context, tc tenant.Te
 	if err != nil {
 		return artifactDBError(err)
 	}
+	if err = SetTenantContext(ctx, tx, tc.TenantID); err != nil {
+		return artifactDBError(err)
+	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'`); err != nil {
 		return artifactDBError(err)
@@ -164,13 +170,18 @@ func (r *ArtifactMetadataRepository) MarkFailed(ctx context.Context, tc tenant.T
 	if err := validateArtifactID(id); err != nil {
 		return err
 	}
-	command, err := r.pool.Exec(ctx, `
+	var affected int64
+	err := WithTenantContext(ctx, r.pool, tc.TenantID, "artifact mark failed", func(ctx context.Context, tx pgx.Tx) error {
+		command, execErr := tx.Exec(ctx, `
 UPDATE artifact SET status='failed'
 WHERE tenant_id=$1 AND artifact_id=$2 AND status='pending'`, tc.TenantID, id)
+		affected = command.RowsAffected()
+		return execErr
+	})
 	if err != nil {
 		return artifactDBError(err)
 	}
-	if command.RowsAffected() == 0 {
+	if affected == 0 {
 		value, getErr := r.Get(ctx, tc, id)
 		if getErr != nil {
 			return getErr
@@ -184,11 +195,16 @@ WHERE tenant_id=$1 AND artifact_id=$2 AND status='pending'`, tc.TenantID, id)
 }
 
 func (r *ArtifactMetadataRepository) markExpired(ctx context.Context, tc tenant.TenantContext, id string) error {
-	command, err := r.pool.Exec(ctx, "UPDATE artifact SET status='expired' WHERE tenant_id=$1 AND artifact_id=$2 AND status='ready'", tc.TenantID, id)
+	var affected int64
+	err := WithTenantContext(ctx, r.pool, tc.TenantID, "artifact mark expired", func(ctx context.Context, tx pgx.Tx) error {
+		command, execErr := tx.Exec(ctx, "UPDATE artifact SET status='expired' WHERE tenant_id=$1 AND artifact_id=$2 AND status='ready'", tc.TenantID, id)
+		affected = command.RowsAffected()
+		return execErr
+	})
 	if err != nil {
 		return artifactDBError(err)
 	}
-	if command.RowsAffected() == 0 {
+	if affected == 0 {
 		value, getErr := r.Get(ctx, tc, id)
 		if getErr != nil {
 			return getErr
@@ -251,7 +267,16 @@ FROM artifact
 WHERE tenant_id=$1 AND artifact_id=$2`
 
 func (r *ArtifactMetadataRepository) query(ctx context.Context, tenantID, id string) (artifact.Artifact, error) {
-	return scanArtifact(ctx, r.pool.QueryRow(ctx, artifactSelect, tenantID, id))
+	var value artifact.Artifact
+	err := WithTenantContext(ctx, r.pool, tenantID, "artifact query", func(ctx context.Context, tx pgx.Tx) error {
+		var scanErr error
+		value, scanErr = scanArtifact(ctx, tx.QueryRow(ctx, artifactSelect, tenantID, id))
+		return scanErr
+	})
+	if err != nil {
+		return artifact.Artifact{}, err
+	}
+	return value, nil
 }
 
 type artifactRow interface {

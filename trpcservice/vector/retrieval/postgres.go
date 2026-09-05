@@ -3,9 +3,11 @@ package retrieval
 import (
 	"context"
 	"errors"
+	"github.com/jackc/pgx/v5"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	tenantctx "github.com/liuzengh/trpc-agent-service/trpcservice/storage/tenantctx"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/vector"
 )
@@ -74,21 +76,24 @@ func (h *PostgresHydrator) Hydrate(ctx context.Context, tc tenant.TenantContext,
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, h.config.QueryTimeout)
 	defer cancel()
-	rows, err := h.pool.Query(queryCtx, `SELECT memory_id, scope, content, version, source_seq, deleted
-        FROM memory WHERE tenant_id = $1 AND memory_id = ANY($2)`, tc.TenantID, sourceIDs)
-	if err != nil {
-		return nil, mapHydrationError(err)
-	}
-	defer rows.Close()
 	facts := make(map[string]Fact, len(sourceIDs))
-	for rows.Next() {
-		var fact Fact
-		if err := rows.Scan(&fact.MemoryID, &fact.Scope, &fact.Content, &fact.SourceVersion, &fact.SourceSequence, &fact.Deleted); err != nil {
-			return nil, ErrUnavailable
+	err := tenantctx.WithTenantContext(queryCtx, h.pool, tc.TenantID, "vector hydration", func(ctx context.Context, tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx, `SELECT memory_id, scope, content, version, source_seq, deleted
+        FROM memory WHERE tenant_id = $1 AND memory_id = ANY($2)`, tc.TenantID, sourceIDs)
+		if queryErr != nil {
+			return queryErr
 		}
-		facts[fact.MemoryID] = fact
-	}
-	if err := rows.Err(); err != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var fact Fact
+			if err := rows.Scan(&fact.MemoryID, &fact.Scope, &fact.Content, &fact.SourceVersion, &fact.SourceSequence, &fact.Deleted); err != nil {
+				return ErrUnavailable
+			}
+			facts[fact.MemoryID] = fact
+		}
+		return rows.Err()
+	})
+	if err != nil {
 		return nil, mapHydrationError(err)
 	}
 	return facts, nil

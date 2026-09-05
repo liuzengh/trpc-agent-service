@@ -10,6 +10,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/jackc/pgx/v5"
+	tenantctx "github.com/liuzengh/trpc-agent-service/trpcservice/storage/tenantctx"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -42,6 +45,7 @@ const productionEvidenceBlocked = "blocked; TEST_DATABASE_URL is required to clo
 type productionTestFixture struct {
 	base              *pgxpool.Pool
 	schema            string
+	runtimeURL        string
 	tenantID          string
 	agentID           string
 	larkBindingID     string
@@ -86,6 +90,8 @@ func newProductionTestFixture(t *testing.T) *productionTestFixture {
 	}
 	_, file, _, _ := runtime.Caller(0)
 	t.Setenv("DATABASE_URL", url)
+	fixture.runtimeURL = ensureProductionRuntimeRole(t, url, fixture.schema)
+	t.Setenv("DATABASE_RUNTIME_URL", fixture.runtimeURL)
 	t.Setenv("DATABASE_SCHEMA", fixture.schema)
 	t.Setenv("MIGRATIONS_DIR", filepath.Join(filepath.Dir(file), "../../migrations"))
 	t.Setenv("MODEL", "synthetic-model")
@@ -249,28 +255,36 @@ func seedProductionRows(t *testing.T, f *productionTestFixture, pool *pgxpool.Po
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := pool.Exec(ctx, `
+	// P2-01: the fixture seeds through the same runtime role and the same
+	// transaction-local tenant binding the production bootstrap uses.
+	err := tenantctx.WithTenantContext(ctx, pool, f.tenantID, "fixture seed", func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
 INSERT INTO tenant (tenant_id, name, status, config_version, default_agent_app_id, backend_config)
 VALUES ($1, $2, 'active', 1, $3, '{"session":"postgres","memory":"postgres"}')`, f.tenantID, "synthetic tenant", f.agentID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
 INSERT INTO agent_app (tenant_id, agent_app_id, name, status, model_config_ref)
 VALUES ($1, $2, $3, 'active', 'synthetic-model-config')`, f.tenantID, f.agentID, "synthetic agent"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
 INSERT INTO channel_binding (tenant_id, channel, binding_id, external_app_id, secret_ref, enabled)
 VALUES ($1, 'lark', $2, $3, 'env://P009GC_LARK_APP_SECRET', true),
        ($1, 'telegram', $4, $5, 'env://P009GC_TELEGRAM_BOT_TOKEN', true)`, f.tenantID, f.larkBindingID, f.larkExternalID, f.telegramBindingID, f.telegramExternal); err != nil {
-		t.Fatal(err)
-	}
-	larkSession := channels.SessionID(f.tenantID, "lark", "ou_"+f.tenantID, "oc_"+f.tenantID)
-	telegramSession := channels.SessionIDWithThread(f.tenantID, "telegram", "10000001", "-10000001", "77")
-	if _, err := pool.Exec(ctx, `
+			return err
+		}
+		larkSession := channels.SessionID(f.tenantID, "lark", "ou_"+f.tenantID, "oc_"+f.tenantID)
+		telegramSession := channels.SessionIDWithThread(f.tenantID, "telegram", "10000001", "-10000001", "77")
+		if _, err := tx.Exec(ctx, `
 INSERT INTO session (tenant_id, session_id, agent_app_id, agent_version, channel, binding_id, external_chat, external_user)
 VALUES ($1, $2, $3, 1, 'lark', $4, $5, $6),
        ($1, $7, $3, 1, 'telegram', $8, $9, $10)`, f.tenantID, larkSession, f.agentID, f.larkBindingID, "oc_"+f.tenantID, "ou_"+f.tenantID, telegramSession, f.telegramBindingID, "-10000001", "10000001"); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 }
@@ -425,13 +439,13 @@ func TestProductionPostgresWebhookFailureWindows(t *testing.T) {
 		runtimeValue, server := assembleProductionTestRuntime(t, f, factory, larkSender, telegramSender, hooks)
 		startResult := startProductionRuntime(t, runtimeValue, hooks)
 		finishProductionStart(t, startResult, hooks)
-		installFailureTrigger(t, runtimeValue.pool, "queue_insert_failure", "job_queue", "BEFORE INSERT", "RAISE EXCEPTION 'synthetic queue submit failure'")
+		installFailureTrigger(t, f.base, "queue_insert_failure", f.schema)
 		body, timestamp, nonce := larkProductionEvent(t, f, "window-queue-event-"+f.tenantID, "window-queue-message-"+f.tenantID)
 		first := sendLarkRequest(t, server, f, body, timestamp, nonce)
 		if first.Code == http.StatusAccepted {
 			t.Fatalf("queue failure unexpectedly accepted: %d", first.Code)
 		}
-		dropFailureTrigger(t, runtimeValue.pool, "queue_insert_failure", "job_queue")
+		dropFailureTrigger(t, f.base, "queue_insert_failure", f.schema)
 		replay := sendLarkRequest(t, server, f, body, timestamp, nonce)
 		if replay.Code != http.StatusAccepted {
 			t.Fatalf("queue failure replay code=%d", replay.Code)
@@ -450,13 +464,13 @@ func TestProductionPostgresWebhookFailureWindows(t *testing.T) {
 		runtimeValue, server := assembleProductionTestRuntime(t, f, factory, larkSender, telegramSender, hooks)
 		startResult := startProductionRuntime(t, runtimeValue, hooks)
 		finishProductionStart(t, startResult, hooks)
-		installFailureTrigger(t, runtimeValue.pool, "claim_complete_failure", "message_dedup", "BEFORE UPDATE", "IF NEW.status = 'completed' THEN RAISE EXCEPTION 'synthetic claim completion failure'; END IF")
+		installFailureTrigger(t, f.base, "claim_complete_failure", f.schema)
 		body, timestamp, nonce := larkProductionEvent(t, f, "window-complete-event-"+f.tenantID, "window-complete-message-"+f.tenantID)
 		first := sendLarkRequest(t, server, f, body, timestamp, nonce)
 		if first.Code == http.StatusAccepted {
 			t.Fatalf("claim completion failure unexpectedly accepted: %d", first.Code)
 		}
-		dropFailureTrigger(t, runtimeValue.pool, "claim_complete_failure", "message_dedup")
+		dropFailureTrigger(t, f.base, "claim_complete_failure", f.schema)
 		replay := sendLarkRequest(t, server, f, body, timestamp, nonce)
 		if replay.Code != http.StatusAccepted {
 			t.Fatalf("claim completion replay code=%d", replay.Code)
@@ -480,7 +494,7 @@ func TestProductionPostgresWebhookFailureWindows(t *testing.T) {
 		body, timestamp, nonce := larkProductionEvent(t, f, "window-ack-event-"+f.tenantID, "window-ack-message-"+f.tenantID)
 		first := sendLarkRequest(t, server, f, body, timestamp, nonce)
 		if first.Code != http.StatusAccepted {
-			t.Fatalf("first ACK code=%d", first.Code)
+			t.Fatalf("first ACK code=%d body=%s", first.Code, first.Body.String())
 		}
 		second := sendLarkRequest(t, server, f, body, timestamp, nonce)
 		if second.Code != http.StatusAccepted || !strings.Contains(second.Body.String(), `"duplicate":true`) {
@@ -513,7 +527,10 @@ func TestProductionPostgresWebhookFailureWindows(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := runtimeValue.pool.Exec(ctx, `UPDATE message_dedup SET expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id=$1 AND channel=$2 AND binding_id=$3 AND external_message_id=$4`, key.TenantID, key.Channel, key.BindingID, key.ExternalMessageID); err != nil {
+		if err := tenantctx.WithTenantContext(ctx, runtimeValue.pool, key.TenantID, "fixture expire dedup", func(ctx context.Context, tx pgx.Tx) error {
+			_, execErr := tx.Exec(ctx, `UPDATE message_dedup SET expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id=$1 AND channel=$2 AND binding_id=$3 AND external_message_id=$4`, key.TenantID, key.Channel, key.BindingID, key.ExternalMessageID)
+			return execErr
+		}); err != nil {
 			t.Fatal(err)
 		}
 		newClaim, err := coordination.Claim(ctx, tc, key, time.Minute, "new-owner")
@@ -595,6 +612,7 @@ func TestProductionAssemblyFailClosedAndChatCompatibility(t *testing.T) {
 		f := newProductionTestFixture(t)
 		badURL := "postgres://invalid-host.invalid:5432/does-not-exist"
 		t.Setenv("DATABASE_URL", badURL)
+		t.Setenv("DATABASE_RUNTIME_URL", badURL)
 		_, err := assembleProductionWithDependencies(context.Background(), productionTestResponder{}, productionAssemblyDependencies{})
 		if err == nil || strings.Contains(strings.ToLower(err.Error()), "memory") {
 			t.Fatalf("database failure did not fail closed: %v", err)
@@ -733,7 +751,9 @@ func assertPendingCompletionFacts(t *testing.T, pool *pgxpool.Pool, tenantID, jo
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var queueStatus string
-	if err := pool.QueryRow(ctx, "SELECT status FROM job_queue WHERE tenant_id=$1 AND job_id=$2", tenantID, jobID).Scan(&queueStatus); err != nil {
+	if err := tenantctx.WithTenantContext(ctx, pool, tenantID, "fixture assert queue", func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, "SELECT status FROM job_queue WHERE tenant_id=$1 AND job_id=$2", tenantID, jobID).Scan(&queueStatus)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if queueStatus != "acked" {
@@ -741,7 +761,9 @@ func assertPendingCompletionFacts(t *testing.T, pool *pgxpool.Pool, tenantID, jo
 	}
 	var resultJob, resultExecution, resultTenant, resultSession, owner, resultJSON string
 	var fence uint64
-	if err := pool.QueryRow(ctx, `SELECT job_id, execution_id, tenant_id, session_id, owner_id, fence_token, result_json::text FROM execution_result WHERE tenant_id=$1 AND job_id=$2 AND execution_id=$3`, tenantID, jobID, executionID).Scan(&resultJob, &resultExecution, &resultTenant, &resultSession, &owner, &fence, &resultJSON); err != nil {
+	if err := tenantctx.WithTenantContext(ctx, pool, tenantID, "fixture assert result", func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT job_id, execution_id, tenant_id, session_id, owner_id, fence_token, result_json::text FROM execution_result WHERE tenant_id=$1 AND job_id=$2 AND execution_id=$3`, tenantID, jobID, executionID).Scan(&resultJob, &resultExecution, &resultTenant, &resultSession, &owner, &fence, &resultJSON)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if resultJob != jobID || resultExecution != executionID || resultTenant != tenantID || resultSession == "" || owner == "" || fence == 0 || !strings.Contains(resultJSON, reply) {
@@ -749,7 +771,9 @@ func assertPendingCompletionFacts(t *testing.T, pool *pgxpool.Pool, tenantID, jo
 	}
 	var outboxStatus, aggregateID, dedupKey string
 	var payload []byte
-	if err := pool.QueryRow(ctx, `SELECT status, aggregate_id, dedup_key, payload FROM outbox_message WHERE tenant_id=$1 AND outbox_id=$2`, tenantID, "reply-"+executionID).Scan(&outboxStatus, &aggregateID, &dedupKey, &payload); err != nil {
+	if err := tenantctx.WithTenantContext(ctx, pool, tenantID, "fixture assert outbox", func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status, aggregate_id, dedup_key, payload FROM outbox_message WHERE tenant_id=$1 AND outbox_id=$2`, tenantID, "reply-"+executionID).Scan(&outboxStatus, &aggregateID, &dedupKey, &payload)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if outboxStatus != "pending" || aggregateID != executionID || dedupKey != tenantID+"|"+executionID+"|agent.reply" {
@@ -772,7 +796,9 @@ func assertCompletedOutbox(t *testing.T, pool *pgxpool.Pool, tenantID, id string
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var status string
-	if err := pool.QueryRow(ctx, "SELECT status FROM outbox_message WHERE tenant_id=$1 AND outbox_id=$2", tenantID, id).Scan(&status); err != nil {
+	if err := tenantctx.WithTenantContext(ctx, pool, tenantID, "fixture assert outbox completed", func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, "SELECT status FROM outbox_message WHERE tenant_id=$1 AND outbox_id=$2", tenantID, id).Scan(&status)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if status != "completed" {
@@ -800,13 +826,15 @@ func assertSingleTenantFacts(t *testing.T, pool *pgxpool.Pool, tenantID string) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var jobs, executions, outboxes int
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM job_queue WHERE tenant_id=$1", tenantID).Scan(&jobs); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM execution_result WHERE tenant_id=$1", tenantID).Scan(&executions); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM outbox_message WHERE tenant_id=$1", tenantID).Scan(&outboxes); err != nil {
+	if err := tenantctx.WithTenantContext(ctx, pool, tenantID, "fixture assert facts", func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, "SELECT count(*) FROM job_queue WHERE tenant_id=$1", tenantID).Scan(&jobs); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, "SELECT count(*) FROM execution_result WHERE tenant_id=$1", tenantID).Scan(&executions); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, "SELECT count(*) FROM outbox_message WHERE tenant_id=$1", tenantID).Scan(&outboxes)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if jobs != 1 || executions != 1 || outboxes != 1 {
@@ -1027,16 +1055,16 @@ func resolvedProductionContext(t *testing.T, runtimeValue *productionRuntime, ch
 	return tc
 }
 
-func installFailureTrigger(t *testing.T, pool *pgxpool.Pool, name, _, _, _ string) {
+func installFailureTrigger(t *testing.T, pool *pgxpool.Pool, name, schema string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var statement string
 	switch name {
 	case "queue_insert_failure":
-		statement = `CREATE FUNCTION queue_insert_failure_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic queue submit failure'; END; $$; CREATE TRIGGER queue_insert_failure BEFORE INSERT ON job_queue FOR EACH ROW EXECUTE FUNCTION queue_insert_failure_fn()`
+		statement = fmt.Sprintf(`CREATE FUNCTION %s.queue_insert_failure_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic queue submit failure'; END; $$; CREATE TRIGGER queue_insert_failure BEFORE INSERT ON %s.job_queue FOR EACH ROW EXECUTE FUNCTION %s.queue_insert_failure_fn()`, schema, schema, schema)
 	case "claim_complete_failure":
-		statement = `CREATE FUNCTION claim_complete_failure_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.status = 'completed' THEN RAISE EXCEPTION 'synthetic claim completion failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER claim_complete_failure BEFORE UPDATE ON message_dedup FOR EACH ROW EXECUTE FUNCTION claim_complete_failure_fn()`
+		statement = fmt.Sprintf(`CREATE FUNCTION %s.claim_complete_failure_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.status = 'completed' THEN RAISE EXCEPTION 'synthetic claim completion failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER claim_complete_failure BEFORE UPDATE ON %s.message_dedup FOR EACH ROW EXECUTE FUNCTION %s.claim_complete_failure_fn()`, schema, schema, schema)
 	default:
 		t.Fatalf("unsupported test failure trigger %q", name)
 	}
@@ -1045,16 +1073,16 @@ func installFailureTrigger(t *testing.T, pool *pgxpool.Pool, name, _, _, _ strin
 	}
 }
 
-func dropFailureTrigger(t *testing.T, pool *pgxpool.Pool, name, _ string) {
+func dropFailureTrigger(t *testing.T, pool *pgxpool.Pool, name, schema string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var statement string
 	switch name {
 	case "queue_insert_failure":
-		statement = `DROP TRIGGER IF EXISTS queue_insert_failure ON job_queue; DROP FUNCTION IF EXISTS queue_insert_failure_fn()`
+		statement = fmt.Sprintf(`DROP TRIGGER IF EXISTS queue_insert_failure ON %s.job_queue; DROP FUNCTION IF EXISTS %s.queue_insert_failure_fn()`, schema, schema)
 	case "claim_complete_failure":
-		statement = `DROP TRIGGER IF EXISTS claim_complete_failure ON message_dedup; DROP FUNCTION IF EXISTS claim_complete_failure_fn()`
+		statement = fmt.Sprintf(`DROP TRIGGER IF EXISTS claim_complete_failure ON %s.message_dedup; DROP FUNCTION IF EXISTS %s.claim_complete_failure_fn()`, schema, schema)
 	default:
 		t.Fatalf("unsupported test failure trigger %q", name)
 	}
@@ -1140,4 +1168,19 @@ func TestBootstrapChannelDefaultsAndSecretFailClosed(t *testing.T) {
 	if _, err := loadBootstrapRuntimeConfig(context.Background()); err == nil || !strings.Contains(err.Error(), "unavailable") || strings.Contains(err.Error(), "P104_MISSING") {
 		t.Fatalf("enabled missing secret was not fail-closed: %v", err)
 	}
+}
+
+func TestP201ProbeResolve(t *testing.T) {
+	f := newProductionTestFixture(t)
+	runtimeValue, err := assembleProductionWithDependencies(context.Background(), productionTestResponder{factory: &deterministicAgentFactory{result: "x", started: make(chan agent.AgentInput, 1)}}, productionAssemblyDependencies{})
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	seedProductionRows(t, f, runtimeValue.pool)
+	req := tenant.ResolveRequest{Channel: lark.Channel, ExternalAppID: f.larkExternalID, ExternalUser: "ou_x", ExternalChat: "oc_x", RequestID: "r1", MessageID: "m1", TraceID: "t1"}
+	tc, resErr := runtimeValue.resolver.Resolve(context.Background(), req)
+	if resErr != nil {
+		t.Fatalf("PROBE resolve error: %v", resErr)
+	}
+	t.Logf("PROBE ok tenant=%s", tc.TenantID)
 }

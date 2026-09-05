@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -28,8 +29,10 @@ func (s *CoordinationStore) GetEpoch(ctx context.Context, tenantID, resourceID s
 		return 0, storage.ErrInvalidArgument
 	}
 	var epoch storage.Epoch
-	err := s.pool.QueryRow(ctx, `SELECT epoch FROM coordination_epoch WHERE tenant_id=$1 AND resource_id=$2`, tenantID, resourceID).Scan(&epoch)
-	if err == pgx.ErrNoRows {
+	err := WithTenantContext(ctx, s.pool, tenantID, "epoch read", func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT epoch FROM coordination_epoch WHERE tenant_id=$1 AND resource_id=$2`, tenantID, resourceID).Scan(&epoch)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
 		return 1, nil
 	}
 	if err != nil {
@@ -58,6 +61,9 @@ func (s *CoordinationStore) BumpEpoch(ctx context.Context, tenantID, resourceID 
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	if err = SetTenantContext(ctx, tx, tenantID); err != nil {
+		return 0, err
+	}
 	if _, err = tx.Exec(ctx, `SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'`); err != nil {
 		return 0, err
 	}
@@ -103,6 +109,9 @@ func (s *CoordinationStore) Claim(ctx context.Context, tc tenant.TenantContext, 
 		return storage.Claim{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err = SetTenantContext(ctx, tx, key.TenantID); err != nil {
+		return storage.Claim{}, err
+	}
 	_, err = tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '15s'`)
 	if err != nil {
 		return storage.Claim{}, err
@@ -172,6 +181,9 @@ func (s *CoordinationStore) write(ctx context.Context, tc tenant.TenantContext, 
 		return e
 	}
 	defer tx.Rollback(ctx)
+	if e = SetTenantContext(ctx, tx, key.TenantID); e != nil {
+		return e
+	}
 	if _, e = tx.Exec(ctx, `SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'`); e != nil {
 		return e
 	}

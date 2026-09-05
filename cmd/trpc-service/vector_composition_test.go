@@ -193,7 +193,9 @@ func waitVectorTaskSucceeded(t *testing.T, pool *pgxpool.Pool, schema, tenantID,
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("vector task did not succeed: last=%v err=%v", status, err)
+			var category string
+			_ = pool.QueryRow(context.Background(), "SELECT COALESCE(last_error_category,'') FROM vector_projection_task WHERE tenant_id=$1 AND source_id=$2 ORDER BY source_version DESC LIMIT 1", tenantID, memoryID).Scan(&category)
+			t.Fatalf("vector task did not succeed: last=%s category=%s err=%v", status, category, err)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

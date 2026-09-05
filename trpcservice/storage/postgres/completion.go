@@ -161,6 +161,9 @@ func (c *AtomicCompletionCoordinator) CommitResultAndAck(ctx context.Context, re
 			conn.Release()
 		}
 	}()
+	if err = SetTenantContext(ctx, tx, request.Commit.TenantID); err != nil {
+		return completionDBError("bind tenant context", err)
+	}
 	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '15s'`); err != nil {
 		return completionDBError("configure transaction", err)
 	}
@@ -521,67 +524,81 @@ func (c *AtomicCompletionCoordinator) reconcileCompletion(ctx context.Context, r
 	if err := ctx.Err(); err != nil {
 		return CompletionOutcomeUnknown, err
 	}
-	var resultExists bool
-	if err := c.pool.QueryRow(ctx, `
+	// The reconcile reads are tenant-scoped facts and therefore run inside a
+	// tenant-bound transaction. The outcome decision logic below is unchanged.
+	var outcome CompletionOutcome
+	err := WithTenantContext(ctx, c.pool, request.Commit.TenantID, "completion reconcile", func(ctx context.Context, tx pgx.Tx) error {
+		var resultExists bool
+		if err := tx.QueryRow(ctx, `
 SELECT EXISTS(
     SELECT 1 FROM execution_result
     WHERE tenant_id = $1 AND execution_id = $2 AND job_id = $3 AND session_id = $4
 )`, request.Commit.TenantID, request.Commit.ExecutionID, request.Commit.JobID, request.Commit.SessionID).Scan(&resultExists); err != nil {
-		return CompletionOutcomeUnknown, completionDBError("reconcile execution result", err)
-	}
-	var outboxExists, outboxMatches bool
-	if request.Outbox != nil {
-		outbox, found, err := readCompletionOutbox(ctx, c.pool, request)
-		if err != nil {
-			return CompletionOutcomeUnknown, err
+			return completionDBError("reconcile execution result", err)
 		}
-		outboxExists = found
-		outboxMatches = found && sameCompletionOutbox(outbox, *request.Outbox)
-	}
-	var status, deliveryID, lastDeliveryID string
-	err := c.pool.QueryRow(ctx, `
+		var outboxExists, outboxMatches bool
+		if request.Outbox != nil {
+			outbox, found, err := readCompletionOutbox(ctx, tx, request)
+			if err != nil {
+				return err
+			}
+			outboxExists = found
+			outboxMatches = found && sameCompletionOutbox(outbox, *request.Outbox)
+		}
+		var status, deliveryID, lastDeliveryID string
+		err := tx.QueryRow(ctx, `
 SELECT status, COALESCE(delivery_id, ''), COALESCE(last_delivery_id, '')
 FROM job_queue WHERE tenant_id = $1 AND job_id = $2`, request.Delivery.TenantID, request.Delivery.JobID).Scan(&status, &deliveryID, &lastDeliveryID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return CompletionOutcomeUnknown, nil
-	}
-	if err != nil {
-		return CompletionOutcomeUnknown, completionDBError("reconcile queue delivery", err)
-	}
-	if status == "acked" && lastDeliveryID == request.Delivery.DeliveryID {
-		if !resultExists {
-			if outboxExists {
-				return CompletionPartialConflict, nil
+		if errors.Is(err, pgx.ErrNoRows) {
+			outcome = CompletionOutcomeUnknown
+			return nil
+		}
+		if err != nil {
+			return completionDBError("reconcile queue delivery", err)
+		}
+		decide := func() CompletionOutcome {
+			if status == "acked" && lastDeliveryID == request.Delivery.DeliveryID {
+				if !resultExists {
+					if outboxExists {
+						return CompletionPartialConflict
+					}
+					return CompletionAckOnly
+				}
+				if request.Outbox == nil {
+					return CompletionAllCommitted
+				}
+				if outboxMatches {
+					return CompletionAllCommitted
+				}
+				if !outboxExists {
+					return CompletionResultAndAckWithoutOutbox
+				}
+				return CompletionPartialConflict
 			}
-			return CompletionAckOnly, nil
+			if status == "in_flight" && deliveryID != request.Delivery.DeliveryID {
+				return CompletionTokenTakenOver
+			}
+			if resultExists && outboxExists {
+				if outboxMatches {
+					return CompletionResultAndOutboxOnly
+				}
+				return CompletionPartialConflict
+			}
+			if resultExists {
+				return CompletionResultOnly
+			}
+			if outboxExists {
+				return CompletionOutboxOnly
+			}
+			return CompletionNeitherCommitted
 		}
-		if request.Outbox == nil {
-			return CompletionAllCommitted, nil
-		}
-		if outboxMatches {
-			return CompletionAllCommitted, nil
-		}
-		if !outboxExists {
-			return CompletionResultAndAckWithoutOutbox, nil
-		}
-		return CompletionPartialConflict, nil
+		outcome = decide()
+		return nil
+	})
+	if err != nil {
+		return CompletionOutcomeUnknown, err
 	}
-	if status == "in_flight" && deliveryID != request.Delivery.DeliveryID {
-		return CompletionTokenTakenOver, nil
-	}
-	if resultExists && outboxExists {
-		if outboxMatches {
-			return CompletionResultAndOutboxOnly, nil
-		}
-		return CompletionPartialConflict, nil
-	}
-	if resultExists {
-		return CompletionResultOnly, nil
-	}
-	if outboxExists {
-		return CompletionOutboxOnly, nil
-	}
-	return CompletionNeitherCommitted, nil
+	return outcome, nil
 }
 
 func validateAtomicCompletionRequest(ctx context.Context, request storage.AtomicCompletionRequest) error {

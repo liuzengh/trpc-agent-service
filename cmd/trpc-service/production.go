@@ -442,8 +442,12 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 		return nil, errors.New("migration initialization failed")
 	}
 	migrator.Close()
-	pool, err := pgstore.NewPool(ctx, pgstore.PostgresConfig{
-		URL:            mustEnv("DATABASE_URL"),
+	// P2-01: business traffic runs on a dedicated runtime role that is
+	// neither superuser, nor BYPASSRLS, nor owner of any protected table, so
+	// row level security actually constrains every pooled connection. The
+	// owner credentials above are used only by the migration gate.
+	runtimePool, err := pgstore.NewPool(ctx, pgstore.PostgresConfig{
+		URL:            mustEnv("DATABASE_RUNTIME_URL"),
 		SearchPath:     os.Getenv("DATABASE_SCHEMA"),
 		MaxConns:       16,
 		MinConns:       2,
@@ -451,6 +455,11 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 	})
 	if err != nil {
 		return nil, errors.New("database pool initialization failed")
+	}
+	pool := runtimePool
+	if err := pgstore.EnsureRuntimeRoleLimits(ctx, pool); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("runtime role limits: %w", err)
 	}
 	closeOnError := true
 	metadataRegistry, err := pgstore.NewTenantRegistry(pool)

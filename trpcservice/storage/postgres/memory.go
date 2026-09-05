@@ -135,6 +135,9 @@ func (r *MemoryRepository) Put(ctx context.Context, tc tenant.TenantContext, val
 	if _, err = tx.Exec(queryCtx, `SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'`); err != nil {
 		return memoryError(err)
 	}
+	if err = SetTenantContext(queryCtx, tx, tc.TenantID); err != nil {
+		return memoryError(err)
+	}
 	var currentVersion, currentSequence int64
 	var currentDeleted bool
 	err = tx.QueryRow(queryCtx, `SELECT version, source_seq, deleted FROM memory WHERE tenant_id=$1 AND memory_id=$2 FOR UPDATE`,
@@ -213,6 +216,9 @@ func (r *MemoryRepository) Delete(ctx context.Context, tc tenant.TenantContext, 
 	if _, err = tx.Exec(queryCtx, `SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'`); err != nil {
 		return memoryError(err)
 	}
+	if err = SetTenantContext(queryCtx, tx, tc.TenantID); err != nil {
+		return memoryError(err)
+	}
 	var currentVersion, currentSequence int64
 	var scope string
 	var currentDeleted bool
@@ -271,8 +277,13 @@ func (r *MemoryRepository) Get(ctx context.Context, tc tenant.TenantContext, mem
 		return memory.Memory{}, err
 	}
 	defer cancel()
-	value, err := scanMemory(r.pool.QueryRow(queryCtx, `SELECT tenant_id, memory_id, scope, scope_id, session_id, kind, content, version, source_seq, deleted, created_at, updated_at
+	var value memory.Memory
+	err = WithTenantContext(queryCtx, r.pool, tc.TenantID, "memory get", func(ctx context.Context, tx pgx.Tx) error {
+		var scanErr error
+		value, scanErr = scanMemory(tx.QueryRow(ctx, `SELECT tenant_id, memory_id, scope, scope_id, session_id, kind, content, version, source_seq, deleted, created_at, updated_at
         FROM memory WHERE tenant_id=$1 AND memory_id=$2`, tc.TenantID, memoryID))
+		return scanErr
+	})
 	if err != nil {
 		return memory.Memory{}, err
 	}
@@ -294,28 +305,32 @@ func (r *MemoryRepository) Search(ctx context.Context, tc tenant.TenantContext, 
 		return nil, err
 	}
 	defer cancel()
-	var rows pgx.Rows
-	if query == "" {
-		rows, err = r.pool.Query(queryCtx, `SELECT tenant_id, memory_id, scope, scope_id, session_id, kind, content, version, source_seq, deleted, created_at, updated_at
-        FROM memory WHERE tenant_id=$1 AND deleted=false ORDER BY updated_at DESC LIMIT $2`, tc.TenantID, limit)
-	} else {
-		rows, err = r.pool.Query(queryCtx, `SELECT tenant_id, memory_id, scope, scope_id, session_id, kind, content, version, source_seq, deleted, created_at, updated_at
-        FROM memory WHERE tenant_id=$1 AND deleted=false AND content=$2 ORDER BY updated_at DESC LIMIT $3`, tc.TenantID, query, limit)
-	}
-	if err != nil {
-		return nil, memoryError(err)
-	}
-	defer rows.Close()
 	result := make([]memory.Memory, 0, limit)
-	for rows.Next() {
-		value, scanErr := scanMemory(rows)
-		if scanErr != nil {
-			return nil, scanErr
+	err = WithTenantContext(queryCtx, r.pool, tc.TenantID, "memory search", func(ctx context.Context, tx pgx.Tx) error {
+		var rows pgx.Rows
+		var queryErr error
+		if query == "" {
+			rows, queryErr = tx.Query(ctx, `SELECT tenant_id, memory_id, scope, scope_id, session_id, kind, content, version, source_seq, deleted, created_at, updated_at
+        FROM memory WHERE tenant_id=$1 AND deleted=false ORDER BY updated_at DESC LIMIT $2`, tc.TenantID, limit)
+		} else {
+			rows, queryErr = tx.Query(ctx, `SELECT tenant_id, memory_id, scope, scope_id, session_id, kind, content, version, source_seq, deleted, created_at, updated_at
+        FROM memory WHERE tenant_id=$1 AND deleted=false AND content=$2 ORDER BY updated_at DESC LIMIT $3`, tc.TenantID, query, limit)
 		}
-		result = append(result, value)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, memoryError(err)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			value, scanErr := scanMemory(rows)
+			if scanErr != nil {
+				return scanErr
+			}
+			result = append(result, value)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }

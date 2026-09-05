@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	tenantctx "github.com/liuzengh/trpc-agent-service/trpcservice/storage/tenantctx"
 )
 
 var (
@@ -95,6 +96,9 @@ func (q *PostgresQueue) Enqueue(ctx context.Context, job AgentJob) (QueueReceipt
 		return QueueReceipt{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := tenantctx.SetTenantContext(ctx, tx, job.Tenant.TenantID); err != nil {
+		return QueueReceipt{}, err
+	}
 	result, err := tx.Exec(ctx, `
 		INSERT INTO job_queue (
 			tenant_id, job_id, execution_id, schema_version, payload,
@@ -168,24 +172,22 @@ func (q *PostgresQueue) claim(ctx context.Context, visibilityTimeout time.Durati
 		return Delivery{}, false, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `
-		UPDATE job_queue
-		SET status = 'queued', delivery_id = NULL, leased_until = NULL,
-			available_at = clock_timestamp(), attempt = attempt + 1,
-			updated_at = clock_timestamp()
-		WHERE status = 'in_flight' AND leased_until <= clock_timestamp()`); err != nil {
-		return Delivery{}, false, queueDBError("recover expired deliveries", err)
+	deliveryID, err := newDeliveryID()
+	if err != nil {
+		return Delivery{}, false, err
 	}
-
+	// The global claim (recover expired deliveries plus SKIP LOCKED claim) is
+	// the queue's one cross-tenant capability and runs as the fixed
+	// SECURITY DEFINER function owned by the dedicated NOLOGIN role. The
+	// statements inside the function are unchanged from the previous inline
+	// implementation.
 	var row durableJobRow
+	var visibleUntil, receivedAt time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT tenant_id, job_id, execution_id, schema_version, payload, attempt
-		FROM job_queue
-		WHERE status = 'queued' AND available_at <= clock_timestamp()
-		ORDER BY available_at, created_at, job_id
-		FOR UPDATE SKIP LOCKED
-		LIMIT 1`).Scan(
-		&row.tenantID, &row.jobID, &row.executionID, &row.schemaVersion, &row.payload, &row.attempt)
+		SELECT tenant_id, job_id, execution_id, schema_version, payload, attempt, leased_until, received_at
+		FROM trpc_queue_claim_next($1, $2)`,
+		durationMicros(visibilityTimeout), deliveryID).Scan(
+		&row.tenantID, &row.jobID, &row.executionID, &row.schemaVersion, &row.payload, &row.attempt, &visibleUntil, &receivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := commitQueueTx(ctx, tx, "recover expired deliveries"); err != nil {
 			return Delivery{}, false, err
@@ -198,26 +200,6 @@ func (q *PostgresQueue) claim(ctx context.Context, visibilityTimeout time.Durati
 	job, err := q.decodeStoredJob(row)
 	if err != nil {
 		return Delivery{}, false, err
-	}
-	deliveryID, err := newDeliveryID()
-	if err != nil {
-		return Delivery{}, false, err
-	}
-	var visibleUntil, receivedAt time.Time
-	err = tx.QueryRow(ctx, `
-		UPDATE job_queue
-		SET status = 'in_flight', delivery_id = $3,
-			leased_until = clock_timestamp() + ($4::double precision * interval '1 microsecond'),
-			delivery_count = delivery_count + 1, updated_at = clock_timestamp()
-		WHERE tenant_id = $1 AND job_id = $2
-		  AND status = 'queued' AND available_at <= clock_timestamp()
-		RETURNING leased_until, clock_timestamp()`,
-		row.tenantID, row.jobID, deliveryID, durationMicros(visibilityTimeout)).Scan(&visibleUntil, &receivedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Delivery{}, false, fmt.Errorf("%w: claim candidate disappeared", ErrQueueBackend)
-	}
-	if err != nil {
-		return Delivery{}, false, queueDBError("claim candidate", err)
 	}
 	if err := commitQueueTx(ctx, tx, "claim"); err != nil {
 		return Delivery{}, false, err
@@ -266,6 +248,9 @@ func (q *PostgresQueue) Ack(ctx context.Context, delivery Delivery) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := tenantctx.SetTenantContext(ctx, tx, delivery.Job.Tenant.TenantID); err != nil {
+		return err
+	}
 	state, err := q.lockDelivery(ctx, tx, delivery)
 	if err != nil {
 		return err
@@ -304,6 +289,9 @@ func (q *PostgresQueue) Nack(ctx context.Context, delivery Delivery, options Nac
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := tenantctx.SetTenantContext(ctx, tx, delivery.Job.Tenant.TenantID); err != nil {
+		return err
+	}
 	state, err := q.lockDelivery(ctx, tx, delivery)
 	if err != nil {
 		return err
@@ -351,6 +339,9 @@ func (q *PostgresQueue) ExtendVisibility(ctx context.Context, delivery Delivery,
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := tenantctx.SetTenantContext(ctx, tx, delivery.Job.Tenant.TenantID); err != nil {
+		return err
+	}
 	state, err := q.lockDelivery(ctx, tx, delivery)
 	if err != nil {
 		return err

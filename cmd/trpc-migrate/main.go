@@ -95,8 +95,45 @@ func run() int {
 	if err != nil {
 		return fail("failed")
 	}
+	if role := strings.TrimSpace(os.Getenv("RUNTIME_ROLE")); role != "" {
+		if err := ensureRuntimeRole(ctx, role); err != nil {
+			return fail("invalid_config")
+		}
+	}
 	fmt.Fprintf(os.Stderr, "migration ok current_version=%d\n", current.Version)
 	return exitOK
+}
+
+// ensureRuntimeRole provisions the deployment's NOBYPASSRLS runtime role and
+// grants its bounded privileges after the migrations created the tables. The
+// password comes from RUNTIME_PASSWORD_FILE and never appears in argv, logs
+// or errors.
+func ensureRuntimeRole(ctx context.Context, role string) error {
+	password := strings.TrimSpace(os.Getenv("RUNTIME_PASSWORD"))
+	if password == "" {
+		passwordFile := strings.TrimSpace(os.Getenv("RUNTIME_PASSWORD_FILE"))
+		if passwordFile == "" {
+			return errors.New("runtime role provisioning requires RUNTIME_PASSWORD_FILE")
+		}
+		raw, readErr := os.ReadFile(passwordFile)
+		if readErr != nil || strings.TrimSpace(string(raw)) == "" {
+			return errors.New("runtime role provisioning requires a non-empty runtime password")
+		}
+		password = strings.TrimSpace(string(raw))
+	}
+	schema := strings.TrimSpace(os.Getenv("DATABASE_SCHEMA"))
+	if schema == "" {
+		schema = "public"
+	}
+	admin, err := postgres.NewPool(ctx, postgres.PostgresConfig{URL: strings.TrimSpace(os.Getenv("DATABASE_URL")), SearchPath: schema, MaxConns: 2, MinConns: 1})
+	if err != nil {
+		return err
+	}
+	defer admin.Close()
+	if err := postgres.EnsureTenantRuntimeRole(ctx, admin, schema, role, password); err != nil {
+		return err
+	}
+	return postgres.GrantRuntimeSchemaPrivileges(ctx, admin, schema, role)
 }
 
 // fail writes one stable redacted category and returns the mapped exit code.

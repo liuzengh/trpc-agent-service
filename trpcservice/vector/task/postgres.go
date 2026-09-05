@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	tenantctx "github.com/liuzengh/trpc-agent-service/trpcservice/storage/tenantctx"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/vector"
 )
@@ -132,15 +133,25 @@ func (r *PostgresRepository) EnqueueTx(ctx context.Context, tx pgx.Tx, tc tenant
 }
 
 func (r *PostgresRepository) Enqueue(ctx context.Context, tc tenant.TenantContext, ref vector.VectorDocumentRef, now time.Time) (EnqueueOutcome, error) {
-	return r.enqueue(ctx, r.pool, tc, ref, now)
+	if err := validTenantContext(tc); err != nil {
+		return EnqueueOutcome{}, err
+	}
+	var outcome EnqueueOutcome
+	queryCtx, cancel, err := r.queryContext(ctx)
+	if err != nil {
+		return EnqueueOutcome{}, err
+	}
+	defer cancel()
+	err = tenantctx.WithTenantContext(queryCtx, r.pool, tc.TenantID, "vector task enqueue", func(ctx context.Context, tx pgx.Tx) error {
+		var enqueueErr error
+		outcome, enqueueErr = r.enqueue(ctx, tx, tc, ref, now)
+		return enqueueErr
+	})
+	if err != nil {
+		return EnqueueOutcome{}, err
+	}
+	return outcome, nil
 }
-
-// RedriveTx enqueues the task inside the caller-owned transaction, or, when a
-// task with the same logical identity already exists in a succeeded terminal
-// state, re-drives that task back to pending so the idempotent projection
-// re-executes. Dead-letter, stale and cancelled tasks are never re-driven by
-// maintenance: they require explicit operator action. This is the repair path
-// used by durable rebuild/reconciliation.
 func (r *PostgresRepository) RedriveTx(ctx context.Context, tx pgx.Tx, tc tenant.TenantContext, ref vector.VectorDocumentRef, now time.Time) (bool, error) {
 	if tx == nil {
 		return false, ErrInvalidTask
@@ -239,9 +250,17 @@ func (r *PostgresRepository) Get(ctx context.Context, tc tenant.TenantContext, t
 }
 
 func (r *PostgresRepository) getByKey(ctx context.Context, tenantID, taskID string) (Task, error) {
-	return r.getByKeyExec(ctx, r.pool, tenantID, taskID)
+	var task Task
+	err := tenantctx.WithTenantContext(ctx, r.pool, tenantID, "vector task read", func(ctx context.Context, tx pgx.Tx) error {
+		var scanErr error
+		task, scanErr = r.getByKeyExec(ctx, tx, tenantID, taskID)
+		return scanErr
+	})
+	if err != nil {
+		return Task{}, err
+	}
+	return task, nil
 }
-
 func (r *PostgresRepository) getByKeyExec(ctx context.Context, exec queryExecutor, tenantID, taskID string) (Task, error) {
 	task, err := scanTask(exec.QueryRow(ctx, `SELECT `+taskColumns+` FROM vector_projection_task WHERE tenant_id=$1 AND task_id=$2`, tenantID, taskID))
 	if err != nil {
@@ -258,10 +277,10 @@ func (r *PostgresRepository) Candidate(ctx context.Context, now time.Time) (Cand
 	}
 	defer cancel()
 	var candidate Candidate
-	err = r.pool.QueryRow(queryCtx, `SELECT tenant_id, task_id FROM vector_projection_task
-        WHERE ((status IN ('pending','retry_wait') AND next_attempt_at <= $1)
-            OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= $1))
-        ORDER BY created_at, task_id LIMIT 1`, now).Scan(&candidate.TenantID, &candidate.TaskID)
+	// Global candidate discovery is the task worker's single cross-tenant
+	// capability and runs as the fixed SECURITY DEFINER function. It returns
+	// only (tenant_id, task_id); every later statement is tenant-bound.
+	err = r.pool.QueryRow(queryCtx, `SELECT tenant_id, task_id FROM trpc_vector_task_candidate($1)`, now).Scan(&candidate.TenantID, &candidate.TaskID)
 	if err != nil {
 		return Candidate{}, dbError(err)
 	}
@@ -281,7 +300,10 @@ func (r *PostgresRepository) Claim(ctx context.Context, candidate Candidate, lea
 		return Task{}, err
 	}
 	defer cancel()
-	row := r.pool.QueryRow(queryCtx, `WITH exhausted AS (
+	var task Task
+	err = tenantctx.WithTenantContext(queryCtx, r.pool, candidate.TenantID, "vector task claim", func(ctx context.Context, tx pgx.Tx) error {
+		var scanErr error
+		task, scanErr = scanTask(tx.QueryRow(ctx, `WITH exhausted AS (
         UPDATE vector_projection_task
         SET status='dead_letter', completed_at=$3, dead_lettered_at=$3,
             last_error_category='unknown', lease_owner=NULL, lease_epoch=NULL,
@@ -299,8 +321,9 @@ func (r *PostgresRepository) Claim(ctx context.Context, candidate Candidate, lea
           AND ((status IN ('pending','retry_wait') AND next_attempt_at <= $3)
             OR (status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= $3))
         RETURNING `+taskColumns, candidate.TenantID, candidate.TaskID, now,
-		lease.Owner, int64(lease.Epoch), int64(lease.Fence), lease.ExpiresAt)
-	task, err := scanTask(row)
+			lease.Owner, int64(lease.Epoch), int64(lease.Fence), lease.ExpiresAt))
+		return scanErr
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrNotClaimable
@@ -309,7 +332,6 @@ func (r *PostgresRepository) Claim(ctx context.Context, candidate Candidate, lea
 	}
 	return task, nil
 }
-
 func (r *PostgresRepository) ExtendLease(ctx context.Context, candidate Candidate, lease LeaseRef, now time.Time) error {
 	if strings.TrimSpace(candidate.TenantID) == "" || strings.TrimSpace(candidate.TaskID) == "" || !lease.Valid() {
 		return ErrInvalidTask
@@ -323,21 +345,26 @@ func (r *PostgresRepository) ExtendLease(ctx context.Context, candidate Candidat
 		return err
 	}
 	defer cancel()
-	result, err := r.pool.Exec(queryCtx, `UPDATE vector_projection_task
+	err = tenantctx.WithTenantContext(queryCtx, r.pool, candidate.TenantID, "vector task extend", func(ctx context.Context, tx pgx.Tx) error {
+		result, execErr := tx.Exec(ctx, `UPDATE vector_projection_task
         SET lease_expires_at=$7, updated_at=$3
         WHERE tenant_id=$1 AND task_id=$2 AND status='running'
           AND lease_owner=$4 AND lease_epoch=$5 AND lease_fence=$6
           AND lease_expires_at IS NOT NULL AND lease_expires_at > $3`,
-		candidate.TenantID, candidate.TaskID, now, lease.Owner, int64(lease.Epoch), int64(lease.Fence), lease.ExpiresAt)
-	if err != nil {
+			candidate.TenantID, candidate.TaskID, now, lease.Owner, int64(lease.Epoch), int64(lease.Fence), lease.ExpiresAt)
+		if execErr != nil {
+			return execErr
+		}
+		if result.RowsAffected() != 1 {
+			return ErrConflictOwnership
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrConflictOwnership) {
 		return dbError(err)
 	}
-	if result.RowsAffected() != 1 {
-		return ErrConflictOwnership
-	}
-	return nil
+	return err
 }
-
 func (r *PostgresRepository) Complete(ctx context.Context, candidate Candidate, lease LeaseRef, now time.Time) (Task, error) {
 	if strings.TrimSpace(candidate.TenantID) == "" || strings.TrimSpace(candidate.TaskID) == "" || !lease.Valid() {
 		return Task{}, ErrInvalidTask
@@ -348,7 +375,10 @@ func (r *PostgresRepository) Complete(ctx context.Context, candidate Candidate, 
 		return Task{}, err
 	}
 	defer cancel()
-	row := r.pool.QueryRow(queryCtx, `UPDATE vector_projection_task v
+	var task Task
+	err = tenantctx.WithTenantContext(queryCtx, r.pool, candidate.TenantID, "vector task complete", func(ctx context.Context, tx pgx.Tx) error {
+		var scanErr error
+		task, scanErr = scanTask(tx.QueryRow(ctx, `UPDATE vector_projection_task v
         SET status='succeeded', completed_at=$3, updated_at=$3,
             next_attempt_at=$3, last_error_category=NULL,
             lease_owner=NULL, lease_epoch=NULL, lease_fence=NULL, lease_expires_at=NULL
@@ -365,8 +395,9 @@ func (r *PostgresRepository) Complete(ctx context.Context, candidate Candidate, 
                        CASE WHEN v.operation='delete' THEN 1 ELSE 0 END)
           )
         RETURNING `+taskColumns, candidate.TenantID, candidate.TaskID, now,
-		lease.Owner, int64(lease.Epoch), int64(lease.Fence))
-	task, err := scanTask(row)
+			lease.Owner, int64(lease.Epoch), int64(lease.Fence)))
+		return scanErr
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrConflictOwnership
@@ -375,7 +406,6 @@ func (r *PostgresRepository) Complete(ctx context.Context, candidate Candidate, 
 	}
 	return task, nil
 }
-
 func (r *PostgresRepository) Fail(ctx context.Context, candidate Candidate, lease LeaseRef, failure Failure, now time.Time) (Task, error) {
 	if strings.TrimSpace(candidate.TenantID) == "" || strings.TrimSpace(candidate.TaskID) == "" || !lease.Valid() {
 		return Task{}, ErrInvalidTask
@@ -398,7 +428,10 @@ func (r *PostgresRepository) Fail(ctx context.Context, candidate Candidate, leas
 		return Task{}, err
 	}
 	defer cancel()
-	row := r.pool.QueryRow(queryCtx, `UPDATE vector_projection_task
+	var task Task
+	err = tenantctx.WithTenantContext(queryCtx, r.pool, candidate.TenantID, "vector task fail", func(ctx context.Context, tx pgx.Tx) error {
+		var scanErr error
+		task, scanErr = scanTask(tx.QueryRow(ctx, `UPDATE vector_projection_task
         SET status = CASE
                 WHEN $4='retry' AND attempt < max_attempts THEN 'retry_wait'
                 WHEN $4='stale' THEN 'stale'
@@ -425,9 +458,10 @@ func (r *PostgresRepository) Fail(ctx context.Context, candidate Candidate, leas
           AND lease_owner=$7 AND lease_epoch=$8 AND lease_fence=$9
           AND lease_expires_at IS NOT NULL AND lease_expires_at > $2
         RETURNING `+taskColumns,
-		candidate.TenantID, now, next, string(failure.Kind), string(failure.Category), candidate.TaskID,
-		lease.Owner, int64(lease.Epoch), int64(lease.Fence))
-	task, err := scanTask(row)
+			candidate.TenantID, now, next, string(failure.Kind), string(failure.Category), candidate.TaskID,
+			lease.Owner, int64(lease.Epoch), int64(lease.Fence)))
+		return scanErr
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Task{}, ErrConflictOwnership
@@ -436,7 +470,6 @@ func (r *PostgresRepository) Fail(ctx context.Context, candidate Candidate, leas
 	}
 	return task, nil
 }
-
 func (r *PostgresRepository) Cancel(ctx context.Context, tc tenant.TenantContext, taskID string, now time.Time) (Task, error) {
 	if err := validTenantContext(tc); err != nil {
 		return Task{}, err
@@ -450,30 +483,33 @@ func (r *PostgresRepository) Cancel(ctx context.Context, tc tenant.TenantContext
 		return Task{}, err
 	}
 	defer cancel()
-	row := r.pool.QueryRow(queryCtx, `UPDATE vector_projection_task
+	var task Task
+	err = tenantctx.WithTenantContext(queryCtx, r.pool, tc.TenantID, "vector task cancel", func(ctx context.Context, tx pgx.Tx) error {
+		var scanErr error
+		task, scanErr = scanTask(tx.QueryRow(ctx, `UPDATE vector_projection_task
         SET status='cancelled', completed_at=$3, updated_at=$3,
             next_attempt_at=$3, last_error_category='cancelled',
             lease_owner=NULL, lease_epoch=NULL, lease_fence=NULL, lease_expires_at=NULL
         WHERE tenant_id=$1 AND task_id=$2
           AND status IN ('pending','retry_wait','running')
-        RETURNING `+taskColumns, tc.TenantID, taskID, now)
-	task, err := scanTask(row)
+        RETURNING `+taskColumns, tc.TenantID, taskID, now))
+		return scanErr
+	})
 	if err == nil {
 		return task, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return Task{}, dbError(err)
 	}
-	current, getErr := r.getByKey(queryCtx, tc.TenantID, taskID)
+	existing, getErr := r.getByKey(queryCtx, tc.TenantID, taskID)
 	if getErr != nil {
 		return Task{}, getErr
 	}
-	if current.State == StateCancelled {
-		return current, nil
+	if existing.State != StateCancelled {
+		return Task{}, ErrConflictOwnership
 	}
-	return current, ErrConflictOwnership
+	return existing, nil
 }
-
 func (r *PostgresRepository) Head(ctx context.Context, tenantID, documentID string) (HeadKey, bool, error) {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(documentID) == "" {
 		return HeadKey{}, false, ErrInvalidTask
@@ -485,10 +521,12 @@ func (r *PostgresRepository) Head(ctx context.Context, tenantID, documentID stri
 	defer cancel()
 	var key HeadKey
 	var operation string
-	err = r.pool.QueryRow(queryCtx, `SELECT source_version, source_sequence, operation
+	err = tenantctx.WithTenantContext(queryCtx, r.pool, tenantID, "vector head read", func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(queryCtx, `SELECT source_version, source_sequence, operation
         FROM vector_projection_task WHERE tenant_id=$1 AND document_id=$2 AND status='succeeded'
         ORDER BY source_version DESC, source_sequence DESC,
             CASE WHEN operation='delete' THEN 1 ELSE 0 END DESC LIMIT 1`, tenantID, documentID).Scan(&key.Version, &key.Sequence, &operation)
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return HeadKey{}, false, nil
 	}
@@ -498,7 +536,6 @@ func (r *PostgresRepository) Head(ctx context.Context, tenantID, documentID stri
 	key.Operation = vector.VectorOperation(operation)
 	return key, true, nil
 }
-
 func (r *PostgresRepository) Counts(ctx context.Context) (map[State]int64, error) {
 	queryCtx, cancel, err := r.queryContext(ctx)
 	if err != nil {

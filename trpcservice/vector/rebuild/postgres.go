@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	tenantctx "github.com/liuzengh/trpc-agent-service/trpcservice/storage/tenantctx"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -81,14 +82,21 @@ func (r *PostgresRunRepository) Create(ctx context.Context, tc tenant.TenantCont
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	row := r.pool.QueryRow(queryCtx, `INSERT INTO vector_rebuild_run
+	var runOut Run
+	var scanErr error
+	err := tenantctx.WithTenantContext(queryCtx, r.pool, tc.TenantID, "rebuild run create", func(ctx context.Context, tx pgx.Tx) error {
+		runOut, scanErr = scanRun(tx.QueryRow(ctx, `INSERT INTO vector_rebuild_run
 		(tenant_id, run_id, projection_fingerprint, mode, phase, max_attempts, deadline_at, created_at, updated_at)
 		VALUES ($1,$2,$3,'rebuild','pending',$4,$5,$6,$6)
 		RETURNING `+runColumns,
-		tc.TenantID, run.RunID, run.Fingerprint, run.MaxAttempts, run.DeadlineAt.UTC(), now.UTC())
-	return scanRun(row)
+			tc.TenantID, run.RunID, run.Fingerprint, run.MaxAttempts, run.DeadlineAt.UTC(), now.UTC()))
+		return scanErr
+	})
+	if err != nil {
+		return Run{}, err
+	}
+	return runOut, nil
 }
-
 func (r *PostgresRunRepository) Get(ctx context.Context, tc tenant.TenantContext, runID string) (Run, error) {
 	if r == nil || r.pool == nil {
 		return Run{}, ErrUnavailable
@@ -101,16 +109,28 @@ func (r *PostgresRunRepository) Get(ctx context.Context, tc tenant.TenantContext
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	return scanRun(r.pool.QueryRow(queryCtx, `SELECT `+runColumns+` FROM vector_rebuild_run WHERE tenant_id=$1 AND run_id=$2`, tc.TenantID, runID))
-}
+	var runOut Run
+	var scanErr error
+	err := tenantctx.WithTenantContext(queryCtx, r.pool, tc.TenantID, "rebuild run read", func(ctx context.Context, tx pgx.Tx) error {
+		runOut, scanErr = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM vector_rebuild_run WHERE tenant_id=$1 AND run_id=$2`, tc.TenantID, runID))
+		return scanErr
+	})
+	if err != nil {
+		return Run{}, err
+	}
+	return runOut, nil
 
+}
 func (r *PostgresRunRepository) Claim(ctx context.Context, tc tenant.TenantContext, runID string, lease LeaseRef, maxAttempts int, now time.Time) (Run, error) {
 	if err := r.guard(tc, runID, lease); err != nil {
 		return Run{}, err
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	run, err := scanRun(r.pool.QueryRow(queryCtx, `UPDATE vector_rebuild_run
+	var runOut Run
+	var scanErr error
+	err := tenantctx.WithTenantContext(queryCtx, r.pool, tc.TenantID, "rebuild run claim", func(ctx context.Context, tx pgx.Tx) error {
+		runOut, scanErr = scanRun(tx.QueryRow(ctx, `UPDATE vector_rebuild_run
 		SET phase=CASE WHEN phase='pending' THEN 'scanning' ELSE phase END,
 			attempt=attempt+1,
 			lease_owner=$3, lease_epoch=$4, lease_fence=$5, lease_expires_at=$6,
@@ -122,16 +142,18 @@ func (r *PostgresRunRepository) Claim(ctx context.Context, tc tenant.TenantConte
 			OR (phase='scanned')
 		  )
 		RETURNING `+runColumns,
-		tc.TenantID, runID, lease.Owner, int64(lease.Epoch), int64(lease.Fence), lease.ExpiresAt.UTC(), now.UTC(), maxAttempts))
+			tc.TenantID, runID, lease.Owner, int64(lease.Epoch), int64(lease.Fence), lease.ExpiresAt.UTC(), now.UTC(), maxAttempts))
+		return scanErr
+	})
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return Run{}, ErrConflictOwner
 		}
 		return Run{}, err
 	}
-	return run, nil
-}
+	return runOut, nil
 
+}
 func (r *PostgresRunRepository) guard(tc tenant.TenantContext, runID string, lease LeaseRef) error {
 	if r == nil || r.pool == nil {
 		return ErrUnavailable
@@ -174,45 +196,55 @@ func (r *PostgresRunRepository) MarkScanned(ctx context.Context, tc tenant.Tenan
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	run, err := scanRun(r.pool.QueryRow(queryCtx, `UPDATE vector_rebuild_run
+	var runOut Run
+	var scanErr error
+	err := tenantctx.WithTenantContext(queryCtx, r.pool, tc.TenantID, "rebuild run scan", func(ctx context.Context, tx pgx.Tx) error {
+		runOut, scanErr = scanRun(tx.QueryRow(ctx, `UPDATE vector_rebuild_run
 		SET phase='scanned', updated_at=$3
 		WHERE tenant_id=$1 AND run_id=$2 AND phase='scanning'
 		  AND lease_owner=$4 AND lease_epoch=$5 AND lease_fence=$6
 		  AND lease_expires_at IS NOT NULL AND lease_expires_at > $3
 		RETURNING `+runColumns,
-		tc.TenantID, runID, now.UTC(), lease.Owner, int64(lease.Epoch), int64(lease.Fence)))
+			tc.TenantID, runID, now.UTC(), lease.Owner, int64(lease.Epoch), int64(lease.Fence)))
+		return scanErr
+	})
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return Run{}, ErrConflictOwner
 		}
 		return Run{}, err
 	}
-	return run, nil
-}
+	return runOut, nil
 
+}
 func (r *PostgresRunRepository) Complete(ctx context.Context, tc tenant.TenantContext, runID string, lease LeaseRef, now time.Time) (Run, error) {
 	if err := r.guard(tc, runID, lease); err != nil {
 		return Run{}, err
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	run, err := scanRun(r.pool.QueryRow(queryCtx, `UPDATE vector_rebuild_run
+	var runOut Run
+	var scanErr error
+	err := tenantctx.WithTenantContext(queryCtx, r.pool, tc.TenantID, "rebuild run complete", func(ctx context.Context, tx pgx.Tx) error {
+		runOut, scanErr = scanRun(tx.QueryRow(ctx, `UPDATE vector_rebuild_run
 		SET phase='completed', completed_at=$3, updated_at=$3,
 			lease_owner=NULL, lease_epoch=NULL, lease_fence=NULL, lease_expires_at=NULL
 		WHERE tenant_id=$1 AND run_id=$2 AND phase='scanned'
 		  AND lease_owner=$4 AND lease_epoch=$5 AND lease_fence=$6
 		  AND lease_expires_at IS NOT NULL AND lease_expires_at > $3
 		RETURNING `+runColumns,
-		tc.TenantID, runID, now.UTC(), lease.Owner, int64(lease.Epoch), int64(lease.Fence)))
+			tc.TenantID, runID, now.UTC(), lease.Owner, int64(lease.Epoch), int64(lease.Fence)))
+		return scanErr
+	})
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return Run{}, ErrConflictOwner
 		}
 		return Run{}, err
 	}
-	return run, nil
-}
+	return runOut, nil
 
+}
 func (r *PostgresRunRepository) Fail(ctx context.Context, tc tenant.TenantContext, runID string, lease LeaseRef, category Category, now time.Time) (Run, error) {
 	if err := r.guard(tc, runID, lease); err != nil {
 		return Run{}, err
@@ -222,23 +254,28 @@ func (r *PostgresRunRepository) Fail(ctx context.Context, tc tenant.TenantContex
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	run, err := scanRun(r.pool.QueryRow(queryCtx, `UPDATE vector_rebuild_run
+	var runOut Run
+	var scanErr error
+	err := tenantctx.WithTenantContext(queryCtx, r.pool, tc.TenantID, "rebuild run fail", func(ctx context.Context, tx pgx.Tx) error {
+		runOut, scanErr = scanRun(tx.QueryRow(ctx, `UPDATE vector_rebuild_run
 		SET phase='failed', completed_at=$3, updated_at=$3, last_error_category=$4,
 			lease_owner=NULL, lease_epoch=NULL, lease_fence=NULL, lease_expires_at=NULL
 		WHERE tenant_id=$1 AND run_id=$2 AND phase IN ('pending','scanning','scanned')
 		  AND lease_owner=$5 AND lease_epoch=$6 AND lease_fence=$7
 		  AND (lease_expires_at IS NULL OR lease_expires_at > $3)
 		RETURNING `+runColumns,
-		tc.TenantID, runID, now.UTC(), string(category), lease.Owner, int64(lease.Epoch), int64(lease.Fence)))
+			tc.TenantID, runID, now.UTC(), string(category), lease.Owner, int64(lease.Epoch), int64(lease.Fence)))
+		return scanErr
+	})
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return Run{}, ErrConflictOwner
 		}
 		return Run{}, err
 	}
-	return run, nil
-}
+	return runOut, nil
 
+}
 func (r *PostgresRunRepository) Cancel(ctx context.Context, tc tenant.TenantContext, runID string, now time.Time) (Run, error) {
 	if r == nil || r.pool == nil {
 		return Run{}, ErrUnavailable
@@ -251,18 +288,26 @@ func (r *PostgresRunRepository) Cancel(ctx context.Context, tc tenant.TenantCont
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	run, err := scanRun(r.pool.QueryRow(queryCtx, `UPDATE vector_rebuild_run
+	var runOut Run
+	var scanErr error
+	err := tenantctx.WithTenantContext(queryCtx, r.pool, tc.TenantID, "rebuild run cancel", func(ctx context.Context, tx pgx.Tx) error {
+		runOut, scanErr = scanRun(tx.QueryRow(ctx, `UPDATE vector_rebuild_run
 		SET phase='cancelled', completed_at=$3, updated_at=$3, last_error_category='cancelled',
 			lease_owner=NULL, lease_epoch=NULL, lease_fence=NULL, lease_expires_at=NULL
 		WHERE tenant_id=$1 AND run_id=$2 AND phase IN ('pending','scanning','scanned')
 		RETURNING `+runColumns,
-		tc.TenantID, runID, now.UTC()))
+			tc.TenantID, runID, now.UTC()))
+		return scanErr
+	})
 	if err != nil {
-		return Run{}, rebuildError(err)
+		if errors.Is(err, ErrNotFound) {
+			return Run{}, ErrConflictOwner
+		}
+		return Run{}, err
 	}
-	return run, nil
-}
+	return runOut, nil
 
+}
 func (r *PostgresRunRepository) Counts(ctx context.Context) (map[Phase]int64, error) {
 	if r == nil || r.pool == nil {
 		return nil, ErrUnavailable

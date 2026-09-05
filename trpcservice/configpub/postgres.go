@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	tenantctx "github.com/liuzengh/trpc-agent-service/trpcservice/storage/tenantctx"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -120,37 +121,70 @@ func (r *PostgresRepository) CreateRevision(ctx context.Context, tc tenant.Tenan
 	if err != nil {
 		return Revision{}, err
 	}
-	inserted, insertErr := scanRevision(r.pool.QueryRow(bounded, `INSERT INTO tenant_config_version
+	var inserted Revision
+	insertErr := tenantctx.WithTenantContext(bounded, r.pool, tc.TenantID, "config revision create", func(ctx context.Context, tx pgx.Tx) error {
+		rev, scanErr := scanRevision(tx.QueryRow(ctx, `INSERT INTO tenant_config_version
 		(tenant_id, config_version, status, config, checksum, created_by, created_at)
 		VALUES ($1, $2, 'draft', $3, $4, $5, $6)
 		RETURNING `+revisionColumns, tc.TenantID, version, raw, fingerprint, actorCategory, now))
+		if scanErr == nil {
+			inserted = rev
+			return nil
+		}
+		var conflict *pgconn.PgError
+		if errors.As(scanErr, &conflict) && conflict.Code == "23505" {
+			switch conflict.ConstraintName {
+			case "tenant_config_version_checksum_key", "tenant_config_version_tenant_id_checksum_key":
+				return ErrDuplicateContent
+			case "tenant_config_version_pkey":
+				// The failed insert aborted this transaction; the idempotent
+				// convergence read must run in a fresh transaction.
+				return idempotentRetrySignal{}
+			}
+		}
+		return scanErr
+	})
 	if insertErr == nil {
 		return inserted, nil
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(insertErr, &pgErr) && pgErr.Code == "23505" {
-		switch pgErr.ConstraintName {
-		case "tenant_config_version_checksum_key", "tenant_config_version_tenant_id_checksum_key":
-			return Revision{}, ErrDuplicateContent
-		case "tenant_config_version_pkey":
-			existing, readErr := scanRevision(r.pool.QueryRow(bounded, `SELECT `+revisionColumns+` FROM tenant_config_version WHERE tenant_id=$1 AND config_version=$2`, tc.TenantID, version))
-			if readErr == nil && existing.Fingerprint == fingerprint {
-				return existing, nil // idempotent create convergence
-			}
-			return Revision{}, ErrRevisionState
-		}
+	var idem idempotentRetrySignal
+	if !errors.As(insertErr, &idem) {
+		return Revision{}, classifyPostgres(insertErr)
 	}
-	return Revision{}, classifyPostgres(insertErr)
+	err = tenantctx.WithTenantContext(bounded, r.pool, tc.TenantID, "config revision idempotent read", func(ctx context.Context, tx pgx.Tx) error {
+		existing, readErr := scanRevision(tx.QueryRow(ctx, `SELECT `+revisionColumns+` FROM tenant_config_version WHERE tenant_id=$1 AND config_version=$2`, tc.TenantID, version))
+		if readErr != nil {
+			return ErrRevisionState
+		}
+		if existing.Fingerprint != fingerprint {
+			return ErrRevisionState
+		}
+		inserted = existing // idempotent create convergence
+		return nil
+	})
+	if err != nil {
+		return Revision{}, err
+	}
+	return inserted, nil
 }
 
-// Revision reads one revision.
+// idempotentRetrySignal marks a unique-key conflict whose idempotent
+// convergence read must run in a fresh transaction after the abort.
+type idempotentRetrySignal struct{}
+
+func (idempotentRetrySignal) Error() string { return "configpub: idempotent retry" }
 func (r *PostgresRepository) Revision(ctx context.Context, tenantID string, version int64) (Revision, error) {
 	bounded, cancel, err := r.queryCtx(ctx)
 	if err != nil {
 		return Revision{}, err
 	}
 	defer cancel()
-	rev, err := scanRevision(r.pool.QueryRow(bounded, `SELECT `+revisionColumns+` FROM tenant_config_version WHERE tenant_id=$1 AND config_version=$2`, tenantID, version))
+	var rev Revision
+	err = tenantctx.WithTenantContext(bounded, r.pool, tenantID, "config revision read", func(ctx context.Context, tx pgx.Tx) error {
+		var scanErr error
+		rev, scanErr = scanRevision(tx.QueryRow(ctx, `SELECT `+revisionColumns+` FROM tenant_config_version WHERE tenant_id=$1 AND config_version=$2`, tenantID, version))
+		return scanErr
+	})
 	if err != nil {
 		return Revision{}, classifyPostgres(err)
 	}
@@ -170,6 +204,9 @@ func (r *PostgresRepository) ValidateRevision(ctx context.Context, tc tenant.Ten
 		return Revision{}, classify("postgres", err)
 	}
 	defer func() { _ = tx.Rollback(bounded) }()
+	if err = tenantctx.SetTenantContext(bounded, tx, tc.TenantID); err != nil {
+		return Revision{}, err
+	}
 	var rawConfig []byte
 	var status string
 	err = tx.QueryRow(bounded, `SELECT status, config FROM tenant_config_version WHERE tenant_id=$1 AND config_version=$2 FOR UPDATE`, tc.TenantID, version).Scan(&status, &rawConfig)
@@ -227,9 +264,11 @@ func (r *PostgresRepository) Operation(ctx context.Context, tenantID, operationI
 	var record OperationRecord
 	var resultVersion *int64
 	var reason *string
-	err = r.pool.QueryRow(bounded, `SELECT tenant_id, operation_id, kind, target_version, expected_active_version, requested_percentage, result_active_version, outcome, reason_category, actor_category, created_at
+	err = tenantctx.WithTenantContext(bounded, r.pool, tenantID, "config operation read", func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT tenant_id, operation_id, kind, target_version, expected_active_version, requested_percentage, result_active_version, outcome, reason_category, actor_category, created_at
 		FROM tenant_config_operation WHERE tenant_id=$1 AND operation_id=$2`, tenantID, operationID).
-		Scan(&record.TenantID, &record.OperationID, &record.Kind, &record.TargetVersion, &record.ExpectedActiveVersion, &record.RequestedPercentage, &resultVersion, &record.Outcome, &reason, &record.ActorCategory, &record.CreatedAt)
+			Scan(&record.TenantID, &record.OperationID, &record.Kind, &record.TargetVersion, &record.ExpectedActiveVersion, &record.RequestedPercentage, &resultVersion, &record.Outcome, &reason, &record.ActorCategory, &record.CreatedAt)
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OperationRecord{}, false, nil
 	}
@@ -278,6 +317,9 @@ func (r *PostgresRepository) Publish(ctx context.Context, tc tenant.TenantContex
 		return OperationRecord{}, classify("postgres", err)
 	}
 	defer func() { _ = tx.Rollback(bounded) }()
+	if err = tenantctx.SetTenantContext(bounded, tx, tc.TenantID); err != nil {
+		return OperationRecord{}, err
+	}
 	if err := lockConfigTenant(bounded, tx, tc.TenantID); err != nil {
 		return OperationRecord{}, err
 	}
@@ -350,6 +392,9 @@ func (r *PostgresRepository) SetRollout(ctx context.Context, tc tenant.TenantCon
 		return OperationRecord{}, classify("postgres", err)
 	}
 	defer func() { _ = tx.Rollback(bounded) }()
+	if err = tenantctx.SetTenantContext(bounded, tx, tc.TenantID); err != nil {
+		return OperationRecord{}, err
+	}
 	if err := lockConfigTenant(bounded, tx, tc.TenantID); err != nil {
 		return OperationRecord{}, err
 	}
@@ -399,6 +444,9 @@ func (r *PostgresRepository) Rollback(ctx context.Context, tc tenant.TenantConte
 		return OperationRecord{}, classify("postgres", err)
 	}
 	defer func() { _ = tx.Rollback(bounded) }()
+	if err = tenantctx.SetTenantContext(bounded, tx, tc.TenantID); err != nil {
+		return OperationRecord{}, err
+	}
 	if err := lockConfigTenant(bounded, tx, tc.TenantID); err != nil {
 		return OperationRecord{}, err
 	}
@@ -461,8 +509,10 @@ func (r *PostgresRepository) Rollout(ctx context.Context, tenantID string) (Roll
 	defer cancel()
 	var state RolloutState
 	var baseline *int64
-	err = r.pool.QueryRow(bounded, `SELECT tenant_id, active_version, baseline_version, percentage, updated_at FROM tenant_config_rollout WHERE tenant_id=$1`, tenantID).
-		Scan(&state.TenantID, &state.ActiveVersion, &baseline, &state.Percentage, &state.UpdatedAt)
+	err = tenantctx.WithTenantContext(bounded, r.pool, tenantID, "config rollout read", func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT tenant_id, active_version, baseline_version, percentage, updated_at FROM tenant_config_rollout WHERE tenant_id=$1`, tenantID).
+			Scan(&state.TenantID, &state.ActiveVersion, &baseline, &state.Percentage, &state.UpdatedAt)
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RolloutState{}, false, nil
 	}
@@ -483,35 +533,37 @@ func (r *PostgresRepository) BindingOwnershipFor(ctx context.Context, tenantID, 
 		return BindingMissing, err
 	}
 	defer cancel()
-	rows, err := r.pool.Query(bounded, `SELECT tenant_id FROM channel_binding WHERE channel=$1 AND binding_id=$2`, channel, bindingID)
+	var owned, foreign bool
+	err = tenantctx.WithTenantContext(bounded, r.pool, tenantID, "binding ownership", func(ctx context.Context, tx pgx.Tx) error {
+		rows, queryErr := tx.Query(ctx, `SELECT tenant_id FROM channel_binding WHERE channel=$1 AND binding_id=$2 AND tenant_id=$3`, channel, bindingID, tenantID)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var owner string
+			if scanErr := rows.Scan(&owner); scanErr != nil {
+				return scanErr
+			}
+			switch {
+			case owner == tenantID:
+				owned = true
+			default:
+				foreign = true
+			}
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return BindingMissing, classifyPostgres(err)
 	}
-	defer rows.Close()
-	owned := false
-	foreign := false
-	for rows.Next() {
-		var owner string
-		if err := rows.Scan(&owner); err != nil {
-			return BindingMissing, classifyPostgres(err)
-		}
-		if owner == tenantID {
-			owned = true
-		} else {
-			foreign = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return BindingMissing, classifyPostgres(err)
-	}
-	switch {
-	case owned:
+	if owned {
 		return BindingOwned, nil
-	case foreign:
-		return BindingForeignTenant, nil
-	default:
-		return BindingMissing, nil
 	}
+	if foreign {
+		return BindingForeignTenant, nil
+	}
+	return BindingMissing, nil
 }
 
 var _ Repository = (*PostgresRepository)(nil)

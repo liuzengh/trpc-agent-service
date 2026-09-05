@@ -285,6 +285,8 @@ func newGDDockerProductionFixture(t *testing.T, container *gdPostgresContainer) 
 	}
 	t.Setenv("TEST_DATABASE_URL", container.url)
 	t.Setenv("DATABASE_URL", container.url)
+	fixture.runtimeURL = ensureProductionRuntimeRole(t, container.url, fixture.schema)
+	t.Setenv("DATABASE_RUNTIME_URL", fixture.runtimeURL)
 	t.Setenv("DATABASE_SCHEMA", fixture.schema)
 	t.Setenv("MIGRATIONS_DIR", filepath.Join(gdRepoRoot(t), "migrations"))
 	t.Setenv("MODEL", "synthetic-model")

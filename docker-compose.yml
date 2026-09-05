@@ -110,9 +110,12 @@ services:
       - |
         set -eu
         export DATABASE_URL="postgres://trpc_app:$(cat /run/secrets/pg_password)@postgres:5432/trpc_agent?sslmode=disable"
+        export RUNTIME_ROLE=trpc_runtime
+        export RUNTIME_PASSWORD="$(cat /run/secrets/pg_runtime_password)"
         exec su-exec app /usr/local/bin/trpc-migrate
     secrets:
       - pg_password
+      - pg_runtime_password
     depends_on:
       postgres:
         condition: service_healthy
@@ -132,9 +135,11 @@ services:
       - |
         set -eu
         export DATABASE_URL="postgres://trpc_app:$(cat /run/secrets/pg_password)@postgres:5432/trpc_agent?sslmode=disable"
+        export DATABASE_RUNTIME_URL="postgres://trpc_runtime:$(cat /run/secrets/pg_runtime_password)@postgres:5432/trpc_agent?sslmode=disable"
         exec su-exec app /usr/local/bin/trpc-service
     secrets:
       - pg_password
+      - pg_runtime_password
     environment: *app-env
     depends_on:
       postgres:
@@ -171,7 +176,9 @@ services:
 
 secrets:
   pg_password:
-    file: ${P109_SECRET_DIR:?set P109_SECRET_DIR to a 0700 directory containing a 0600 pg_password file}/pg_password
+    file: ${P109_SECRET_DIR:?set P109_SECRET_DIR to a 0700 directory containing 0600 pg_password and pg_runtime_password files}/pg_password
+  pg_runtime_password:
+    file: ${P109_SECRET_DIR:?set P109_SECRET_DIR to a 0700 directory containing 0600 pg_password and pg_runtime_password files}/pg_runtime_password
 
 volumes:
   pgdata:

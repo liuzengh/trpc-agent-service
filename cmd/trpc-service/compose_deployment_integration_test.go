@@ -140,6 +140,10 @@ func newComposeRun(t *testing.T, image string) *composeRun {
 	if err := os.WriteFile(secret, []byte(run.canary), 0o600); err != nil {
 		t.Fatalf("secret file unavailable")
 	}
+	runtimeSecret := filepath.Join(secretDir, "pg_runtime_password")
+	if err := os.WriteFile(runtimeSecret, []byte(run.canary+"-runtime"), 0o600); err != nil {
+		t.Fatalf("runtime secret file unavailable")
+	}
 	env := fmt.Sprintf("P109_RUN_ID=%s\nP109_SECRET_DIR=%s\nP109_APP_PORT=%d\nP109_PG_PORT=%d\nP109_APP_IMAGE=%s\n",
 		run.id, secretDir, run.appPort, run.pgPort, image)
 	if err := os.WriteFile(filepath.Join(run.dir, "env"), []byte(env), 0o600); err != nil {
@@ -396,7 +400,7 @@ func TestComposeLifecycleAndRecovery(t *testing.T) {
 	if exit := run.waitServiceExited(t, "migrate", 2*time.Minute); exit != 0 {
 		t.Fatalf("migration step exit=%d", exit)
 	}
-	if logs := run.serviceLogs(t, "migrate"); !strings.Contains(logs, "current_version=9") {
+	if logs := run.serviceLogs(t, "migrate"); !strings.Contains(logs, "current_version=10") {
 		t.Fatalf("migration step did not reach version 9: %s", tailString(logs, 800))
 	}
 
@@ -416,8 +420,8 @@ func TestComposeLifecycleAndRecovery(t *testing.T) {
 	}
 
 	// 4. Durable facts after a cold start.
-	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "9" {
-		t.Fatalf("schema_migration versions=%s want=9", got)
+	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "10" {
+		t.Fatalf("schema_migration versions=%s want=10", got)
 	}
 	for _, table := range []string{"job_queue", "execution_result", "outbox_message", "tenant", "agent_app", "tenant_config_rollout", "tenant_config_operation"} {
 		if got := run.psqlScalar(t, fmt.Sprintf("SELECT count(*) FROM information_schema.tables WHERE table_name='%s'", table)); got != "1" {
@@ -473,7 +477,7 @@ func TestComposeLifecycleAndRecovery(t *testing.T) {
 	})
 	run.compose(t, time.Minute, "start", "app")
 	run.waitForHealth(t, "/healthz", 200, 3*time.Minute)
-	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "9" {
+	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "10" {
 		t.Fatalf("schema_migration versions after SIGKILL=%s want=9", got)
 	}
 	if got := run.psqlScalar(t, "SELECT count(*) FROM tenant"); got != tenantMarker {

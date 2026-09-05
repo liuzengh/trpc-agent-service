@@ -126,25 +126,28 @@ func (r *ExecutionResultRepository) GetExecutionResult(ctx context.Context, tc t
 	}
 	var record storage.ExecutionResultRecord
 	var configVersion *int64
-	err := r.pool.QueryRow(ctx, `
+	err := WithTenantContext(ctx, r.pool, tc.TenantID, "execution result read", func(ctx context.Context, tx pgx.Tx) error {
+		scanErr := tx.QueryRow(ctx, `
 SELECT job_id, execution_id, tenant_id, session_id, owner_id, epoch, fence_token,
        status, result_version, result_json, committed_at, config_version
 FROM execution_result
 WHERE tenant_id = $1 AND job_id = $2 AND execution_id = $3
 `, tc.TenantID, jobID, executionID).Scan(
-		&record.JobID,
-		&record.ExecutionID,
-		&record.TenantID,
-		&record.SessionID,
-		&record.OwnerID,
-		&record.Epoch,
-		&record.FenceToken,
-		&record.Status,
-		&record.ResultVersion,
-		&record.ResultJSON,
-		&record.CommittedAt,
-		&configVersion,
-	)
+			&record.JobID,
+			&record.ExecutionID,
+			&record.TenantID,
+			&record.SessionID,
+			&record.OwnerID,
+			&record.Epoch,
+			&record.FenceToken,
+			&record.Status,
+			&record.ResultVersion,
+			&record.ResultJSON,
+			&record.CommittedAt,
+			&configVersion,
+		)
+		return scanErr
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return storage.ExecutionResultRecord{}, storage.ErrNotFound
 	}

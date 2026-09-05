@@ -2,10 +2,13 @@ package task
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	tenantctx "github.com/liuzengh/trpc-agent-service/trpcservice/storage/tenantctx"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/vector"
 )
@@ -94,10 +97,13 @@ func (p *PostgresSourceProjector) Load(ctx context.Context, tc tenant.TenantCont
 	var deleted bool
 	var version, sequence int64
 	var scope string
-	err := p.pool.QueryRow(queryCtx, `SELECT content, deleted, version, source_seq, scope
+	var err error
+	err = tenantctx.WithTenantContext(queryCtx, p.pool, tc.TenantID, "vector source load", func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT content, deleted, version, source_seq, scope
         FROM memory WHERE tenant_id = $1 AND memory_id = $2`, task.TenantID, task.SourceID).Scan(&content, &deleted, &version, &sequence, &scope)
+	})
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, storage.ErrNotFound) {
 			return vector.SourceDocument{}, vector.ErrNotFound
 		}
 		return vector.SourceDocument{}, ErrUnavailable

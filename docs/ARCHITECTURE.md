@@ -351,3 +351,7 @@ Milvus 是可删除、可重建的 derived index，不是 Memory、Knowledge、p
 ## 9B. P1-09 本地部署边界
 
 P1-09 交付可重复的本地 Docker/Compose 部署边界：`Dockerfile` 多阶段构建的固定 digest 非 root 镜像只携带 `trpc-service`、`trpc-migrate`、migration 文件与 CA 证书；`docker-compose.yml` 以 core profile 编排 PostgreSQL、Redis、独立 `migrate` 生命周期步骤和应用，`depends_on` 保证 PostgreSQL healthy 且 migration 成功后应用才启动；`telemetry` profile（默认关闭）提供本地 OTel collector，不参与业务 readiness；不存在 vector/Milvus 服务，`VECTOR_BACKEND` 默认 `none`。readiness/liveness 由 `/livez` 与 `/healthz` 分担：liveness 只表达进程存活，readiness 在 drain、依赖 outage 或 migration mismatch 时 fail closed（503）。PostgreSQL 密码经 Docker secret 文件（宿主 0600）注入，wrapper 读取后经 `su-exec` 以非 root 用户执行服务进程；`docker compose config` 输出、镜像层与容器 inspect 环境均不含密码或完整 DSN。`cmd/trpc-migrate` 以稳定退出码和脱敏类别暴露 migration gate 结果，并在 checksum mismatch、版本缺失或超前时 fail closed 阻断应用启动。
+
+## 9C. P2-01 数据库强制租户隔离边界
+
+P2-01 在 PostgreSQL 层为全部 24 张 tenant 表启用并 FORCE ROW LEVEL SECURITY，policy 以事务本地 GUC `trpc.tenant_id` 为准（`set_config(..., true)`），缺失或为空时读零行、写拒绝。应用层 tenant predicate 全部保留，RLS 是额外的数据库防线。部署模型分离 migration owner 与 `trpc_runtime`（NOSUPERUSER/NOBYPASSRLS/非表 owner）角色：应用业务池只接受受限角色（启动时 `EnsureRuntimeRoleLimits` fail closed），migration gate 使用 owner 凭据，`trpc-migrate` 可在迁移后供给 runtime 角色与最小授权。跨租户能力仅保留三个固定 SECURITY DEFINER 函数（queue 全局 claim、vector task candidate、pre-tenant binding resolve），由专用 NOLOGIN BYPASSRLS 角色持有，静态 SQL、有界返回、REVOKE PUBLIC。

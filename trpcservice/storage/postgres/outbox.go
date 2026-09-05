@@ -133,6 +133,9 @@ func (r *OutboxRepository) Enqueue(ctx context.Context, tc tenant.TenantContext,
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err = SetTenantContext(ctx, tx, tc.TenantID); err != nil {
+		return err
+	}
 	result, err := tx.Exec(ctx, `
 INSERT INTO outbox_message (
     tenant_id, outbox_id, kind, aggregate_id, dedup_key, payload,
@@ -222,6 +225,9 @@ func (r *OutboxRepository) ClaimBatch(ctx context.Context, tc tenant.TenantConte
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err = SetTenantContext(ctx, tx, tc.TenantID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `
 UPDATE outbox_message
 SET status='retry', next_attempt_at=clock_timestamp(), attempt=attempt+1,
@@ -282,6 +288,9 @@ func (r *OutboxRepository) MarkCompleted(ctx context.Context, tc tenant.TenantCo
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err = SetTenantContext(ctx, tx, tc.TenantID); err != nil {
+		return err
+	}
 	result, err := tx.Exec(ctx, `
 UPDATE outbox_message
 SET status='completed', locked_by=NULL, locked_until=NULL, updated_at=clock_timestamp()
@@ -317,6 +326,9 @@ func (r *OutboxRepository) MarkRetry(ctx context.Context, tc tenant.TenantContex
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err = SetTenantContext(ctx, tx, tc.TenantID); err != nil {
+		return err
+	}
 	result, err := tx.Exec(ctx, `
 UPDATE outbox_message
 SET status='retry', next_attempt_at=$4, attempt=attempt+1, last_error=$5,
@@ -350,6 +362,9 @@ func (r *OutboxRepository) MoveToDLQ(ctx context.Context, tc tenant.TenantContex
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err = SetTenantContext(ctx, tx, tc.TenantID); err != nil {
+		return err
+	}
 	value, err := r.lockAndValidate(ctx, tx, tc.TenantID, id, workerID)
 	if err != nil {
 		return err

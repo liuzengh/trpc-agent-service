@@ -7,10 +7,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -147,6 +149,41 @@ func freeHTTPAddr(t *testing.T) string {
 	return addr
 }
 
+// ensureP006RuntimeRole provisions the schema-scoped NOBYPASSRLS runtime role
+// used by the real command gate. The owner connection only creates the role.
+func ensureP006RuntimeRole(t *testing.T, databaseURL, schema string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	admin, err := NewPool(ctx, PostgresConfig{URL: databaseURL, MaxConns: 2, MinConns: 1})
+	if err != nil {
+		t.Fatalf("runtime role admin pool: %v", err)
+	}
+	roleName := "trpc_rt_" + schema
+	if len(roleName) > 60 {
+		roleName = roleName[:60]
+	}
+	password := "p201rls" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	if err := EnsureTenantRuntimeRole(ctx, admin, schema, roleName, password); err != nil {
+		admin.Close()
+		t.Fatalf("ensure runtime role: %v", err)
+	}
+	parsed, err := url.Parse(databaseURL)
+	if err != nil {
+		admin.Close()
+		t.Fatalf("runtime role url: %v", err)
+	}
+	parsed.User = url.UserPassword(roleName, password)
+	runtimeURL := parsed.String()
+	t.Cleanup(func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer ccancel()
+		_, _ = admin.Exec(cctx, fmt.Sprintf("DROP ROLE IF EXISTS %s", roleName))
+		admin.Close()
+	})
+	return runtimeURL
+}
+
 func startService(t *testing.T, ctx context.Context, binary, databaseURL, schema, migrationsDir string) *serviceProcess {
 	t.Helper()
 	process := &serviceProcess{
@@ -156,8 +193,10 @@ func startService(t *testing.T, ctx context.Context, binary, databaseURL, schema
 		stderr: boundedOutput{limit: serviceOutputLimit},
 	}
 	process.cmd.Dir = repoRoot(t)
+	runtimeURL := ensureP006RuntimeRole(t, databaseURL, schema)
 	process.cmd.Env = append(os.Environ(),
 		"DATABASE_URL="+databaseURL,
+		"DATABASE_RUNTIME_URL="+runtimeURL,
 		"DATABASE_SCHEMA="+schema,
 		"MIGRATIONS_DIR="+migrationsDir,
 		"HTTP_ADDR="+freeHTTPAddr(t),
@@ -259,7 +298,8 @@ func runReadyService(t *testing.T, ctx context.Context, binary, url, schema, mig
 		stderr: boundedOutput{limit: serviceOutputLimit},
 	}
 	process.cmd.Dir = repoRoot(t)
-	process.cmd.Env = append(os.Environ(), "DATABASE_URL="+url, "DATABASE_SCHEMA="+schema, "MIGRATIONS_DIR="+migrations, "HTTP_ADDR="+addr)
+	runtimeURL := ensureP006RuntimeRole(t, url, schema)
+	process.cmd.Env = append(os.Environ(), "DATABASE_URL="+url, "DATABASE_RUNTIME_URL="+runtimeURL, "DATABASE_SCHEMA="+schema, "MIGRATIONS_DIR="+migrations, "HTTP_ADDR="+addr)
 	process.cmd.Stdout = &process.stdout
 	process.cmd.Stderr = &process.stderr
 	if err := process.start(); err != nil {
@@ -356,7 +396,8 @@ func TestCommandFailsClosedOnMigrationMismatch(t *testing.T) {
 				stdout: boundedOutput{limit: serviceOutputLimit}, stderr: boundedOutput{limit: serviceOutputLimit},
 			}
 			process.cmd.Dir = repoRoot(t)
-			process.cmd.Env = append(os.Environ(), "DATABASE_URL="+databaseURL, "DATABASE_SCHEMA="+schema, "MIGRATIONS_DIR="+migrations, "HTTP_ADDR="+addr)
+			runtimeURL := ensureP006RuntimeRole(t, databaseURL, schema)
+			process.cmd.Env = append(os.Environ(), "DATABASE_URL="+databaseURL, "DATABASE_RUNTIME_URL="+runtimeURL, "DATABASE_SCHEMA="+schema, "MIGRATIONS_DIR="+migrations, "HTTP_ADDR="+addr)
 			process.cmd.Stdout, process.cmd.Stderr = &process.stdout, &process.stderr
 			if err := process.start(); err != nil {
 				t.Fatal(err)
