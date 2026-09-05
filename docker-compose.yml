@@ -1,0 +1,183 @@
+# P1-09 reproducible local Docker/Compose deployment boundary.
+#
+# Scope: local verification only. This file never connects to Production
+# Milvus, real Model/Embedding providers or real Telegram/Lark channels, and
+# it is not a production deployment or HA proof.
+#
+# Profiles:
+#   default (no profile): postgres + redis + migrate + app (core boundary).
+#   telemetry:            adds a local OTel collector. The application keeps
+#                         P1-07 no-export semantics unless P109_TELEMETRY_*
+#                         variables are provided explicitly.
+#   There is deliberately no vector profile: vector/retrieval/rebuild stay
+#   disabled (P1-06 production rollout remains BLOCKED), and no Milvus
+#   service is defined so no profile can accidentally activate one.
+#
+# Ownership: every resource carries owner=p109, run_id, component and
+# created_by labels; names embed the run id. Published ports bind to
+# 127.0.0.1 only. The PostgreSQL password is supplied through a Docker
+# secret file (0600) and never through compose environment values.
+name: p109-deploy-${P109_RUN_ID:-local}
+
+x-owner-labels: &owner-labels
+  owner: p109
+  run_id: ${P109_RUN_ID:-local}
+  component: deployment
+  created_by: pi
+
+x-app-env: &app-env
+  DATABASE_SCHEMA: public
+  HTTP_ADDR: 0.0.0.0:8080
+  DEFAULT_TENANT: p109-local
+  DEFAULT_AGENT_APP_ID: p109-local-agent
+  # runner + closed loopback endpoint keeps the production responder shape
+  # while guaranteeing zero external provider requests for the local gate.
+  MODEL_PROVIDER: runner
+  MODEL_BASE_URL: http://127.0.0.1:9
+  MODEL_NAME: local-gate-model
+  MODEL_API_KEY: local-gate-placeholder-not-a-secret
+  MODEL_CONFIG_VERSION: "1"
+  ASYNC_OWNER_ID: p109-local-owner
+  BOOTSTRAP_OBJECT_BACKEND: none
+  BOOTSTRAP_TENANT_ID: p109-local
+  BOOTSTRAP_TENANT_NAME: p109-local
+  BOOTSTRAP_AGENT_APP_ID: p109-local-agent
+  BOOTSTRAP_AGENT_NAME: p109-local-agent
+  BOOTSTRAP_AGENT_VERSION: "1"
+  BOOTSTRAP_LARK_BINDING_ID: p109-lark
+  BOOTSTRAP_TELEGRAM_BINDING_ID: p109-tg
+  BOOTSTRAP_LARK_EXTERNAL_APP_ID: p109-lark-ext
+  BOOTSTRAP_TELEGRAM_EXTERNAL_APP_ID: p109-tg-ext
+  BOOTSTRAP_LARK_APP_ID: p109-lark-app
+  BOOTSTRAP_LARK_APP_SECRET_REF: env:local-placeholder
+  BOOTSTRAP_TELEGRAM_BOT_TOKEN_REF: env:local-placeholder
+  BOOTSTRAP_TELEGRAM_WEBHOOK_SECRET_REF: env:local-placeholder
+  BOOTSTRAP_LARK_VERIFY_TOKEN_REF: env:local-placeholder
+  BOOTSTRAP_LARK_ENCRYPT_KEY_REF: env:local-placeholder
+  BOOTSTRAP_LARK_RECEIVER_ID_TYPE: open_id
+  # Telemetry stays in P1-07 no-export mode unless the local telemetry
+  # profile is explicitly selected with non-empty variables.
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${P109_TELEMETRY_ENDPOINT:-}
+  TELEMETRY_MODE: ${P109_TELEMETRY_MODE:-}
+  TELEMETRY_INSECURE_LOCAL: ${P109_TELEMETRY_INSECURE_LOCAL:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    labels: *owner-labels
+    environment:
+      POSTGRES_USER: trpc_app
+      POSTGRES_DB: trpc_agent
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trpc_app -d trpc_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+    ports:
+      - "127.0.0.1:${P109_PG_PORT:-15432}:5432"
+    networks:
+      - p109
+
+  redis:
+    image: redis:7-alpine
+    labels: *owner-labels
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 5s
+    ports:
+      - "127.0.0.1:${P109_REDIS_PORT:-16379}:6379"
+    networks:
+      - p109
+
+  migrate:
+    image: ${P109_APP_IMAGE:-p109-deploy-app:local}
+    labels: *owner-labels
+    # The wrapper starts as root only to read the 0600 Docker secret and
+    # immediately drops to the non-root app user via su-exec before exec.
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        export DATABASE_URL="postgres://trpc_app:$(cat /run/secrets/pg_password)@postgres:5432/trpc_agent?sslmode=disable"
+        exec su-exec app /usr/local/bin/trpc-migrate
+    secrets:
+      - pg_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - p109
+
+  app:
+    image: ${P109_APP_IMAGE:-p109-deploy-app:local}
+    labels: *owner-labels
+    # Same root-wrapper + su-exec drop pattern as the migrate service: the
+    # serving process itself runs as the non-root app user (verified in the
+    # lifecycle test via /proc/1 Uid).
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        export DATABASE_URL="postgres://trpc_app:$(cat /run/secrets/pg_password)@postgres:5432/trpc_agent?sslmode=disable"
+        exec su-exec app /usr/local/bin/trpc-service
+    secrets:
+      - pg_password
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${P109_APP_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 15s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      - p109
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    labels: *owner-labels
+    profiles:
+      - telemetry
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "127.0.0.1:${P109_OTEL_PORT:-14317}:4317"
+    networks:
+      - p109
+
+secrets:
+  pg_password:
+    file: ${P109_SECRET_DIR:?set P109_SECRET_DIR to a 0700 directory containing a 0600 pg_password file}/pg_password
+
+volumes:
+  pgdata:
+    name: p109-deploy-${P109_RUN_ID:-local}-pgdata
+    labels: *owner-labels
+
+networks:
+  p109:
+    name: p109-deploy-${P109_RUN_ID:-local}-net

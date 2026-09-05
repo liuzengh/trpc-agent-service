@@ -96,7 +96,7 @@ README/ARCHITECTURE 明确 Object Storage 是平台目标能力；本轮已完�
 | P1-06 | Memory、Summary 和 Milvus Vector Index | 计划中，未开始 |
 | P1-07 | OTel、Metrics 和结构化日志 | 未开始 |
 | P1-08 | 配置发布、灰度和回滚 | verified（真实 PostgreSQL/Redis/Docker integration matrix 已通过；production rollout 未部署） |
-| P1-09 | Docker Compose 和运行文档 | 未开始 |
+| P1-09 | Docker Compose 和运行文档 | verified（可重复本地 Compose 部署、生命周期、依赖健康、migration/config gate 与恢复边界已验证；production rollout 未部署） |
 | P2-01 至 P2-04 | RLS、恢复、容量、安全、压力和发布运维 | 未开始 |
 
 原计划的 `P1-01 企业微信 Adapter` 已改为当前路线的 `P0-09G-B1 飞书（Lark）Adapter`；原计划的 `P1-02 Telegram Adapter` 改为 `P0-09G-B2 Telegram Adapter`。原 `P1-03 Web Chat、SSE 和 API 鉴权` 已从当前生产计划删除，不再安排 Web Chat 异步或 SSE 实现。认证和 TenantContext 保护仍需在 Lark/Telegram 生产入口及后续管理接口中单独完成。
