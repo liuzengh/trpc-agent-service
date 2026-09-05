@@ -34,6 +34,16 @@ type Server struct {
 	accepting    atomic.Bool
 	draining     atomic.Bool
 	readinessMu  sync.RWMutex
+	// telemetryMiddlewareField is the optional server-owned HTTP observability
+	// middleware. Nil keeps the historical handler chain. Telemetry never
+	// changes status codes, response bodies, or routing decisions.
+	telemetryMiddlewareField func(http.Handler) http.Handler
+}
+
+// SetTelemetryMiddleware attaches the optional observability middleware. It
+// must be called before Handler() and is not safe for concurrent use.
+func (s *Server) SetTelemetryMiddleware(middleware func(http.Handler) http.Handler) {
+	s.telemetryMiddlewareField = middleware
 }
 
 func NewServer(store platform.Store, runner platform.Runner) *Server {
@@ -95,7 +105,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/tenants", s.tenants)
 	mux.HandleFunc("/api/chat", s.chat)
 	mux.HandleFunc("/webhook/", s.webhook)
-	return requestLog(mux)
+	return s.applyTelemetryMiddleware(requestLog(mux))
+}
+
+// telemetryMiddleware wraps the mux with the optional server-owned
+// observability middleware. Nil keeps the historical handler chain; telemetry
+// never changes status codes or response bodies.
+// applyTelemetryMiddleware resolves the observability middleware lazily per
+// request so the middleware may be attached after Handler() is first invoked
+// (the production runtime assembles after the listener starts). Telemetry
+// never changes status codes or response bodies.
+func (s *Server) applyTelemetryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if middleware := s.telemetryMiddlewareField; middleware != nil {
+			middleware(next).ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

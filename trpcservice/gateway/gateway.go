@@ -14,6 +14,15 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
+// Telemetry is the narrow, optional observability surface the gateway uses
+// for correlation carrier injection and queue producer metrics. Nil keeps
+// historical behavior byte-identical.
+type Telemetry interface {
+	StartProducerSpan(ctx context.Context, operation string) (context.Context, func(outcome string))
+	InjectCarrier(ctx context.Context) *queue.TelemetryCarrier
+	QueueProducerMetric(outcome string)
+}
+
 var (
 	ErrInvalidRequest = errors.New("gateway: invalid request")
 	ErrQueueRejected  = errors.New("gateway: queue rejected job")
@@ -39,7 +48,15 @@ type Accepted struct {
 }
 
 type Gateway struct {
-	queue queue.JobQueue
+	queue     queue.JobQueue
+	telemetry Telemetry
+}
+
+// WithTelemetry attaches the optional observability boundary. Nil keeps
+// historical behavior; telemetry is never a business fact source.
+func (g *Gateway) WithTelemetry(telemetry Telemetry) *Gateway {
+	g.telemetry = telemetry
+	return g
 }
 
 func New(q queue.JobQueue) (*Gateway, error) {
@@ -82,6 +99,7 @@ func (g *Gateway) submit(ctx context.Context, request GatewayRequest, jobID, exe
 	for i, message := range request.History {
 		history[i] = messageDTO(message)
 	}
+	producerCtx, endProducerSpan := g.startProducer(ctx)
 	job := queue.AgentJob{
 		SchemaVersion: queue.SchemaVersion,
 		JobID:         jobID,
@@ -95,17 +113,38 @@ func (g *Gateway) submit(ctx context.Context, request GatewayRequest, jobID, exe
 		Deadline:      request.Deadline,
 		Attempt:       1,
 	}
+	if g.telemetry != nil {
+		job.Telemetry = g.telemetry.InjectCarrier(producerCtx)
+	}
+	outcome := "accepted"
+	defer func() {
+		endProducerSpan(outcome)
+		if g.telemetry != nil {
+			g.telemetry.QueueProducerMetric(outcome)
+		}
+	}()
 	if err := job.ValidateAt(now, queue.DefaultJobMaxAge); err != nil {
+		outcome = "rejected"
 		return Accepted{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
-	receipt, err := g.queue.Enqueue(ctx, job)
+	receipt, err := g.queue.Enqueue(producerCtx, job)
 	if err != nil {
+		outcome = "failed"
 		return Accepted{}, fmt.Errorf("%w: %w", ErrQueueFailure, err)
 	}
 	if !receipt.Accepted {
+		outcome = "rejected"
 		return Accepted{}, fmt.Errorf("%w: job=%s", ErrQueueRejected, jobID)
 	}
 	return Accepted{Accepted: true, JobID: jobID, ExecutionID: executionID, RequestID: tc.RequestID, TraceID: tc.TraceID, ReceiptID: receipt.ReceiptID}, nil
+}
+
+// startProducerSpan opens the queue producer span when telemetry is attached.
+func (g *Gateway) startProducer(ctx context.Context) (context.Context, func(string)) {
+	if g.telemetry == nil {
+		return ctx, func(string) {}
+	}
+	return g.telemetry.StartProducerSpan(ctx, "queue.enqueue")
 }
 
 func validateRequest(request GatewayRequest) error {

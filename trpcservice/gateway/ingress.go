@@ -15,35 +15,31 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
-// WebhookAdapter is the verification and parsing boundary for one channel.
-// The adapter is never allowed to resolve tenant identity from request data.
 type WebhookAdapter interface {
 	Verify(*http.Request, []byte) error
 	Parse([]byte) (channels.Incoming, error)
 }
 
-// WebhookChallengeAdapter handles provider URL verification without entering
-// the asynchronous job path.
 type WebhookChallengeAdapter interface {
 	Challenge([]byte) ([]byte, bool, error)
 }
 
-// WebhookIngress is the HTTP-neutral async webhook submission boundary.
 type WebhookIngress interface {
 	Handle(context.Context, string, string, *http.Request, []byte) WebhookResult
 }
 
-// WebhookResult is a bounded HTTP result produced by the async ingress.
 type WebhookResult struct {
 	Status      int
 	ContentType string
 	Body        []byte
 }
 
-// IngressConfig contains all server-owned dependencies for production webhook
-// submission. No field is populated from a webhook body.
+// IngressConfig contains server-owned dependencies. Tenant, binding, and
+// internal identity values are resolved from this boundary, never from body.
 type IngressConfig struct {
 	Resolver     tenant.TenantResolver
+	Identity     tenant.IdentityResolver
+	Audit        storage.BindingAuditRepository
 	Claims       storage.ClaimStore
 	Gateway      *Gateway
 	ResolveAgent func(context.Context, tenant.TenantContext) (agent.AgentSpec, error)
@@ -54,11 +50,10 @@ type IngressConfig struct {
 	Now          func() time.Time
 }
 
-// Ingress verifies a webhook, resolves its binding, claims its external
-// identity, and durably submits a Job. It never executes an Agent or sends a
-// provider reply in the request goroutine.
 type Ingress struct {
 	resolver     tenant.TenantResolver
+	identity     tenant.IdentityResolver
+	audit        storage.BindingAuditRepository
 	claims       storage.ClaimStore
 	gateway      *Gateway
 	resolveAgent func(context.Context, tenant.TenantContext) (agent.AgentSpec, error)
@@ -70,7 +65,7 @@ type Ingress struct {
 }
 
 func NewIngress(config IngressConfig) (*Ingress, error) {
-	if config.Resolver == nil || config.Claims == nil || config.Gateway == nil || config.ResolveAgent == nil || config.OwnerID == "" || len(config.Adapters) == 0 {
+	if config.Resolver == nil || config.Claims == nil || config.Gateway == nil || config.ResolveAgent == nil || config.OwnerID == "" {
 		return nil, ErrInvalidRequest
 	}
 	if config.ClaimTTL == 0 {
@@ -85,6 +80,9 @@ func NewIngress(config IngressConfig) (*Ingress, error) {
 	if config.Now == nil {
 		config.Now = func() time.Time { return time.Now().UTC() }
 	}
+	if config.Identity == nil {
+		config.Identity = tenant.RepositoryIdentityResolver{}
+	}
 	adapters := make(map[string]WebhookAdapter, len(config.Adapters))
 	for channel, adapter := range config.Adapters {
 		if strings.TrimSpace(channel) == "" || adapter == nil {
@@ -92,17 +90,7 @@ func NewIngress(config IngressConfig) (*Ingress, error) {
 		}
 		adapters[channel] = adapter
 	}
-	return &Ingress{
-		resolver:     config.Resolver,
-		claims:       config.Claims,
-		gateway:      config.Gateway,
-		resolveAgent: config.ResolveAgent,
-		adapters:     adapters,
-		ownerID:      config.OwnerID,
-		claimTTL:     config.ClaimTTL,
-		jobTimeout:   config.JobTimeout,
-		now:          config.Now,
-	}, nil
+	return &Ingress{resolver: config.Resolver, identity: config.Identity, audit: config.Audit, claims: config.Claims, gateway: config.Gateway, resolveAgent: config.ResolveAgent, adapters: adapters, ownerID: config.OwnerID, claimTTL: config.ClaimTTL, jobTimeout: config.JobTimeout, now: config.Now}, nil
 }
 
 func (i *Ingress) Handle(ctx context.Context, channel, externalAppID string, request *http.Request, body []byte) WebhookResult {
@@ -129,24 +117,35 @@ func (i *Ingress) Handle(ctx context.Context, channel, externalAppID string, req
 	if err != nil || incoming.ID == "" || strings.TrimSpace(incoming.Text) == "" {
 		return failureResult(http.StatusBadRequest)
 	}
+	if (incoming.Channel != "" && incoming.Channel != channel) || incoming.TenantID != "" {
+		return failureResult(http.StatusBadRequest)
+	}
 	incoming.Channel = channel
-	tc, err := i.resolver.Resolve(ctx, tenant.ResolveRequest{
-		Channel:          channel,
-		ExternalAppID:    externalAppID,
-		ExternalUser:     incoming.UserID,
-		ExternalChat:     incoming.ChatID,
-		ExternalThreadID: incoming.ThreadID,
-		RequestID:        incoming.ID,
-		MessageID:        incoming.ID,
-		TraceID:          incoming.ID,
-	})
+	tc, err := i.resolver.Resolve(ctx, tenant.ResolveRequest{Channel: channel, ExternalAppID: externalAppID, ExternalUser: incoming.UserID, ExternalChat: incoming.ChatID, ExternalChatType: incoming.ChatType, ExternalThreadID: incoming.ThreadID, RequestID: incoming.ID, MessageID: incoming.ID, TraceID: incoming.ID})
 	if err != nil {
 		if errors.Is(err, storage.ErrBackendUnavailable) {
 			return failureResult(http.StatusServiceUnavailable)
 		}
 		return failureResult(http.StatusUnauthorized)
 	}
-	tc.SessionID = channels.SessionID(tc.TenantID, channel, incoming.UserID, incoming.ChatID)
+	if i.identity != nil {
+		// Identity resolution is fail-closed. Audit is best effort and never
+		// changes this security decision.
+		resolvedIdentity, identityErr := i.identity.ResolveIdentity(ctx, tc)
+		if errors.Is(identityErr, storage.ErrBackendUnavailable) {
+			return failureResult(http.StatusServiceUnavailable)
+		}
+		if identityErr != nil || resolvedIdentity.Validate() != nil || resolvedIdentity.Identity.TenantID != tc.TenantID || resolvedIdentity.Identity.Channel != tc.Channel || resolvedIdentity.Identity.BindingID != tc.BindingID {
+			return failureResult(http.StatusUnauthorized)
+		}
+		if i.audit != nil {
+			_ = i.audit.AppendBindingEvent(ctx, tc, storage.BindingAuditEvent{TenantID: tc.TenantID, AuditID: auditEventID(tc, "identity_resolve"), BindingID: tc.BindingID, Channel: tc.Channel, Operation: "identity_resolve", Success: true, IdentityFingerprint: tenant.IdentityFingerprint(tc.ExternalUser), Version: resolvedIdentity.Identity.Version, CreatedAt: i.now()})
+		}
+		tc.InternalUser = resolvedIdentity.Identity.InternalUserID
+	} else {
+		tc.InternalUser = incoming.UserID
+	}
+	tc.SessionID = channels.SessionIDWithThread(tc.TenantID, channel, incoming.UserID, incoming.ChatID, incoming.ThreadID)
 	if err := tc.Validate(); err != nil {
 		return failureResult(http.StatusUnauthorized)
 	}
@@ -170,18 +169,7 @@ func (i *Ingress) Handle(ctx context.Context, channel, externalAppID string, req
 	if createdAt.IsZero() {
 		createdAt = i.now()
 	}
-	accepted, err := i.gateway.SubmitWithIdentity(tenant.WithContext(ctx, tc), GatewayRequest{
-		TenantContext: tc,
-		Agent:         agentSpec,
-		Input: agent.Message{
-			ID:        incoming.ID,
-			Role:      "user",
-			Content:   incoming.Text,
-			CreatedAt: createdAt,
-		},
-		CreatedAt: createdAt,
-		Deadline:  createdAt.Add(i.jobTimeout),
-	}, jobID, executionID)
+	accepted, err := i.gateway.SubmitWithIdentity(tenant.WithContext(ctx, tc), GatewayRequest{TenantContext: tc, Agent: agentSpec, Input: agent.Message{ID: incoming.ID, Role: "user", Content: incoming.Text, CreatedAt: createdAt}, CreatedAt: createdAt, Deadline: createdAt.Add(i.jobTimeout)}, jobID, executionID)
 	if err != nil {
 		return failureResult(http.StatusServiceUnavailable)
 	}
@@ -196,10 +184,13 @@ func (i *Ingress) Handle(ctx context.Context, channel, externalAppID string, req
 	return acceptedResult(&accepted, false)
 }
 
+func auditEventID(tc tenant.TenantContext, operation string) string {
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("p1-04-audit:"+tc.TenantID+"|"+tc.Channel+"|"+tc.BindingID+"|"+tc.MessageID+"|"+operation)).String()
+}
+
 func ingressJobIdentity(key storage.DedupKey) (string, string) {
 	identity := strings.Join([]string{key.TenantID, key.Channel, key.BindingID, key.ExternalMessageID}, "\x00")
-	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("trpc-agent-job:"+identity)).String(),
-		uuid.NewSHA1(uuid.NameSpaceURL, []byte("trpc-agent-execution:"+identity)).String()
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("trpc-agent-job:"+identity)).String(), uuid.NewSHA1(uuid.NameSpaceURL, []byte("trpc-agent-execution:"+identity)).String()
 }
 
 func acceptedResult(accepted *Accepted, duplicate bool) WebhookResult {

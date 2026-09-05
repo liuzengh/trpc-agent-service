@@ -44,7 +44,7 @@ func (a Artifact) Validate() error {
 	}
 	prefix := "tenants/" + a.TenantID + "/"
 	clean := path.Clean(a.ObjectKey)
-	if !strings.HasPrefix(a.ObjectKey, prefix) || clean != a.ObjectKey || strings.Contains(a.ObjectKey, "..") {
+	if !strings.HasPrefix(a.ObjectKey, prefix) || clean != a.ObjectKey || strings.Contains(a.ObjectKey, "..") || strings.ContainsRune(a.ObjectKey, '\\') {
 		return fmt.Errorf("%w: object key must be tenant-prefixed and relative", ErrInvalidArtifact)
 	}
 	if a.SizeBytes < 0 || !validStatus(a.Status) {

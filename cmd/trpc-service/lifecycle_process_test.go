@@ -210,6 +210,7 @@ func gdChildEnv(f *productionTestFixture, addr, modelURL, providerURL, owner str
 		"ASYNC_OWNER_ID":              owner,
 		"G_D_TEST_MODE":               "1",
 		"G_D_TEST_PROVIDER_URL":       providerURL,
+		"BOOTSTRAP_OBJECT_BACKEND":    "none",
 		"G_D_STARTUP_HOLD":            "300ms",
 		"STARTUP_TIMEOUT":             "20s",
 		"SHUTDOWN_TIMEOUT":            "3s",
@@ -227,6 +228,9 @@ func gdChildEnv(f *productionTestFixture, addr, modelURL, providerURL, owner str
 	for _, value := range os.Environ() {
 		name, _, ok := strings.Cut(value, "=")
 		if ok {
+			if strings.HasPrefix(name, "OBJECT_") || name == "BOOTSTRAP_OBJECT_BACKEND" {
+				continue
+			}
 			if _, overridden := overrides[name]; overridden {
 				continue
 			}
@@ -430,23 +434,68 @@ func (p *gdProviderServer) Release() { p.releaseOnce.Do(func() { close(p.release
 
 func (p *gdProviderServer) Close() { p.Release(); p.server.Close() }
 
-func gdPostLarkWebhook(t *testing.T, addr string, f *productionTestFixture, body []byte, timestamp, nonce string) int {
+const gdOutageWebhookDeadline = 20 * time.Second
+
+type gdWebhookResult struct {
+	status           int
+	completeResponse bool
+	stage            gdRecoveryStage
+	category         string
+	elapsed          time.Duration
+}
+
+func gdWebhookErrorCategory(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "outage_webhook_deadline"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "outage_webhook_canceled"
+	}
+	return "outage_webhook_transport"
+}
+
+func gdPostLarkWebhook(t *testing.T, addr string, f *productionTestFixture, body []byte, timestamp, nonce string) gdWebhookResult {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, "http://"+addr+"/webhook/lark/"+f.larkExternalID, bytes.NewReader(body))
+	started := time.Now()
+	result := gdWebhookResult{stage: gdStageOutageWebhook}
+	ctx, cancel := context.WithTimeout(context.Background(), gdOutageWebhookDeadline)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/webhook/lark/"+f.larkExternalID, bytes.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		result.category = "outage_webhook_request"
+		result.elapsed = time.Since(started)
+		return result
 	}
 	request.Header.Set("X-Lark-Request-Timestamp", timestamp)
 	request.Header.Set("X-Lark-Request-Nonce", nonce)
 	request.Header.Set("X-Lark-Signature", larkProductionSignature(timestamp, nonce, os.Getenv("P009GC_LARK_ENCRYPT_KEY"), body))
-	client := &http.Client{Timeout: 5 * time.Second}
-	response, err := client.Do(request)
+	response, err := (&http.Client{Timeout: gdOutageWebhookDeadline}).Do(request)
+	result.elapsed = time.Since(started)
 	if err != nil {
-		t.Fatal(err)
+		result.category = gdWebhookErrorCategory(err)
+		return result
 	}
-	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, response.Body)
-	return response.StatusCode
+	result.status = response.StatusCode
+	_, copyErr := io.Copy(io.Discard, response.Body)
+	closeErr := response.Body.Close()
+	if copyErr != nil || closeErr != nil {
+		if copyErr != nil {
+			result.category = gdWebhookErrorCategory(copyErr)
+		} else {
+			result.category = "outage_webhook_transport"
+		}
+		return result
+	}
+	result.completeResponse = true
+	if result.status == http.StatusServiceUnavailable {
+		result.category = "service_unavailable"
+	} else {
+		result.category = "unexpected_status"
+	}
+	return result
 }
 
 func gdSchemaTable(schema, table string) string { return pgx.Identifier{schema, table}.Sanitize() }
@@ -485,6 +534,7 @@ func gdReadQueueState(ctx context.Context, pool *pgxpool.Pool, f *productionTest
 func gdWaitFor(t *testing.T, timeout time.Duration, check func(context.Context) (bool, error)) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
+	backoff := 25 * time.Millisecond
 	var lastErr error
 	for time.Now().Before(deadline) {
 		remaining := time.Until(deadline)
@@ -500,8 +550,15 @@ func gdWaitFor(t *testing.T, timeout time.Duration, check func(context.Context) 
 		if err != nil {
 			lastErr = err
 		}
-		timer := time.NewTimer(25 * time.Millisecond)
-		<-timer.C
+		if !gdWaitRecoveryBackoff(deadline, backoff) {
+			break
+		}
+		if backoff < 500*time.Millisecond {
+			backoff *= 2
+			if backoff > 500*time.Millisecond {
+				backoff = 500 * time.Millisecond
+			}
+		}
 	}
 	t.Fatalf("condition did not converge within %s: %v", timeout, lastErr)
 }
@@ -520,12 +577,14 @@ func gdWaitQueueInFlight(t *testing.T, pool *pgxpool.Pool, f *productionTestFixt
 func gdWaitDeliveryExpired(t *testing.T, pool *pgxpool.Pool, f *productionTestFixture, jobID string) {
 	t.Helper()
 	gdWaitFor(t, 10*time.Second, func(ctx context.Context) (bool, error) {
+		// A queued/released job has no active lease; it is ready for Receive to reclaim.
 		var queueExpired, leaseExpired bool
-		err := pool.QueryRow(ctx, "SELECT leased_until <= clock_timestamp() FROM "+gdSchemaTable(f.schema, "job_queue")+" WHERE tenant_id=$1 AND job_id=$2", f.tenantID, jobID).Scan(&queueExpired)
+		err := pool.QueryRow(ctx, "SELECT COALESCE(leased_until <= clock_timestamp(), true) FROM "+gdSchemaTable(f.schema, "job_queue")+" WHERE tenant_id=$1 AND job_id=$2", f.tenantID, jobID).Scan(&queueExpired)
 		if err != nil {
 			return false, err
 		}
-		err = pool.QueryRow(ctx, "SELECT leased_until <= clock_timestamp() FROM "+gdSchemaTable(f.schema, "session_lease")+" WHERE tenant_id=$1", f.tenantID).Scan(&leaseExpired)
+		// The worker may release the session lease after the database returns; absence means no active session lease remains.
+		err = pool.QueryRow(ctx, "SELECT COALESCE((SELECT leased_until <= clock_timestamp() FROM "+gdSchemaTable(f.schema, "session_lease")+" WHERE tenant_id=$1), true)", f.tenantID).Scan(&leaseExpired)
 		return queueExpired && leaseExpired, err
 	})
 }
@@ -702,8 +761,9 @@ func TestGDSIGKILLReclaimsQueueDelivery(t *testing.T) {
 
 	eventID := "g-d-crash-event-" + f.tenantID
 	body, timestamp, nonce := larkProductionEvent(t, f, eventID, "g-d-crash-message-"+f.tenantID)
-	if status := gdPostLarkWebhook(t, addrA, f, body, timestamp, nonce); status != http.StatusAccepted {
-		t.Fatalf("crash webhook status=%d", status)
+	webhook := gdPostLarkWebhook(t, addrA, f, body, timestamp, nonce)
+	if !webhook.completeResponse || webhook.status != http.StatusAccepted {
+		t.Fatalf("crash webhook status=%d complete_response=%t category=%s elapsed=%s", webhook.status, webhook.completeResponse, webhook.category, webhook.elapsed)
 	}
 	key := storage.DedupKey{TenantID: f.tenantID, Channel: lark.Channel, BindingID: f.larkBindingID, ExternalMessageID: eventID}
 	jobID, executionID := gdIngressJobIdentity(key)

@@ -492,6 +492,9 @@ func runService(ctx context.Context, signals <-chan os.Signal, stdout, stderr io
 		}
 		server.Resolver = runtimeValue.resolver
 		server.AsyncIngress = runtimeValue.ingress
+		if middleware := runtimeValue.TelemetryWebMiddleware(); middleware != nil {
+			server.SetTelemetryMiddleware(middleware)
+		}
 		readinessGate.SetDelegate(runtimeValue.readiness)
 		runtimeValue.beginDrainingHook = server.BeginDraining
 	} else {

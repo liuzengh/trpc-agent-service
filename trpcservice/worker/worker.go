@@ -30,6 +30,19 @@ var (
 	errActionAlreadyComplete = errors.New("worker: delivery action already completed")
 )
 
+// WorkerTelemetry is the narrow optional observability surface the worker
+// uses. Implementations must be best-effort: telemetry failures never change
+// business outcomes, retries, or durability.
+type WorkerTelemetry interface {
+	// StartAttemptSpan opens an execution attempt span, linking the producer
+	// span carried by the job when present. Missing or invalid carriers are
+	// reported as low-cardinality context_state and never fail the job.
+	StartAttemptSpan(ctx context.Context, jobID, executionID, workerID string, carrier *queue.TelemetryCarrier, attempt int) (context.Context, func(outcome string))
+	JobStarted()
+	JobFinished(outcome string, seconds float64)
+	Inflight(delta int)
+}
+
 // AgentResolver restores the immutable AgentSpec referenced by a queued job.
 // It must not return mutable tenant or provider state shared across requests.
 type AgentResolver interface {
@@ -47,6 +60,10 @@ func (f AgentResolverFunc) Resolve(ctx context.Context, tc tenant.TenantContext,
 
 // Config controls the bounded worker pool and one delivery's execution.
 type Config struct {
+	// Telemetry is the optional observability boundary. Nil keeps historical
+	// behavior: no spans, no carrier links, no metrics. It never changes
+	// delivery outcomes, retries, or durability.
+	Telemetry               WorkerTelemetry
 	WorkerID                string
 	Concurrency             int
 	VisibilityTimeout       time.Duration
@@ -430,25 +447,53 @@ func (w *Worker) untrack(record *deliveryRecord) {
 }
 
 func (w *Worker) process(record *deliveryRecord) (processErr error) {
+	job, decodeErr := queue.DecodeJob(record.delivery.Envelope)
+	if decodeErr == nil {
+		decodeErr = record.delivery.Job.Validate()
+	}
+	if decodeErr != nil {
+		// The job never decoded; start a fallback attempt span so the failure
+		// stays observable, then nack as before.
+		if w.config.Telemetry != nil {
+			spanCtx, endAttempt := w.config.Telemetry.StartAttemptSpan(record.ctx, "", "", w.config.WorkerID, nil, 0)
+			w.config.Telemetry.JobStarted()
+			w.config.Telemetry.Inflight(1)
+			endAttempt("failed_decode")
+			w.config.Telemetry.Inflight(-1)
+			_ = spanCtx
+		}
+		return errors.Join(decodeErr, w.nack(record, false, decodeErr))
+	}
+	tc, err := job.Tenant.Restore()
+	if err != nil {
+		return errors.Join(err, w.nack(record, false, err))
+	}
+	// The attempt span decorates a LOCAL context: the delivery record's ctx is
+	// shared with the visibility renewal goroutine and must not be mutated.
+	attemptCtx := record.ctx
+	if w.config.Telemetry != nil {
+		var endAttempt func(outcome string)
+		attemptCtx, endAttempt = w.config.Telemetry.StartAttemptSpan(record.ctx, job.JobID, job.ExecutionID, w.config.WorkerID, job.Telemetry, job.Attempt)
+		w.config.Telemetry.JobStarted()
+		w.config.Telemetry.Inflight(1)
+		started := time.Now()
+		defer func() {
+			w.config.Telemetry.Inflight(-1)
+			outcome := "completed"
+			if processErr != nil {
+				outcome = "failed"
+			}
+			w.config.Telemetry.JobFinished(outcome, time.Since(started).Seconds())
+			endAttempt(outcome)
+		}()
+	}
 	visibilityDone := make(chan struct{})
 	go w.renewVisibility(record, visibilityDone)
 	defer func() {
 		record.cancel()
 		<-visibilityDone
 	}()
-
-	job, err := queue.DecodeJob(record.delivery.Envelope)
-	if err == nil {
-		err = record.delivery.Job.Validate()
-	}
-	if err != nil {
-		return errors.Join(err, w.nack(record, false, err))
-	}
-	tc, err := job.Tenant.Restore()
-	if err != nil {
-		return errors.Join(err, w.nack(record, false, err))
-	}
-	spec, err := w.config.ResolveAgent.Resolve(record.ctx, tc, job.Agent)
+	spec, err := w.config.ResolveAgent.Resolve(attemptCtx, tc, job.Agent)
 	if err != nil {
 		err = fmt.Errorf("%w: %w", ErrAgentResolution, err)
 		return errors.Join(err, w.nack(record, false, err))
@@ -465,9 +510,9 @@ func (w *Worker) process(record *deliveryRecord) (processErr error) {
 	var result execution.ExecutionResult
 	var executeErr error
 	if w.completion == nil {
-		result, executeErr = w.executor.Execute(record.ctx, request)
+		result, executeErr = w.executor.Execute(attemptCtx, request)
 	} else {
-		result, executeErr = w.executor.ExecuteWithCompletion(record.ctx, request, func(ctx context.Context, commit execution.ExecutionCommit) error {
+		result, executeErr = w.executor.ExecuteWithCompletion(attemptCtx, request, func(ctx context.Context, commit execution.ExecutionCommit) error {
 			if err := record.beginCompletion(); err != nil {
 				return err
 			}

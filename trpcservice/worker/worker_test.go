@@ -27,6 +27,10 @@ type testQueue struct {
 	closeOnce            sync.Once
 	ackErrors            []error
 	nackErrors           []error
+	nackAlwaysError      error
+	nackStarted          chan queue.NackOptions
+	nackFailed           chan struct{}
+	nackBlock            <-chan struct{}
 	extendErrors         []error
 	receiveErrors        []error
 	ackCalls             int
@@ -118,13 +122,35 @@ func (q *testQueue) Ack(ctx context.Context, _ queue.Delivery) error {
 	return nil
 }
 func (q *testQueue) Nack(ctx context.Context, _ queue.Delivery, options queue.NackOptions) error {
+	q.mu.Lock()
+	q.nackCalls++
+	started := q.nackStarted
+	failed := q.nackFailed
+	block := q.nackBlock
+	q.mu.Unlock()
+	if started != nil {
+		select {
+		case started <- options:
+		default:
+		}
+	}
+	if block != nil {
+		<-block
+	}
 	if err := ctx.Err(); err != nil {
+		if failed != nil {
+			select {
+			case failed <- struct{}{}:
+			default:
+			}
+		}
 		return err
 	}
 	q.mu.Lock()
-	q.nackCalls++
 	var err error
-	if len(q.nackErrors) > 0 {
+	if q.nackAlwaysError != nil {
+		err = q.nackAlwaysError
+	} else if len(q.nackErrors) > 0 {
 		err = q.nackErrors[0]
 		q.nackErrors = q.nackErrors[1:]
 	}
@@ -137,6 +163,12 @@ func (q *testQueue) Nack(ctx context.Context, _ queue.Delivery, options queue.Na
 	}
 	q.mu.Unlock()
 	if err != nil {
+		if failed != nil {
+			select {
+			case failed <- struct{}{}:
+			default:
+			}
+		}
 		return err
 	}
 	select {
@@ -1166,7 +1198,15 @@ func TestWorkerStopForcesCancellationAndReportsUnresolved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	releaseNack := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseNack) }) }
+	defer release()
 	q := newTestQueue(queue.Delivery{DeliveryID: "delivery-forced-stop", Envelope: envelope, Job: job, Attempt: 1})
+	q.nackAlwaysError = errors.New("controlled nack failure")
+	q.nackStarted = make(chan queue.NackOptions, 4)
+	q.nackFailed = make(chan struct{}, 4)
+	q.nackBlock = releaseNack
 	allow := make(chan struct{})
 	canceled := make(chan struct{}, 1)
 	w, sink := newBlockingWorker(t, q, allow, canceled, func(config *Config) {
@@ -1182,10 +1222,18 @@ func TestWorkerStopForcesCancellationAndReportsUnresolved(t *testing.T) {
 	if !errors.Is(stopErr, ErrDrainTimeout) {
 		t.Fatalf("Stop error=%v, want ErrDrainTimeout", stopErr)
 	}
+	if !errors.Is(stopErr, ErrDeliveryUnresolved) {
+		t.Fatalf("Stop error=%v, want ErrDeliveryUnresolved", stopErr)
+	}
 	select {
 	case <-canceled:
 	case <-time.After(time.Second):
 		t.Fatal("forced Stop did not cancel Runtime")
+	}
+	select {
+	case <-q.nackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("controlled Nack did not start")
 	}
 	if sink.Count() != 0 {
 		t.Fatalf("forced cancellation committed result: %d", sink.Count())
@@ -1199,11 +1247,33 @@ func TestWorkerStopForcesCancellationAndReportsUnresolved(t *testing.T) {
 	if closeCalls > 1 {
 		t.Fatalf("queue closed more than once: %d", closeCalls)
 	}
+	release()
+	for failure := 0; failure < 2; failure++ {
+		select {
+		case <-q.nackFailed:
+		case <-time.After(time.Second):
+			t.Fatalf("controlled Nack failure %d was not observed", failure+1)
+		}
+	}
+	select {
+	case <-q.closed:
+	case <-time.After(time.Second):
+		t.Fatal("background stop did not close Queue")
+	}
+	q.mu.Lock()
+	nackCalls, closeCalls, activeActions, nackApplied := q.nackCalls, q.closeCalls, q.activeActions, q.nackApplied
+	q.mu.Unlock()
+	if nackCalls < 2 || nackApplied {
+		t.Fatalf("nack calls=%d applied=%v, want repeated deterministic failures", nackCalls, nackApplied)
+	}
+	if closeCalls != 1 || activeActions != 0 {
+		t.Fatalf("close calls=%d active actions=%d, want one close after recovery", closeCalls, activeActions)
+	}
 	w.mu.Lock()
 	_, tracked := w.inFlight[q.delivery.DeliveryID]
 	w.mu.Unlock()
 	if !tracked {
-		t.Fatal("forced unresolved delivery was removed from inFlight")
+		t.Fatal("unresolved delivery was removed from inFlight")
 	}
 }
 

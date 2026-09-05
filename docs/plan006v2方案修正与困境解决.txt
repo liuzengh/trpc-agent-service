@@ -1,0 +1,168 @@
+解决目标
+
+当前困境不是继续多写几轮代码就能解决，而是需要把“P0-06 全部完成”改造成一个可以收敛的交付流程，同时保留 plan006Revise 中真正必要的安全要求。
+
+建议立即采用以下方案：
+
+一、先冻结当前状态
+不要让当前 Agent 继续按原计划自由扩展。先建立一个不可变的基线记录：
+
+当前 Git diff 和未提交文件清单；
+已实现的公共类型和接口；
+已实现的 Redis、PostgreSQL、migration、限流和 failover 文件；
+每个包当前的测试状态；
+哪些测试是真实 Redis/PostgreSQL 集成，哪些只是 mock、fake 或编译测试；
+当前已知缺陷和不符合计划的地方。
+执行命令可以固定为：
+
+git status --short
+git diff --stat
+git diff --check
+go test ./... -count=1
+go test ./... -race -count=1
+go vet ./...
+这一步只负责记录，不修复、不新增范围。尤其要明确：[no test files] 只能说明包可编译，不能计入功能验收通过。
+
+二、把原计划改成三个可独立关闭的交付包
+不要再把所有功能放进一个 P0-06 结束条件。保留原计划作为总体设计，但增加一个“执行分阶段附录”，把任务拆成以下三个交付包。
+
+P0-06A：公共契约和单 backend 基础能力
+范围限定为：
+
+DedupKey、Claim、Lease、FenceToken、Epoch、OperationGuard；
+tenant 校验和错误分类；
+Redis Claim Acquire/Complete/Fail；
+PostgreSQL Claim Acquire/Complete/Fail；
+Fake backend 与 Redis/PostgreSQL 的 contract tests；
+旧 repository 接口适配层。
+完成条件：
+
+Redis 和 PostgreSQL 对相同操作返回一致的状态语义；
+同一 key 并发只能有一个有效 owner；
+过期接管会递增 attempt 和 fencing token；
+旧 owner、旧 token、错误 tenant、错误 epoch 均被拒绝；
+contract tests 至少同时运行 Fake、Redis 和 PostgreSQL；
+go test、go test -race、go vet 通过。
+这一阶段不包含 failover 状态机、不包含三维限流、不包含网络故障注入。完成后可以提交为一个独立阶段，不能因为后续阶段未完成而反复重测全部项目。
+
+P0-06B：Session lease 和 epoch authority
+范围限定为：
+
+Redis lease Acquire/Renew/Release/Validate；
+PostgreSQL session_lease Acquire/Renew/Release/Validate；
+PostgreSQL epoch authority；
+epoch/generation 与 lease/fencing token 的组合校验；
+lease 的并发、过期接管、续租、释放和旧 token 拒绝测试。
+完成条件：
+
+lease 只能绑定已存在的 session；
+Renew、Release、Validate 均不依赖本地缓存；
+旧 owner、旧 fencing token 和旧 epoch 不能继续提交；
+epoch 切换是数据库原子操作；
+Redis 和 PostgreSQL 的 lease contract tests 通过；
+真实 Redis/PostgreSQL 测试通过；
+go test ./... -race -count=1 通过。
+这一阶段完成后，才能进入 failover。不要在 lease 未稳定时同时加入 quarantine、限流和故障注入。
+
+P0-06C：Failover、限流和故障注入
+范围限定为：
+
+FailoverStore；
+quarantine、熔断、恢复和 probing/recovering 状态机；
+三维限流；
+migration fail-closed catalog 校验；
+故障注入；
+跨 backend 双 owner 防护；
+最终集成和 race 验收。
+完成条件需要按状态机逐项列出，而不是只写“所有测试通过”：
+
+正常状态下主 backend 提供操作；
+明确的 timeout/断连错误触发 quarantine；
+quarantine 期间禁止立即切换或重复 claim；
+等待 TTL 和保护窗口后才能进入切换流程；
+epoch authority 原子递增；
+新 owner 使用新 epoch/fencing token；
+旧 owner 的提交被拒绝；
+新 backend 恢复后必须经过 probing/recovering 才能重新服务；
+限流不绕过 claim/lease/fencing 保护；
+故障注入测试和双 backend integration 测试通过。
+三、为每个阶段建立“完成/未完成”矩阵
+不要再用“还有一些部分未完成”作为唯一状态描述。建立一个固定表格，例如：
+
+项目	代码	单元测试	真实集成	race	状态
+Redis Claim	已有	通过	通过	通过	完成
+PostgreSQL Claim	已有	通过	缺失	缺失	未完成
+Redis lease	缺失	缺失	缺失	缺失	未开始
+PostgreSQL lease	已有	部分	缺失	缺失	未完成
+epoch authority	缺失	缺失	缺失	缺失	未开始
+FailoverStore	缺失	缺失	缺失	缺失	未开始
+三维限流	部分	缺失	缺失	缺失	未完成
+规则必须固定：
+
+“代码存在”不等于完成；
+“普通测试通过”不等于完成；
+[no test files] 不得标记为通过；
+真实 Redis/PostgreSQL 测试跳过时，状态必须是 blocked 或 not verified，不能是 passed；
+只有矩阵中该阶段的所有必需项都通过，阶段才关闭。
+四、解决计划中的安全边界问题
+plan006Revise 中“只有经过统一 FailoverStore 或 fencing-aware API 的路径才受保护”的边界是合理的，应该保留，但必须把它写成可验证的设计约束：
+
+明确哪些公共接口是受保护入口；
+对这些入口做静态搜索或架构测试，禁止业务代码直接调用 Redis 原始 client；
+旧客户端绕过协调层的路径明确标记为 out of scope；
+不要声称可以防止所有绕过 API 的外部写入；
+将“保护所有合法业务提交入口”作为验收目标，而不是“保护任意可能存在的客户端”。
+否则安全目标会无限扩大，最后变成无法证明的绝对保证。
+
+五、修复测试策略
+测试必须分层执行，避免每次“继续”都重新跑全量测试：
+
+修改公共契约后：运行相关包的编译、单元和 contract tests；
+修改 Redis 后：运行 Redis package tests 和 Redis integration tests；
+修改 PostgreSQL 后：运行 PostgreSQL package tests、migration tests 和并发 integration tests；
+修改 failover 后：运行 failover state-machine 和 fault-injection tests；
+阶段结束时：运行一次全量普通测试、race 和 vet。
+真实集成测试应使用明确开关：
+
+TEST_REDIS_URL=redis://127.0.0.1:6379/15
+TEST_DATABASE_URL=postgres://.../trpc_agent_test?sslmode=disable
+测试必须：
+
+使用随机 key prefix 或随机 schema；
+不执行 FLUSHDB；
+只删除自身创建的数据；
+连接不可用时明确输出 blocked，而不是静默跳过后继续宣称通过；
+将“测试未运行”和“测试失败”区分开。
+六、给当前 Agent 的执行控制指令
+当前会话不应再发送笼统的“继续完成剩下的部分”。应发送一个带边界的执行指令：
+
+暂停按原 P0-06 总计划扩展范围。先读取当前 git diff，建立 P0-06A/B/C 验收矩阵。
+本轮只完成 P0-06A，不实现 lease、epoch authority、FailoverStore、限流或故障注入。
+先补齐 Redis Claim 和 PostgreSQL Claim 的 contract tests 及真实集成测试。
+每完成一个测试项立即更新矩阵；测试跳过必须标记为 not verified。
+只有 P0-06A 的所有必需项通过后，才运行该阶段的全量 go test、race 和 vet，并输出阶段关闭报告。
+如果发现接口或 schema 缺陷，只修复 P0-06A 所需部分，不扩大范围。
+P0-06A 关闭后，再使用同样格式启动 P0-06B。每一轮只能有一个阶段处于 in_progress，避免 Agent 同时推进多个互相依赖的 backend。
+
+七、当前代码应如何处理
+不要立即回滚当前未提交代码，也不要把当前代码直接标记为完成。先按文件和功能归属重新分类：
+
+对属于 P0-06A 的公共契约、Claim backend 和适配层进行审查和补测；
+对属于 P0-06B/C 但目前只是半成品的文件保留在工作区，标记为 incomplete；
+对明显违反接口或编译约束的实现修复；
+对只通过编译、没有真实行为测试的实现，不继续叠加功能；
+每个阶段完成后再考虑提交，提交信息中明确阶段编号，而不是使用笼统的“complete P0-06”。
+特别需要优先审查当前会话中生成的 PostgreSQL coordination/lease 实现。此前记录显示它们虽然能够通过普通 go test ./...，但真实并发、epoch authority、旧 token 拒绝和故障注入尚未完成，因此不能仅依据编译和普通测试关闭阶段。
+
+八、最终收敛规则
+为避免再次进入循环，给计划增加以下硬规则：
+
+每个阶段必须有明确的 in-scope 和 out-of-scope；
+每个阶段最多维护一个当前阻塞项；
+发现新需求时先放入 backlog，不得自动加入当前阶段；
+测试通过但验收项缺失时，状态为“代码可用但阶段未关闭”；
+环境缺失时记录为 blocked，不通过反复运行同一命令解决；
+阶段关闭报告必须包含：变更文件、已通过测试、未运行测试、已知限制和下一阶段入口；
+Agent 只有在当前阶段关闭报告生成后才能停止；
+不允许用一次 go test ./... 代替完整验收矩阵。
+推荐的最终判断：保留 plan006Revise 作为技术设计和安全约束文档，但不要再把它直接当作单轮执行清单。为它增加分阶段执行附录，先关闭 P0-06A，再关闭 P0-06B，最后关闭 P0-06C。这样既不会降低 fencing、epoch 和 failover 的安全要求，也能让当前处于 implementing 阶段的对话获得明确的停止点，不再依赖用户不断发送“继续”。

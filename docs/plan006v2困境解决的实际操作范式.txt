@@ -1,0 +1,390 @@
+我发送给你pi的返回结果，你帮我拟定下一步提示词。如下：
+
+给予提示词后，pi返回消息：P0-06A 已建立验收矩阵，并开始补 Fake Claim contract test，但第一项测试暴露了现有 v2 Fake 适配器问题，尚未关闭：
+
+go test ./trpcservice/storage -run TestFakeCoordinationClaimContract -count=1
+FAIL: winners=0
+当前原因是测试使用的 tenant.TenantContext 不满足仓库现有 tenant 校验前置条件，导致并发 Claim 没有形成有效 winner；这不是通过修改断言掩盖的问题，需要先复用现有有效 tenant fixture 或补齐 P0-06A 所需的最小合法上下文。
+
+矩阵状态保持为：
+
+公共 Claim 契约：in_progress
+Fake Claim contract：not verified
+Redis Claim：not verified
+PostgreSQL Claim：not verified
+P0-06B：not started
+P0-06C：not started
+本轮没有进入 lease、epoch authority、FailoverStore、限流、故障注入或 migration fail-closed 范围，也没有运行阶段关闭用的全量 go test、race 或 vet，因为 P0-06A 必需项尚未通过。
+
+
+17:12:56
+这个返回说明分阶段策略已经生效，当前没有再次扩大到 lease、failover 或限流。winners=0 也不应通过放宽断言来处理，先修正测试前置条件是正确的。
+
+下一步应给 pi 发送下面的提示词：
+
+继续 P0-06A，但只处理 Fake Claim contract test 的合法 tenant 前置条件。
+
+先定位：
+1. storage v2 Fake Claim 适配器实际调用的 tenant 校验；
+2. 仓库现有有效 TenantContext fixture、构造函数和测试 helper；
+3. 现有 tenant 包对 TenantContext 的必填字段、状态和权限要求。
+
+优先复用已有合法 fixture，不要在测试中手工构造一个绕过仓库规则的 TenantContext。
+如果仓库没有可复用 fixture，只新增一个最小、明确命名的测试 helper，并说明每个字段为何必需；不要修改生产 tenant 校验逻辑。
+
+然后按以下顺序验证：
+1. 先运行单 goroutine Claim，确认返回有效 Claim、owner、epoch、fence token 和 acquired 状态；
+2. 再运行并发 Claim contract test，确认同一 DedupKey 恰好一个 winner；
+3. 验证 losing callers 返回已有 owner 或明确的冲突状态，而不是把所有错误都当作失败；
+4. 验证过期接管递增 attempt 和 fence token；
+5. 验证旧 owner/token 的 Complete、Fail 被拒绝；
+6. 验证 tenant mismatch、空 owner、非法 DedupKey 的错误分类。
+
+只有确认测试使用合法 TenantContext 后仍然失败，才检查 Fake v2 适配器的生产代码。
+如果是适配器缺陷，只修复 Fake Claim 所需的最小逻辑，并补对应回归测试。
+不要修改 Redis、PostgreSQL、lease、epoch authority、FailoverStore、限流、migration 或故障注入代码。
+每完成一个检查项就更新验收矩阵。
+pi 还需要特别避免一个常见误判：“并发 winner 数为 0”不一定说明 Fake 的并发互斥逻辑错误。如果所有调用都在参数校验阶段返回错误，那么 winners=0 只是测试 fixture 无效。应先在并发测试之前加入或临时执行单调用诊断，输出受控的错误分类，例如：
+
+claim, err := fake.Claim(ctx, validTenant, key, ttl, "owner-1")
+需要确认：
+
+err == nil；
+claim.Status == storage.ClaimAcquired；
+claim.OwnerID == "owner-1"；
+claim.Epoch 和 claim.FenceToken 为有效值；
+使用的 DedupKey.TenantID 与 TenantContext.TenantID 一致。
+如果单调用仍失败，问题优先级应是：
+
+测试构造的 TenantContext 不合法；
+测试 key 与 tenant 不一致；
+测试使用了错误的 v2 API 或旧接口适配方式；
+最后才判断 Fake 适配器生产代码有缺陷。
+如果单调用通过而并发测试仍然 winners=0，再检查并发测试本身是否把所有 goroutine 的错误吞掉了。测试应收集每个调用的结果和错误，不能只统计 winner：
+
+type result struct {
+    claim storage.Claim
+    err   error
+}
+验收标准应明确为：
+
+一个合法 Claim winner；
+其余调用为已占用、冲突或等价的明确非 winner 结果；
+不允许出现参数校验错误；
+不允许通过修改测试把 winners=0 视为可接受结果。
+当前矩阵保持不变是正确的：
+
+公共 Claim 契约：in_progress
+Fake Claim contract：not verified
+Redis Claim：not verified
+PostgreSQL Claim：not verified
+P0-06B：not started
+P0-06C：not started
+在 Fake contract 通过前，不要运行阶段关闭测试，也不要把 Redis 或 PostgreSQL 标记为已验证。<CPA_DONE>
+
+pi返回：已定位到现有合法 fixture：trpcservice/storage/contract_test.go 中的 validContext(tenantID)，它提供了 AgentAppID、RequestID、MessageID、TraceID、ConfigVersion 和完整 BackendPolicy。原测试手工构造的 TenantContext 缺少这些字段，因此所有调用在前置校验阶段失败，winners=0 不是并发互斥缺陷。
+
+我已将 Fake contract 测试改为复用 validContext("tenant-a")，并增加了单调用诊断，检查：
+
+Claim 返回无错误；
+status 为 ClaimAcquired；
+owner、epoch、fence token 有效；
+并发重复调用返回已有 Claim，而不是把所有调用当作失败。
+但测试文件目前仍有一个待清理的未使用 tenant import，尚未重新运行测试，因此 P0-06A 的 Fake Claim contract 仍然是 not verified。本轮没有修改生产 tenant 校验逻辑，也没有触碰 Redis、PostgreSQL、lease、epoch authority、FailoverStore、限流、migration 或故障注入代码。
+
+当前矩阵保持：
+
+公共 Claim 契约：in_progress
+Fake Claim contract：not verified
+Redis Claim：not verified
+PostgreSQL Claim：not verified
+P0-06B：not started
+P0-06C：not started
+
+17:15:16
+这一步的处理方向正确，当前只剩测试文件清理和验证，不应继续扩大范围。请把下面的提示词发送给 pi：
+
+继续处理 P0-06A Fake Claim contract，范围严格限定在当前测试文件。
+
+1. 删除未使用的 tenant import，或改为实际需要的引用；不要修改生产代码。
+2. 运行格式化：
+   gofmt -w trpcservice/storage/contract_test.go
+3. 先运行单项测试：
+   go test ./trpcservice/storage -run TestFakeCoordinationClaimContract -count=1 -v
+4. 如果单项测试失败，完整保留并检查每个调用的错误，不要只看 winners 数量。区分：
+   - 参数/tenant 前置校验错误；
+   - 首次 Claim 成功；
+   - 重复 Claim 返回已有 Claim 或明确冲突状态；
+   - Fake 适配器生产逻辑错误。
+5. 如果单项测试通过，再运行 Fake contract 相关测试文件中的全部测试；不要运行 Redis、PostgreSQL、lease、epoch、FailoverStore、限流或故障注入测试。
+6. 只有以下条件全部满足，才把 Fake Claim contract 标记为 verified：
+   - `validContext("tenant-a")` 被复用；
+   - 单调用返回无错误；
+   - status 为 `ClaimAcquired`；
+   - owner、epoch、fence token 有效；
+   - 并发相同 key 恰好一个 winner；
+   - 其他调用返回已有 Claim 或契约规定的明确非 winner 结果；
+   - 没有 tenant 前置校验错误；
+   - 过期接管和旧 token 拒绝测试若属于当前 Fake contract 范围，也必须通过，否则保持 `not verified` 并明确列出缺口。
+7. 测试通过后更新矩阵，并报告实际命令和完整结果。不要因为普通编译通过就关闭 Fake contract。
+8. 如果测试通过，下一步仍只进入 P0-06A 的下一个 Claim backend 验证；不要提前进入 P0-06B 或 P0-06C。
+当前状态判断应保持谨慎：未清理 import 且未重新运行测试前，Fake Claim contract 继续保持 not verified 是正确的。这里不需要重新设计 tenant fixture，也不应为了推进进度修改 tenant 校验或放宽 contract 断言。
+
+测试通过后，矩阵应更新为：
+
+公共 Claim 契约：in_progress
+Fake Claim contract：verified
+Redis Claim：not verified
+PostgreSQL Claim：not verified
+P0-06B：not started
+P0-06C：not started
+如果测试仍失败，下一步只分析 Fake Claim contract 的具体失败结果，不要用全量 go test ./... 的通过来掩盖该阶段项未验证。
+
+
+17:18:14
+pi返回：P0-06A Fake Claim contract 仍未通过，当前没有进入下一项，也没有运行其他阶段测试。
+
+已完成的限定范围修改：
+
+删除了 claim_contract_test.go 中未使用的 tenant import。
+claim_contract_test.go 继续复用现有 validContext("tenant-a")，没有修改生产 tenant 校验逻辑。
+按要求运行了：
+gofmt -w trpcservice/storage/contract_test.go
+gofmt -w trpcservice/storage/fake_coordination.go trpcservice/storage/claim_contract_test.go
+go test ./trpcservice/storage -run TestFakeCoordinationClaimContract -count=1 -v
+结果仍失败：
+
+=== RUN   TestFakeCoordinationClaimContract
+claim_contract_test.go:46: unexpected takeover winners=100
+--- FAIL: TestFakeCoordinationClaimContract
+这次失败已经排除 tenant 前置条件问题，说明 Fake v2 适配器修复后，测试对“winner”的判断仍不符合当前 Claim contract：重复调用返回已有 Claim 时，状态仍为 ClaimAcquired，测试不能仅用 Status == ClaimAcquired 统计 winner。下一步必须在当前测试文件中收集每个调用的完整 Claim 和 error，以 owner/token/attempt 或首次 owner 判断唯一 winner，并明确验证其他调用返回同一已有 owner，而不是把它们计为新 winner。
+
+矩阵保持：
+
+公共 Claim 契约：in_progress
+Fake Claim contract：not verified
+Redis Claim：not verified
+PostgreSQL Claim：not verified
+P0-06B：not started
+P0-06C：not started
+没有运行 Redis、PostgreSQL、lease、epoch、FailoverStore、限流、migration 或故障注入测试。
+
+
+17:18:37
+这次失败说明测试已经越过 tenant 前置条件，暴露的是 contract 语义问题，而不是应立即修改 Fake 实现。ClaimAcquired 表示当前记录的状态，不一定表示“本次调用成功取得了 owner”；重复调用返回同一个仍处于 acquired 状态的 Claim 是合理行为。
+
+请把下面的提示词发送给 pi：
+
+继续 P0-06A Fake Claim contract，但只修改当前 contract 测试的结果收集和断言，不修改生产代码，除非先证明 Fake 行为违反了公共 Claim contract。
+
+先读取并确认 Claim contract 对重复 Acquire 的明确语义：
+1. 首次调用成功取得 owner 时返回 ClaimAcquired；
+2. 重复调用返回已有 Claim 时，status 可能仍为 ClaimAcquired；
+3. 因此不能仅用 Claim.Status == ClaimAcquired 统计 winner。
+
+修改测试以收集每个并发调用的完整结果：
+- 请求 owner；
+- 返回的 Claim；
+- error；
+- attempt；
+- fence token；
+- epoch；
+- returned owner。
+
+测试必须区分：
+1. 本次调用真正取得 owner 的结果；
+2. 返回已有 Claim 的结果；
+3. 参数校验错误或其他非契约错误。
+
+winner 的判定必须依据公共 contract 的实际语义，不要猜测。优先使用以下逻辑：
+- 记录每个调用传入的唯一 owner；
+- 首次成功建立记录的返回值，其 OwnerID 应等于该调用的 owner；
+- 后续调用返回的 OwnerID 应全部等于同一个已建立 owner；
+- 所有结果的 DedupKey、epoch、attempt 和 fence token 应与当前记录一致；
+- 不能因为所有结果的 status 都是 ClaimAcquired 就计为多个 winner。
+
+如果当前 Claim API 没有返回“本次是否新建”的字段，不要通过 status 推断。使用 owner 与返回值的一致性、首次成功记录以及后续重复调用的稳定 owner 来验证单 owner 语义；同时检查 error 是否符合 contract。
+
+补充并验证以下断言：
+- 并发调用最终只有一个稳定 owner；
+- 所有成功返回的 Claim 指向同一个 owner；
+- fencing token 和 attempt 不会因未过期的重复 Acquire 错误递增；
+- 对同一已有 Claim 的重复 Acquire 不会产生第二个 owner；
+- 如果 contract 规定重复调用必须返回特定冲突错误，则按 contract 断言该错误；不要擅自把成功返回已有 Claim 改成错误。
+
+先运行：
+  gofmt -w trpcservice/storage/claim_contract_test.go
+  go test ./trpcservice/storage -run TestFakeCoordinationClaimContract -count=1 -v
+
+失败时输出每个结果的受控摘要，至少包含请求 owner、返回 owner、status、attempt、fence token 和 error，不要吞掉错误。
+
+只有确认 contract 测试语义正确且全部通过后，才将 Fake Claim contract 标记为 verified。若测试通过，不要进入 Redis 或 PostgreSQL；先报告测试结果并保持：
+- 公共 Claim 契约：in_progress
+- Fake Claim contract：verified
+- Redis Claim：not verified
+- PostgreSQL Claim：not verified
+- P0-06B：not started
+- P0-06C：not started
+还需要注意一个关键点：不能简单把 winners=100 改成 winners=1 就结束。 需要先确认所有 100 个返回结果是否都指向同一个 owner，以及 attempt、fence token 是否保持稳定。如果不同调用返回了不同 owner，才是 Fake 的并发互斥缺陷；如果全部返回同一个 owner，那么问题仅是测试把“当前 acquired 状态”误当成“本次新建成功”。
+
+在 Fake contract 通过前，继续保持当前矩阵，不运行后续阶段测试。
+
+
+17:20:53
+pi返回：不能简单把 winners=100 改成 winners=1 就结束。 需要先确认所有 100 个返回结果是否都指向同一个 owner，以及 attempt、fence token 是否保持稳定。如果不同调用返回了不同 owner，才是 Fake 的并发互斥缺陷；如果全部返回同一个 owner，那么问题仅是测试把“当前 acquired 状态”误当成“本次新建成功”。
+
+
+17:21:10
+这条返回只是确认了判断标准，尚未说明它已经修改测试或重新运行验证。因此 Fake Claim contract 仍然是 not verified，不能进入 Redis Claim。
+
+请发送下面的执行提示词：
+
+不要只复述判断，立即在当前 P0-06A 范围内执行验证。禁止修改生产代码，除非验证结果证明 Fake 违反公共 Claim contract。
+
+修改 `trpcservice/storage/claim_contract_test.go`，收集 100 个并发调用的完整结果，至少保存：
+- 请求 owner；
+- error；
+- 返回 Claim.OwnerID；
+- status；
+- attempt；
+- fence token；
+- epoch。
+
+运行测试前先保留足够的失败诊断。测试必须明确验证：
+1. 所有无错误结果的 Claim.OwnerID 是否相同；
+2. 是否存在多个不同 owner；
+3. 所有返回结果的 attempt、fence token、epoch 是否稳定；
+4. 未过期的重复 Acquire 是否错误递增 attempt 或 fence token；
+5. 是否出现 tenant、参数或其他非预期错误。
+
+不要用 `Status == ClaimAcquired` 统计 winner，也不要简单把期望值从 100 改成 1。
+
+判定规则：
+- 若所有成功结果都指向同一个 owner，且 attempt/fence token/epoch 稳定，则修正测试语义，不改 Fake 生产代码；
+- 若出现多个 owner，或未过期重复 Acquire 导致 token/attempt 不稳定，则停止修改测试，定位 Fake v2 适配器的并发互斥实现并只做最小生产修复；
+- 若存在错误，逐个按公共 Claim contract 分类，不能吞掉错误。
+
+然后运行：
+
+gofmt -w trpcservice/storage/claim_contract_test.go
+go test ./trpcservice/storage -run TestFakeCoordinationClaimContract -count=1 -v
+
+输出必须包含：
+- 是否存在多个 owner；
+- owner 集合；
+- attempt 集合；
+- fence token 集合；
+- epoch 集合；
+- error 分类；
+- 测试最终结果。
+
+只有测试真正通过后，才更新矩阵。不要运行 Redis、PostgreSQL、lease、epoch authority、FailoverStore、限流、migration 或故障注入测试。
+如果执行结果是“所有调用都返回同一个 owner，token 和 attempt 稳定”，那么应将测试从“统计 ClaimAcquired 次数”改为“验证唯一稳定 owner”，随后把 Fake contract 标记为 verified。如果结果出现多个 owner 或 token 递增，则说明 Fake 确实存在并发语义缺陷，不能通过修改测试断言掩盖。
+
+在 pi 给出实际测试结果前，矩阵保持：
+
+公共 Claim 契约：in_progress
+Fake Claim contract：not verified
+Redis Claim：not verified
+PostgreSQL Claim：not verified
+P0-06B：not started
+P0-06C：not started
+
+17:22:45
+pi返回：P0-06A Fake Claim contract 已按要求重新验证通过，未运行 Redis、PostgreSQL 或其他阶段测试。
+
+本轮只修改了 trpcservice/storage/claim_contract_test.go：
+
+收集 100 个并发调用的请求 owner、error、返回 owner、status、attempt、fence token、epoch；
+不再用 Status == ClaimAcquired 统计 winner；
+增加 owner、attempt、fence token、epoch 集合诊断；
+区分参数/tenant 错误与 unexpected error；
+验证没有多个 owner；
+验证所有成功结果指向同一个 owner；
+验证未过期重复 Acquire 不递增 attempt 或 fence token；
+保留旧 owner Complete 拒绝验证。
+执行命令：
+
+gofmt -w trpcservice/storage/claim_contract_test.go
+go test ./trpcservice/storage -run TestFakeCoordinationClaimContract -count=1 -v
+实际诊断输出：
+
+owners=map[owner-1:100]
+attempts=map[1:100]
+fences=map[1:100]
+epochs=map[1:100]
+statuses=map[acquired:100]
+errors=map[]
+测试结果：
+
+PASS
+ok github.com/liuzengh/trpc-agent-service/trpcservice/storage
+这证明当前 Fake Claim 行为符合公共 contract：100 个调用都返回同一个稳定 owner，且 attempt、fencing token、epoch 均稳定，没有 tenant、参数或其他错误。因此没有修改 Fake 生产代码。
+
+验收矩阵：
+
+公共 Claim 契约：in_progress
+Fake Claim contract：verified
+Redis Claim：not verified
+PostgreSQL Claim：not verified
+P0-06B：not started
+P0-06C：not started
+下一步仍只进入 P0-06A 的下一个 Claim backend 验证，不进入 P0-06B 或 P0-06C。
+
+
+17:23:10
+P0-06A 的 Fake Claim contract 已经真正关闭，诊断结果也足以证明当前 Fake 没有并发双 owner 问题。现在可以进入 Redis Claim，但仍然只推进这一项，不要提前进入 PostgreSQL 或 P0-06B。
+
+请向 pi 发送以下提示词：
+
+进入 P0-06A 的 Redis Claim contract，范围严格限定为 Redis Claim Acquire/重复 Acquire/过期接管/Complete/Fail/fencing 行为。
+
+先阅读现有 Redis v2 适配器、Lua 脚本、Redis 测试和公共 Claim contract，确认实际 API、脚本返回值和错误映射。复用 `trpcservice/storage/contract_test.go` 中的 `validContext("tenant-a")`，不要重新手工构造 TenantContext。
+
+测试要求：
+1. 优先使用现有 Redis client 和测试 helper；没有 helper 时只新增最小测试 helper，不修改 tenant 校验逻辑。
+2. 真实 Redis 测试使用显式 `TEST_REDIS_URL`，默认目标可以是 `redis://127.0.0.1:6379/15`，但不要硬编码生产连接。
+3. 每个测试使用随机 key prefix 或唯一 DedupKey；禁止 `FLUSHDB`；清理时只删除本测试创建的 key。
+4. 如果 `TEST_REDIS_URL` 未设置，测试可以明确跳过，但 Redis Claim 必须保持 `not verified`，不能把跳过当作通过。
+5. 先运行单调用测试，确认：
+   - 首次 Claim 无错误；
+   - status、owner、epoch、fence token 有效；
+   - 返回 backend 为 Redis；
+   - tenant 和 DedupKey 一致。
+6. 再运行 100 个并发相同 key 的 Acquire，收集每个调用的请求 owner、error、返回 owner、status、attempt、fence token 和 epoch。
+7. 不要用 `Status == ClaimAcquired` 统计 winner。验证所有成功返回是否指向同一个稳定 owner，且未过期重复 Acquire 不递增 attempt 或 fence token。
+8. 测试过期接管：新 owner 只能在过期后接管，并且 attempt 与 fence token 必须递增。
+9. 测试 fencing：旧 owner/token/epoch 的 Complete 和 Fail 必须被拒绝；新 owner 使用新 token 才能执行允许的操作。
+10. 验证 Lua 脚本错误能映射为公共 storage 错误，而不是吞错、返回 nil 或误报成功。
+
+执行顺序：
+- 先运行 Redis Claim 的最小 targeted test；
+- 根据结果只修复 Redis Claim 所需的最小生产代码或测试；
+- 再运行 Redis Claim contract 全部测试；
+- 不运行 PostgreSQL、lease、epoch authority、FailoverStore、限流、migration 或故障注入测试。
+
+如果 Redis 真实连接不可用，输出明确的 `blocked/not verified` 原因，不修改测试使其通过，也不把 Fake 的通过结果复制为 Redis 已验证。
+
+只有以下条件全部满足，才更新矩阵：
+- 真实 Redis 测试实际运行而非 skip；
+- 单调用通过；
+- 并发调用只有一个稳定 owner；
+- 未过期重复 Acquire 不错误递增 token/attempt；
+- 过期接管正确递增 token/attempt；
+- 旧 owner/token/epoch 被拒绝；
+- key 隔离和清理通过；
+- Redis Claim contract 测试通过。
+
+报告必须包含实际测试命令、是否使用真实 Redis、Redis URL 是否来自环境变量、owner/token/attempt/epoch 的诊断集合，以及错误分类。
+Redis 项开始后的矩阵应保持为：
+
+公共 Claim 契约：in_progress
+Fake Claim contract：verified
+Redis Claim：in_progress
+PostgreSQL Claim：not verified
+P0-06B：not started
+P0-06C：not started
+需要特别守住两个边界：
+
+go test 显示 Redis 测试被跳过时，Redis Claim 仍然是 not verified；只有真实 Redis 测试实际执行并通过，才能标记为 verified。
+Fake contract 已验证只说明 Fake backend 符合公共语义，不能推导 Redis Lua、Redis key schema、TTL 或脚本错误映射也已经正确。

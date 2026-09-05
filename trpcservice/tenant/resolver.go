@@ -5,20 +5,25 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 var (
-	ErrBindingNotFound = errors.New("channel binding not found")
-	ErrBindingConflict = errors.New("channel binding conflicts with another tenant")
-	ErrTenantInactive  = errors.New("tenant is not active")
-	ErrTenantMismatch  = errors.New("tenant context does not allow resource tenant")
+	ErrBindingNotFound      = errors.New("channel binding not found")
+	ErrBindingConflict      = errors.New("channel binding conflicts with another tenant")
+	ErrTenantInactive       = errors.New("tenant is not active")
+	ErrTenantMismatch       = errors.New("tenant context does not allow resource tenant")
+	ErrCallerTenantOverride = errors.New("caller tenant or binding override is not allowed")
 )
 
 type ResolveRequest struct {
+	TenantID         string
+	BindingID        string
 	Channel          string
 	ExternalAppID    string
 	ExternalUser     string
 	ExternalChat     string
+	ExternalChatType string
 	ExternalThreadID string
 	RequestID        string
 	MessageID        string
@@ -35,11 +40,23 @@ type Registry interface {
 	Binding(context.Context, string, string) (ChannelBinding, error)
 }
 
-type RegistryResolver struct{ Registry Registry }
+type RegistryResolver struct {
+	Registry       Registry
+	SecretResolver SecretResolver
+}
 
 func (r RegistryResolver) Resolve(ctx context.Context, req ResolveRequest) (TenantContext, error) {
+	if ctx == nil {
+		return TenantContext{}, errors.New("tenant resolver requires context")
+	}
 	if err := ctx.Err(); err != nil {
 		return TenantContext{}, err
+	}
+	if req.TenantID != "" || req.BindingID != "" {
+		return TenantContext{}, ErrCallerTenantOverride
+	}
+	if req.Channel != ChannelLark && req.Channel != ChannelTelegram {
+		return TenantContext{}, ErrUnsupportedBindingChannel
 	}
 	if r.Registry == nil {
 		return TenantContext{}, errors.New("tenant registry is not configured")
@@ -51,8 +68,30 @@ func (r RegistryResolver) Resolve(ctx context.Context, req ResolveRequest) (Tena
 	if binding.Channel != req.Channel || binding.ExternalAppID != req.ExternalAppID {
 		return TenantContext{}, ErrBindingNotFound
 	}
-	if err := binding.Validate(); err != nil || !binding.Enabled {
+	if err := binding.Validate(); err != nil {
+		return TenantContext{}, fmt.Errorf("%w: %w", ErrBindingNotFound, err)
+	}
+	if err := binding.IsUsableAt(time.Now().UTC()); err != nil {
+		return TenantContext{}, fmt.Errorf("%w: %w", ErrBindingNotFound, err)
+	}
+	if binding.ExternalTargetType == BindingTargetUser && binding.ExternalTargetID != req.ExternalUser {
 		return TenantContext{}, ErrBindingNotFound
+	}
+	if binding.ExternalTargetType == BindingTargetChat && binding.ExternalTargetID != req.ExternalChat {
+		return TenantContext{}, ErrBindingNotFound
+	}
+	if r.SecretResolver != nil {
+		for _, ref := range []string{binding.SecretRef, binding.VerifyTokenRef} {
+			if ref == "" {
+				continue
+			}
+			if _, secretErr := r.SecretResolver.Resolve(ctx, ref); secretErr != nil {
+				if errors.Is(secretErr, context.Canceled) || errors.Is(secretErr, context.DeadlineExceeded) {
+					return TenantContext{}, secretErr
+				}
+				return TenantContext{}, ErrBindingNotFound
+			}
+		}
 	}
 	t, err := r.Registry.Tenant(ctx, binding.TenantID)
 	if err != nil {
@@ -74,7 +113,7 @@ func (r RegistryResolver) Resolve(ctx context.Context, req ResolveRequest) (Tena
 	if agent.TenantID != t.ID {
 		return TenantContext{}, ErrTenantMismatch
 	}
-	tc := TenantContext{TenantID: t.ID, AgentAppID: agent.ID, BindingID: binding.ID, Channel: binding.Channel, ExternalUser: req.ExternalUser, ExternalChat: req.ExternalChat, ExternalThreadID: req.ExternalThreadID, RequestID: req.RequestID, MessageID: req.MessageID, TraceID: req.TraceID, ConfigVersion: t.ConfigVersion, BackendPolicy: t.Backend}
+	tc := TenantContext{TenantID: t.ID, AgentAppID: agent.ID, BindingID: binding.ID, Channel: binding.Channel, ExternalUser: req.ExternalUser, ExternalChat: req.ExternalChat, ExternalChatType: req.ExternalChatType, ExternalThreadID: req.ExternalThreadID, RequestID: req.RequestID, MessageID: req.MessageID, TraceID: req.TraceID, ConfigVersion: t.ConfigVersion, BackendPolicy: t.Backend}
 	if err := tc.Validate(); err != nil {
 		return TenantContext{}, err
 	}

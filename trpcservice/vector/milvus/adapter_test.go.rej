@@ -1,0 +1,4 @@
+--- trpcservice/vector/milvus/adapter_test.go
++++ trpcservice/vector/milvus/adapter_test.go
+@@ -352 +352,0 @@
+-		}

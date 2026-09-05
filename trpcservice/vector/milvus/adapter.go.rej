@@ -1,0 +1,9 @@
+--- trpcservice/vector/milvus/adapter.go
++++ trpcservice/vector/milvus/adapter.go
+@@ -371,3 +371,6 @@
+ 	if collection == nil || collection.Schema == nil || collection.Schema.CollectionName != cfg.Collection || collection.Schema.AutoID || collection.Schema.EnableDynamicField {
+ 		return false
+ 	}
++	if collection.Properties[propertySchemaVersion] != cfg.SchemaVersion || collection.Properties[propertyModel] != cfg.Model || collection.Properties[propertyModelVersion] != cfg.ModelVersion {
++		return false
++	}

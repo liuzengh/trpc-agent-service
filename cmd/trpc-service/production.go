@@ -24,18 +24,25 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/queue"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	pgstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/s3object"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/vector"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 )
 
 type productionRuntime struct {
+	telemetry           *telemetry.Runtime
 	pool                *pgxpool.Pool
+	objectStore         storage.ObjectStore
+	artifactRepository  storage.ArtifactMetadataRepository
 	readiness           *productionReadiness
 	resolver            tenant.TenantResolver
 	ingress             *gateway.Ingress
 	worker              *worker.Worker
 	dispatcher          *outbox.Dispatcher
+	vector              *vectorComposition
 	dispatcherStartHook func()
 	beginDrainingHook   func()
 	poolCloseOnce       sync.Once
@@ -47,8 +54,25 @@ func (r *productionRuntime) Start(ctx context.Context) error {
 	if r == nil || r.worker == nil || r.dispatcher == nil || r.readiness == nil || ctx == nil {
 		return errors.New("production runtime is not configured")
 	}
+	if r.objectStore != nil {
+		probe, ok := r.objectStore.(storage.ObjectStoreReadiness)
+		if !ok {
+			return errors.New("object storage readiness is not configured")
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+		err := probe.Ready(probeCtx)
+		cancel()
+		if err != nil {
+			return errors.New("object storage is unavailable")
+		}
+	}
 	if err := r.worker.Start(ctx); err != nil {
 		return err
+	}
+	if r.vector != nil {
+		if err := r.vector.start(ctx); err != nil {
+			return err
+		}
 	}
 	if r.dispatcherStartHook != nil {
 		r.dispatcherStartHook()
@@ -67,6 +91,9 @@ func (r *productionRuntime) Stop(ctx context.Context) error {
 	}
 	r.BeginDraining()
 	var stopErr error
+	if r.vector != nil {
+		r.vector.stopWorker(ctx)
+	}
 	if r.worker != nil {
 		if err := r.worker.Stop(ctx); err != nil && !errors.Is(err, worker.ErrNotStarted) {
 			stopErr = errors.Join(stopErr, newLifecycleError("worker", "stop", errors.Join(errProcessWorkerDrain, err)))
@@ -76,6 +103,20 @@ func (r *productionRuntime) Stop(ctx context.Context) error {
 		if err := r.dispatcher.Stop(ctx); err != nil && !errors.Is(err, outbox.ErrNotStarted) {
 			stopErr = errors.Join(stopErr, newLifecycleError("dispatcher", "stop", errors.Join(errProcessDispatcherDrain, err)))
 		}
+	}
+	if r.vector != nil {
+		r.vector.close()
+	}
+	if r.telemetry != nil {
+		// Bounded fresh contexts: the signal context may already be canceled
+		// and must not abort the final export flush.
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		r.telemetry.ForceFlush(flushCtx)
+		flushCancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_ = r.telemetry.Shutdown(shutdownCtx)
+		shutdownCancel()
+		r.telemetry.Logger().Event(context.Background(), 0, "telemetry_shutdown", "telemetry", "shutdown", "completed")
 	}
 	r.closePool()
 	return stopErr
@@ -115,6 +156,9 @@ func (r *productionRuntime) ForceClose() {
 				r.rememberForceError(err)
 			}
 		}
+		if r.vector != nil {
+			r.vector.stopWorker(ctx)
+		}
 	}()
 }
 
@@ -134,14 +178,16 @@ func (r *productionRuntime) closePool() {
 }
 
 type productionReadiness struct {
-	migration  web.ReadinessGate
-	pool       *pgxpool.Pool
-	jobQueue   queue.JobQueue
-	worker     *worker.Worker
-	dispatcher *outbox.Dispatcher
-	mu         sync.RWMutex
-	started    bool
-	draining   bool
+	migration   web.ReadinessGate
+	pool        *pgxpool.Pool
+	jobQueue    queue.JobQueue
+	worker      *worker.Worker
+	dispatcher  *outbox.Dispatcher
+	objectProbe storage.ObjectStoreReadiness
+	vectorProbe storage.ObjectStoreReadiness
+	mu          sync.RWMutex
+	started     bool
+	draining    bool
 }
 
 func (r *productionReadiness) Ready(ctx context.Context) error {
@@ -169,6 +215,22 @@ func (r *productionReadiness) Ready(ctx context.Context) error {
 		r.pool.Reset()
 		return errors.New("database dependency is unavailable")
 	}
+	if r.vectorProbe != nil {
+		vectorCtx, vectorCancel := context.WithTimeout(ctx, time.Second)
+		err := r.vectorProbe.Ready(vectorCtx)
+		vectorCancel()
+		if err != nil {
+			return errors.New("vector store dependency is unavailable")
+		}
+	}
+	if r.objectProbe != nil {
+		objectCtx, objectCancel := context.WithTimeout(ctx, time.Second)
+		err := r.objectProbe.Ready(objectCtx)
+		objectCancel()
+		if err != nil {
+			return errors.New("object storage dependency is unavailable")
+		}
+	}
 	return nil
 }
 
@@ -185,17 +247,22 @@ func (r *productionReadiness) setDraining() {
 }
 
 type bootstrapRuntimeConfig struct {
-	tenant       tenant.Tenant
-	agent        tenant.AgentApp
-	larkBinding  tenant.ChannelBinding
-	telegramBind tenant.ChannelBinding
-	larkSender   lark.Binding
-	telegramSend telegram.Binding
-	larkAppID    string
-	larkVerify   string
-	larkEncrypt  string
-	telegramHook string
-	ownerID      string
+	tenant          tenant.Tenant
+	agent           tenant.AgentApp
+	larkBinding     tenant.ChannelBinding
+	telegramBind    tenant.ChannelBinding
+	larkSender      lark.Binding
+	telegramSend    telegram.Binding
+	larkAppID       string
+	larkVerify      string
+	larkEncrypt     string
+	telegramHook    string
+	ownerID         string
+	objectBackend   string
+	objectConfig    s3object.Config
+	larkEnabled     bool
+	telegramEnabled bool
+	secretResolver  tenant.SecretResolver
 }
 
 type bootstrapResolver struct {
@@ -213,17 +280,22 @@ func newBootstrapResolver(config bootstrapRuntimeConfig) (*bootstrapResolver, er
 	if config.agent.TenantID != config.tenant.ID || config.agent.ID != config.tenant.DefaultAgentID || config.agent.Version != config.tenant.ConfigVersion {
 		return nil, errors.New("bootstrap agent does not match tenant")
 	}
+	bindings := make(map[string]tenant.ChannelBinding, 2)
 	for _, binding := range []tenant.ChannelBinding{config.larkBinding, config.telegramBind} {
-		if err := binding.Validate(); err != nil || binding.TenantID != config.tenant.ID || !binding.Enabled {
+		if !binding.Enabled {
+			continue
+		}
+		if err := binding.Validate(); err != nil || binding.TenantID != config.tenant.ID {
 			return nil, errors.New("bootstrap binding is invalid")
 		}
+		key := binding.Channel + "|" + binding.ExternalAppID
+		if _, exists := bindings[key]; exists {
+			return nil, errors.New("bootstrap binding conflicts")
+		}
+		bindings[key] = binding
 	}
-	return &bootstrapResolver{config: config, bindings: map[string]tenant.ChannelBinding{
-		config.larkBinding.Channel + "|" + config.larkBinding.ExternalAppID:   config.larkBinding,
-		config.telegramBind.Channel + "|" + config.telegramBind.ExternalAppID: config.telegramBind,
-	}}, nil
+	return &bootstrapResolver{config: config, bindings: bindings}, nil
 }
-
 func (r *bootstrapResolver) Resolve(ctx context.Context, req tenant.ResolveRequest) (tenant.TenantContext, error) {
 	if err := ctx.Err(); err != nil {
 		return tenant.TenantContext{}, err
@@ -283,6 +355,14 @@ type productionAssemblyDependencies struct {
 	dispatcherStartHook func()
 	completionHook      func()
 	outboxCompletedHook func()
+	// VectorEmbedder/VectorStore/VectorLeases are explicit vector composition
+	// seams. Production default is nil: enabled vector configuration without a
+	// production Embedder fails closed instead of falling back to a fake.
+	VectorEmbedder vector.EmbeddingProvider
+	VectorStore    vector.VectorStore
+	VectorLeases   storage.LeaseStore
+	Telemetry      *telemetry.Runtime
+	WebMiddleware  func(http.Handler) http.Handler
 }
 
 type productionCompletionObserver struct {
@@ -335,11 +415,19 @@ func assembleProduction(ctx context.Context, responder platformRuntimeResponder)
 // replaces request execution and channel transport; all durable production
 // components still come from the composition root below.
 func assembleProductionWithDependencies(ctx context.Context, responder platformRuntimeResponder, dependencies productionAssemblyDependencies) (*productionRuntime, error) {
+	telemetryRuntime, telemetryErr := assembleTelemetry(ctx, dependencies)
+	if telemetryErr != nil {
+		return nil, telemetryErr
+	}
 	config, err := loadBootstrapRuntimeConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	resolver, err := newBootstrapResolver(config)
+	objectStore, objectProbe, err := newProductionObjectStore(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	bootstrapResolver, err := newBootstrapResolver(config)
 	if err != nil {
 		return nil, err
 	}
@@ -364,11 +452,21 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 		return nil, errors.New("database pool initialization failed")
 	}
 	closeOnError := true
+	metadataRegistry, err := pgstore.NewTenantRegistry(pool)
+	if err != nil {
+		return nil, errors.New("tenant metadata repository initialization failed")
+	}
+	resolver := tenant.RegistryResolver{Registry: metadataRegistry, SecretResolver: config.secretResolver}
+	identityResolver := tenant.RepositoryIdentityResolver{Repository: metadataRegistry}
 	defer func() {
 		if closeOnError {
 			pool.Close()
 		}
 	}()
+	artifactRepository, err := pgstore.NewArtifactMetadataRepository(pool, objectStore)
+	if err != nil {
+		return nil, errors.New("artifact metadata initialization failed")
+	}
 	coordination, err := pgstore.NewCoordinationStore(pool)
 	if err != nil {
 		return nil, errors.New("coordination initialization failed")
@@ -424,28 +522,35 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 		CleanupTimeout:     lifecycleDuration("WORKER_CLEANUP_TIMEOUT", 5*time.Second),
 		LeaseRenewInterval: 0,
 		RetryDelay:         lifecycleDuration("WORKER_RETRY_DELAY", 5*time.Second),
-		ResolveAgent:       bootstrapAgentResolver{resolver: resolver},
+		ResolveAgent:       bootstrapAgentResolver{resolver: bootstrapResolver},
+	}
+	if dependencies.Telemetry != nil {
+		workerConfig.Telemetry = dependencies.Telemetry
 	}
 	durableWorker, err := worker.NewWithAtomicCompletion(jobQueue, executor, workerConfig, completion)
 	if err != nil {
 		return nil, errors.New("worker initialization failed")
 	}
 	var larkSender channels.Sender
-	if dependencies.larkSender != nil {
-		larkSender = dependencies.larkSender
-	} else {
-		larkSender, err = newProductionLarkSender(config)
-		if err != nil {
-			return nil, err
+	if config.larkBinding.Enabled {
+		if dependencies.larkSender != nil {
+			larkSender = dependencies.larkSender
+		} else {
+			larkSender, err = newProductionLarkSender(config)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	var telegramSender channels.Sender
-	if dependencies.telegramSender != nil {
-		telegramSender = dependencies.telegramSender
-	} else {
-		telegramSender, err = newProductionTelegramSender(config)
-		if err != nil {
-			return nil, err
+	if config.telegramBind.Enabled {
+		if dependencies.telegramSender != nil {
+			telegramSender = dependencies.telegramSender
+		} else {
+			telegramSender, err = newProductionTelegramSender(config)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	channelSender, err := outbox.NewChannelSender(channels.SenderFunc(func(sendCtx context.Context, message storage.OutboxMessage) channels.SenderOutcome {
@@ -455,8 +560,14 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 		}
 		switch payload.Payload.Channel {
 		case lark.Channel:
+			if larkSender == nil {
+				return channels.SenderOutcome{Class: channels.OutcomePermanentFailure, Code: channels.LarkSenderNotConfiguredCode}
+			}
 			return larkSender.Send(sendCtx, message)
 		case telegram.Channel:
+			if telegramSender == nil {
+				return channels.SenderOutcome{Class: channels.OutcomePermanentFailure, Code: channels.TelegramSenderNotConfiguredCode}
+			}
 			return telegramSender.Send(sendCtx, message)
 		default:
 			return channels.SenderOutcome{Class: channels.OutcomePermanentFailure, Code: channels.SenderUnknownChannelCode}
@@ -466,55 +577,85 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 		return nil, errors.New("channel sender initialization failed")
 	}
 	dispatcher, err := outbox.NewDispatcher(oRepository, channelSender, outbox.Config{
-		OwnerID:         config.ownerID,
-		Tenants:         []tenant.TenantContext{baseTenantContext(config)},
-		ClaimInterval:   lifecycleDuration("DISPATCHER_CLAIM_INTERVAL", time.Second),
-		ShutdownTimeout: lifecycleDuration("DISPATCHER_SHUTDOWN_TIMEOUT", 5*time.Second),
+		OwnerID: config.ownerID, Tenants: []tenant.TenantContext{baseTenantContext(config)}, ClaimInterval: lifecycleDuration("DISPATCHER_CLAIM_INTERVAL", time.Second), ShutdownTimeout: lifecycleDuration("DISPATCHER_SHUTDOWN_TIMEOUT", 5*time.Second),
 	})
 	if err != nil {
 		return nil, errors.New("dispatcher initialization failed")
 	}
-	larkWebhook, err := lark.NewWebhookAdapter(lark.WebhookConfig{Binding: config.larkSender, VerificationToken: config.larkVerify, EncryptKey: config.larkEncrypt})
-	if err != nil {
-		return nil, errors.New("Lark webhook initialization failed")
+	adapters := make(map[string]gateway.WebhookAdapter, 2)
+	if config.larkBinding.Enabled {
+		larkWebhook, webhookErr := lark.NewWebhookAdapter(lark.WebhookConfig{Binding: config.larkSender, VerificationToken: config.larkVerify, EncryptKey: config.larkEncrypt})
+		if webhookErr != nil {
+			return nil, errors.New("Lark webhook initialization failed")
+		}
+		adapters[lark.Channel] = larkWebhook
 	}
-	telegramWebhook, err := telegram.NewWebhookAdapter(telegram.WebhookConfig{Binding: config.telegramSend, Secret: config.telegramHook})
-	if err != nil {
-		return nil, errors.New("Telegram webhook initialization failed")
+	if config.telegramBind.Enabled {
+		telegramWebhook, webhookErr := telegram.NewWebhookAdapter(telegram.WebhookConfig{Binding: config.telegramSend, Secret: config.telegramHook})
+		if webhookErr != nil {
+			return nil, errors.New("Telegram webhook initialization failed")
+		}
+		adapters[telegram.Channel] = &telegramWebhookAdapter{inner: telegramWebhook}
 	}
 	asyncGateway, err := gateway.New(jobQueue)
 	if err != nil {
 		return nil, errors.New("gateway initialization failed")
 	}
-	ingress, err := gateway.NewIngress(gateway.IngressConfig{
-		Resolver: resolver, Claims: coordination, Gateway: asyncGateway, ResolveAgent: resolver.agentSpec,
-		Adapters: map[string]gateway.WebhookAdapter{lark.Channel: larkWebhook, telegram.Channel: &telegramWebhookAdapter{inner: telegramWebhook}},
-		OwnerID:  config.ownerID,
-	})
+	if dependencies.Telemetry != nil {
+		asyncGateway.WithTelemetry(dependencies.Telemetry)
+	}
+	ingress, err := gateway.NewIngress(gateway.IngressConfig{Claims: coordination, Gateway: asyncGateway, Resolver: resolver, Identity: identityResolver, Audit: metadataRegistry, ResolveAgent: bootstrapResolver.agentSpec, Adapters: adapters, OwnerID: config.ownerID})
 	if err != nil {
 		return nil, errors.New("webhook ingress initialization failed")
 	}
+	vectorRuntime, vectorErr := assembleVectorComposition(ctx, vectorCompositionInput{pool: pool, ownerID: config.ownerID, secret: config.secretResolver, dependencies: &dependencies})
+	if vectorErr != nil {
+		return nil, vectorErr
+	}
+	var vectorProbe storage.ObjectStoreReadiness
+	if vectorRuntime != nil {
+		vectorProbe = vectorRuntime.store
+	}
 	runtime := &productionRuntime{
-		pool: pool, resolver: resolver, ingress: ingress, worker: durableWorker, dispatcher: dispatcher,
+		telemetry: telemetryRuntime,
+		pool:      pool, objectStore: objectStore, artifactRepository: artifactRepository, resolver: resolver, ingress: ingress, worker: durableWorker, dispatcher: dispatcher, vector: vectorRuntime,
 		dispatcherStartHook: dependencies.dispatcherStartHook,
 		readiness: &productionReadiness{
-			migration: migrationReady, pool: pool, jobQueue: jobQueue, worker: durableWorker, dispatcher: dispatcher,
+			migration: migrationReady, pool: pool, jobQueue: jobQueue, worker: durableWorker, dispatcher: dispatcher, objectProbe: objectProbe, vectorProbe: vectorProbe,
 		},
 	}
 	closeOnError = false
 	return runtime, nil
 }
 
-// platformRuntimeResponder keeps production assembly independent of the
-// concrete responder's construction details while retaining the existing
-// synchronous /api/chat responder.
 type platformRuntimeResponder interface {
 	Factory() agent.AgentFactory
+}
+
+// TelemetryWebMiddleware exposes the optional HTTP observability middleware
+// for the serving layer. Nil when telemetry is disabled.
+func (r *productionRuntime) TelemetryWebMiddleware() func(http.Handler) http.Handler {
+	if r == nil || r.telemetry == nil {
+		return nil
+	}
+	return r.telemetry.HTTPMiddleware
 }
 
 type runtimeResponderAdapter struct{ value platform.RuntimeResponder }
 
 func (r runtimeResponderAdapter) Factory() agent.AgentFactory { return r.value.Factory }
+
+func optionalBoolEnv(name string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, errors.New(name + " is invalid")
+	}
+	return parsed, nil
+}
 
 func loadBootstrapRuntimeConfig(ctx context.Context) (bootstrapRuntimeConfig, error) {
 	if ctx == nil {
@@ -526,44 +667,155 @@ func loadBootstrapRuntimeConfig(ctx context.Context) (bootstrapRuntimeConfig, er
 	}
 	tenantID := requiredEnv("BOOTSTRAP_TENANT_ID")
 	agentID := requiredEnv("BOOTSTRAP_AGENT_APP_ID")
-	larkAppID := requiredEnv("BOOTSTRAP_LARK_APP_ID")
+	larkEnabled, err := optionalBoolEnv("BOOTSTRAP_LARK_ENABLED", false)
+	if err != nil {
+		return bootstrapRuntimeConfig{}, err
+	}
+	telegramEnabled, err := optionalBoolEnv("BOOTSTRAP_TELEGRAM_ENABLED", false)
+	if err != nil {
+		return bootstrapRuntimeConfig{}, err
+	}
 	larkBindingID := requiredEnv("BOOTSTRAP_LARK_BINDING_ID")
 	telegramBindingID := requiredEnv("BOOTSTRAP_TELEGRAM_BINDING_ID")
 	larkExternalAppID := requiredEnv("BOOTSTRAP_LARK_EXTERNAL_APP_ID")
 	telegramExternalAppID := requiredEnv("BOOTSTRAP_TELEGRAM_EXTERNAL_APP_ID")
+	larkAppID := requiredEnv("BOOTSTRAP_LARK_APP_ID")
 	larkSecretRef := requiredEnv("BOOTSTRAP_LARK_APP_SECRET_REF")
 	telegramTokenRef := requiredEnv("BOOTSTRAP_TELEGRAM_BOT_TOKEN_REF")
 	telegramWebhookRef := requiredEnv("BOOTSTRAP_TELEGRAM_WEBHOOK_SECRET_REF")
-	larkVerify, err := resolveEnvSecret(ctx, requiredEnv("BOOTSTRAP_LARK_VERIFY_TOKEN_REF"))
-	if err != nil {
-		return bootstrapRuntimeConfig{}, errors.New("Lark verification token is unavailable")
+	larkVerifyRef := requiredEnv("BOOTSTRAP_LARK_VERIFY_TOKEN_REF")
+	larkEncryptRef := requiredEnv("BOOTSTRAP_LARK_ENCRYPT_KEY_REF")
+	if larkEnabled && (larkAppID == "" || larkSecretRef == "" || larkVerifyRef == "" || larkEncryptRef == "") {
+		return bootstrapRuntimeConfig{}, errors.New("Lark enabled configuration is incomplete")
 	}
-	larkEncrypt, err := resolveEnvSecret(ctx, requiredEnv("BOOTSTRAP_LARK_ENCRYPT_KEY_REF"))
-	if err != nil {
-		return bootstrapRuntimeConfig{}, errors.New("Lark encryption key is unavailable")
+	if telegramEnabled && (telegramTokenRef == "" || telegramWebhookRef == "") {
+		return bootstrapRuntimeConfig{}, errors.New("Telegram enabled configuration is incomplete")
 	}
-	telegramHook, err := resolveEnvSecret(ctx, telegramWebhookRef)
-	if err != nil {
-		return bootstrapRuntimeConfig{}, errors.New("Telegram webhook secret is unavailable")
+	secretResolver := tenant.EnvironmentSecretResolver{}
+	var larkVerify, larkEncrypt, telegramHook string
+	if larkEnabled {
+		if _, err = secretResolver.Resolve(ctx, larkSecretRef); err != nil {
+			return bootstrapRuntimeConfig{}, errors.New("Lark app secret is unavailable")
+		}
+		larkVerify, err = secretResolver.Resolve(ctx, larkVerifyRef)
+		if err != nil {
+			return bootstrapRuntimeConfig{}, errors.New("Lark verification token is unavailable")
+		}
+		larkEncrypt, err = secretResolver.Resolve(ctx, larkEncryptRef)
+		if err != nil {
+			return bootstrapRuntimeConfig{}, errors.New("Lark encryption key is unavailable")
+		}
 	}
-	larkSenderBinding := lark.Binding{TenantID: tenantID, BindingID: larkBindingID, Channel: lark.Channel, AppID: larkAppID, SecretRef: larkSecretRef, ReceiverIDType: requiredEnv("BOOTSTRAP_LARK_RECEIVER_ID_TYPE"), Enabled: true}
-	telegramSenderBinding := telegram.Binding{TenantID: tenantID, BindingID: telegramBindingID, Channel: telegram.Channel, BotTokenSecretRef: telegramTokenRef, WebhookSecretRef: telegramWebhookRef, Enabled: true}
+	if telegramEnabled {
+		if _, err = secretResolver.Resolve(ctx, telegramTokenRef); err != nil {
+			return bootstrapRuntimeConfig{}, errors.New("Telegram bot token is unavailable")
+		}
+		telegramHook, err = secretResolver.Resolve(ctx, telegramWebhookRef)
+		if err != nil {
+			return bootstrapRuntimeConfig{}, errors.New("Telegram webhook secret is unavailable")
+		}
+	}
+	objectBackend := strings.ToLower(strings.TrimSpace(env("BOOTSTRAP_OBJECT_BACKEND", "none")))
+	objectConfig, err := loadProductionObjectConfigWithResolver(ctx, objectBackend, secretResolver)
+	if err != nil {
+		return bootstrapRuntimeConfig{}, err
+	}
+	larkSenderBinding := lark.Binding{TenantID: tenantID, BindingID: larkBindingID, Channel: lark.Channel, AppID: larkAppID, SecretRef: larkSecretRef, ReceiverIDType: requiredEnv("BOOTSTRAP_LARK_RECEIVER_ID_TYPE"), Enabled: larkEnabled}
+	telegramSenderBinding := telegram.Binding{TenantID: tenantID, BindingID: telegramBindingID, Channel: telegram.Channel, BotTokenSecretRef: telegramTokenRef, WebhookSecretRef: telegramWebhookRef, Enabled: telegramEnabled}
+	larkBinding := tenant.ChannelBinding{TenantID: tenantID, ID: larkBindingID, Channel: lark.Channel, ExternalAppID: larkExternalAppID, SecretRef: larkSecretRef, VerifyTokenRef: larkVerifyRef, Enabled: larkEnabled}
+	telegramBinding := tenant.ChannelBinding{TenantID: tenantID, ID: telegramBindingID, Channel: telegram.Channel, ExternalAppID: telegramExternalAppID, SecretRef: telegramTokenRef, VerifyTokenRef: telegramWebhookRef, Enabled: telegramEnabled}
 	return bootstrapRuntimeConfig{
-		tenant:       tenant.Tenant{ID: tenantID, Name: requiredEnv("BOOTSTRAP_TENANT_NAME"), Status: tenant.StatusActive, ConfigVersion: version, DefaultAgentID: agentID, Backend: tenant.BackendPolicy{Session: "postgres", Memory: "postgres", Vector: "none", Object: "none"}},
-		agent:        tenant.AgentApp{TenantID: tenantID, ID: agentID, Name: requiredEnv("BOOTSTRAP_AGENT_NAME"), Version: version, Status: tenant.StatusActive, ModelConfigRef: env("MODEL_CONFIG_REF", "env"), SystemPrompt: os.Getenv("BOOTSTRAP_AGENT_SYSTEM_PROMPT"), ToolPolicyID: env("TOOL_POLICY_REF", "default"), GuardrailRef: os.Getenv("GUARDRAIL_REF")},
-		larkBinding:  tenant.ChannelBinding{TenantID: tenantID, ID: larkBindingID, Channel: lark.Channel, ExternalAppID: larkExternalAppID, SecretRef: larkSecretRef, VerifyTokenRef: requiredEnv("BOOTSTRAP_LARK_VERIFY_TOKEN_REF"), Enabled: true},
-		telegramBind: tenant.ChannelBinding{TenantID: tenantID, ID: telegramBindingID, Channel: telegram.Channel, ExternalAppID: telegramExternalAppID, SecretRef: telegramTokenRef, VerifyTokenRef: telegramWebhookRef, Enabled: true},
-		larkSender:   larkSenderBinding, telegramSend: telegramSenderBinding, larkAppID: larkAppID, larkVerify: larkVerify, larkEncrypt: larkEncrypt, telegramHook: telegramHook, ownerID: requiredEnv("ASYNC_OWNER_ID"),
+		tenant:      tenant.Tenant{ID: tenantID, Name: requiredEnv("BOOTSTRAP_TENANT_NAME"), Status: tenant.StatusActive, ConfigVersion: version, DefaultAgentID: agentID, Backend: tenant.BackendPolicy{Session: "postgres", Memory: "postgres", Vector: "none", Object: objectBackend}},
+		agent:       tenant.AgentApp{TenantID: tenantID, ID: agentID, Name: requiredEnv("BOOTSTRAP_AGENT_NAME"), Version: version, Status: tenant.StatusActive, ModelConfigRef: env("MODEL_CONFIG_REF", "env"), SystemPrompt: os.Getenv("BOOTSTRAP_AGENT_SYSTEM_PROMPT"), ToolPolicyID: env("TOOL_POLICY_REF", "default"), GuardrailRef: os.Getenv("GUARDRAIL_REF")},
+		larkBinding: larkBinding, telegramBind: telegramBinding,
+		larkSender: larkSenderBinding, telegramSend: telegramSenderBinding, larkAppID: larkAppID, larkVerify: larkVerify, larkEncrypt: larkEncrypt, telegramHook: telegramHook, ownerID: requiredEnv("ASYNC_OWNER_ID"), objectBackend: objectBackend, objectConfig: objectConfig, secretResolver: secretResolver, larkEnabled: larkEnabled, telegramEnabled: telegramEnabled,
 	}, nil
 }
 
+func loadProductionObjectConfig(ctx context.Context, backend string) (s3object.Config, error) {
+	return loadProductionObjectConfigWithResolver(ctx, backend, tenant.EnvironmentSecretResolver{})
+}
+
+func loadProductionObjectConfigWithResolver(ctx context.Context, backend string, secrets tenant.SecretResolver) (s3object.Config, error) {
+	if ctx == nil {
+		return s3object.Config{}, errors.New("object storage configuration requires context")
+	}
+	if secrets == nil {
+		return s3object.Config{}, errors.New("object storage secret resolver is not configured")
+	}
+	backend = strings.ToLower(strings.TrimSpace(backend))
+	switch backend {
+	case "", "none":
+		return s3object.Config{}, nil
+	case "s3":
+		endpoint := requiredEnv("OBJECT_ENDPOINT")
+		region := requiredEnv("OBJECT_REGION")
+		bucket := requiredEnv("OBJECT_BUCKET")
+		accessRef := requiredEnv("OBJECT_ACCESS_KEY_REF")
+		secretRef := requiredEnv("OBJECT_SECRET_KEY_REF")
+		if endpoint == "" || region == "" || bucket == "" || accessRef == "" || secretRef == "" {
+			return s3object.Config{}, errors.New("object storage configuration is incomplete")
+		}
+		accessKey, err := secrets.Resolve(ctx, accessRef)
+		if err != nil {
+			return s3object.Config{}, errors.New("object access credential is unavailable")
+		}
+		secretKey, err := secrets.Resolve(ctx, secretRef)
+		if err != nil {
+			return s3object.Config{}, errors.New("object secret credential is unavailable")
+		}
+		cfg := s3object.Config{Endpoint: endpoint, Region: region, Bucket: bucket, AccessKey: accessKey, SecretKey: secretKey}
+		if raw := strings.TrimSpace(os.Getenv("OBJECT_USE_PATH_STYLE")); raw != "" {
+			cfg.UsePathStyle, err = strconv.ParseBool(raw)
+			if err != nil {
+				return s3object.Config{}, errors.New("OBJECT_USE_PATH_STYLE is invalid")
+			}
+		}
+		if raw := strings.TrimSpace(os.Getenv("OBJECT_MAX_BYTES")); raw != "" {
+			cfg.MaxObjectBytes, err = strconv.ParseInt(raw, 10, 64)
+			if err != nil || cfg.MaxObjectBytes < 1 {
+				return s3object.Config{}, errors.New("OBJECT_MAX_BYTES is invalid")
+			}
+		}
+		if raw := strings.TrimSpace(os.Getenv("OBJECT_PRESIGN_MAX_TTL")); raw != "" {
+			cfg.PresignMaxTTL, err = time.ParseDuration(raw)
+			if err != nil || cfg.PresignMaxTTL <= 0 {
+				return s3object.Config{}, errors.New("OBJECT_PRESIGN_MAX_TTL is invalid")
+			}
+		}
+		return cfg, nil
+	default:
+		return s3object.Config{}, errors.New("BOOTSTRAP_OBJECT_BACKEND is unsupported")
+	}
+}
+
+func newProductionObjectStore(ctx context.Context, config bootstrapRuntimeConfig) (storage.ObjectStore, storage.ObjectStoreReadiness, error) {
+	if ctx == nil {
+		return nil, nil, errors.New("object storage initialization requires context")
+	}
+	switch config.objectBackend {
+	case "", "none":
+		return nil, nil, nil
+	case "s3":
+		store, err := s3object.New(config.objectConfig)
+		if err != nil {
+			return nil, nil, errors.New("object storage initialization failed")
+		}
+		return store, store, nil
+	default:
+		return nil, nil, errors.New("object storage backend is unsupported")
+	}
+}
+
 func newProductionLarkSender(config bootstrapRuntimeConfig) (*lark.Sender, error) {
+	if config.secretResolver == nil {
+		return nil, errors.New("Lark secret resolver is not configured")
+	}
 	client, err := productionChannelHTTPClient()
 	if err != nil {
 		return nil, err
 	}
-	resolver := lark.SecretResolverFunc(resolveEnvSecret)
-	tokens, err := lark.NewHTTPAccessTokenResolver(lark.TokenResolverConfig{Secrets: resolver, Client: client})
+	tokens, err := lark.NewHTTPAccessTokenResolver(lark.TokenResolverConfig{Secrets: config.secretResolver, Client: client})
 	if err != nil {
 		return nil, errors.New("Lark token resolver initialization failed")
 	}
@@ -571,12 +823,15 @@ func newProductionLarkSender(config bootstrapRuntimeConfig) (*lark.Sender, error
 }
 
 func newProductionTelegramSender(config bootstrapRuntimeConfig) (*telegram.Sender, error) {
+	if config.secretResolver == nil {
+		return nil, errors.New("Telegram secret resolver is not configured")
+	}
 	client, err := productionChannelHTTPClient()
 	if err != nil {
 		return nil, err
 	}
 	return telegram.NewSender(telegram.SenderConfig{Bindings: []telegram.Binding{config.telegramSend}, Tokens: telegram.TokenResolverFunc(func(ctx context.Context, binding telegram.Binding) (string, error) {
-		return resolveEnvSecret(ctx, binding.BotTokenSecretRef)
+		return config.secretResolver.Resolve(ctx, binding.BotTokenSecretRef)
 	}), Client: client})
 }
 
@@ -617,7 +872,14 @@ func (t routedProviderTransport) RoundTrip(request *http.Request) (*http.Respons
 }
 
 func baseTenantContext(config bootstrapRuntimeConfig) tenant.TenantContext {
-	return tenant.TenantContext{TenantID: config.tenant.ID, AgentAppID: config.agent.ID, BindingID: config.larkBinding.ID, Channel: lark.Channel, RequestID: "bootstrap-request", MessageID: "bootstrap-message", TraceID: "bootstrap-trace", ConfigVersion: config.tenant.ConfigVersion, BackendPolicy: config.tenant.Backend}
+	binding := config.larkBinding
+	if !binding.Enabled {
+		binding = config.telegramBind
+	}
+	if binding.ID == "" || binding.Channel == "" {
+		return tenant.TenantContext{TenantID: config.tenant.ID, AgentAppID: config.agent.ID, BindingID: "disabled-bootstrap-binding", Channel: "disabled", RequestID: "bootstrap-request", MessageID: "bootstrap-message", TraceID: "bootstrap-trace", ConfigVersion: config.tenant.ConfigVersion, BackendPolicy: config.tenant.Backend}
+	}
+	return tenant.TenantContext{TenantID: config.tenant.ID, AgentAppID: config.agent.ID, BindingID: binding.ID, Channel: binding.Channel, RequestID: "bootstrap-request", MessageID: "bootstrap-message", TraceID: "bootstrap-trace", ConfigVersion: config.tenant.ConfigVersion, BackendPolicy: config.tenant.Backend}
 }
 
 type telegramWebhookAdapter struct{ inner *telegram.WebhookAdapter }
@@ -635,25 +897,11 @@ func (a *telegramWebhookAdapter) Parse(body []byte) (channels.Incoming, error) {
 	if incoming.MessageThreadID != nil {
 		threadID = strconv.FormatInt(*incoming.MessageThreadID, 10)
 	}
-	return channels.Incoming{ID: strconv.FormatInt(incoming.UpdateID, 10), Channel: telegram.Channel, UserID: strconv.FormatInt(incoming.UserID, 10), ChatID: strconv.FormatInt(incoming.ChatID, 10), ThreadID: threadID, Text: incoming.Text}, nil
+	return channels.Incoming{ID: strconv.FormatInt(incoming.UpdateID, 10), Channel: telegram.Channel, UserID: strconv.FormatInt(incoming.UserID, 10), ChatID: strconv.FormatInt(incoming.ChatID, 10), ThreadID: threadID, ChatType: incoming.ChatType, Text: incoming.Text}, nil
 }
 
 func resolveEnvSecret(ctx context.Context, ref string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if !strings.HasPrefix(ref, "env://") || len(ref) <= len("env://") {
-		return "", errors.New("secret reference is not an environment reference")
-	}
-	name := strings.TrimPrefix(ref, "env://")
-	if strings.ContainsAny(name, "\r\n\x00") {
-		return "", errors.New("secret reference is invalid")
-	}
-	value := os.Getenv(name)
-	if value == "" {
-		return "", errors.New("secret is unavailable")
-	}
-	return value, nil
+	return tenant.EnvironmentSecretResolver{}.Resolve(ctx, ref)
 }
 
 func requiredEnv(name string) string {

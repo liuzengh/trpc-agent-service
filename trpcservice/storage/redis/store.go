@@ -120,7 +120,7 @@ func (s *Store) Acquire(ctx context.Context, tc tenant.TenantContext, resource, 
 	if err != nil {
 		return storage.Lease{}, err
 	}
-	l, err := s.Backend.Acquire(ctx, tc, LeaseSession, resource, owner, ttl)
+	l, err := s.Backend.acquireWithEpoch(ctx, tc, LeaseSession, resource, owner, ttl, epoch)
 	if err != nil {
 		return storage.Lease{}, mapLeaseError(err)
 	}
@@ -134,7 +134,7 @@ func (s *Store) Renew(ctx context.Context, tc tenant.TenantContext, l storage.Le
 	if err := s.validateLeaseEpoch(ctx, tc, l.ResourceID, l.Epoch); err != nil {
 		return l, err
 	}
-	updated, err := s.Backend.Renew(ctx, Lease{Kind: LeaseSession, TenantID: l.TenantID, ResourceID: l.ResourceID, OwnerID: l.OwnerID, FenceToken: l.FenceToken, ExpiresAt: l.ExpiresAt}, ttl)
+	updated, err := s.Backend.Renew(ctx, Lease{Kind: LeaseSession, TenantID: l.TenantID, ResourceID: l.ResourceID, OwnerID: l.OwnerID, FenceToken: l.FenceToken, ExpiresAt: l.ExpiresAt, Epoch: l.Epoch}, ttl)
 	if err != nil {
 		return l, mapLeaseError(err)
 	}
@@ -149,7 +149,7 @@ func (s *Store) Release(ctx context.Context, tc tenant.TenantContext, l storage.
 	if err := s.validateLeaseEpoch(ctx, tc, l.ResourceID, l.Epoch); err != nil {
 		return err
 	}
-	return mapLeaseError(s.Backend.Release(ctx, Lease{Kind: LeaseSession, TenantID: l.TenantID, ResourceID: l.ResourceID, OwnerID: l.OwnerID, FenceToken: l.FenceToken, ExpiresAt: l.ExpiresAt}))
+	return mapLeaseError(s.Backend.Release(ctx, Lease{Kind: LeaseSession, TenantID: l.TenantID, ResourceID: l.ResourceID, OwnerID: l.OwnerID, FenceToken: l.FenceToken, ExpiresAt: l.ExpiresAt, Epoch: l.Epoch}))
 }
 
 func (s *Store) Validate(ctx context.Context, tc tenant.TenantContext, l storage.Lease) error {
@@ -159,7 +159,7 @@ func (s *Store) Validate(ctx context.Context, tc tenant.TenantContext, l storage
 	if err := s.validateLeaseEpoch(ctx, tc, l.ResourceID, l.Epoch); err != nil {
 		return err
 	}
-	return mapLeaseError(s.Backend.Validate(ctx, Lease{Kind: LeaseSession, TenantID: l.TenantID, ResourceID: l.ResourceID, OwnerID: l.OwnerID, FenceToken: l.FenceToken, ExpiresAt: l.ExpiresAt}))
+	return mapLeaseError(s.Backend.Validate(ctx, Lease{Kind: LeaseSession, TenantID: l.TenantID, ResourceID: l.ResourceID, OwnerID: l.OwnerID, FenceToken: l.FenceToken, ExpiresAt: l.ExpiresAt, Epoch: l.Epoch}))
 }
 
 var _ storage.ClaimStore = (*Store)(nil)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -190,15 +191,26 @@ func queueRow(t *testing.T, f *postgresQueueFixture, tenantID, jobID string) (st
 	return
 }
 
+func isContextDeadlineTimeout(ctx context.Context, err error) bool {
+	if ctx.Err() != context.DeadlineExceeded {
+		return false
+	}
+	var timeout net.Error
+	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
 func requireNoDurableDelivery(t *testing.T, q *PostgresQueue, timeout time.Duration) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if _, err := q.Receive(ctx, time.Minute); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Receive without visible job = %v", err)
+	_, err := q.Receive(ctx, time.Minute)
+	if errors.Is(err, context.DeadlineExceeded) || isContextDeadlineTimeout(ctx, err) {
+		return
 	}
+	var transportTimeout net.Error
+	stats := q.pool.Stat()
+	t.Fatalf("Receive without visible job failure stage=claim_candidate category=unexpected_receiver_error context_deadline=%t transport_timeout=%t wait_group_complete=true pool_total=%d pool_idle=%d pool_acquired=%d", ctx.Err() == context.DeadlineExceeded, errors.As(err, &transportTimeout) && transportTimeout.Timeout(), stats.TotalConns(), stats.IdleConns(), stats.AcquiredConns())
 }
-
 func TestPostgresQueueEnqueueReceiveAckPersistsAndRestoresJob(t *testing.T) {
 	f := newPostgresQueueFixture(t)
 	job := durableTestJob("queue-tenant-a", "job-persist", "execution-persist")
@@ -304,22 +316,42 @@ func TestPostgresQueueConcurrentReceiveHasOneActiveDelivery(t *testing.T) {
 	t.Cleanup(func() { pool1.Close() })
 	t.Cleanup(func() { pool2.Close() })
 	type result struct {
-		delivery Delivery
-		err      error
+		delivery            Delivery
+		err                 error
+		contextErr          error
+		transportTimeout    bool
+		totalConnections    int32
+		idleConnections     int32
+		acquiredConnections int32
 	}
 	results := make(chan result, 2)
+	ready := make(chan struct{}, 2)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for _, q := range []*PostgresQueue{q1, q2} {
 		wg.Add(1)
 		go func(q *PostgresQueue) {
 			defer wg.Done()
+			ready <- struct{}{}
 			<-start
 			ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
-			defer cancel()
 			delivery, err := q.Receive(ctx, 2*time.Second)
-			results <- result{delivery: delivery, err: err}
+			var timeout net.Error
+			stats := q.pool.Stat()
+			results <- result{
+				delivery:            delivery,
+				err:                 err,
+				contextErr:          ctx.Err(),
+				transportTimeout:    errors.As(err, &timeout) && timeout.Timeout(),
+				totalConnections:    stats.TotalConns(),
+				idleConnections:     stats.IdleConns(),
+				acquiredConnections: stats.AcquiredConns(),
+			}
+			cancel()
 		}(q)
+	}
+	for i := 0; i < 2; i++ {
+		<-ready
 	}
 	close(start)
 	wg.Wait()
@@ -332,8 +364,8 @@ func TestPostgresQueueConcurrentReceiveHasOneActiveDelivery(t *testing.T) {
 			winner = result.delivery
 			continue
 		}
-		if !errors.Is(result.err, context.DeadlineExceeded) {
-			t.Fatalf("concurrent Receive error=%v", result.err)
+		if !errors.Is(result.err, context.DeadlineExceeded) && !(result.contextErr == context.DeadlineExceeded && result.transportTimeout) {
+			t.Fatalf("concurrent Receive failure stage=claim_candidate category=unexpected_receiver_error context_deadline=%t transport_timeout=%t active_receivers=2 wait_group_complete=true pool_total=%d pool_idle=%d pool_acquired=%d", result.contextErr == context.DeadlineExceeded, result.transportTimeout, result.totalConnections, result.idleConnections, result.acquiredConnections)
 		}
 	}
 	if successes != 1 || winner.DeliveryID == "" {

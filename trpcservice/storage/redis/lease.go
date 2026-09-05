@@ -21,6 +21,7 @@ type Lease struct {
 	TenantID, ResourceID, OwnerID string
 	FenceToken                    uint64
 	ExpiresAt                     time.Time
+	Epoch                         storage.Epoch
 }
 type LeaseManager interface {
 	Acquire(context.Context, tenant.TenantContext, LeaseKind, string, string, time.Duration) (Lease, error)
@@ -29,11 +30,14 @@ type LeaseManager interface {
 	Validate(context.Context, Lease) error
 }
 
-const leaseAcquire = `local k=KEYS[1]; local seq=KEYS[2]; local owner=ARGV[1]; local ttl=tonumber(ARGV[2]); local now=redis.call('TIME')[1]; local cur=redis.call('HMGET',k,'owner','fence','expires'); if cur[1] and cur[3] and tonumber(cur[3])>tonumber(now) then return {0,cur[1],cur[2],cur[3]} end; local f=redis.call('INCR',seq); local exp=tonumber(now)+ttl; redis.call('HSET',k,'owner',owner,'fence',f,'expires',exp); redis.call('EXPIRE',k,ttl); return {1,owner,f,exp}`
-const leaseRenew = `local k=KEYS[1]; local now=redis.call('TIME')[1]; local c=redis.call('HMGET',k,'owner','fence','expires'); if c[1]~=ARGV[1] or c[2]~=ARGV[2] or not c[3] or tonumber(c[3])<=tonumber(now) then return 0 end; local exp=tonumber(now)+tonumber(ARGV[3]); redis.call('HSET',k,'expires',exp); redis.call('EXPIRE',k,tonumber(ARGV[3])); return exp`
-const leaseRelease = `local c=redis.call('HMGET',KEYS[1],'owner','fence'); if c[1]~=ARGV[1] or c[2]~=ARGV[2] then return 0 end; redis.call('DEL',KEYS[1]); return 1`
+const leaseAcquire = `local k=KEYS[1]; local seq=KEYS[2]; local owner=ARGV[1]; local ttl=tonumber(ARGV[2]); local requested=ARGV[3]; local now=redis.call('TIME')[1]; local cur=redis.call('HMGET',k,'owner','fence','expires','epoch'); if cur[1] and cur[3] and tonumber(cur[3])>tonumber(now) and (requested=='' or cur[4]==requested) then return {0,cur[1],cur[2],cur[3],cur[4]} end; local f=redis.call('INCR',seq); local exp=tonumber(now)+ttl; redis.call('HSET',k,'owner',owner,'fence',f,'expires',exp,'epoch',requested); redis.call('EXPIRE',k,ttl); return {1,owner,f,exp,requested}`
+const leaseRenew = `local k=KEYS[1]; local now=redis.call('TIME')[1]; local c=redis.call('HMGET',k,'owner','fence','expires','epoch'); if c[1]~=ARGV[1] or c[2]~=ARGV[2] or (ARGV[4]~='' and c[4]~=ARGV[4]) or not c[3] or tonumber(c[3])<=tonumber(now) then return 0 end; local exp=tonumber(now)+tonumber(ARGV[3]); redis.call('HSET',k,'expires',exp); redis.call('EXPIRE',k,tonumber(ARGV[3])); return exp`
+const leaseRelease = `local c=redis.call('HMGET',KEYS[1],'owner','fence','epoch'); if c[1]~=ARGV[1] or c[2]~=ARGV[2] or (ARGV[3]~='' and c[3]~=ARGV[3]) then return 0 end; redis.call('DEL',KEYS[1]); return 1`
 
 func (b *Backend) Acquire(ctx context.Context, tc tenant.TenantContext, kind LeaseKind, id, owner string, ttl time.Duration) (Lease, error) {
+	return b.acquireWithEpoch(ctx, tc, kind, id, owner, ttl, 0)
+}
+func (b *Backend) acquireWithEpoch(ctx context.Context, tc tenant.TenantContext, kind LeaseKind, id, owner string, ttl time.Duration, epoch storage.Epoch) (Lease, error) {
 	if err := validateContext(ctx, tc, owner); err != nil {
 		return Lease{}, err
 	}
@@ -45,7 +49,11 @@ func (b *Backend) Acquire(ctx context.Context, tc tenant.TenantContext, kind Lea
 	if ttl <= 0 {
 		ttl = b.leaseTTL
 	}
-	r, e := b.client.Eval(ctx, leaseAcquire, []string{k, seq}, owner, int(ttl.Seconds())).Result()
+	args := []interface{}{owner, int(ttl.Seconds()), ""}
+	if epoch > 0 {
+		args[2] = strconv.FormatUint(uint64(epoch), 10)
+	}
+	r, e := b.client.Eval(ctx, leaseAcquire, []string{k, seq}, args...).Result()
 	if e != nil {
 		return Lease{}, mapRedisErr(e)
 	}
@@ -55,11 +63,15 @@ func (b *Backend) Acquire(ctx context.Context, tc tenant.TenantContext, kind Lea
 	if fmt.Sprint(a[0]) != "1" {
 		return Lease{}, ErrAlreadyClaimed
 	}
-	return Lease{Kind: kind, TenantID: tc.TenantID, ResourceID: id, OwnerID: owner, FenceToken: f, ExpiresAt: time.Unix(exp, 0).UTC()}, nil
+	return Lease{Kind: kind, TenantID: tc.TenantID, ResourceID: id, OwnerID: owner, FenceToken: f, ExpiresAt: time.Unix(exp, 0).UTC(), Epoch: epoch}, nil
 }
 func (b *Backend) Renew(ctx context.Context, l Lease, ttl time.Duration) (Lease, error) {
 	k, _ := sessionLeaseKey(b.prefix, l.TenantID, string(l.Kind)+"-"+l.ResourceID)
-	r, e := b.client.Eval(ctx, leaseRenew, []string{k}, l.OwnerID, strconv.FormatUint(l.FenceToken, 10), int(ttl.Seconds())).Int64()
+	epoch := ""
+	if l.Epoch > 0 {
+		epoch = strconv.FormatUint(uint64(l.Epoch), 10)
+	}
+	r, e := b.client.Eval(ctx, leaseRenew, []string{k}, l.OwnerID, strconv.FormatUint(l.FenceToken, 10), int(ttl.Seconds()), epoch).Int64()
 	if e != nil {
 		return l, mapRedisErr(e)
 	}
@@ -71,7 +83,11 @@ func (b *Backend) Renew(ctx context.Context, l Lease, ttl time.Duration) (Lease,
 }
 func (b *Backend) Release(ctx context.Context, l Lease) error {
 	k, _ := sessionLeaseKey(b.prefix, l.TenantID, string(l.Kind)+"-"+l.ResourceID)
-	r, e := b.client.Eval(ctx, leaseRelease, []string{k}, l.OwnerID, strconv.FormatUint(l.FenceToken, 10)).Int()
+	epoch := ""
+	if l.Epoch > 0 {
+		epoch = strconv.FormatUint(uint64(l.Epoch), 10)
+	}
+	r, e := b.client.Eval(ctx, leaseRelease, []string{k}, l.OwnerID, strconv.FormatUint(l.FenceToken, 10), epoch).Int()
 	if e != nil {
 		return mapRedisErr(e)
 	}

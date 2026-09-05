@@ -112,6 +112,46 @@ type ArtifactRepository interface {
 	PresignedURL(context.Context, tenant.TenantContext, string, time.Duration) (string, error)
 }
 
+// ArtifactMetadataRepository is the production metadata boundary for an
+// artifact whose bytes live in ObjectStore. It intentionally remains
+// separate from AtomicCompletionCoordinator and never stores object bytes.
+type ArtifactMetadataRepository interface {
+	ArtifactRepository
+	Get(context.Context, tenant.TenantContext, string) (artifact.Artifact, error)
+	MarkReady(context.Context, tenant.TenantContext, string, ObjectInfo) error
+	MarkFailed(context.Context, tenant.TenantContext, string) error
+	Reconcile(context.Context, tenant.TenantContext, string) (artifact.Artifact, error)
+}
+
+// BindingMetadataRepository is the durable P1-04 configuration boundary.
+type BindingMetadataRepository interface {
+	CreateBinding(context.Context, tenant.TenantContext, tenant.ChannelBinding) error
+	GetBinding(context.Context, tenant.TenantContext, string) (tenant.ChannelBinding, error)
+	ResolveBinding(context.Context, string, string) (tenant.ChannelBinding, error)
+	UpdateBinding(context.Context, tenant.TenantContext, tenant.ChannelBinding, int64) error
+}
+
+type IdentityMetadataRepository interface {
+	ResolveIdentity(context.Context, tenant.TenantContext) (tenant.Identity, error)
+}
+
+type BindingAuditRepository interface {
+	AppendBindingEvent(context.Context, tenant.TenantContext, BindingAuditEvent) error
+}
+
+type BindingAuditEvent struct {
+	TenantID            string
+	AuditID             string
+	BindingID           string
+	Channel             string
+	Operation           string
+	Success             bool
+	ErrorType           string
+	IdentityFingerprint string
+	SecretFingerprint   string
+	Version             int64
+	CreatedAt           time.Time
+}
 type AuditRepository interface {
 	Append(context.Context, tenant.TenantContext, audit.AuditLog) error
 }

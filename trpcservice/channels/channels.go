@@ -8,7 +8,7 @@ import (
 	"net/http"
 )
 
-type Incoming struct{ ID, TenantID, Channel, UserID, ChatID, ThreadID, Text string }
+type Incoming struct{ ID, TenantID, Channel, UserID, ChatID, ThreadID, ChatType, Text string }
 type Adapter interface {
 	Name() string
 	Verify(*http.Request, []byte) error
@@ -22,6 +22,20 @@ func SessionID(tenant, channel, user, chat string) string {
 		scope = user
 	}
 	h := sha256.Sum256([]byte(tenant + "|" + channel + "|" + scope))
+	return hex.EncodeToString(h[:])
+}
+
+// SessionIDWithThread preserves the established chat-scoped ID when there is
+// no thread and adds the provider thread only for topic-scoped messages.
+func SessionIDWithThread(tenant, channel, user, chat, thread string) string {
+	if thread == "" {
+		return SessionID(tenant, channel, user, chat)
+	}
+	scope := chat
+	if scope == "" {
+		scope = user
+	}
+	h := sha256.Sum256([]byte(tenant + "|" + channel + "|" + scope + "|thread:" + thread))
 	return hex.EncodeToString(h[:])
 }
 

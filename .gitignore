@@ -3,6 +3,7 @@
 .DS_Store
 *.log
 *.swp
+.pi
 
 bin/
 dist/

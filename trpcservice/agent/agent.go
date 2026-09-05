@@ -41,6 +41,10 @@ type ToolSpec struct {
 	Name        string
 	Description string
 	InputSchema map[string]any
+	// Version and Capability are server-owned declaration metadata. A zero
+	// Version is treated as the initial version for backwards compatibility.
+	Version    int64
+	Capability string
 }
 
 // Message is the platform representation of a conversation message.

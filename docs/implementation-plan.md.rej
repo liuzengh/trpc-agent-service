@@ -1,0 +1,5 @@
+--- docs/implementation-plan.md
++++ docs/implementation-plan.md
+@@ -91 +91 @@
+-| P0-09G-R | P0-09 总审查和关闭 | `partial`；production ObjectStore composition、Artifact metadata persistence/reconciliation、独立 MinIO gate 与 current same-network G-D recovery 通过；真实 Provider 和完整 combined closure 仍未证明 |
++| P0-09G-R | P0-09 总审查和关闭 | `verified (defined P0 closure boundary)`；production ObjectStore composition、Artifact metadata persistence/reconciliation、独立 MinIO gate、Redis restart failover 与 current same-network G-D recovery 通过；scheduler/lifecycle cleanup 不属于本轮 P0 门禁，ObjectStore/G-D 为并列 boundary，enabled-object 联合故障是后续 evidence；真实 Provider、provider-side dedup、完整业务 Repository、认证和 framework global Wait/Done 仍未证明 |

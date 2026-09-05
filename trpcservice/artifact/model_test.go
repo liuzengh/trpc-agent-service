@@ -18,6 +18,19 @@ func TestArtifactValidation(t *testing.T) {
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("expected traversal rejection")
 	}
+	for name, objectKey := range map[string]string{
+		"empty":     "",
+		"absolute":  "/tmp/tenant-a/file",
+		"backslash": "tenants/tenant-a/dir\\file",
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := validArtifact()
+			invalid.ObjectKey = objectKey
+			if err := invalid.Validate(); err == nil {
+				t.Fatalf("expected object key rejection for %q", name)
+			}
+		})
+	}
 	invalid = validArtifact()
 	invalid.ObjectKey = "tenants/tenant-b/file"
 	if err := invalid.Validate(); err == nil {

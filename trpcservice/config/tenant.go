@@ -36,6 +36,7 @@ func (b TenantBundle) Validate() error {
 	if !defaultFound {
 		return errors.New("default_agent_id does not reference an agent in the bundle")
 	}
+	seenBindings := make(map[string]struct{}, len(b.Bindings))
 	for i, binding := range b.Bindings {
 		if err := binding.Validate(); err != nil {
 			return fmt.Errorf("binding %d: %w", i, err)
@@ -43,6 +44,11 @@ func (b TenantBundle) Validate() error {
 		if binding.TenantID != b.Tenant.ID {
 			return fmt.Errorf("binding %q belongs to a different tenant", binding.ID)
 		}
+		key := binding.Channel + "\x00" + binding.ExternalAppID
+		if _, exists := seenBindings[key]; exists {
+			return fmt.Errorf("binding %q conflicts with another binding", binding.ID)
+		}
+		seenBindings[key] = struct{}{}
 	}
 	return nil
 }

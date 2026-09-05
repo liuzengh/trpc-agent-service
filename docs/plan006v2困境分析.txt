@@ -1,0 +1,52 @@
+docs/plan006Revise 是造成该 JSONL 对话困境的重要诱因之一，但不是唯一根因，也不是“计划文件本身导致 Agent 自动死循环”。 更准确地说，它把原本已经偏大的 P0-06 任务进一步定义成了一个“所有核心能力和真实集成验收全部完成后才能停止”的不可轻易收敛任务；而 Agent 又没有把计划拆成可独立关闭的交付边界，于是形成了“实现一小段 -> 跑已有测试 -> 发现计划仍有大量未完成项 -> 停止当前轮 -> 用户继续”的循环。
+
+证据对照
+
+会话一开始，用户已经明确说明当前只是“基础骨架 + 编译验证”，并列出 Redis、PostgreSQL、FailoverStore、限流、故障注入和 race 等缺口。也就是说，困境的原始来源早于 plan006Revise，不是该文件凭空制造的。
+plan006Revise 随后把这些缺口扩大成完整平台级协调协议，要求同时覆盖：
+Redis Claim、lease、renewal、release、validate；
+PostgreSQL Claim、lease、epoch authority；
+FailoverStore、quarantine、熔断、恢复和切换保护；
+migration catalog fail-closed；
+三维限流；
+integration、fault injection、contract、race、vet 和全量测试。
+JSONL 中 Agent 的实际行为与计划完全对应：
+先实现 PostgreSQL Claim，然后报告 lease、epoch、FailoverStore 和集成测试仍未完成；
+再实现 PostgreSQL lease，然后报告 epoch、failover、Redis lease、限流和故障注入仍未完成；
+Redis 验证因为 redis-cli 缺失而转为 Go 集成测试，但之后仍没有完成完整 Redis lease 和 failover 验收；
+多次执行 go test ./... 或 go test ./... -race -count=1，这些测试通过，但新增包中多个包仍显示 [no test files]。
+每轮 Agent 都明确知道任务尚未完成，却以 stop 结束当前轮；用户只好反复发送“继续完成剩下的部分”。这说明停止点来自 Agent 轮次边界和执行闭环缺失，而不是测试错误自动触发的重试。
+计划文件造成困境的具体方式
+
+范围过宽且横跨多个交付层。 计划从存储公共契约一路扩展到 Redis Lua 协议、PostgreSQL 事务锁、epoch 权威、跨 backend 切换、限流、故障注入和 race。文件的“完整文件范围”列出了几十个必须新增或修改的文件，见 plan006Revise。这已经不是一个适合单轮 Agent 任务的窄功能变更。
+结束条件是全局 AND，而不是阶段性交付。 第 11 节要求按完整链路推进，第 12 节要求普通测试、vet、migration integration、Redis integration、PostgreSQL integration、fault injection 和 race 全部通过，见 plan006Revise 和 plan006Revise。任何一个环节缺失，Agent 都不能诚实结束。
+安全边界要求高，但实现边界没有同步收窄。 计划要求所有 Claim、lease、renew、release、complete、fail 和结果提交都经过统一 FailoverStore 或 fencing-aware API，见 plan006Revise。这使得公共接口、两个 backend 和 failover 调度必须同时保持一致，局部实现很难形成可独立验收的闭环。
+故障切换规则本身具有长链路依赖。 计划要求 timeout/断连进入 quarantine，等待 lease TTL 和保护窗口，通过 PostgreSQL epoch authority 串行化，再经过 probing/recovering 才允许切换，见 plan006Revise。这不是增加一个 backend wrapper 就能完成的功能。
+真实集成测试依赖多个外部条件。 计划要求显式 PostgreSQL/Redis URL、随机 schema、独立连接池、100 并发、锁等待、Context cancel、故障注入和 race。虽然计划明确不要求重启服务或真实网络分区，但仍然需要大量 fixture、数据库结构和可注入 backend 先完成，见 plan006Revise。
+计划本身的设计问题
+
+它把 P0-05 称为已完成的前提与“必须修改 P0-05 migration runner/schema 校验”同时放在一起，导致 P0-05 的完成边界不稳定。
+它把“安全保证边界”写得很严格，但没有定义一个可以先交付的最小安全子集。例如没有先单独交付“Redis-only Claim + contract tests”，再另行交付 PostgreSQL fallback 和 failover。
+它把 [no test files] 的包也放进完整验收目标，但没有为每个阶段定义明确的最小测试文件和通过标准，因此 Agent 可以运行全量测试，却无法从结果判断计划是否真正完成。
+它同时要求“每个阶段先补测试再进入下一阶段”，又允许一次性实现多个任务；这两个执行节奏没有明确优先级，容易让 Agent 在局部实现和全局实现之间来回切换。
+它没有定义“本轮完成”的终止条件、剩余任务清单格式或最大工作批次。于是模型只能依靠自然语言判断何时停止，而当前 JSONL 中模型选择了在每次局部验证后停止。
+不是计划文件单独造成的部分
+
+原始用户需求本身就要求 P0-05 修补、P0-06 完整实现、真实 Redis/PostgreSQL 集成和 race 验收，任务天然比当前代码规模大很多。
+代码实际实现明显落后于计划，尤其是新增 coordination/ratelimit 包缺少完整测试；因此即使没有 plan006Revise，仅执行 go test ./... 也仍然不能证明任务完成。
+Agent 没有持续执行到计划末尾，而是在每个局部阶段结束时返回 stop。这属于 Agent 执行策略/轮次闭环问题，不是计划文件能单独解决的。
+最终判断
+
+可以把原因拆成：
+
+约 40%：任务和计划范围过大。 plan006Revise 把多个基础设施子系统绑定成一个不可部分关闭的 P0-06。
+约 35%：验收条件设计为全局 AND，缺少可独立交付的阶段边界。
+约 25%：Agent 执行策略问题。 Agent 每轮只推进局部实现并运行已有测试，没有维护一个持久的剩余任务闭环，也没有在未完成时继续执行到当前批次的自然终点。
+因此，答案是：对话困境部分由 plan006Revise 造成，尤其是它的范围和最终验收设计；但真正导致“重复测试或停止”的直接机制，是 Agent 没有把该计划转化为可连续执行、可阶段关闭的任务队列。
+
+要避免同类困境，计划应拆成至少三个独立任务：
+
+Redis Claim/lease 和 contract tests；
+PostgreSQL Claim/lease/epoch 和 migration tests；
+FailoverStore、限流、故障注入和跨 backend integration。
+每个任务都应有独立文件范围、独立验收命令和明确完成条件；只有在前一任务通过后，才进入下一任务，而不是把三者放在一个“全部完成才能结束”的 P0-06 总目标中。

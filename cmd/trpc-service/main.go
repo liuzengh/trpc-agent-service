@@ -11,6 +11,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/platform"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	governancetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 )
 
 func main() {
@@ -63,7 +64,11 @@ func newResponder(mode string) (platform.Responder, error) {
 				return secret, nil
 			}),
 		}
-		factory, err := agent.NewFactory(agent.RuntimeDependencies{ProviderFactory: providerFactory})
+		secureInvoker, err := governancetool.NewFailClosedInvoker()
+		if err != nil {
+			return nil, err
+		}
+		factory, err := agent.NewFactory(agent.RuntimeDependencies{ProviderFactory: providerFactory, ToolInvoker: secureInvoker})
 		if err != nil {
 			return nil, err
 		}

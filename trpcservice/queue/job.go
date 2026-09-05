@@ -109,18 +109,28 @@ type MessageDTO struct {
 }
 
 // AgentJob is the versioned, runtime-independent unit of asynchronous work.
+// The optional Telemetry carrier is additive: old payloads without it decode
+// unchanged, and its presence or absence never affects validation outcomes.
 type AgentJob struct {
-	SchemaVersion int              `json:"schema_version"`
-	JobID         string           `json:"job_id"`
-	ExecutionID   string           `json:"execution_id"`
-	Tenant        TenantContextDTO `json:"tenant"`
-	Agent         AgentRefDTO      `json:"agent"`
-	History       []MessageDTO     `json:"history,omitempty"`
-	Message       MessageDTO       `json:"message"`
-	Trace         TraceContextDTO  `json:"trace"`
-	CreatedAt     time.Time        `json:"created_at"`
-	Deadline      time.Time        `json:"deadline"`
-	Attempt       int              `json:"attempt"`
+	SchemaVersion int               `json:"schema_version"`
+	JobID         string            `json:"job_id"`
+	ExecutionID   string            `json:"execution_id"`
+	Tenant        TenantContextDTO  `json:"tenant"`
+	Agent         AgentRefDTO       `json:"agent"`
+	History       []MessageDTO      `json:"history,omitempty"`
+	Message       MessageDTO        `json:"message"`
+	Trace         TraceContextDTO   `json:"trace"`
+	CreatedAt     time.Time         `json:"created_at"`
+	Deadline      time.Time         `json:"deadline"`
+	Attempt       int               `json:"attempt"`
+	Telemetry     *TelemetryCarrier `json:"telemetry,omitempty"`
+}
+
+// TelemetryCarrier carries a W3C traceparent across the durable queue
+// boundary for correlation only. It never carries baggage and is never used
+// for authentication, tenant resolution, dedup, lease or fencing.
+type TelemetryCarrier struct {
+	Traceparent string `json:"traceparent,omitempty"`
 }
 
 // JobEnvelope is the stable wire representation stored by a queue.

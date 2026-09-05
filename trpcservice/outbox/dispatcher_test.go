@@ -27,6 +27,8 @@ type observingRepository struct {
 	transitionCalls chan observedTransition
 	mutationCalls   chan string
 	claimCalls      chan struct{}
+	claimEntered    chan struct{}
+	claimRelease    chan struct{}
 	completeErr     error
 	retryErr        error
 	dlqErr          error
@@ -42,6 +44,10 @@ func (r *observingRepository) ClaimBatch(ctx context.Context, tc tenant.TenantCo
 		case r.claimCalls <- struct{}{}:
 		default:
 		}
+	}
+	if r.claimEntered != nil {
+		r.claimEntered <- struct{}{}
+		<-r.claimRelease
 	}
 	return r.inner.ClaimBatch(ctx, tc, owner, limit)
 }
@@ -329,7 +335,9 @@ func TestDispatcherBatchFailureDoesNotPolluteOtherMessages(t *testing.T) {
 
 func TestTwoDispatchersHaveOneActiveSenderOwner(t *testing.T) {
 	tc := testTenant("tenant-competing")
-	repository := &observingRepository{inner: storage.NewFakeRepository(), transitionCalls: make(chan observedTransition, 2)}
+	claimEntered := make(chan struct{}, 2)
+	claimRelease := make(chan struct{})
+	repository := &observingRepository{inner: storage.NewFakeRepository(), transitionCalls: make(chan observedTransition, 2), claimEntered: claimEntered, claimRelease: claimRelease}
 	enqueueTestMessage(t, repository, tc, "outbox-competing")
 	calls := make(chan string, 2)
 	sender := &scriptedSender{calls: calls}
@@ -344,6 +352,14 @@ func TestTwoDispatchersHaveOneActiveSenderOwner(t *testing.T) {
 	firstRun, secondRun := make(chan error, 1), make(chan error, 1)
 	go func() { firstRun <- first.Run(context.Background()) }()
 	go func() { secondRun <- second.Run(context.Background()) }()
+	for started := 0; started < 2; started++ {
+		select {
+		case <-claimEntered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("both dispatchers did not reach the claim barrier")
+		}
+	}
+	close(claimRelease)
 	select {
 	case <-calls:
 	case <-time.After(3 * time.Second):

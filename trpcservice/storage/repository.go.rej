@@ -1,0 +1,7 @@
+--- trpcservice/storage/repository.go
++++ trpcservice/storage/repository.go
+@@ -124,3 +124,4 @@
+ }
+ 
++// marker
+ type AuditRepository interface {
