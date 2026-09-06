@@ -17,7 +17,7 @@ agent: approval-demo-agent
 prompt_tokens / completion_tokens: 533 / 109
 ```
 
-数据库确认回复包含测试要求的“新版测试收到”，测试入站记录只有一条。实际 Tempo trace 返回 16 个 span，单根、无缺失 parent、无环、无错误；包含 MCP read/poll、Gateway、队列、Worker、LLMAgent、`chat glm-5.3-flash`、Session event、后台作业和 Sender/MCP send。没有超出白名单的属性或事件正文。这次没有工具调用；UI 实际显示几条仍由用户确认。
+数据库确认回复包含测试要求的“新版测试收到”，测试入站记录只有一条。实际 Tempo trace 返回 16 个 span，单根、无缺失 parent、无环、无错误；包含 MCP read/poll、Gateway、队列、Worker、LLMAgent、`chat glm-5.3-flash`、Session event、后台作业和 Sender/MCP send。没有超出白名单的属性或事件正文。这次没有工具调用。用户随后确认群里实际只收到一条“新版测试收到”，UI 与发送记录一致。
 
 图片确实以 `unsupported_type` 隔离，没有卡住文字，但 rc.1 在重叠窗口写出了两条隔离记录，因此**不能把 rc.1 的媒体去重也判为通过**。
 
@@ -35,4 +35,6 @@ rc.1 的两条历史隔离记录保留，不通过删行或改表来让验收数
 
 修复提交 `ff6a20d`，全仓库 `go test -race ./...`、lint 和文档链接检查通过。确认 Run、Outbound、Job 和 Queue Outbox 都无待处理项后，保存 rc.1 运行二进制和日志到原私有备份目录，优雅退出旧 Agent，仅替换主程序并启动 `0.2.0-rc.2`。数据库、Redis、模型和监控栈没有停止；schema 保持 16，`.env` 和 Binding 没有修改。
 
-20:01:35 检查：`/readyz` 为 ready，检查点已到 20:01:21、版本 613，历史补查完成；测试 Outbound 仍为 sent、attempt_count=1，历史 unsupported_type 隔离记录仍为两条。新版本已运行，用户尚需确认界面是否只显示一条测试回复。
+20:01:35 检查：`/readyz` 为 ready，检查点已到 20:01:21、版本 613，历史补查完成；测试 Outbound 仍为 sent、attempt_count=1，历史 unsupported_type 隔离记录仍为两条。新版本已运行，随后用户确认 UI 只显示一条测试回复。
+
+剩余的针对性验证是 rc.2 接收一张新图片，在正常轮询及重叠读取后只新增一条媒体隔离分组。无需重复发送原测试文字；图片预期不触发 Agent 或回复。这一新版入库检查尚未计为通过。
