@@ -364,12 +364,21 @@ func (w *Worker) retryDelivery(ctx context.Context, delivery workqueue.Delivery)
 // the worker because their run state and retry decision are already durable.
 func (w *Worker) Run(ctx context.Context) error {
 	for {
-		_, err := w.ProcessOne(ctx)
+		processed, err := w.ProcessOne(ctx)
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
-		if err != nil {
-			continue
+		if err != nil || !processed {
+			// Receive may fail immediately while a backend is unavailable. Do
+			// not spin, including for non-blocking empty queue implementations.
+			delay := max(w.opts.RetryDelay, 100*time.Millisecond)
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return context.Cause(ctx)
+			}
 		}
 	}
 }

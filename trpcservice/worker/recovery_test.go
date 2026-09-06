@@ -1,0 +1,203 @@
+package worker
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	agentruntime "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+)
+
+type countedModel struct {
+	model.Model
+	calls atomic.Int64
+}
+
+func (m *countedModel) GenerateContent(ctx context.Context, req *model.Request) (<-chan *model.Response, error) {
+	m.calls.Add(1)
+	return m.Model.GenerateContent(ctx, req)
+}
+
+type completionFault struct {
+	*gateway.MemoryJournal
+	fail, afterCommit bool
+}
+
+func (j *completionFault) CompleteRun(ctx context.Context, task workqueue.AgentTask, result gateway.RunResult) error {
+	if j.fail {
+		j.fail = false
+		if j.afterCommit {
+			if err := j.MemoryJournal.CompleteRun(ctx, task, result); err != nil {
+				return err
+			}
+		}
+		return errors.New("injected completion acknowledgement loss")
+	}
+	return j.MemoryJournal.CompleteRun(ctx, task, result)
+}
+
+func recoveryTask(t *testing.T, j *gateway.MemoryJournal) workqueue.AgentTask {
+	t.Helper()
+	_, err := j.Accept(context.Background(), gateway.InboundRequest{
+		Scope: runtimecontext.TutorialScope(), ExternalMessageID: "recovery-message",
+		UserID: "fixture-user", SessionID: "fixture-session", ChatType: "direct", Text: "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return j.Tasks()[0]
+}
+
+func newRecoveryWorker(t *testing.T, q workqueue.Queue, j gateway.Journal, r Runtime, id string) *Worker {
+	t.Helper()
+	w, err := New(q, j, r, Options{WorkerID: id, MaxAttempts: 3, RetryDelay: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+func TestCompletionFailureReplaysCachedModelResult(t *testing.T) {
+	for _, committed := range []bool{false, true} {
+		name := "before-commit"
+		if committed {
+			name = "commit-response-lost"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			j := &completionFault{MemoryJournal: gateway.NewMemoryJournal(), fail: true, afterCommit: committed}
+			defer j.Close()
+			q := workqueue.NewMemoryQueue(4)
+			defer q.Close()
+			m := &countedModel{Model: agentruntime.NewTutorialModel()}
+			r, err := agentruntime.NewRuntime(m, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			task := recoveryTask(t, j.MemoryJournal)
+			if err := q.Publish(ctx, task); err != nil {
+				t.Fatal(err)
+			}
+			w := newRecoveryWorker(t, q, j, r, "worker")
+			if processed, err := w.ProcessOne(ctx); !processed || err == nil {
+				t.Fatal("completion fault was not exercised")
+			}
+			if processed, err := w.ProcessOne(ctx); !processed || err != nil {
+				t.Fatalf("repair failed: %v", err)
+			}
+			if m.calls.Load() != 1 {
+				t.Fatal("repair called model again despite cached result")
+			}
+			items, err := j.ClaimOutbound(ctx, "sender", 10, time.Minute)
+			if err != nil || len(items) != 1 {
+				t.Fatal("repair did not retain exactly one outbound")
+			}
+		})
+	}
+}
+
+type cancellationRuntime struct{ started chan struct{} }
+
+func (r cancellationRuntime) ChatWithScope(ctx context.Context, _ agentruntime.ChatInput) (agentruntime.ChatResult, error) {
+	close(r.started)
+	<-ctx.Done()
+	return agentruntime.ChatResult{}, context.Cause(ctx)
+}
+
+func TestCanceledWorkerLeavesDeliveryForAnotherConsumer(t *testing.T) {
+	server := miniredis.RunT(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	queue := func(id string) *workqueue.RedisQueue {
+		q, err := workqueue.NewRedisQueue(ctx, workqueue.RedisOptions{
+			URL: "redis://" + server.Addr() + "/0", KeyPrefix: "recovery", Stream: "runs", Group: "workers",
+			Consumer: id, BlockTimeout: 10 * time.Millisecond, ClaimMinIdle: 20 * time.Millisecond, MaxLen: 100,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = q.Close() })
+		return q
+	}
+	first, second := queue("first"), queue("second")
+	j := gateway.NewMemoryJournal()
+	defer j.Close()
+	task := recoveryTask(t, j)
+	if err := first.Publish(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	r := cancellationRuntime{started: make(chan struct{})}
+	w := newRecoveryWorker(t, first, j, r, "first")
+	firstCtx, stopFirst := context.WithCancel(ctx)
+	defer stopFirst()
+	done := make(chan error, 1)
+	go func() { done <- w.Run(firstCtx) }()
+	select {
+	case <-r.started:
+	case <-ctx.Done():
+		t.Fatal("first worker did not start")
+	}
+	stopFirst()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("shutdown: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("worker did not join on cancellation")
+	}
+	// No new publish: the original unacknowledged Redis Streams delivery must
+	// be reclaimed by a different consumer after its idle interval.
+	time.Sleep(30 * time.Millisecond)
+	next := agentruntime.NewDemoRuntime()
+	defer next.Close()
+	if processed, err := newRecoveryWorker(t, second, j, next, "second").ProcessOne(ctx); !processed || err != nil {
+		t.Fatalf("reclaim: processed=%t error=%v", processed, err)
+	}
+	status, _, _ := j.RunStatus(task.RequestID)
+	if status != "completed" {
+		t.Fatalf("status=%s", status)
+	}
+	items, err := j.ClaimOutbound(ctx, "sender", 10, time.Minute)
+	if err != nil || len(items) != 1 {
+		t.Fatal("recovered task must produce only one reply")
+	}
+}
+
+type unavailableQueue struct {
+	workqueue.Queue
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (q *unavailableQueue) Receive(context.Context) (workqueue.Delivery, error) {
+	q.calls++
+	if q.calls == 3 {
+		q.cancel()
+	}
+	return nil, errors.New("injected unavailable backend")
+}
+
+func TestWorkerBackendFailureBacksOffAndCancels(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	q := &unavailableQueue{cancel: cancel}
+	j := gateway.NewMemoryJournal()
+	defer j.Close()
+	r := agentruntime.NewDemoRuntime()
+	defer r.Close()
+	start := time.Now()
+	err := newRecoveryWorker(t, q, j, r, "worker").Run(ctx)
+	if !errors.Is(err, context.Canceled) || q.calls != 3 || time.Since(start) < 200*time.Millisecond {
+		t.Fatalf("backend failure spun or ignored cancellation: calls=%d err=%v", q.calls, err)
+	}
+}
