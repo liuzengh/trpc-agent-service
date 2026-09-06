@@ -43,7 +43,6 @@ import (
 	"golang.org/x/sync/errgroup"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	agentrunner "trpc.group/trpc-go/trpc-agent-go/runner"
-	sessionsummary "trpc.group/trpc-go/trpc-agent-go/session/summary"
 )
 
 func main() {
@@ -85,6 +84,10 @@ func run() error {
 	}
 	if roleName == "" {
 		roleName = config.RoleAll
+	}
+	auditConfig, err := config.LoadAuditConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("load audit configuration: %w", err)
 	}
 
 	fmt.Printf("trpc-agent-service %s\n", trpcservice.Version)
@@ -166,10 +169,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("build platform metrics: %w", err)
 	}
-	sessionSummarizer := sessionsummary.NewSummarizer(
-		selectedModel,
-		sessionsummary.WithMaxSummaryWords(500),
-	)
+	sessionSummarizer := background.NewJobSummarizer()
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
 	sessionService, err := platformstorage.NewSessionService(
 		startupCtx,
@@ -214,7 +214,7 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build quota guard: %w", err)
 	}
-	auditWriter, err := audit.NewForControlPlane(controlPlaneRepository)
+	auditWriter, err := audit.NewForControlPlane(controlPlaneRepository, audit.Options{SpoolDirectory: auditConfig.SpoolDirectory, MaxBufferedRecords: auditConfig.MaxBufferedRecords})
 	if err != nil {
 		_ = quotaGuard.Close()
 		_ = controlPlaneRepository.Close()
@@ -291,7 +291,7 @@ func run() error {
 		_ = sessionCoordinator.Close()
 		return fmt.Errorf("build artifact router: %w", err)
 	}
-	knowledgeRouter, err := platformstorage.NewKnowledgeRouter(controlPlaneRepository, secretStore)
+	knowledgeRouter, err := platformstorage.NewKnowledgeRouter(controlPlaneRepository, secretStore, platformstorage.WithEmbeddingBudget(quotaGuard))
 	if err != nil {
 		_ = sessionRouter.Close()
 		_ = artifactRouter.Close()
@@ -349,6 +349,7 @@ func run() error {
 		agentservice.WithKnowledgeProvider(knowledgeRouter),
 		agentservice.WithToolExecutionJournal(toolExecutionJournal),
 		agentservice.WithSecretStore(secretStore),
+		agentservice.WithModelBudget(quotaGuard),
 	)
 	if err != nil {
 		_ = sessionRouter.Close()
@@ -399,7 +400,8 @@ func run() error {
 		selectedModel,
 		auditWriter,
 		background.ProcessorOptions{
-			WorkerID: "jobs-" + nodeID, ClaimLease: 2 * time.Minute,
+			ModelResolver: revisionCompiler.ModelForRevision,
+			WorkerID:      "jobs-" + nodeID, ClaimLease: 2 * time.Minute,
 			PollInterval: 500 * time.Millisecond, RetryDelay: time.Second,
 		},
 	)
@@ -425,15 +427,16 @@ func run() error {
 		return fmt.Errorf("build queue outbox relay: %w", err)
 	}
 	agentWorker, err := worker.New(agentQueue, inboundJournal, runtime, worker.Options{
-		WorkerID:    "worker-" + nodeID,
-		MaxAttempts: 3,
-		RetryDelay:  250 * time.Millisecond,
-		Audit:       auditWriter,
-		Metrics:     metricRecorder,
-		Approvals:   approvalRepository,
-		ToolJournal: toolExecutionJournal,
-		Jobs:        backgroundJobs,
-		Quota:       quotaGuard,
+		WorkerID:          "worker-" + nodeID,
+		MaxAttempts:       3,
+		RetryDelay:        250 * time.Millisecond,
+		Audit:             auditWriter,
+		Metrics:           metricRecorder,
+		Approvals:         approvalRepository,
+		ToolJournal:       toolExecutionJournal,
+		Jobs:              backgroundJobs,
+		Quota:             quotaGuard,
+		ModelUsageManaged: true,
 	})
 	if err != nil {
 		_ = agentQueue.Close()
@@ -677,6 +680,7 @@ func run() error {
 	handlerOptions := []web.Option{
 		web.WithRouteResolver(routeResolver),
 		web.WithQuotaGuard(quotaGuard),
+		web.WithManagedModelUsage(),
 		web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
 		web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
 		web.WithReadinessCheck("audit", auditWriter.Ready),
@@ -726,6 +730,9 @@ func run() error {
 	defer stop()
 
 	group, groupCtx := errgroup.WithContext(ctx)
+	if maintenance, ok := auditWriter.(*audit.PolicyWriter); ok {
+		group.Go(func() error { return ignoreCancellation(maintenance.RunMaintenance(groupCtx, roles.Jobs)) })
+	}
 	if serverEnabled {
 		group.Go(func() error {
 			err := server.ListenAndServe()

@@ -13,14 +13,16 @@ import (
 )
 
 const (
-	JobSummary         = "session_summary"
-	JobMemoryExtract   = "memory_extract"
-	JobKnowledgeUpsert = "knowledge_upsert"
-	JobKnowledgeDelete = "knowledge_delete"
-	JobMemoryBackfill  = "memory_backfill"
-	JobMemoryVerify    = "memory_verify"
-	JobSessionBackfill = "session_backfill"
-	JobSessionVerify   = "session_verify"
+	JobSummary           = "session_summary"
+	JobMemoryExtract     = "memory_extract"
+	JobKnowledgeUpsert   = "knowledge_upsert"
+	JobKnowledgeDelete   = "knowledge_delete"
+	JobMemoryBackfill    = "memory_backfill"
+	JobMemoryVerify      = "memory_verify"
+	JobSessionBackfill   = "session_backfill"
+	JobSessionVerify     = "session_verify"
+	JobKnowledgeBackfill = "knowledge_backfill"
+	JobKnowledgeVerify   = "knowledge_verify"
 )
 
 var (

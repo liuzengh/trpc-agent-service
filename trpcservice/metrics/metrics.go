@@ -21,6 +21,7 @@ type Recorder struct {
 	promptTokens      metric.Int64Counter
 	completionTokens  metric.Int64Counter
 	cost              metric.Float64Counter
+	settlements       metric.Int64Counter
 	channelPolls      metric.Int64Counter
 	channelLag        metric.Float64Histogram
 	channelRejections metric.Int64Counter
@@ -64,6 +65,10 @@ func New() (*Recorder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create model cost counter: %w", err)
 	}
+	settlements, err := meter.Int64Counter("agent.model.settlements")
+	if err != nil {
+		return nil, err
+	}
 	channelPolls, err := meter.Int64Counter("agent.channel.polls")
 	if err != nil {
 		return nil, err
@@ -80,9 +85,24 @@ func New() (*Recorder, error) {
 		inbound: inbound, idempotentHit: idempotentHit,
 		runs: runs, runLatency: runLatency,
 		deliveries: deliveries, deliveryLatency: deliveryLatency,
-		promptTokens: promptTokens, completionTokens: completionTokens, cost: cost,
+		promptTokens: promptTokens, completionTokens: completionTokens, cost: cost, settlements: settlements,
 		channelPolls: channelPolls, channelLag: channelLag, channelRejections: channelRejections,
 	}, nil
+}
+
+func (r *Recorder) RecordSettlement(ctx context.Context, tenantID, purpose string, estimated, overrun bool, err error) {
+	if r == nil {
+		return
+	}
+	source := "reported"
+	if estimated {
+		source = "estimated"
+	}
+	status := "settled"
+	if err != nil {
+		status = "failed"
+	}
+	r.settlements.Add(ctx, 1, metric.WithAttributes(attribute.String("tenant.id", tenantID), attribute.String("model.purpose", purpose), attribute.String("usage.source", source), attribute.String("settlement.status", status), attribute.Bool("reservation.overrun", overrun)))
 }
 
 func (r *Recorder) RecordChannelRejection(ctx context.Context, tenantID, reason string) {

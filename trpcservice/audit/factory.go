@@ -9,12 +9,26 @@ import (
 
 type sqlProvider interface{ SQLDB() *sql.DB }
 
-func NewForControlPlane(repository controlplane.Repository) (Writer, error) {
+type Options struct {
+	SpoolDirectory     string
+	MaxBufferedRecords int
+}
+
+func NewForControlPlane(repository controlplane.Repository, options ...Options) (Writer, error) {
 	if repository == nil {
 		return nil, fmt.Errorf("audit control-plane repository is required")
 	}
+	var base Writer = NewMemoryWriter()
 	if provider, ok := repository.(sqlProvider); ok {
-		return NewPostgresWriter(provider.SQLDB())
+		var err error
+		base, err = NewPostgresWriter(provider.SQLDB())
+		if err != nil {
+			return nil, err
+		}
 	}
-	return NewMemoryWriter(), nil
+	opts := Options{MaxBufferedRecords: 10000}
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	return NewPolicyWriter(base, repository, opts.SpoolDirectory, opts.MaxBufferedRecords)
 }

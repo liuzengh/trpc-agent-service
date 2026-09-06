@@ -1,6 +1,14 @@
 groups:
   - name: trpc-agent-platform
     rules:
+      - alert: AgentModelSettlementFailure
+        expr: sum by (tenant_id) (increase(agent_model_settlements_total{settlement_status="failed"}[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Model usage could not be settled
+          description: Reserved tenant budget remains occupied; check quota backend before retrying.
+
       - alert: OTelCollectorScrapeDown
         expr: up{job="otel-collector"} == 0
         for: 2m
@@ -116,6 +124,13 @@ groups:
         annotations:
           summary: Backlog metrics cannot read their source
           description: Missing measurements must not be interpreted as an empty queue.
+
+      - alert: AgentAuditPersistenceFailure
+        expr: sum by (tenant_id) (increase(agent_audit_calls_total{operation_result="error"}[5m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: Audit persistence or replay failed
+          description: Check the audit backend and private spool capacity; buffered mode never permits silent loss.
 
       - alert: AgentBacklogSnapshotStale
         expr: (time() - max(agent_backlog_snapshot_timestamp_seconds) > 180) or absent_over_time(agent_backlog_snapshot_timestamp_seconds[5m])

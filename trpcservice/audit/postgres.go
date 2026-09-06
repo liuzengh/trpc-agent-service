@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 type PostgresWriter struct {
@@ -23,33 +21,35 @@ func NewPostgresWriter(db *sql.DB) (*PostgresWriter, error) {
 
 func (w *PostgresWriter) Record(ctx context.Context, event Event) error {
 	event = sanitizeEvent(event)
-	details, err := json.Marshal(event.Details)
+	payload, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal audit details: %w", err)
 	}
-	_, err = w.db.ExecContext(ctx, `
-INSERT INTO audit_log(
-    audit_id, occurred_at, tenant_id, channel, channel_binding_id,
-    user_id, session_id, message_id, request_id, trace_id, agent_name,
-    revision_id, tool_name, decision, latency_ms, error_type, cost, details
-) VALUES (
-    $1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''),
-    NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''),
-    NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, ''), $14, $15,
-    NULLIF($16, ''), $17, $18::jsonb
-)`, "audit-"+uuid.NewString(), event.OccurredAt, event.TenantID,
-		event.Channel, event.ChannelBindingID, event.UserID, event.SessionID,
-		event.MessageID, event.RequestID, event.TraceID, event.AgentName,
-		event.RevisionID, event.ToolName, event.Decision, event.Latency.Milliseconds(),
-		event.ErrorType, event.Cost, string(details))
+	var accepted bool
+	err = w.db.QueryRowContext(ctx, "SELECT platform_audit_append($1::jsonb)", string(payload)).Scan(&accepted)
 	if err != nil {
-		return fmt.Errorf("insert audit event: %w", err)
+		return fmt.Errorf("audit persistence unavailable")
+	}
+	if !accepted {
+		return ErrEventConflict
 	}
 	return nil
 }
 
+func (w *PostgresWriter) Prune(ctx context.Context, tenantID string, _ time.Time, limit int) (int, error) {
+	var n int
+	if err := w.db.QueryRowContext(ctx, "SELECT platform_audit_prune($1,$2)", tenantID, limit).Scan(&n); err != nil {
+		return 0, fmt.Errorf("audit retention unavailable")
+	}
+	return n, nil
+}
+
 func (w *PostgresWriter) Ready(ctx context.Context) error {
-	return w.db.PingContext(ctx)
+	var ready bool
+	if err := w.db.QueryRowContext(ctx, "SELECT to_regprocedure('platform_audit_append(jsonb)') IS NOT NULL").Scan(&ready); err != nil || !ready {
+		return fmt.Errorf("audit schema unavailable")
+	}
+	return nil
 }
 
 func (w *PostgresWriter) Query(ctx context.Context, query Query) ([]Event, error) {
@@ -58,7 +58,7 @@ func (w *PostgresWriter) Query(ctx context.Context, query Query) ([]Event, error
 		limit = 100
 	}
 	rows, err := w.db.QueryContext(ctx, `
-SELECT occurred_at,tenant_id,COALESCE(channel,''),COALESCE(channel_binding_id,''),
+SELECT audit_id,occurred_at,tenant_id,COALESCE(channel,''),COALESCE(channel_binding_id,''),
        COALESCE(user_id,''),COALESCE(session_id,''),COALESCE(message_id,''),
        COALESCE(request_id,''),COALESCE(trace_id,''),COALESCE(agent_name,''),
        COALESCE(revision_id,''),COALESCE(tool_name,''),decision,latency_ms,
@@ -76,7 +76,7 @@ ORDER BY occurred_at DESC LIMIT $4`, query.TenantID, query.Decision, query.Trace
 		var latencyMS int64
 		var details []byte
 		if err := rows.Scan(
-			&event.OccurredAt, &event.TenantID, &event.Channel, &event.ChannelBindingID,
+			&event.ID, &event.OccurredAt, &event.TenantID, &event.Channel, &event.ChannelBindingID,
 			&event.UserID, &event.SessionID, &event.MessageID, &event.RequestID,
 			&event.TraceID, &event.AgentName, &event.RevisionID, &event.ToolName,
 			&event.Decision, &latencyMS, &event.ErrorType, &event.Cost, &details,

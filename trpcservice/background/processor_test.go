@@ -111,6 +111,41 @@ func TestProcessorRunsKnowledgeJob(t *testing.T) {
 	if err != nil || result.Document == nil {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
+	// Exercise the durable backfill -> continuation -> verification pipeline,
+	// not only direct router methods. No human-provided proof is involved.
+	if err := control.CreateBackendBinding(context.Background(), controlplane.BackendBinding{ID: "knowledge-target", TenantID: "tutorial-tenant", AppID: "tutorial-app", ResourceType: "knowledge", BackendType: "inmemory", MigrationState: "migration_target", Version: 1, Config: json.RawMessage(`{"dimensions":32}`)}); err != nil {
+		t.Fatal(err)
+	}
+	m := controlplane.BackendMigration{ID: "knowledge-migration", TenantID: "tutorial-tenant", AppID: "tutorial-app", ResourceType: "knowledge", SourceBindingID: "knowledge", TargetBindingID: "knowledge-target", State: controlplane.MigrationBackfill, Version: 1, Checkpoint: json.RawMessage(`{}`), Verification: json.RawMessage(`{}`)}
+	if err := control.CreateBackendMigration(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	mp, _ := json.Marshal(KnowledgeMigrationPayload{MigrationID: m.ID})
+	if _, err := jobs.Enqueue(context.Background(), EnqueueRequest{TenantID: m.TenantID, AppID: m.AppID, RevisionID: data.Revisions[0].ID, Type: JobKnowledgeBackfill, DedupeKey: "migration", Payload: mp}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		worked, err := processor.ProcessOne(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !worked {
+			break
+		}
+		if i == 9 {
+			t.Fatal("migration jobs did not finish")
+		}
+	}
+	m, err = control.GetBackendMigration(context.Background(), m.TenantID, m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.State != controlplane.MigrationVerify || string(m.Verification) != `{"passed":true,"source":"knowledge_sync"}` {
+		t.Fatalf("migration not verified: %+v", m)
+	}
+	if _, err = control.TransitionBackendMigration(context.Background(), m.TenantID, m.ID, controlplane.MigrationCutover, m.Version, nil, nil); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestProcessorCreatesDurableSummary(t *testing.T) {

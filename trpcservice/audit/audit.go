@@ -7,10 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	platformlog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	"go.opentelemetry.io/otel/trace"
 )
 
 type Event struct {
+	ID               string         `json:"audit_id,omitempty"`
 	TenantID         string         `json:"tenant_id"`
 	Channel          string         `json:"channel,omitempty"`
 	ChannelBindingID string         `json:"channel_binding_id,omitempty"`
@@ -56,9 +59,13 @@ func TraceID(ctx context.Context) string {
 }
 
 func sanitizeEvent(event Event) Event {
+	if event.ID == "" {
+		event.ID = "audit-" + uuid.NewString()
+	}
 	if event.OccurredAt.IsZero() {
 		event.OccurredAt = time.Now().UTC()
 	}
+	event.OccurredAt = event.OccurredAt.UTC()
 	event.Details = redactMap(event.Details)
 	return event
 }
@@ -73,16 +80,28 @@ func redactMap(input map[string]any) map[string]any {
 			result[key] = "[REDACTED]"
 			continue
 		}
-		switch typed := value.(type) {
-		case map[string]any:
-			result[key] = redactMap(typed)
-		case json.RawMessage:
-			result[key] = "[JSON]"
-		default:
-			result[key] = typed
-		}
+		result[key] = redactValue(value)
 	}
 	return result
+}
+
+func redactValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		return redactMap(v)
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = redactValue(item)
+		}
+		return out
+	case json.RawMessage:
+		return "[JSON]"
+	case string:
+		return platformlog.Redact(v)
+	default:
+		return value
+	}
 }
 
 func sensitiveKey(key string) bool {

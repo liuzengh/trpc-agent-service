@@ -43,7 +43,7 @@ func LoadRuntimeBackends(roles Roles, hasMCPPoller bool) (RuntimeBackends, error
 			return result, err
 		}
 	}
-	if roles.Worker || roles.Gateway {
+	if roles.Worker || roles.Gateway || roles.Jobs {
 		result.Quota, err = LoadQuotaConfigFromEnv()
 		if err != nil {
 			return result, err

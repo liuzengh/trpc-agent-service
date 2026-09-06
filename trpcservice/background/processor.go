@@ -22,11 +22,12 @@ import (
 )
 
 type ProcessorOptions struct {
-	WorkerID     string
-	ClaimLease   time.Duration
-	PollInterval time.Duration
-	RetryDelay   time.Duration
-	Watermarks   Watermarks
+	WorkerID      string
+	ClaimLease    time.Duration
+	PollInterval  time.Duration
+	RetryDelay    time.Duration
+	Watermarks    Watermarks
+	ModelResolver func(context.Context, controlplane.AgentRevision, string) (model.Model, error)
 }
 
 type Processor struct {
@@ -105,7 +106,11 @@ func (p *Processor) ProcessOne(ctx context.Context) (bool, error) {
 		attribute.Int("background.job.attempt", job.AttemptCount),
 	)
 	started := time.Now()
+	// Finish before the claim can be stolen, even if a provider stalls. Large
+	// migrations checkpoint and enqueue bounded continuations.
+	jobCtx, cancelJob := context.WithTimeout(jobCtx, p.options.ClaimLease*2/3)
 	processErr := p.process(jobCtx, job)
+	cancelJob()
 	span.End()
 	finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
@@ -129,6 +134,8 @@ func (p *Processor) process(ctx context.Context, job Job) error {
 		return errors.New("background job revision scope mismatch")
 	}
 	switch job.Type {
+	case JobKnowledgeBackfill, JobKnowledgeVerify:
+		return p.processKnowledgeMigration(ctx, job, revision)
 	case JobSummary:
 		var payload SessionJobPayload
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
@@ -316,6 +323,13 @@ func (p *Processor) processSummary(
 	if config.SummaryEveryTurns <= 0 || payload.TurnSeq%int64(config.SummaryEveryTurns) != 0 {
 		return nil
 	}
+	if p.options.ModelResolver != nil {
+		m, err := p.options.ModelResolver(ctx, revision, "summary")
+		if err != nil {
+			return err
+		}
+		ctx = context.WithValue(ctx, summaryModelKey{}, m)
+	}
 	sess, err := p.sessions.GetSession(ctx, session.Key{
 		AppName: payload.StorageScope, UserID: payload.UserID, SessionID: payload.SessionID,
 	})
@@ -375,7 +389,18 @@ func (p *Processor) processMemory(
 	if err != nil {
 		return err
 	}
-	operations, err := p.extractor.Extract(ctx, messages, existing)
+	memoryExtractor := p.extractor
+	if p.options.ModelResolver != nil {
+		m, err := p.options.ModelResolver(ctx, revision, "memory")
+		if err != nil {
+			return err
+		}
+		memoryExtractor = extractor.NewExtractor(m)
+		if setter, ok := memoryExtractor.(interface{ SetEnabledTools(map[string]struct{}) }); ok {
+			setter.SetEnabledTools(map[string]struct{}{memory.AddToolName: {}})
+		}
+	}
+	operations, err := memoryExtractor.Extract(ctx, messages, existing)
 	if err != nil {
 		return err
 	}

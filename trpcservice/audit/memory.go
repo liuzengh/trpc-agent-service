@@ -1,16 +1,20 @@
 package audit
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"sync"
+	"time"
 )
 
 type MemoryWriter struct {
-	mu     sync.Mutex
-	closed bool
-	events []Event
+	mu         sync.Mutex
+	closed     bool
+	events     []Event
+	identities map[string][]byte
 }
 
 func (w *MemoryWriter) Query(ctx context.Context, query Query) ([]Event, error) {
@@ -30,6 +34,7 @@ func (w *MemoryWriter) Query(ctx context.Context, query Query) ([]Event, error) 
 			(query.TraceID != "" && event.TraceID != query.TraceID) {
 			continue
 		}
+		event.Details = redactMap(event.Details)
 		result = append(result, event)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].OccurredAt.After(result[j].OccurredAt) })
@@ -50,14 +55,53 @@ func (w *MemoryWriter) Record(ctx context.Context, event Event) error {
 	if w.closed {
 		return errors.New("audit writer is closed")
 	}
-	w.events = append(w.events, sanitizeEvent(event))
+	event = sanitizeEvent(event)
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	if w.identities == nil {
+		w.identities = map[string][]byte{}
+	}
+	if old, exists := w.identities[event.ID]; exists {
+		if !bytes.Equal(old, payload) {
+			return ErrEventConflict
+		}
+		return nil
+	}
+	w.identities[event.ID] = payload
+	w.events = append(w.events, event)
 	return nil
+}
+
+func (w *MemoryWriter) Prune(ctx context.Context, tenantID string, before time.Time, limit int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	count := 0
+	kept := w.events[:0]
+	for _, event := range w.events {
+		if event.TenantID == tenantID && event.OccurredAt.Before(before) && count < limit {
+			delete(w.identities, event.ID)
+			count++
+			continue
+		}
+		kept = append(kept, event)
+	}
+	w.events = kept
+	return count, nil
 }
 
 func (w *MemoryWriter) Events() []Event {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return append([]Event(nil), w.events...)
+	result := append([]Event(nil), w.events...)
+	for i := range result {
+		result[i].Details = redactMap(result[i].Details)
+	}
+	return result
 }
 
 func (w *MemoryWriter) Ready(ctx context.Context) error {

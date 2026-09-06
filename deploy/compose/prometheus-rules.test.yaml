@@ -3,6 +3,20 @@ evaluation_interval: 1m
 tests:
   - interval: 1m
     input_series:
+      - series: 'agent_model_settlements_total{tenant_id="tenant-a",settlement_status="failed"}'
+        values: '0+1x10'
+      - series: 'agent_audit_calls_total{tenant_id="tenant-a",operation_result="error"}'
+        values: '0+1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AgentModelSettlementFailure
+        exp_alerts:
+          - exp_labels: {severity: warning, tenant_id: tenant-a}
+            exp_annotations:
+              summary: Model usage could not be settled
+              description: Reserved tenant budget remains occupied; check quota backend before retrying.
+  - interval: 1m
+    input_series:
       - series: 'agent_backlog_items{tenant_id="tenant-a",backlog_stage="delivery",backlog_state="unknown",instance="a"}'
         values: '1x20'
       - series: 'agent_backlog_items{tenant_id="tenant-a",backlog_stage="delivery",backlog_state="unknown",instance="b"}'

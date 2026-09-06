@@ -36,16 +36,17 @@ type ChatService interface {
 
 // Handler serves the tutorial HTTP API.
 type Handler struct {
-	chatService     ChatService
-	maxBodySize     int64
-	readiness       []readinessCheck
-	routeResolver   routing.Resolver
-	intake          *gateway.Intake
-	callbackGateway *gateway.CallbackGateway
-	adminHandler    http.Handler
-	quotaGuard      *tenant.Guard
-	apiAccess       *APIAccess
-	synchronousChat bool
+	chatService       ChatService
+	maxBodySize       int64
+	readiness         []readinessCheck
+	routeResolver     routing.Resolver
+	intake            *gateway.Intake
+	callbackGateway   *gateway.CallbackGateway
+	adminHandler      http.Handler
+	quotaGuard        *tenant.Guard
+	modelUsageManaged bool
+	apiAccess         *APIAccess
+	synchronousChat   bool
 }
 
 type readinessCheck struct {
@@ -101,6 +102,8 @@ func WithAdminHandler(adminHandler http.Handler) Option {
 func WithQuotaGuard(guard *tenant.Guard) Option {
 	return func(handler *Handler) { handler.quotaGuard = guard }
 }
+
+func WithManagedModelUsage() Option { return func(h *Handler) { h.modelUsageManaged = true } }
 
 // NewHandler exposes health checks; chat/intake, callbacks and Admin require
 // explicit options. In particular a missing APIAccess never means anonymous.
@@ -408,7 +411,7 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "agent execution failed"})
 		return
 	}
-	if h.quotaGuard != nil {
+	if h.quotaGuard != nil && !h.modelUsageManaged {
 		if err := h.quotaGuard.RecordUsage(
 			r.Context(), scope.TenantID, result.RequestID,
 			result.PromptTokens, result.CompletionTokens, result.Cost,

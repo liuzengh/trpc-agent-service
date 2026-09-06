@@ -8,14 +8,17 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/modelops"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/toolexec"
 	"golang.org/x/sync/singleflight"
@@ -100,9 +103,31 @@ type RevisionCompiler struct {
 	knowledge     KnowledgeProvider
 	toolJournal   toolexec.Journal
 	secrets       secret.Store
+	modelBudget   *tenant.Guard
 }
 
 type RevisionCompilerOption func(*RevisionCompiler)
+
+func WithModelBudget(guard *tenant.Guard) RevisionCompilerOption {
+	return func(c *RevisionCompiler) { c.modelBudget = guard }
+}
+
+// ModelForRevision also resolves background models through the same tenant
+// secret grants, revision pricing and per-call budget guard as foreground runs.
+func (c *RevisionCompiler) ModelForRevision(ctx context.Context, revision controlplane.AgentRevision, purpose string) (model.Model, error) {
+	selected, err := c.buildRevisionModel(ctx, revision.TenantID, revision.ModelConfig)
+	if err != nil {
+		return nil, err
+	}
+	if c.modelBudget == nil {
+		return selected, nil
+	}
+	cfg, err := parseRevisionModelConfig(revision.ModelConfig)
+	if err != nil {
+		return nil, err
+	}
+	return modelops.New(selected, c.modelBudget, modelops.Options{TenantID: revision.TenantID, AppID: revision.AppID, Purpose: purpose, PromptPerMillion: cfg.PromptCostPerMillion, CompletionPerMillion: cfg.CompletionCostPerMillion, MaxPromptTokens: cfg.MaxPromptTokens, MaxCompletionTokens: cfg.MaxCompletionTokens, Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second})
+}
 
 func WithSecretStore(store secret.Store) RevisionCompilerOption {
 	return func(c *RevisionCompiler) { c.secrets = store }
@@ -237,6 +262,9 @@ type revisionAgentConfig struct {
 }
 
 type revisionModelConfig struct {
+	MaxPromptTokens          int     `json:"max_prompt_tokens,omitempty"`
+	MaxCompletionTokens      int     `json:"max_completion_tokens,omitempty"`
+	TimeoutSeconds           int     `json:"timeout_seconds,omitempty"`
 	Source                   string  `json:"source"`
 	Provider                 string  `json:"provider"`
 	Name                     string  `json:"name"`
@@ -271,7 +299,7 @@ func (c *RevisionCompiler) compileRevision(
 	if agentConfig.SummaryEveryTurns < 0 {
 		return nil, fmt.Errorf("Agent revision summary_every_turns must not be negative")
 	}
-	selectedModel, err := c.buildRevisionModel(ctx, scope.TenantID, revision.ModelConfig)
+	selectedModel, err := c.ModelForRevision(ctx, revision, "chat")
 	if err != nil {
 		return nil, err
 	}
@@ -481,8 +509,11 @@ func parseRevisionModelConfig(raw json.RawMessage) (revisionModelConfig, error) 
 	if err := decodeStrictJSON(raw, &modelConfig); err != nil {
 		return revisionModelConfig{}, fmt.Errorf("decode revision model config: %w", err)
 	}
-	if modelConfig.PromptCostPerMillion < 0 || modelConfig.CompletionCostPerMillion < 0 {
+	if modelConfig.PromptCostPerMillion < 0 || modelConfig.CompletionCostPerMillion < 0 || modelConfig.PromptCostPerMillion > 1_000_000 || modelConfig.CompletionCostPerMillion > 1_000_000 {
 		return revisionModelConfig{}, fmt.Errorf("model token prices must not be negative")
+	}
+	if modelConfig.MaxPromptTokens < 0 || modelConfig.MaxPromptTokens > 1_000_000 || modelConfig.MaxCompletionTokens < 0 || modelConfig.MaxCompletionTokens > 131072 || modelConfig.TimeoutSeconds < 0 || modelConfig.TimeoutSeconds > 300 {
+		return revisionModelConfig{}, fmt.Errorf("invalid per-call model limits")
 	}
 	return modelConfig, nil
 }

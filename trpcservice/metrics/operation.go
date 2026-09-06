@@ -18,7 +18,7 @@ type Operation struct {
 }
 
 func NewOperation(kind string) *Operation {
-	if kind != "model" && kind != "storage" {
+	if kind != "model" && kind != "storage" && kind != "audit" {
 		return nil
 	}
 	meter := otel.Meter("trpc-agent-service/operations")

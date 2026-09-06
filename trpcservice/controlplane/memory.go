@@ -9,20 +9,23 @@ import (
 
 // MemoryRepository is an in-process control plane for tutorials and tests.
 type MemoryRepository struct {
-	mu         sync.RWMutex
-	closed     bool
-	tenants    map[string]Tenant
-	apps       map[string]AgentApp
-	revisions  map[string]AgentRevision
-	channels   map[string]ChannelBinding
-	channelIDs map[string]ChannelBinding
-	backends   []BackendBinding
-	migrations map[string]BackendMigration
+	knowledgeLock   chan struct{}
+	knowledgeStates map[string][]byte
+	mu              sync.RWMutex
+	closed          bool
+	tenants         map[string]Tenant
+	apps            map[string]AgentApp
+	revisions       map[string]AgentRevision
+	channels        map[string]ChannelBinding
+	channelIDs      map[string]ChannelBinding
+	backends        []BackendBinding
+	migrations      map[string]BackendMigration
 }
 
 // NewMemoryRepository builds a validated in-process snapshot.
 func NewMemoryRepository(data BootstrapData) *MemoryRepository {
 	repository := &MemoryRepository{
+		knowledgeLock: make(chan struct{}, 1), knowledgeStates: map[string][]byte{},
 		tenants:    make(map[string]Tenant),
 		apps:       make(map[string]AgentApp),
 		revisions:  make(map[string]AgentRevision),
@@ -437,7 +440,7 @@ func (r *MemoryRepository) CreateBackendMigration(
 }
 
 func (r *MemoryRepository) TransitionBackendMigration(
-	_ context.Context,
+	ctx context.Context,
 	tenantID string,
 	migrationID string,
 	nextState string,
@@ -445,6 +448,12 @@ func (r *MemoryRepository) TransitionBackendMigration(
 	checkpoint []byte,
 	verification []byte,
 ) (BackendMigration, error) {
+	select {
+	case r.knowledgeLock <- struct{}{}:
+	case <-ctx.Done():
+		return BackendMigration{}, context.Cause(ctx)
+	}
+	defer func() { <-r.knowledgeLock }()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	key := scopedKey(tenantID, migrationID)
@@ -454,6 +463,9 @@ func (r *MemoryRepository) TransitionBackendMigration(
 	}
 	if migration.Version != expectedVersion {
 		return BackendMigration{}, ErrConflict
+	}
+	if migration.ResourceType == "knowledge" && (nextState == MigrationCutover || nextState == MigrationCompleted) && !validKnowledgeProof(r.knowledgeStates[scopedKey(tenantID, migration.AppID)], migration) {
+		return BackendMigration{}, errors.New("knowledge migration requires current server verification")
 	}
 	migration.State = nextState
 	migration.Version++

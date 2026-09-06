@@ -2,10 +2,13 @@
 package tenant
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -19,6 +22,7 @@ var (
 	ErrRateLimited        = errors.New("tenant request rate exceeded")
 	ErrConcurrencyLimited = errors.New("tenant concurrent run limit exceeded")
 	ErrBudgetExceeded     = errors.New("tenant daily budget exceeded")
+	ErrPricingRequired    = errors.New("nonzero model pricing required when a monetary budget is enabled")
 )
 
 type QuotaPolicy struct {
@@ -34,24 +38,27 @@ func ParseQuotaPolicy(raw json.RawMessage) (QuotaPolicy, error) {
 		raw = json.RawMessage(`{}`)
 	}
 	var policy QuotaPolicy
-	if err := json.Unmarshal(raw, &policy); err != nil {
-		return QuotaPolicy{}, err
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&policy) != nil || decoder.Decode(new(any)) != io.EOF || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return QuotaPolicy{}, errors.New("invalid tenant quota policy")
 	}
 	if policy.RequestsPerMinute < 0 || policy.ConcurrentRuns < 0 ||
 		policy.DailyPromptTokens < 0 || policy.DailyCompletionTokens < 0 ||
-		policy.DailyCostUSD < 0 {
+		policy.DailyCostUSD < 0 || math.IsInf(policy.DailyCostUSD, 0) || math.IsNaN(policy.DailyCostUSD) || policy.DailyCostUSD > 1_000_000 || policy.DailyPromptTokens > 1_000_000_000 || policy.DailyCompletionTokens > 1_000_000_000 {
 		return QuotaPolicy{}, errors.New("tenant quotas must not be negative")
 	}
 	return policy, nil
 }
 
 type Guard struct {
-	repository controlplane.Repository
-	redis      *redis.Client
-	prefix     string
-	mu         sync.Mutex
-	local      map[string]*localQuota
-	usageSeen  map[string]struct{}
+	repository   controlplane.Repository
+	redis        *redis.Client
+	prefix       string
+	mu           sync.Mutex
+	local        map[string]*localQuota
+	usageSeen    map[string]struct{}
+	reservations map[string]reservationState
 }
 
 type localQuota struct {

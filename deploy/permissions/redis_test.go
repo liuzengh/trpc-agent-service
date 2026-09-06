@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 	redis "github.com/redis/go-redis/v9"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -94,6 +96,21 @@ func TestRedisACLIntegration(t *testing.T) {
 		return c
 	}
 	gw, w, relay, sender := client("gateway"), client("worker"), client("relay"), client("sender")
+	for _, role := range []string{"worker", "jobs"} {
+		url := &url.URL{Scheme: "redis", Host: addr, User: url.UserPassword("trpc_"+role, "fixture-only")}
+		guard, err := tenant.NewGuard(ctx, controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData()), config.QuotaConfig{Backend: "redis", RedisURL: url.String(), KeyPrefix: "policy-test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := guard.ReserveModel(ctx, "tutorial-tenant", 100, 10, .01)
+		if err != nil {
+			t.Fatal("role cannot reserve model budget: ", err)
+		}
+		if _, err := guard.SettleModel(ctx, r, 20, 5, .005); err != nil {
+			t.Fatal("role cannot settle model budget: ", err)
+		}
+		guard.Close()
+	}
 	if err := gw.Set(ctx, "policy-test:quota:rate:t:u:m", 1, 0).Err(); err != nil {
 		t.Fatal(err)
 	}

@@ -30,15 +30,16 @@ type Runtime interface {
 }
 
 type Options struct {
-	WorkerID    string
-	MaxAttempts int
-	RetryDelay  time.Duration
-	Audit       audit.Writer
-	Metrics     *platformmetrics.Recorder
-	Approvals   approval.Repository
-	ToolJournal toolexec.Journal
-	Jobs        background.Repository
-	Quota       *tenant.Guard
+	WorkerID          string
+	MaxAttempts       int
+	RetryDelay        time.Duration
+	Audit             audit.Writer
+	Metrics           *platformmetrics.Recorder
+	Approvals         approval.Repository
+	ToolJournal       toolexec.Journal
+	Jobs              background.Repository
+	Quota             *tenant.Guard
+	ModelUsageManaged bool
 }
 
 // Worker processes at-least-once queue deliveries. Durable idempotency makes
@@ -177,7 +178,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	}, "run_completed", "", started); err != nil {
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
-	if w.opts.Quota != nil {
+	if w.opts.Quota != nil && !w.opts.ModelUsageManaged {
 		if err := w.opts.Quota.RecordUsage(
 			ctx, task.Scope.TenantID, task.RequestID,
 			result.PromptTokens, result.CompletionTokens, result.Cost,
@@ -189,9 +190,11 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
 	w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "completed", time.Since(started))
-	w.opts.Metrics.RecordUsage(
-		ctx, task.Scope.TenantID, result.PromptTokens, result.CompletionTokens, result.Cost,
-	)
+	if !w.opts.ModelUsageManaged {
+		w.opts.Metrics.RecordUsage(
+			ctx, task.Scope.TenantID, result.PromptTokens, result.CompletionTokens, result.Cost,
+		)
+	}
 	if err := delivery.Ack(ctx); err != nil {
 		return true, err
 	}

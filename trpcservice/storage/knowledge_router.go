@@ -11,8 +11,10 @@ import (
 	"sync"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/modelops"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"golang.org/x/sync/singleflight"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/document"
@@ -38,7 +40,15 @@ type KnowledgeRouter struct {
 	mu         sync.RWMutex
 	closed     bool
 	handles    map[string]*knowledgeHandle
+	stores     map[string]vectorstore.VectorStore
 	group      singleflight.Group
+	budget     *tenant.Guard
+}
+
+type KnowledgeRouterOption func(*KnowledgeRouter)
+
+func WithEmbeddingBudget(guard *tenant.Guard) KnowledgeRouterOption {
+	return func(r *KnowledgeRouter) { r.budget = guard }
 }
 
 type knowledgeHandle struct {
@@ -53,15 +63,23 @@ type knowledgeHandle struct {
 func NewKnowledgeRouter(
 	repository controlplane.Repository,
 	secretStore secret.Store,
+	opts ...KnowledgeRouterOption,
 ) (*KnowledgeRouter, error) {
 	if repository == nil || secretStore == nil {
 		return nil, fmt.Errorf("knowledge router repository and secret store are required")
 	}
-	return &KnowledgeRouter{
+	router := &KnowledgeRouter{
 		repository: repository,
 		secrets:    secretStore,
 		handles:    make(map[string]*knowledgeHandle),
-	}, nil
+		stores:     make(map[string]vectorstore.VectorStore),
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(router)
+		}
+	}
+	return router, nil
 }
 
 func (r *KnowledgeRouter) KnowledgeForRevision(
@@ -77,6 +95,42 @@ func (r *KnowledgeRouter) KnowledgeForRevision(
 }
 
 func (r *KnowledgeRouter) UpsertDocument(
+	ctx context.Context, scope runtimecontext.Scope, revision controlplane.AgentRevision, doc KnowledgeDocument,
+) (int, error) {
+	if err := scope.Validate(); err != nil {
+		return 0, err
+	}
+	if revision.TenantID != scope.TenantID || revision.AppID != scope.AppID || revision.ID != scope.RevisionID {
+		return 0, errors.New("knowledge revision scope mismatch")
+	}
+	doc.ID = strings.TrimSpace(doc.ID)
+	doc.Content = strings.TrimSpace(doc.Content)
+	if doc.ID == "" || len(doc.ID) > 128 || doc.Content == "" {
+		return 0, errors.New("knowledge document identity and content required")
+	}
+	encoded, err := json.Marshal(doc)
+	if err != nil || len(encoded) > 1<<20 {
+		return 0, errors.New("knowledge document exceeds durable intent limit")
+	}
+	var chunks int
+	err = r.withSync(ctx, scope, func(ctx context.Context, state *controlplane.KnowledgeSync, save func() error) error {
+		state.Epoch++
+		state.Intents[doc.ID] = controlplane.KnowledgeIntent{RevisionID: revision.ID, Document: encoded}
+		if err := save(); err != nil {
+			return err
+		}
+		var err error
+		chunks, err = r.upsertDocument(ctx, scope, revision, doc)
+		if err != nil {
+			return err
+		}
+		delete(state.Intents, doc.ID)
+		return save()
+	})
+	return chunks, err
+}
+
+func (r *KnowledgeRouter) upsertDocument(
 	ctx context.Context,
 	scope runtimecontext.Scope,
 	revision controlplane.AgentRevision,
@@ -145,6 +199,33 @@ func upsertKnowledgeHandle(
 }
 
 func (r *KnowledgeRouter) DeleteDocument(
+	ctx context.Context, scope runtimecontext.Scope, revision controlplane.AgentRevision, documentID string,
+) error {
+	if err := scope.Validate(); err != nil {
+		return err
+	}
+	if revision.TenantID != scope.TenantID || revision.AppID != scope.AppID || revision.ID != scope.RevisionID {
+		return errors.New("knowledge revision scope mismatch")
+	}
+	documentID = strings.TrimSpace(documentID)
+	if documentID == "" || len(documentID) > 128 {
+		return errors.New("knowledge document identity required")
+	}
+	return r.withSync(ctx, scope, func(ctx context.Context, state *controlplane.KnowledgeSync, save func() error) error {
+		state.Epoch++
+		state.Intents[documentID] = controlplane.KnowledgeIntent{RevisionID: revision.ID, Deleted: true}
+		if err := save(); err != nil {
+			return err
+		}
+		if err := r.deleteDocument(ctx, scope, revision, documentID); err != nil {
+			return err
+		}
+		delete(state.Intents, documentID)
+		return save()
+	})
+}
+
+func (r *KnowledgeRouter) deleteDocument(
 	ctx context.Context,
 	scope runtimecontext.Scope,
 	revision controlplane.AgentRevision,
@@ -196,14 +277,14 @@ func (r *KnowledgeRouter) Close() error {
 		return nil
 	}
 	r.closed = true
-	handles := make([]*knowledgeHandle, 0, len(r.handles))
-	for _, handle := range r.handles {
-		handles = append(handles, handle)
+	stores := make([]vectorstore.VectorStore, 0, len(r.stores))
+	for _, store := range r.stores {
+		stores = append(stores, store)
 	}
 	r.mu.Unlock()
 	var closeErr error
-	for _, handle := range handles {
-		closeErr = errors.Join(closeErr, handle.store.Close())
+	for _, store := range stores {
+		closeErr = errors.Join(closeErr, store.Close())
 	}
 	return closeErr
 }
@@ -218,11 +299,12 @@ type revisionKnowledgeConfig struct {
 }
 
 type knowledgeEmbeddingConfig struct {
-	Provider   string `json:"provider"`
-	Model      string `json:"model"`
-	BaseURL    string `json:"base_url"`
-	Dimensions int    `json:"dimensions"`
-	SecretRef  string `json:"secret_ref"`
+	PromptCostPerMillion float64 `json:"prompt_cost_per_million"`
+	Provider             string  `json:"provider"`
+	Model                string  `json:"model"`
+	BaseURL              string  `json:"base_url"`
+	Dimensions           int     `json:"dimensions"`
+	SecretRef            string  `json:"secret_ref"`
 }
 
 type knowledgeBackendConfig struct {
@@ -246,6 +328,9 @@ func parseRevisionKnowledgeConfig(raw json.RawMessage) (revisionKnowledgeConfig,
 	}
 	if !config.Enabled {
 		return config, nil
+	}
+	if config.Embedding.PromptCostPerMillion < 0 || config.Embedding.PromptCostPerMillion > 1_000_000 {
+		return revisionKnowledgeConfig{}, errors.New("invalid embedding token price")
 	}
 	if config.Embedding.Dimensions <= 0 {
 		return revisionKnowledgeConfig{}, errors.New("knowledge embedding dimensions must be positive")
@@ -276,6 +361,9 @@ func (r *KnowledgeRouter) handleFor(
 ) (*knowledgeHandle, bool, error) {
 	if err := scope.Validate(); err != nil {
 		return nil, false, err
+	}
+	if revision.TenantID != scope.TenantID || revision.AppID != scope.AppID || revision.ID != scope.RevisionID {
+		return nil, false, errors.New("knowledge revision scope mismatch")
 	}
 	revisionConfig, err := parseRevisionKnowledgeConfig(revision.KnowledgeConfig)
 	if err != nil {
@@ -366,7 +454,14 @@ func (r *KnowledgeRouter) cachedHandle(
 	revisionConfig revisionKnowledgeConfig,
 	binding controlplane.BackendBinding,
 ) (*knowledgeHandle, error) {
-	cacheKey := binding.ID + "\x00" + fmt.Sprint(binding.Version) + "\x00" + revision.Checksum
+	// Publishing an unrelated Agent revision or changing migration state must
+	// not silently replace an InMemory vector store with an empty instance.
+	physicalConfig, _ := json.Marshal(struct {
+		Backend   json.RawMessage
+		Knowledge revisionKnowledgeConfig
+	}{binding.Config, revisionConfig})
+	digest := sha256.Sum256(physicalConfig)
+	cacheKey := scope.StorageScope + "\x00" + binding.ID + "\x00" + hex.EncodeToString(digest[:])
 	r.mu.RLock()
 	handle := r.handles[cacheKey]
 	closed := r.closed
@@ -424,37 +519,71 @@ func (r *KnowledgeRouter) build(
 	if err != nil {
 		return nil, err
 	}
-	var store vectorstore.VectorStore
-	switch strings.ToLower(binding.BackendType) {
-	case "inmemory":
-		store = vectorinmemory.New(vectorinmemory.WithMaxResults(backendConfig.MaxResults))
-	case "qdrant":
-		if backendConfig.Host == "" || backendConfig.Port <= 0 ||
-			backendConfig.CollectionName == "" {
-			return nil, errors.New("Qdrant host, port and collection_name are required")
-		}
-		options := []vectorqdrant.Option{
-			vectorqdrant.WithHost(backendConfig.Host),
-			vectorqdrant.WithPort(backendConfig.Port),
-			vectorqdrant.WithTLS(backendConfig.TLS),
-			vectorqdrant.WithDimension(backendConfig.Dimensions),
-			vectorqdrant.WithCollectionName(backendConfig.CollectionName),
-			vectorqdrant.WithMaxResults(backendConfig.MaxResults),
-		}
-		if binding.SecretRef != "" {
-			apiKey, err := r.secrets.Resolve(ctx, binding.TenantID, secret.Knowledge, binding.SecretRef)
-			if err != nil {
-				return nil, err
-			}
-			options = append(options, vectorqdrant.WithAPIKey(apiKey))
-		}
-		store, err = vectorqdrant.New(ctx, options...)
+	if r.budget != nil {
+		selectedEmbedder, err = modelops.NewEmbedding(selectedEmbedder, r.budget, scope.TenantID, scope.AppID, revisionConfig.Embedding.PromptCostPerMillion)
 		if err != nil {
 			return nil, err
 		}
-	default:
-		return nil, fmt.Errorf("unsupported knowledge backend %q", binding.BackendType)
 	}
+	// Physical storage is independent of prompt/chunking/retrieval settings.
+	// New revision views may change those settings without losing existing data.
+	backendBytes, _ := json.Marshal(backendConfig)
+	storeKey := scope.StorageScope + "\x00" + binding.ID + "\x00" + binding.BackendType + "\x00" + string(backendBytes)
+	value, err, _ := r.group.Do("physical-store\x00"+storeKey, func() (any, error) {
+		r.mu.RLock()
+		existing := r.stores[storeKey]
+		closed := r.closed
+		r.mu.RUnlock()
+		if closed {
+			return nil, errors.New("knowledge router is closed")
+		}
+		if existing != nil {
+			return existing, nil
+		}
+		var store vectorstore.VectorStore
+		switch strings.ToLower(binding.BackendType) {
+		case "inmemory":
+			store = vectorinmemory.New(vectorinmemory.WithMaxResults(backendConfig.MaxResults))
+		case "qdrant":
+			if backendConfig.Host == "" || backendConfig.Port <= 0 ||
+				backendConfig.CollectionName == "" {
+				return nil, errors.New("Qdrant host, port and collection_name are required")
+			}
+			options := []vectorqdrant.Option{
+				vectorqdrant.WithHost(backendConfig.Host),
+				vectorqdrant.WithPort(backendConfig.Port),
+				vectorqdrant.WithTLS(backendConfig.TLS),
+				vectorqdrant.WithDimension(backendConfig.Dimensions),
+				vectorqdrant.WithCollectionName(backendConfig.CollectionName),
+				vectorqdrant.WithMaxResults(backendConfig.MaxResults),
+			}
+			if binding.SecretRef != "" {
+				apiKey, err := r.secrets.Resolve(ctx, binding.TenantID, secret.Knowledge, binding.SecretRef)
+				if err != nil {
+					return nil, err
+				}
+				options = append(options, vectorqdrant.WithAPIKey(apiKey))
+			}
+			store, err = vectorqdrant.New(ctx, options...)
+			if err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("unsupported knowledge backend %q", binding.BackendType)
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.closed {
+			_ = store.Close()
+			return nil, errors.New("knowledge router is closed")
+		}
+		r.stores[storeKey] = store
+		return store, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	store := value.(vectorstore.VectorStore)
 	scoped := &scopedKnowledge{
 		store: store, embedder: selectedEmbedder,
 		tenantID: scope.TenantID, appID: scope.AppID,

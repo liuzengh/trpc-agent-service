@@ -26,7 +26,7 @@ func (r *PostgresRepository) GetTenant(
 	ctx context.Context,
 	tenantID string,
 ) (Tenant, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.dbFor(ctx).QueryRowContext(ctx, `
 SELECT tenant_id, display_name, status, region, quota_config, audit_policy,
        secret_namespace, version, created_at, updated_at
 FROM tenant
@@ -58,7 +58,7 @@ func (r *PostgresRepository) GetAgentApp(
 	tenantID string,
 	appID string,
 ) (AgentApp, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.dbFor(ctx).QueryRowContext(ctx, `
 SELECT app_id, tenant_id, name, description, status, stable_revision_id,
        rollout_policy, version, created_at, updated_at
 FROM agent_app
@@ -71,7 +71,7 @@ func (r *PostgresRepository) GetRevision(
 	tenantID string,
 	revisionID string,
 ) (AgentRevision, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.dbFor(ctx).QueryRowContext(ctx, `
 SELECT revision_id, tenant_id, app_id, revision_no, agent_type,
        agent_config, model_config, tool_policy, knowledge_config,
        memory_config, guardrail_config, checksum, created_by, created_at
@@ -85,7 +85,7 @@ func (r *PostgresRepository) GetStableRevision(
 	tenantID string,
 	appID string,
 ) (AgentRevision, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.dbFor(ctx).QueryRowContext(ctx, `
 SELECT r.revision_id, r.tenant_id, r.app_id, r.revision_no, r.agent_type,
        r.agent_config, r.model_config, r.tool_policy, r.knowledge_config,
        r.memory_config, r.guardrail_config, r.checksum, r.created_by, r.created_at
@@ -100,7 +100,7 @@ func (r *PostgresRepository) GetChannelBindingByCallbackKey(
 	ctx context.Context,
 	callbackKey string,
 ) (ChannelBinding, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.dbFor(ctx).QueryRowContext(ctx, `
 SELECT channel_binding_id, tenant_id, app_id, channel_type, account_id,
        callback_key, config, secret_ref, status, version, created_at, updated_at
 FROM channel_binding
@@ -132,7 +132,7 @@ func (r *PostgresRepository) GetChannelBinding(
 	tenantID string,
 	bindingID string,
 ) (ChannelBinding, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.dbFor(ctx).QueryRowContext(ctx, `
 SELECT channel_binding_id, tenant_id, app_id, channel_type, account_id,
        callback_key, config, secret_ref, status, version, created_at, updated_at
 FROM channel_binding
@@ -164,7 +164,7 @@ func (r *PostgresRepository) ListBackendBindings(
 	tenantID string,
 	appID string,
 ) ([]BackendBinding, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.dbFor(ctx).QueryContext(ctx, `
 SELECT binding_id, tenant_id, COALESCE(app_id, ''), resource_type,
        backend_type, config, COALESCE(secret_ref, ''), isolation_level,
        migration_state, version, created_at, updated_at
@@ -209,7 +209,7 @@ func (r *PostgresRepository) GetBackendBinding(
 	tenantID string,
 	bindingID string,
 ) (BackendBinding, error) {
-	return scanBackendBinding(r.db.QueryRowContext(ctx, `
+	return scanBackendBinding(r.dbFor(ctx).QueryRowContext(ctx, `
 SELECT binding_id, tenant_id, COALESCE(app_id, ''), resource_type,
        backend_type, config, COALESCE(secret_ref, ''), isolation_level,
        migration_state, version, created_at, updated_at
@@ -221,7 +221,7 @@ func (r *PostgresRepository) GetBackendMigration(
 	tenantID string,
 	migrationID string,
 ) (BackendMigration, error) {
-	return scanBackendMigration(r.db.QueryRowContext(ctx, backendMigrationSelect+
+	return scanBackendMigration(r.dbFor(ctx).QueryRowContext(ctx, backendMigrationSelect+
 		` WHERE tenant_id=$1 AND migration_id=$2`, tenantID, migrationID))
 }
 
@@ -231,7 +231,7 @@ func (r *PostgresRepository) GetActiveBackendMigration(
 	appID string,
 	resourceType string,
 ) (BackendMigration, error) {
-	return scanBackendMigration(r.db.QueryRowContext(ctx, backendMigrationSelect+`
+	return scanBackendMigration(r.dbFor(ctx).QueryRowContext(ctx, backendMigrationSelect+`
 WHERE tenant_id=$1 AND app_id IS NOT DISTINCT FROM NULLIF($2,'') AND resource_type=$3
   AND state NOT IN ('completed','rolled_back','failed')
 ORDER BY created_at DESC LIMIT 1`, tenantID, appID, resourceType))
@@ -243,7 +243,7 @@ func (r *PostgresRepository) AdjustBackendMigrationRepair(
 	migrationID string,
 	delta int64,
 ) error {
-	result, err := r.db.ExecContext(ctx, `
+	result, err := r.dbFor(ctx).ExecContext(ctx, `
 UPDATE backend_migration
 SET repair_backlog=GREATEST(0,repair_backlog+$3),updated_at=now()
 WHERE tenant_id=$1 AND migration_id=$2`, tenantID, migrationID, delta)
@@ -288,7 +288,7 @@ func (r *PostgresRepository) SQLDB() *sql.DB {
 }
 
 func (r *PostgresRepository) CreateTenant(ctx context.Context, tenant Tenant) error {
-	_, err := r.db.ExecContext(ctx, `
+	_, err := r.dbFor(ctx).ExecContext(ctx, `
 INSERT INTO tenant(
     tenant_id, display_name, status, region, quota_config, audit_policy,
     secret_namespace, version, created_at, updated_at
@@ -300,7 +300,7 @@ INSERT INTO tenant(
 }
 
 func (r *PostgresRepository) CreateAgentApp(ctx context.Context, app AgentApp) error {
-	_, err := r.db.ExecContext(ctx, `
+	_, err := r.dbFor(ctx).ExecContext(ctx, `
 INSERT INTO agent_app(
     app_id, tenant_id, name, description, status, stable_revision_id,
     rollout_policy, version, created_at, updated_at
@@ -315,7 +315,7 @@ func (r *PostgresRepository) CreateRevision(
 	ctx context.Context,
 	revision AgentRevision,
 ) error {
-	_, err := r.db.ExecContext(ctx, `
+	_, err := r.dbFor(ctx).ExecContext(ctx, `
 INSERT INTO agent_revision(
     revision_id, tenant_id, app_id, revision_no, agent_type,
     agent_config, model_config, tool_policy, knowledge_config,
@@ -338,7 +338,7 @@ func (r *PostgresRepository) PublishRevision(
 	revisionID string,
 	expectedVersion int64,
 ) (AgentApp, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.dbFor(ctx).QueryRowContext(ctx, `
 UPDATE agent_app a
 SET stable_revision_id = r.revision_id,
     version = a.version + 1,
@@ -363,7 +363,7 @@ func (r *PostgresRepository) UpdateRolloutPolicy(
 	rolloutPolicy []byte,
 	expectedVersion int64,
 ) (AgentApp, error) {
-	result, err := r.db.ExecContext(ctx, `
+	result, err := r.dbFor(ctx).ExecContext(ctx, `
 UPDATE agent_app
 SET rollout_policy=$3::jsonb,version=version+1,updated_at=now()
 WHERE tenant_id=$1 AND app_id=$2 AND version=$4`,
@@ -389,7 +389,7 @@ func (r *PostgresRepository) CreateChannelBinding(
 	ctx context.Context,
 	binding ChannelBinding,
 ) error {
-	_, err := r.db.ExecContext(ctx, `
+	_, err := r.dbFor(ctx).ExecContext(ctx, `
 INSERT INTO channel_binding(
     channel_binding_id, tenant_id, app_id, channel_type, account_id,
     callback_key, config, secret_ref, status, version, created_at, updated_at
@@ -409,7 +409,7 @@ func (r *PostgresRepository) UpdateChannelBinding(
 	status string,
 	expectedVersion int64,
 ) (ChannelBinding, error) {
-	result, err := r.db.ExecContext(ctx, `
+	result, err := r.dbFor(ctx).ExecContext(ctx, `
 UPDATE channel_binding
 SET config=$3::jsonb,status=$4,version=version+1,updated_at=now()
 WHERE tenant_id=$1 AND channel_binding_id=$2 AND version=$5`,
@@ -439,7 +439,7 @@ func (r *PostgresRepository) CreateBackendBinding(
 	if binding.AppID != "" {
 		appID = binding.AppID
 	}
-	_, err := r.db.ExecContext(ctx, `
+	_, err := r.dbFor(ctx).ExecContext(ctx, `
 INSERT INTO backend_binding(
     binding_id, tenant_id, app_id, resource_type, backend_type, config,
     secret_ref, isolation_level, migration_state, version, created_at, updated_at
@@ -459,7 +459,7 @@ func (r *PostgresRepository) CreateBackendMigration(
 	if migration.AppID != "" {
 		appID = migration.AppID
 	}
-	_, err := r.db.ExecContext(ctx, `
+	_, err := r.dbFor(ctx).ExecContext(ctx, `
 INSERT INTO backend_migration(
     migration_id,tenant_id,app_id,resource_type,source_binding_id,
     target_binding_id,state,checkpoint,verification,repair_backlog,
@@ -482,11 +482,26 @@ func (r *PostgresRepository) TransitionBackendMigration(
 	checkpoint []byte,
 	verification []byte,
 ) (BackendMigration, error) {
+	current, err := r.GetBackendMigration(ctx, tenantID, migrationID)
+	if err != nil {
+		return BackendMigration{}, err
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return BackendMigration{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if current.ResourceType == "knowledge" {
+		if _, err = tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", KnowledgeLockName(tenantID, current.AppID)); err != nil {
+			return BackendMigration{}, err
+		}
+		if nextState == MigrationCutover || nextState == MigrationCompleted {
+			var state []byte
+			if err = tx.QueryRowContext(ctx, "SELECT state FROM knowledge_sync WHERE tenant_id=$1 AND app_id=$2", tenantID, current.AppID).Scan(&state); err != nil || !validKnowledgeProof(state, current) {
+				return BackendMigration{}, errors.New("knowledge migration requires current server verification")
+			}
+		}
+	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE backend_migration
 SET state=$3,

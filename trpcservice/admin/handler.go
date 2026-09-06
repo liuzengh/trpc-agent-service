@@ -113,6 +113,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		value, err := h.service.CreateTenant(r.Context(), input)
 		h.writeResult(w, http.StatusCreated, value, err)
+	case "/admin/tenants/policies":
+		var input TenantPolicyInput
+		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionWrite) {
+			return
+		}
+		value, err := h.service.UpdateTenantPolicies(r.Context(), input)
+		h.writeResult(w, http.StatusOK, value, err)
 	case "/admin/apps":
 		var input controlplane.AgentApp
 		if !decodeAdmin(w, r, &input) {
@@ -248,6 +255,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeResult(w, http.StatusOK, value, err)
 	case "/admin/backend-migrations/backfill-memory":
 		h.handleMemoryMigrationJob(w, r, background.JobMemoryBackfill)
+	case "/admin/backend-migrations/backfill-knowledge":
+		h.handleKnowledgeMigrationJob(w, r, background.JobKnowledgeBackfill)
+	case "/admin/backend-migrations/verify-knowledge":
+		h.handleKnowledgeMigrationJob(w, r, background.JobKnowledgeVerify)
+	case "/admin/backend-migrations/knowledge-status":
+		h.handleKnowledgeMigrationStatus(w, r)
 	case "/admin/backend-migrations/verify-memory":
 		h.handleMemoryMigrationJob(w, r, background.JobMemoryVerify)
 	case "/admin/backend-migrations/backfill-session":
