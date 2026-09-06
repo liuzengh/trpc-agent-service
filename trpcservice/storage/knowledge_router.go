@@ -420,7 +420,7 @@ func (r *KnowledgeRouter) build(
 	if backendConfig.Dimensions != revisionConfig.Embedding.Dimensions {
 		return nil, errors.New("knowledge vector and embedding dimensions differ")
 	}
-	selectedEmbedder, err := r.buildEmbedder(ctx, revisionConfig.Embedding)
+	selectedEmbedder, err := r.buildEmbedder(ctx, scope.TenantID, revisionConfig.Embedding)
 	if err != nil {
 		return nil, err
 	}
@@ -442,7 +442,7 @@ func (r *KnowledgeRouter) build(
 			vectorqdrant.WithMaxResults(backendConfig.MaxResults),
 		}
 		if binding.SecretRef != "" {
-			apiKey, err := r.secrets.Resolve(ctx, binding.SecretRef)
+			apiKey, err := r.secrets.Resolve(ctx, binding.TenantID, secret.Knowledge, binding.SecretRef)
 			if err != nil {
 				return nil, err
 			}
@@ -467,12 +467,16 @@ func (r *KnowledgeRouter) build(
 
 func (r *KnowledgeRouter) buildEmbedder(
 	ctx context.Context,
+	tenantID string,
 	config knowledgeEmbeddingConfig,
 ) (embedder.Embedder, error) {
 	switch strings.ToLower(config.Provider) {
 	case "hash":
 		return NewHashEmbedder(config.Dimensions), nil
 	case "openai":
+		if config.SecretRef == "" {
+			return nil, errors.New("OpenAI embedding requires an explicit tenant credential reference")
+		}
 		options := []openaiembedder.Option{
 			openaiembedder.WithModel(config.Model),
 			openaiembedder.WithDimensions(config.Dimensions),
@@ -481,7 +485,7 @@ func (r *KnowledgeRouter) buildEmbedder(
 			options = append(options, openaiembedder.WithBaseURL(config.BaseURL))
 		}
 		if config.SecretRef != "" {
-			apiKey, err := r.secrets.Resolve(ctx, config.SecretRef)
+			apiKey, err := r.secrets.Resolve(ctx, tenantID, secret.Embedding, config.SecretRef)
 			if err != nil {
 				return nil, err
 			}

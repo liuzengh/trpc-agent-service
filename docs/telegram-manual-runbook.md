@@ -14,6 +14,8 @@
 
 这些配置不会因关闭终端或正常重启电脑而消失。不要删除 `.env`、Cloudflare 凭据文件或 Docker Volume，也不要执行 `docker compose down -v`。
 
+2026-09-06 安全更新：现有 `.env` 已为 `tutorial-tenant` 增加 Bot Token 和 Webhook Secret 的精确用途授权，见[密钥授权说明](security-boundaries.md#2-租户密钥授权)。迁移到新机器时也需保存这项配置。`/chat`、`/inbound` 默认关闭，不影响 Telegram 回调；升级代码不会自动重启现有进程。
+
 ## 每次开始测试
 
 如果使用本机 `workbuddy2api` 提供模型，先在一个独立终端启动它：

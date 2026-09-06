@@ -23,7 +23,7 @@ docker compose --profile observability up -d
 ./scripts/e2e-observability.sh
 ```
 
-脚本使用固定 W3C Trace 上下文发送 `/chat`，从 Tempo 查询 HTTP 与 Session spans，检查 Collector 导出的租户级 inbound/run/reply metrics，并确认 Grafana Dashboard 与 Prometheus Alert Rule 已加载。验收结束后会停止本次应用进程和可观测容器，但不会删除数据卷。
+脚本为自己的临时进程生成 HTTP 测试凭据，使用固定 W3C Trace 上下文发送 `/chat`，从 Tempo 查询 HTTP 与 Session spans，并检查 metrics、Dashboard 与 Alert Rule。结束时只停止本次应用进程，共享可观测容器保持运行，不删除数据卷。日常服务的 HTTP 入口默认关闭，见[安全配置](security-boundaries.md)。
 
 端口：OTLP gRPC 4317、OTLP HTTP 4318、Prometheus 9090、Tempo 3200、Grafana 3000、MinIO Console 9001、Qdrant REST 6333。Grafana 本地默认账号为 `admin/admin`，只用于开发环境。
 
@@ -49,11 +49,13 @@ deploy/kubernetes/migration-job.yaml
 部署顺序：
 
 1. 替换镜像地址；
-2. 用 Secret Manager/External Secrets 生成 `trpc-agent-secrets`，不要直接应用示例值；
-3. 应用 namespace、ConfigMap、ServiceAccount 和 NetworkPolicy；
+2. 用 Secret Manager/External Secrets 分别生成 `trpc-agent-{gateway,admin,relay,worker,sender,jobs,migration}-secrets`，不要直接应用示例值或复制同一份全集凭据；
+3. 在 ConfigMap 中配置精确 secret grants；应用 namespace、ConfigMap、ServiceAccount 和 NetworkPolicy，并为入口代理与管理命名空间分别设置 `trpc-agent-access=gateway` / `admin` 标签；
 4. 运行 migration Job，确认完成；
 5. 应用六类 Deployment/Service/HPA/PDB；
 6. 配置 Ingress，只公开 Gateway；Admin 通过内网和额外身份代理访问。
+
+Gateway 默认只接受 IM 回调，不挂载 Admin 或同步 `/chat`，且不需要模型 API Key。需要 HTTP 异步调用时为它显式启用 `/inbound` 并注入受限调用方凭据。Admin 只有自身角色启用管理接口。当前模板仍需按真实后端划分 SQL GRANT、Redis ACL 与外连目标策略；模板存在不等于这些账号或网络策略已经在集群验证。
 
 ```bash
 kubectl apply -f deploy/kubernetes/platform.yaml

@@ -23,6 +23,8 @@ type IntakeRequest struct {
 	ChatType          string
 	Text              string
 	ReplyTarget       string
+	// AuthorizeScope is an internal pre-persistence check, never an HTTP field.
+	AuthorizeScope func(runtimecontext.Scope) error
 }
 
 // Intake resolves a binding and durably accepts its normalized message.
@@ -78,6 +80,11 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 	scope, err := i.resolveScope(ctx, input.BindingKey, input.UserID, input.SessionID)
 	if err != nil {
 		return AcceptResult{}, err
+	}
+	if input.AuthorizeScope != nil {
+		if err := input.AuthorizeScope(scope); err != nil {
+			return AcceptResult{}, err
+		}
 	}
 	span.SetAttributes(attribute.String("tenant.id", scope.TenantID), attribute.String("agent.app.id", scope.AppID))
 	if i.quota != nil {

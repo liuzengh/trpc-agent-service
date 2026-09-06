@@ -83,11 +83,11 @@ func (a *Adapter) Callback(
 	if err != nil {
 		return channels.CallbackResult{}, err
 	}
-	token, err := a.secrets.Resolve(ctx, cfg.CallbackTokenRef)
+	token, err := a.secrets.Resolve(ctx, binding.TenantID, secret.WeComCallback, cfg.CallbackTokenRef)
 	if err != nil {
 		return channels.CallbackResult{}, fmt.Errorf("resolve WeCom callback token: %w", err)
 	}
-	aesKeyText, err := a.secrets.Resolve(ctx, cfg.EncodingAESKeyRef)
+	aesKeyText, err := a.secrets.Resolve(ctx, binding.TenantID, secret.WeComAES, cfg.EncodingAESKeyRef)
 	if err != nil {
 		return channels.CallbackResult{}, fmt.Errorf("resolve WeCom AES key: %w", err)
 	}
@@ -253,7 +253,7 @@ func (a *Adapter) accessToken(
 	binding controlplane.ChannelBinding,
 	cfg bindingConfig,
 ) (string, error) {
-	cacheKey := fmt.Sprintf("%s:%d", binding.ID, binding.Version)
+	cacheKey := fmt.Sprintf("%s:%s:%d", binding.TenantID, binding.ID, binding.Version)
 	a.mu.Lock()
 	entry := a.tokens[cacheKey]
 	a.mu.Unlock()
@@ -267,7 +267,7 @@ func (a *Adapter) accessToken(
 		if cached.value != "" && time.Now().Before(cached.expiresAt) {
 			return cached.value, nil
 		}
-		appSecret, err := a.secrets.Resolve(ctx, cfg.AppSecretRef)
+		appSecret, err := a.secrets.Resolve(ctx, binding.TenantID, secret.WeComApp, cfg.AppSecretRef)
 		if err != nil {
 			return "", fmt.Errorf("resolve WeCom app secret: %w", err)
 		}
@@ -352,7 +352,7 @@ func (a *Adapter) sendText(
 
 func (a *Adapter) invalidateToken(binding controlplane.ChannelBinding) {
 	a.mu.Lock()
-	delete(a.tokens, fmt.Sprintf("%s:%d", binding.ID, binding.Version))
+	delete(a.tokens, fmt.Sprintf("%s:%s:%d", binding.TenantID, binding.ID, binding.Version))
 	a.mu.Unlock()
 }
 

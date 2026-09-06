@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
@@ -46,7 +47,7 @@ func (f fakeRouteResolver) Resolve(context.Context, string) (runtimecontext.Scop
 }
 
 func newChatHandler(service ChatService) http.Handler {
-	return NewHandler(
+	return newAuthorizedTestHandler(
 		service,
 		WithRouteResolver(fakeRouteResolver{scope: runtimecontext.TutorialScope()}),
 	)
@@ -131,7 +132,7 @@ func TestHandlerRejectsInvalidRequests(t *testing.T) {
 }
 
 func TestHandlerRejectsUnknownBinding(t *testing.T) {
-	handler := NewHandler(
+	handler := newAuthorizedTestHandler(
 		&fakeChatService{},
 		WithRouteResolver(fakeRouteResolver{err: routing.ErrBindingNotFound}),
 	)
@@ -294,7 +295,7 @@ func TestHandlerDurablyAcceptsInboundMessage(t *testing.T) {
 		t.Fatalf("new intake: %v", err)
 	}
 	t.Cleanup(func() { _ = intake.Close() })
-	handler := NewHandler(
+	handler := newAuthorizedTestHandler(
 		&fakeChatService{},
 		WithRouteResolver(resolver),
 		WithGatewayIntake(intake),
@@ -324,7 +325,7 @@ func TestHandlerRejectsInboundPayloadConflict(t *testing.T) {
 	journal := gateway.NewMemoryJournal()
 	intake, _ := gateway.NewIntake(resolver, journal)
 	t.Cleanup(func() { _ = intake.Close() })
-	handler := NewHandler(
+	handler := newAuthorizedTestHandler(
 		&fakeChatService{},
 		WithRouteResolver(resolver),
 		WithGatewayIntake(intake),
@@ -342,6 +343,23 @@ func TestHandlerRejectsInboundPayloadConflict(t *testing.T) {
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
+}
+
+// Functional tests use a real scoped test credential; auth denial tests call
+// NewHandler directly so this helper cannot hide missing authorization.
+func newAuthorizedTestHandler(service ChatService, opts ...Option) http.Handler {
+	access, err := NewAPIAccess(config.HTTPAPIConfig{Enabled: true, Principals: []config.HTTPAPIPrincipal{{
+		Name: "test-client", Token: testAPIToken, TenantID: "tutorial-tenant",
+		BindingKeys: []string{"tutorial-http", "unknown", "b"}, UserIDs: []string{"alice", "user", "u"},
+	}}})
+	if err != nil {
+		panic(err)
+	}
+	handler := NewHandler(service, append(opts, WithAPIAccess(access))...)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+testAPIToken)
+		handler.ServeHTTP(w, r)
+	})
 }
 
 func postChat(t *testing.T, handler http.Handler, body string) chatResponse {

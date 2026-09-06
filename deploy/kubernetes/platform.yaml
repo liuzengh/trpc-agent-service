@@ -30,7 +30,10 @@ data:
   TRPC_AGENT_QUEUE_GROUP: agent-workers
   TRPC_AGENT_QUEUE_CLAIM_MIN_IDLE: "30s"
   TRPC_AGENT_QUOTA_BACKEND: redis
-  TRPC_AGENT_ADMIN_ENABLED: "true"
+  TRPC_AGENT_ADMIN_ENABLED: "false"
+  TRPC_AGENT_HTTP_API_ENABLED: "false"
+  # Full reference grants (metadata only) are provisioned by platform operators.
+  TRPC_AGENT_SECRET_GRANTS_JSON: "[]"
   TRPC_AGENT_OTEL_ENABLED: "true"
   TRPC_AGENT_OTEL_SERVICE_NAME: trpc-agent-service
   TRPC_AGENT_OTEL_ENDPOINT: otel-collector.observability.svc.cluster.local:4317
@@ -59,7 +62,7 @@ spec:
           args: ["-role", "gateway", "-addr", ":8080"]
           envFrom:
             - configMapRef: {name: trpc-agent-config}
-            - secretRef: {name: trpc-agent-secrets}
+            - secretRef: {name: trpc-agent-gateway-secrets}
           ports: [{name: http, containerPort: 8080}]
           readinessProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 5, timeoutSeconds: 2}
           livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10, timeoutSeconds: 2}
@@ -96,9 +99,11 @@ spec:
         - name: service
           image: ghcr.io/example/trpc-agent-service:replace-me
           args: ["-role", "admin", "-addr", ":8080"]
+          env:
+            - {name: TRPC_AGENT_ADMIN_ENABLED, value: "true"}
           envFrom:
             - configMapRef: {name: trpc-agent-config}
-            - secretRef: {name: trpc-agent-secrets}
+            - secretRef: {name: trpc-agent-admin-secrets}
           ports: [{name: http, containerPort: 8080}]
           readinessProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 5}
           livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
@@ -138,7 +143,7 @@ spec:
           args: ["-role", "relay"]
           envFrom:
             - configMapRef: {name: trpc-agent-config}
-            - secretRef: {name: trpc-agent-secrets}
+            - secretRef: {name: trpc-agent-relay-secrets}
           resources:
             requests: {cpu: 100m, memory: 128Mi}
             limits: {cpu: "1", memory: 512Mi}
@@ -166,7 +171,7 @@ spec:
           args: ["-role", "worker"]
           envFrom:
             - configMapRef: {name: trpc-agent-config}
-            - secretRef: {name: trpc-agent-secrets}
+            - secretRef: {name: trpc-agent-worker-secrets}
           resources:
             requests: {cpu: 500m, memory: 512Mi}
             limits: {cpu: "4", memory: 2Gi}
@@ -194,7 +199,7 @@ spec:
           args: ["-role", "sender"]
           envFrom:
             - configMapRef: {name: trpc-agent-config}
-            - secretRef: {name: trpc-agent-secrets}
+            - secretRef: {name: trpc-agent-sender-secrets}
           resources:
             requests: {cpu: 100m, memory: 192Mi}
             limits: {cpu: "1", memory: 512Mi}
@@ -222,7 +227,7 @@ spec:
           args: ["-role", "jobs"]
           envFrom:
             - configMapRef: {name: trpc-agent-config}
-            - secretRef: {name: trpc-agent-secrets}
+            - secretRef: {name: trpc-agent-jobs-secrets}
           resources:
             requests: {cpu: 250m, memory: 384Mi}
             limits: {cpu: "2", memory: 1Gi}
@@ -292,16 +297,11 @@ spec:
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: {name: platform-allowed-traffic, namespace: trpc-agent}
+metadata: {name: platform-dependency-egress, namespace: trpc-agent}
 spec:
   podSelector:
     matchLabels: {app: trpc-agent-service}
-  policyTypes: [Ingress, Egress]
-  ingress:
-    - from:
-        - namespaceSelector: {}
-      ports:
-        - {protocol: TCP, port: 8080}
+  policyTypes: [Egress]
   egress:
     - to:
         - namespaceSelector: {}
@@ -317,3 +317,45 @@ spec:
         - ipBlock: {cidr: 0.0.0.0/0}
       ports:
         - {protocol: TCP, port: 443}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: gateway-ingress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-service, role: gateway}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # Label only the namespace hosting the trusted Ingress/tunnel connector.
+        - namespaceSelector:
+            matchLabels: {trpc-agent-access: gateway}
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: admin-ingress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-service, role: admin}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-access: admin}
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: migration-egress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-migrate}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+        - {protocol: TCP, port: 5432}

@@ -9,6 +9,7 @@ CONCURRENCY="${BENCHMARK_CONCURRENCY:-50}"
 SESSIONS="${BENCHMARK_SESSIONS:-200}"
 PORT="${BENCHMARK_PORT:-18083}"
 RUN_ID="$(date +%s)-$$"
+HTTP_API_TOKEN="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
 PREFIX="benchmark-$RUN_ID"
 POSTGRES_URL="${TEST_POSTGRES_URL:-postgres://trpc_agent:trpc_agent_dev@127.0.0.1:5432/trpc_agent?sslmode=disable}"
 REDIS_URL_VALUE="${TEST_REDIS_URL:-redis://127.0.0.1:6379/0}"
@@ -28,7 +29,7 @@ cleanup() {
     kill -TERM "$APP_PID" 2>/dev/null || true
     wait "$APP_PID" 2>/dev/null || true
   fi
-  docker compose stop redis postgres >/dev/null 2>&1 || true
+  # Dependencies may be shared with a manually running service; leave them up.
 }
 trap cleanup EXIT
 
@@ -52,6 +53,9 @@ TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=true \
   ./bin/trpc-migrate >/dev/null
 
 env \
+  TRPC_AGENT_HTTP_API_ENABLED=true \
+  TRPC_AGENT_HTTP_API_TOKEN= \
+  TRPC_AGENT_HTTP_API_PRINCIPALS_JSON="[{\"name\":\"load-test\",\"token\":\"$HTTP_API_TOKEN\",\"tenant_id\":\"tutorial-tenant\",\"binding_keys\":[\"tutorial-http\"],\"user_ids\":[\"load-tester\"]}]" \
   TRPC_AGENT_MODEL_PROVIDER=mock \
   TRPC_AGENT_SESSION_BACKEND=redis \
   TRPC_AGENT_COORDINATOR_BACKEND=redis \
@@ -81,7 +85,8 @@ fi
 
 echo "environment: cpu=$(nproc) go=$(go env GOVERSION) docker=$(docker version --format '{{.Server.Version}}')"
 echo "configuration: requests=$REQUESTS concurrency=$CONCURRENCY sessions=$SESSIONS"
-./bin/trpc-loadgen \
+TRPC_AGENT_HTTP_API_TOKEN="$HTTP_API_TOKEN" ./bin/trpc-loadgen \
+  -user load-tester \
   -url "http://127.0.0.1:$PORT/inbound" \
   -binding tutorial-http \
   -requests "$REQUESTS" \

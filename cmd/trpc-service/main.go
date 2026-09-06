@@ -40,6 +40,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 	"golang.org/x/sync/errgroup"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 	agentrunner "trpc.group/trpc-go/trpc-agent-go/runner"
 	sessionsummary "trpc.group/trpc-go/trpc-agent-go/session/summary"
 )
@@ -88,13 +89,36 @@ func run() error {
 	fmt.Printf("trpc-agent-service %s\n", trpcservice.Version)
 	fmt.Printf("service role=%s\n", roleName)
 
-	modelConfig, err := config.LoadModelConfigFromEnv()
-	if err != nil {
-		return fmt.Errorf("load model config: %w", err)
+	modelConfig := config.ModelConfig{Provider: "disabled"}
+	var selectedModel model.Model = agentservice.DisabledModel{}
+	if roles.Worker || roles.Jobs {
+		modelConfig, err = config.LoadModelConfigFromEnv()
+		if err != nil {
+			return fmt.Errorf("load model config: %w", err)
+		}
+		selectedModel, err = agentservice.BuildModel(modelConfig)
+		if err != nil {
+			return fmt.Errorf("build model: %w", err)
+		}
 	}
-	selectedModel, err := agentservice.BuildModel(modelConfig)
+	var httpAPIConfig config.HTTPAPIConfig
+	if roles.Gateway {
+		httpAPIConfig, err = config.LoadHTTPAPIConfigFromEnv()
+		if err != nil {
+			return fmt.Errorf("load HTTP API config: %w", err)
+		}
+	}
+	apiAccess, err := web.NewAPIAccess(httpAPIConfig)
 	if err != nil {
-		return fmt.Errorf("build model: %w", err)
+		return err
+	}
+	secretGrants, err := config.LoadSecretGrantsFromEnv()
+	if err != nil {
+		return fmt.Errorf("load secret grants: %w", err)
+	}
+	secretStore, err := secret.NewEnvStore(roles.SecretGrants(secretGrants))
+	if err != nil {
+		return err
 	}
 	sessionConfig, err := config.LoadSessionConfigFromEnv()
 	if err != nil {
@@ -116,9 +140,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load queue config: %w", err)
 	}
-	adminConfig, err := config.LoadAdminConfigFromEnv()
-	if err != nil {
-		return fmt.Errorf("load Admin config: %w", err)
+	var adminConfig config.AdminConfig
+	if roles.Admin {
+		adminConfig, err = config.LoadAdminConfigFromEnv()
+		if err != nil {
+			return fmt.Errorf("load Admin config: %w", err)
+		}
 	}
 	quotaConfig, err := config.LoadQuotaConfigFromEnv()
 	if err != nil {
@@ -234,7 +261,6 @@ func run() error {
 		_ = sessionService.Close()
 		return fmt.Errorf("build tool execution journal: %w", err)
 	}
-	secretStore := secret.EnvStore{}
 	sessionRouter, err := platformstorage.NewSessionRouter(
 		controlPlaneRepository,
 		secretStore,
@@ -325,6 +351,7 @@ func run() error {
 		agentservice.WithApprovalRepository(approvalRepository),
 		agentservice.WithKnowledgeProvider(knowledgeRouter),
 		agentservice.WithToolExecutionJournal(toolExecutionJournal),
+		agentservice.WithSecretStore(secretStore),
 	)
 	if err != nil {
 		_ = sessionRouter.Close()
@@ -484,6 +511,9 @@ func run() error {
 		adminService.WithAuditWriter(auditWriter)
 		adminService.WithKnowledgeRouter(knowledgeRouter)
 		adminService.WithBackgroundJobs(backgroundJobs)
+		// Admin checks grants but cannot resolve model/IM values on an Admin-only node.
+		grantAuthorizer, _ := secret.NewEnvStore(secretGrants)
+		adminService.WithSecretAuthorizer(grantAuthorizer)
 		principals := make([]adminservice.Principal, 0, len(adminConfig.Principals))
 		for _, principal := range adminConfig.Principals {
 			principals = append(principals, adminservice.Principal{
@@ -528,6 +558,9 @@ func run() error {
 		selectedModel.Info().Name,
 		modelConfig.Stream,
 	)
+	fmt.Printf("http test api enabled=%t synchronous_chat=%t\n",
+		roles.Gateway && httpAPIConfig.Enabled,
+		roles.Gateway && roles.Worker && httpAPIConfig.Enabled)
 	fmt.Printf(
 		"session backend=%s ttl=%s\n",
 		sessionConfig.Backend,
@@ -614,8 +647,6 @@ func run() error {
 
 	handlerOptions := []web.Option{
 		web.WithRouteResolver(routeResolver),
-		web.WithGatewayIntake(gatewayIntake),
-		web.WithCallbackGateway(callbackGateway),
 		web.WithQuotaGuard(quotaGuard),
 		web.WithReadinessCheck("control-plane", controlPlaneRepository.Ready),
 		web.WithReadinessCheck("inbound-journal", gatewayIntake.Ready),
@@ -628,6 +659,11 @@ func run() error {
 		web.WithReadinessCheck("session-router", sessionRouter.Ready),
 		web.WithReadinessCheck("quota", quotaGuard.Ready),
 		web.WithReadinessCheck("tool-execution", toolExecutionJournal.Ready),
+	}
+	if roles.Gateway {
+		handlerOptions = append(handlerOptions,
+			web.WithAPIAccess(apiAccess), web.WithSynchronousChat(roles.Worker),
+			web.WithGatewayIntake(gatewayIntake), web.WithCallbackGateway(callbackGateway))
 	}
 	if adminHandler != nil {
 		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))

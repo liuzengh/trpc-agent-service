@@ -19,7 +19,7 @@ spec:
           command: ["/usr/local/bin/trpc-migrate"]
           envFrom:
             - configMapRef: {name: trpc-agent-config}
-            - secretRef: {name: trpc-agent-secrets}
+            - secretRef: {name: trpc-agent-migration-secrets}
           resources:
             requests: {cpu: 100m, memory: 128Mi}
             limits: {cpu: "1", memory: 512Mi}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/toolexec"
 	"golang.org/x/sync/singleflight"
@@ -99,9 +99,14 @@ type RevisionCompiler struct {
 	approvals     approval.Repository
 	knowledge     KnowledgeProvider
 	toolJournal   toolexec.Journal
+	secrets       secret.Store
 }
 
 type RevisionCompilerOption func(*RevisionCompiler)
+
+func WithSecretStore(store secret.Store) RevisionCompilerOption {
+	return func(c *RevisionCompiler) { c.secrets = store }
+}
 
 func WithToolCatalog(catalog *platformtool.Catalog) RevisionCompilerOption {
 	return func(compiler *RevisionCompiler) {
@@ -152,6 +157,7 @@ func NewRevisionCompiler(
 		startupModel:  startupModel,
 		defaultStream: defaultStream,
 		cache:         make(map[string]agentcore.Agent),
+		secrets:       secret.EnvStore{},
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -236,6 +242,7 @@ type revisionModelConfig struct {
 	Name                     string  `json:"name"`
 	BaseURL                  string  `json:"base_url"`
 	APIKeyEnv                string  `json:"api_key_env"`
+	APIKeyRef                string  `json:"api_key_ref,omitempty"`
 	PromptCostPerMillion     float64 `json:"prompt_cost_per_million,omitempty"`
 	CompletionCostPerMillion float64 `json:"completion_cost_per_million,omitempty"`
 }
@@ -264,7 +271,7 @@ func (c *RevisionCompiler) compileRevision(
 	if agentConfig.SummaryEveryTurns < 0 {
 		return nil, fmt.Errorf("Agent revision summary_every_turns must not be negative")
 	}
-	selectedModel, err := c.buildRevisionModel(revision.ModelConfig)
+	selectedModel, err := c.buildRevisionModel(ctx, scope.TenantID, revision.ModelConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -430,7 +437,7 @@ func (c *RevisionCompiler) UsagePricing(
 	}, nil
 }
 
-func (c *RevisionCompiler) buildRevisionModel(raw json.RawMessage) (model.Model, error) {
+func (c *RevisionCompiler) buildRevisionModel(ctx context.Context, tenantID string, raw json.RawMessage) (model.Model, error) {
 	modelConfig, err := parseRevisionModelConfig(raw)
 	if err != nil {
 		return nil, err
@@ -442,12 +449,19 @@ func (c *RevisionCompiler) buildRevisionModel(raw json.RawMessage) (model.Model,
 	if modelConfig.Source != "revision" {
 		return nil, fmt.Errorf("unsupported revision model source %q", modelConfig.Source)
 	}
-	if !environmentNamePattern.MatchString(modelConfig.APIKeyEnv) {
-		return nil, fmt.Errorf("revision model api_key_env is invalid")
+	ref := modelConfig.APIKeyRef
+	if modelConfig.APIKeyEnv != "" {
+		if ref != "" || !environmentNamePattern.MatchString(modelConfig.APIKeyEnv) {
+			return nil, fmt.Errorf("revision model requires only one valid api_key_ref or api_key_env")
+		}
+		ref = "env://" + modelConfig.APIKeyEnv
 	}
-	apiKey, ok := os.LookupEnv(modelConfig.APIKeyEnv)
-	if !ok || strings.TrimSpace(apiKey) == "" {
-		return nil, fmt.Errorf("revision model secret environment %q is unavailable", modelConfig.APIKeyEnv)
+	if ref == "" || c.secrets == nil {
+		return nil, secret.ErrForbidden
+	}
+	apiKey, err := c.secrets.Resolve(ctx, tenantID, secret.Model, ref)
+	if err != nil {
+		return nil, fmt.Errorf("resolve revision model credential: %w", err)
 	}
 	return BuildModel(config.ModelConfig{
 		Provider: strings.ToLower(strings.TrimSpace(modelConfig.Provider)),

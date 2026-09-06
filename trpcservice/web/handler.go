@@ -44,6 +44,8 @@ type Handler struct {
 	callbackGateway *gateway.CallbackGateway
 	adminHandler    http.Handler
 	quotaGuard      *tenant.Guard
+	apiAccess       *APIAccess
+	synchronousChat bool
 }
 
 type readinessCheck struct {
@@ -100,11 +102,13 @@ func WithQuotaGuard(guard *tenant.Guard) Option {
 	return func(handler *Handler) { handler.quotaGuard = guard }
 }
 
-// NewHandler creates a handler with health and chat endpoints.
+// NewHandler exposes health checks; chat/intake, callbacks and Admin require
+// explicit options. In particular a missing APIAccess never means anonymous.
 func NewHandler(chatService ChatService, opts ...Option) http.Handler {
 	h := &Handler{
-		chatService: chatService,
-		maxBodySize: defaultMaxBodyBytes,
+		chatService:     chatService,
+		maxBodySize:     defaultMaxBodyBytes,
+		synchronousChat: true,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -114,9 +118,15 @@ func NewHandler(chatService ChatService, opts ...Option) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.handleHealth)
 	mux.HandleFunc("/readyz", h.handleReady)
-	mux.HandleFunc("/chat", h.handleChat)
-	mux.HandleFunc("/inbound", h.handleInbound)
-	mux.HandleFunc("/callbacks/", h.handleCallback)
+	if h.apiAccess != nil && len(h.apiAccess.principals) > 0 {
+		if h.synchronousChat {
+			mux.HandleFunc("/chat", h.handleChat)
+		}
+		mux.HandleFunc("/inbound", h.handleInbound)
+	}
+	if h.callbackGateway != nil {
+		mux.HandleFunc("/callbacks/", h.handleCallback)
+	}
 	if h.adminHandler != nil {
 		mux.Handle("/admin/", h.adminHandler)
 	}
@@ -219,6 +229,10 @@ type inboundRequest struct {
 }
 
 func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.authenticateAPI(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
@@ -233,7 +247,32 @@ func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
+	request.BindingKey = strings.TrimSpace(request.BindingKey)
+	request.UserID = strings.TrimSpace(request.UserID)
+	request.MessageID = strings.TrimSpace(request.MessageID)
+	request.SessionID = strings.TrimSpace(request.SessionID)
+	request.Message = strings.TrimSpace(request.Message)
+	request.ChatType = strings.TrimSpace(request.ChatType)
+	if request.ChatType == "" {
+		request.ChatType = "direct"
+	}
+	if err := validateChatRequest(chatRequest{
+		BindingKey: request.BindingKey, MessageID: request.MessageID,
+		UserID: request.UserID, SessionID: request.SessionID, Message: request.Message,
+	}); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	if request.ChatType != "direct" && request.ChatType != "group" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unsupported chat_type"})
+		return
+	}
+	if !principal.allows(request.BindingKey, request.UserID) {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
 	result, err := h.intake.Accept(r.Context(), gateway.IntakeRequest{
+		AuthorizeScope:    principal.authorizeScope,
 		BindingKey:        request.BindingKey,
 		ExternalMessageID: request.MessageID,
 		UserID:            request.UserID,
@@ -243,6 +282,8 @@ func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, errAPIScopeForbidden):
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
 		case errors.Is(err, gateway.ErrMessageConflict), errors.Is(err, idempotency.ErrKeyConflict):
 			writeJSON(w, http.StatusConflict, errorResponse{Error: "message ID payload conflict"})
 		case errors.Is(err, routing.ErrBindingNotFound):
@@ -270,6 +311,10 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.authenticateAPI(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
@@ -298,6 +343,10 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
+	if !principal.allows(request.BindingKey, request.UserID) {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
 
 	var scope runtimecontext.Scope
 	var err error
@@ -319,6 +368,10 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("resolve chat route failed: %v", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "route resolution failed"})
+		return
+	}
+	if principal.authorizeScope(scope) != nil {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
 		return
 	}
 	if h.quotaGuard != nil {

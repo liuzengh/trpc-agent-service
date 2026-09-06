@@ -32,6 +32,7 @@ func main() {
 	sessions := flag.Int("sessions", 100, "session cardinality")
 	timeout := flag.Duration("timeout", 10*time.Second, "per-request timeout")
 	messagePrefix := flag.String("message-prefix", "", "external message ID prefix")
+	userID := flag.String("user", "", "authorized user ID (empty generates one user per session)")
 	flag.Parse()
 	if *requests <= 0 || *concurrency <= 0 || *sessions <= 0 {
 		fmt.Fprintln(os.Stderr, "requests, concurrency and sessions must be positive")
@@ -39,6 +40,7 @@ func main() {
 	}
 
 	client := &http.Client{Timeout: *timeout}
+	apiToken := os.Getenv("TRPC_AGENT_HTTP_API_TOKEN")
 	work := make(chan int)
 	latencies := make([]time.Duration, 0, *requests)
 	var latencyMu sync.Mutex
@@ -55,10 +57,14 @@ func main() {
 		go func() {
 			defer group.Done()
 			for index := range work {
+				user := *userID
+				if user == "" {
+					user = fmt.Sprintf("load-user-%d", index%*sessions)
+				}
 				body, _ := json.Marshal(requestBody{
 					BindingKey: *binding,
 					MessageID:  fmt.Sprintf("%s-%d", prefix, index),
-					UserID:     fmt.Sprintf("load-user-%d", index%*sessions),
+					UserID:     user,
 					SessionID:  fmt.Sprintf("load-session-%d", index%*sessions),
 					ChatType:   "direct",
 					Message:    "capacity test",
@@ -66,6 +72,9 @@ func main() {
 				ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 				request, _ := http.NewRequestWithContext(ctx, http.MethodPost, *endpoint, bytes.NewReader(body))
 				request.Header.Set("Content-Type", "application/json")
+				if apiToken != "" {
+					request.Header.Set("Authorization", "Bearer "+apiToken)
+				}
 				requestStarted := time.Now()
 				response, err := client.Do(request)
 				latency := time.Since(requestStarted)

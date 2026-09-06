@@ -13,6 +13,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
@@ -150,7 +151,8 @@ func TestRevisionCompilerBuildsRevisionModelFromSecretEnvironment(t *testing.T) 
 	t.Setenv("TENANT_MODEL_TEST_KEY", "test-secret")
 	repository := controlplane.NewMemoryRepository(data)
 	t.Cleanup(func() { _ = repository.Close() })
-	compiler, err := NewRevisionCompiler(repository, NewTutorialModel(), false)
+	store, _ := secret.NewEnvStore([]secret.Grant{{TenantID: "tutorial-tenant", Purpose: secret.Model, Reference: "env://TENANT_MODEL_TEST_KEY"}})
+	compiler, err := NewRevisionCompiler(repository, NewTutorialModel(), false, WithSecretStore(store))
 	if err != nil {
 		t.Fatalf("new compiler: %v", err)
 	}

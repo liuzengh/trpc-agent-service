@@ -461,7 +461,7 @@ func (r *MemoryRouter) build(
 		}
 		return memoryinmemory.NewMemoryService(options...), nil
 	case "redis":
-		url, err := r.endpoint(ctx, cfg.URL, binding.SecretRef)
+		url, err := r.endpoint(ctx, binding.TenantID, cfg.URL, binding.SecretRef)
 		if err != nil {
 			return nil, err
 		}
@@ -474,7 +474,7 @@ func (r *MemoryRouter) build(
 		}
 		return memoryredis.NewService(options...)
 	case "postgres":
-		dsn, err := r.endpoint(ctx, cfg.DSN, binding.SecretRef)
+		dsn, err := r.endpoint(ctx, binding.TenantID, cfg.DSN, binding.SecretRef)
 		if err != nil {
 			return nil, err
 		}
@@ -496,11 +496,12 @@ func (r *MemoryRouter) build(
 
 func (r *MemoryRouter) endpoint(
 	ctx context.Context,
+	tenantID string,
 	configured string,
 	secretRef string,
 ) (string, error) {
 	if secretRef != "" {
-		value, err := r.secrets.Resolve(ctx, secretRef)
+		value, err := r.secrets.Resolve(ctx, tenantID, secret.Memory, secretRef)
 		if err != nil {
 			return "", err
 		}

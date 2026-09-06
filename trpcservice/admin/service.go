@@ -20,6 +20,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	platformtenant "github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
@@ -34,6 +35,7 @@ type Service struct {
 	audit      audit.Writer
 	knowledge  *platformstorage.KnowledgeRouter
 	jobs       background.Repository
+	secrets    secret.Authorizer
 }
 
 func (s *Service) WithBackgroundJobs(repository background.Repository) *Service {
@@ -387,6 +389,9 @@ func (s *Service) CreateRevision(
 			return controlplane.AgentRevision{}, invalidf("%s: %v", name, err)
 		}
 	}
+	if err := s.authorizeRevisionSecrets(ctx, revision); err != nil {
+		return controlplane.AgentRevision{}, err
+	}
 	toolPolicy, err := governance.ParseToolPolicy(revision.ToolPolicy)
 	if err != nil {
 		return controlplane.AgentRevision{}, invalidf("tool_policy: %v", err)
@@ -510,6 +515,9 @@ func (s *Service) CreateChannelBinding(
 	if err := normalizeJSON(&binding.Config); err != nil {
 		return controlplane.ChannelBinding{}, invalidf("channel binding config: %v", err)
 	}
+	if err := s.authorizeChannelSecrets(ctx, binding); err != nil {
+		return controlplane.ChannelBinding{}, err
+	}
 	if binding.Status == "" {
 		binding.Status = controlplane.StatusActive
 	}
@@ -547,6 +555,17 @@ func (s *Service) UpdateChannelBinding(
 	if err := normalizeJSON(&config); err != nil {
 		return controlplane.ChannelBinding{}, invalidf("channel binding config: %v", err)
 	}
+	current, err := s.repository.GetChannelBinding(ctx, tenantID, bindingID)
+	if err != nil {
+		return controlplane.ChannelBinding{}, err
+	}
+	current.Config = config
+	// Disabling remains possible after a grant has been revoked.
+	if status == controlplane.StatusActive {
+		if err := s.authorizeChannelSecrets(ctx, current); err != nil {
+			return controlplane.ChannelBinding{}, err
+		}
+	}
 	binding, err := s.repository.UpdateChannelBinding(
 		ctx, tenantID, bindingID, config, status, expectedVersion,
 	)
@@ -578,6 +597,11 @@ func (s *Service) CreateBackendBinding(
 	}
 	if err := normalizeJSON(&binding.Config); err != nil {
 		return controlplane.BackendBinding{}, invalidf("backend binding config: %v", err)
+	}
+	if binding.SecretRef != "" {
+		if err := s.authorizeSecret(ctx, binding.TenantID, binding.ResourceType, binding.SecretRef); err != nil {
+			return controlplane.BackendBinding{}, err
+		}
 	}
 	if binding.IsolationLevel == "" {
 		binding.IsolationLevel = "shared"

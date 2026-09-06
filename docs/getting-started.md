@@ -1,5 +1,7 @@
 # 从一个可运行 Agent 开始
 
+安全更新：下文的 HTTP 示例现在需要先在 `.env` 中启用调试接口并配置独立 Token，见[HTTP 调试鉴权](security-boundaries.md#1-http-调试接口)。默认关闭返回 404，开启但没有有效 Token 返回 401；两者都不表示模型失效。各节仍按实现阶段拆解链路，新增的鉴权发生在这些链路之前。
+
 这份指南不讨论多租户、消息队列、分布式锁或 Kubernetes。目标只有一个：亲手跑通下面这条链路。
 
 ```text
@@ -158,6 +160,7 @@ TRPC_AGENT_MODEL_STREAM=true
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/chat \
+  -H "Authorization: Bearer $TRPC_AGENT_HTTP_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "binding_key": "tutorial-http",
@@ -200,6 +203,7 @@ curl -sS -X POST http://127.0.0.1:8080/chat \
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/chat \
+  -H "Authorization: Bearer $TRPC_AGENT_HTTP_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "binding_key": "tutorial-http",
@@ -232,6 +236,7 @@ TutorialModel 本身没有保存用户资料。它只检查 tRPC-Agent-Go 传给
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/chat \
+  -H "Authorization: Bearer $TRPC_AGENT_HTTP_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "binding_key": "tutorial-http",

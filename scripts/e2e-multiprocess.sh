@@ -8,6 +8,7 @@ POSTGRES_URL="${TEST_POSTGRES_URL:-postgres://trpc_agent:trpc_agent_dev@127.0.0.
 REDIS_URL_VALUE="${TEST_REDIS_URL:-redis://127.0.0.1:6379/0}"
 PORT="${TEST_GATEWAY_PORT:-18088}"
 RUN_ID="$(date +%s)-$$"
+HTTP_API_TOKEN="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
 PIDS=()
 
 cleanup() {
@@ -15,7 +16,7 @@ cleanup() {
     kill -TERM "$pid" 2>/dev/null || true
   done
   wait 2>/dev/null || true
-  docker compose stop redis postgres >/dev/null 2>&1 || true
+  # Dependencies may be shared with a manually running service; leave them up.
 }
 trap cleanup EXIT
 
@@ -32,6 +33,9 @@ done
 ./build.sh >/dev/null
 
 export TRPC_AGENT_MODEL_PROVIDER=mock
+export TRPC_AGENT_HTTP_API_ENABLED=true
+export TRPC_AGENT_HTTP_API_TOKEN=
+export TRPC_AGENT_HTTP_API_PRINCIPALS_JSON="[{\"name\":\"multiprocess-test\",\"token\":\"$HTTP_API_TOKEN\",\"tenant_id\":\"tutorial-tenant\",\"binding_keys\":[\"tutorial-http\"],\"user_ids\":[\"alice\"]}]"
 export TRPC_AGENT_SESSION_BACKEND=redis
 export TRPC_AGENT_COORDINATOR_BACKEND=redis
 export TRPC_AGENT_IDEMPOTENCY_BACKEND=redis
@@ -75,6 +79,7 @@ post_message() {
   local message_id="$1"
   local text="$2"
   curl -fsS -X POST "http://127.0.0.1:$PORT/inbound" \
+    -H "Authorization: Bearer $HTTP_API_TOKEN" \
     -H 'Content-Type: application/json' \
     -d "{\"binding_key\":\"tutorial-http\",\"message_id\":\"$message_id\",\"user_id\":\"alice\",\"session_id\":\"e2e-$RUN_ID\",\"chat_type\":\"direct\",\"message\":\"$text\"}"
 }

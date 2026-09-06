@@ -9,6 +9,7 @@ SERVICE_NAME="trpc-agent-observability-e2e"
 TRACE_ID="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 SPAN_ID="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 RUN_ID="$(date +%s)-$$"
+HTTP_API_TOKEN="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
 APP_PID=""
 TRACE_OUTPUT="/tmp/trpc-agent-otel-trace-$RUN_ID.json"
 METRIC_OUTPUT="/tmp/trpc-agent-otel-metrics-$RUN_ID.txt"
@@ -63,6 +64,9 @@ fi
 
 ./build.sh >/dev/null
 env \
+  TRPC_AGENT_HTTP_API_ENABLED=true \
+  TRPC_AGENT_HTTP_API_TOKEN= \
+  TRPC_AGENT_HTTP_API_PRINCIPALS_JSON="[{\"name\":\"trace-test\",\"token\":\"$HTTP_API_TOKEN\",\"tenant_id\":\"tutorial-tenant\",\"binding_keys\":[\"tutorial-http\"],\"user_ids\":[\"alice\"]}]" \
   TRPC_AGENT_MODEL_PROVIDER=mock \
   TRPC_AGENT_SESSION_BACKEND=inmemory \
   TRPC_AGENT_COORDINATOR_BACKEND=local \
@@ -82,6 +86,7 @@ APP_PID=$!
 wait_http "http://127.0.0.1:$PORT/readyz"
 
 headers="$(curl -fsS -D - -o /dev/null -X POST "http://127.0.0.1:$PORT/chat" \
+  -H "Authorization: Bearer $HTTP_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -H "traceparent: 00-$TRACE_ID-$SPAN_ID-01" \
   -d "{\"binding_key\":\"tutorial-http\",\"message_id\":\"otel-chat-$RUN_ID\",\"user_id\":\"alice\",\"session_id\":\"otel-$RUN_ID\",\"message\":\"trace check\"}")"
@@ -91,6 +96,7 @@ if ! grep -qi "^X-Trace-Id: $TRACE_ID" <<<"$headers"; then
 fi
 
 curl -fsS -X POST "http://127.0.0.1:$PORT/inbound" \
+  -H "Authorization: Bearer $HTTP_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d "{\"binding_key\":\"tutorial-http\",\"message_id\":\"otel-inbound-$RUN_ID\",\"user_id\":\"alice\",\"session_id\":\"otel-async-$RUN_ID\",\"chat_type\":\"direct\",\"message\":\"metric check\"}" \
   >/dev/null

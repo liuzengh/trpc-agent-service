@@ -582,7 +582,7 @@ func (r *SessionRouter) build(
 		}
 		return inmemory.NewSessionService(options...), nil
 	case "redis":
-		endpoint, err := r.endpoint(ctx, config.URL, binding.SecretRef)
+		endpoint, err := r.endpoint(ctx, binding.TenantID, config.URL, binding.SecretRef)
 		if err != nil {
 			return nil, err
 		}
@@ -599,7 +599,7 @@ func (r *SessionRouter) build(
 		}
 		return redissession.NewService(options...)
 	case "postgres":
-		endpoint, err := r.endpoint(ctx, config.DSN, binding.SecretRef)
+		endpoint, err := r.endpoint(ctx, binding.TenantID, config.DSN, binding.SecretRef)
 		if err != nil {
 			return nil, err
 		}
@@ -620,11 +620,12 @@ func (r *SessionRouter) build(
 
 func (r *SessionRouter) endpoint(
 	ctx context.Context,
+	tenantID string,
 	configured string,
 	secretRef string,
 ) (string, error) {
 	if secretRef != "" {
-		return r.secrets.Resolve(ctx, secretRef)
+		return r.secrets.Resolve(ctx, tenantID, secret.Session, secretRef)
 	}
 	if strings.TrimSpace(configured) == "" {
 		return "", errors.New("session backend endpoint or secret_ref is required")

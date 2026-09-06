@@ -83,7 +83,7 @@
 - 真实多进程跨 Worker Session 恢复验收脚本；
 - Redis 和 PostgreSQL Docker Compose 开发依赖。
 
-README 验收范围已全部形成代码、测试、部署文件或明确的生产安全边界。
+上述清单包含实现、自动测试和部署模板，不能等同于完整生产交付。真实联调边界以[功能状态](feature-status.md)为准；剩余开发按[执行清单](execution-plan.md)推进。
 
 ## 1. 建议目录
 

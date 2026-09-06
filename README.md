@@ -152,6 +152,8 @@
 - [从聊天走到真实工具调用](docs/current-time-tool-walkthrough.md)
 - [Telegram 工具审批上手说明](docs/telegram-approval-walkthrough.md)
 - [Telegram 完整链路追踪](docs/telegram-tracing-walkthrough.md)
+- [接口鉴权与租户密钥边界](docs/security-boundaries.md)
+- [当前开发执行清单](docs/execution-plan.md)
 - [治理、安全、监控、故障恢复和部署](docs/governance-operations.md)
 - [生产风险清单](docs/risks.md)
 - [代码实施路线和验收映射](docs/implementation-roadmap.md)
@@ -169,7 +171,7 @@ cd trpc-agent-service
 ./start.sh
 ```
 
-当前仓库包含一个不需要 API Key 的教学 Agent。发送第一轮消息：
+当前仓库包含一个不需要模型 API Key 的教学 Agent。HTTP 调试接口现在默认关闭；先按[安全配置说明](docs/security-boundaries.md#1-http-调试接口)在 `.env` 中启用并设置独立的 `TRPC_AGENT_HTTP_API_TOKEN`，将该变量加载到当前 shell。只测试 Telegram 则保持关闭。发送第一轮消息：
 
 ```bash
 ./start-mock.sh
@@ -177,6 +179,7 @@ cd trpc-agent-service
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/chat \
+  -H "Authorization: Bearer $TRPC_AGENT_HTTP_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"binding_key":"tutorial-http","message_id":"readme-message-1","user_id":"alice","session_id":"demo","message":"我叫小明。"}'
 ```
@@ -185,6 +188,7 @@ curl -sS -X POST http://127.0.0.1:8080/chat \
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/chat \
+  -H "Authorization: Bearer $TRPC_AGENT_HTTP_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"binding_key":"tutorial-http","message_id":"readme-message-2","user_id":"alice","session_id":"demo","message":"我叫什么？"}'
 ```
@@ -192,7 +196,7 @@ curl -sS -X POST http://127.0.0.1:8080/chat \
 切换到真实 OpenAI-compatible 模型：
 
 ```bash
-cp .env.example .env
+test -f .env || cp .env.example .env
 ```
 
 然后编辑 `.env`：
@@ -289,6 +293,7 @@ Channel Binding、tenant-scoped Runtime 和动态 Agent Revision 编译见 [Chan
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/inbound \
+  -H "Authorization: Bearer $TRPC_AGENT_HTTP_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"binding_key":"tutorial-http","message_id":"external-001","user_id":"alice","session_id":"durable-session","chat_type":"direct","message":"hello"}'
 ```

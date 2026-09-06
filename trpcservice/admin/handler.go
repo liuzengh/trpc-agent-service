@@ -10,6 +10,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 )
 
@@ -400,6 +401,8 @@ func (h *Handler) writeResult(w http.ResponseWriter, success int, value any, err
 	}
 	var status int
 	switch {
+	case errors.Is(err, secret.ErrForbidden):
+		status = http.StatusForbidden
 	case errors.Is(err, ErrInvalid):
 		status = http.StatusBadRequest
 	case errors.Is(err, controlplane.ErrConflict):

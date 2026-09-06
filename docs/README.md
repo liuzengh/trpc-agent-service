@@ -5,6 +5,8 @@
 | 文档 | 内容 |
 | --- | --- |
 | [getting-started.md](getting-started.md) | 从 `POST /chat` 开始认识 Message、Runner、Event 和 Session |
+| [security-boundaries.md](security-boundaries.md) | HTTP 默认关闭、调用方授权、租户密钥用途与角色隔离 |
+| [execution-plan.md](execution-plan.md) | 当前收尾顺序与已完成项，不扩张原始交付范围 |
 | [architecture.md](architecture.md) | 总体架构、组件职责、节点拓扑、租户隔离和框架复用边界 |
 | [sequence.md](sequence.md) | 企业微信消息进入平台后的完整执行时序，以及取消和故障处理 |
 | [data-model.md](data-model.md) | 控制面、运行面核心表结构和索引设计 |

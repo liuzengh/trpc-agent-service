@@ -69,7 +69,7 @@ func (a *Adapter) Callback(
 	if err != nil {
 		return channels.CallbackResult{}, err
 	}
-	webhookSecret, err := a.secrets.Resolve(ctx, cfg.WebhookSecretRef)
+	webhookSecret, err := a.secrets.Resolve(ctx, binding.TenantID, secret.TelegramWebhook, cfg.WebhookSecretRef)
 	if err != nil {
 		return channels.CallbackResult{}, fmt.Errorf("resolve Telegram webhook secret: %w", err)
 	}
@@ -294,7 +294,7 @@ func (a *Adapter) Send(
 	if err != nil {
 		return channels.DeliveryReceipt{}, err
 	}
-	botToken, err := a.secrets.Resolve(ctx, cfg.BotTokenRef)
+	botToken, err := a.secrets.Resolve(ctx, binding.TenantID, secret.TelegramBot, cfg.BotTokenRef)
 	if err != nil {
 		return channels.DeliveryReceipt{}, fmt.Errorf("resolve Telegram bot token: %w", err)
 	}

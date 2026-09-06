@@ -305,8 +305,11 @@ func (r *ArtifactRouter) build(
 		if cfg.Retries > 0 {
 			options = append(options, artifacts3.WithRetries(cfg.Retries))
 		}
+		if binding.SecretRef == "" {
+			return nil, errors.New("S3 requires an explicit tenant credential reference")
+		}
 		if binding.SecretRef != "" {
-			raw, err := r.secrets.Resolve(ctx, binding.SecretRef)
+			raw, err := r.secrets.Resolve(ctx, binding.TenantID, secret.Artifact, binding.SecretRef)
 			if err != nil {
 				return nil, err
 			}
