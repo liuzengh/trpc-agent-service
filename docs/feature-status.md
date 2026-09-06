@@ -35,7 +35,7 @@
 | Secret 管理 | 自动测试 | `env://` 精确租户/用途授权，Admin 保存前检查与运行时校验、角色用途收窄、S3/Embedding 隐式凭据拒绝 | Vault/KMS、在线轮换撤销、真实分角色账号权限 |
 | 分角色数据/网络权限 | 自动测试 + 本地隔离集成 | SQL GRANT/Redis ACL 生成器、允许与拒绝测试、按角色初始化后端和网络模板 | 真实 LOGIN/Redis 账号、CNI 与依赖标签的部署验证；不是租户 RLS |
 | MCP 异常隔离/恢复 | 自动测试 + 本地 PostgreSQL 集成 | 单条媒体/畸形记录隔离、检查点 CAS、禁用/版本检查、恢复审计原子性 | 候选版本真实媒体/分页联调；不支持媒体分析或下载 |
-| 积压与异常告警 | 自动测试 + 本地 SQL/规则验证 | 聚合积压、unknown/attempting、检查点停滞、快照失败/过期、多节点去重聚合 | 新版指标与规则部署、阈值/SLO、实际通知渠道 |
+| 积压与异常告警 | 自动测试 + 本地 SQL/规则验证与启用 | 聚合积压、unknown/attempting、检查点停滞、快照失败/过期、多节点去重聚合；候选实例快照 up=1，13 条规则加载健康 | 生产部署、阈值/SLO、实际通知渠道 |
 | Docker Compose | 本地集成 | 依赖启动、镜像构建、非 root 运行 | 长时间稳定性验证 |
 | Kubernetes | 配置 | Deployment、HPA、PDB、NetworkPolicy YAML 校验 | 测试或生产集群部署 |
 | 容量与故障恢复 | 自动测试 + 本地隔离集成 | Worker 取消接管、完成确认丢失、故障退避；PostgreSQL 暂停/业务 schema 恢复与发送事实保护，Redis RDB 工具链；历史 1000 请求 Mock 基线 | 真实模型/多 Worker 压测、PITR/主从切换、MinIO/Qdrant 恢复和完整故障矩阵 |
