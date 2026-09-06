@@ -1,5 +1,7 @@
 # IM Channel Adapter 设计
 
+当前用户的企业微信接入入口是托管消息 MCP，已实际连接并查询工具列表，见[企业微信 MCP](wecom-mcp.md)。下文第 3 节描述的是原自建应用回调 Adapter，不适用于该 MCP 配置页；两种协议不能混用。
+
 ## 1. 通道抽象
 
 当前代码已实现统一 `Adapter`、`CallbackAdapter`、Channel Registry、企业微信 Adapter、Telegram Adapter 和 HTTP Test Adapter。这里的“实现”指代码与模拟协议测试，不表示已经使用真实企业微信账号或 Telegram Bot 完成联调。当前出站只发送文本；图片和文件只会规范化 provider media ID，受控下载、病毒扫描、Artifact 转存和媒体回复尚未实现。

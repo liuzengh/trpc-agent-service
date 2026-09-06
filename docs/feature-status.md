@@ -25,10 +25,11 @@
 | Knowledge | 本地集成 | InMemory、Qdrant、切块、过滤和本地 Qdrant 集成 | 外部 Embedding 服务和远端 Qdrant 联调 |
 | Artifact | 本地集成 | InMemory、MinIO/S3-compatible、版本锁 | AWS S3 或其他云对象存储联调 |
 | 企业微信 | 自动测试 | URL 验证、签名、解密、文本入站、Token 获取、文本发送模拟 | 真实企业账号、公网回调、真实收发、媒体与卡片发送 |
+| 企业微信消息 MCP | 真实连接 / 工具发现 | 用户当前入口实际 initialize / tools/list 成功，确认 6 个工具；方法白名单的只读探测命令 | 消息输出结构取样、接收检查点、通道绑定、机器人回复、真实收发；未读取任何聊天内容 |
 | Telegram | 基础真实联调 + 后续自动测试 | 固定域名、私聊/群聊/Topic、current_time 和审批基础收发真实联调；重复确认新回执、失败回执、媒体/编辑拒绝、模拟 429 由自动测试覆盖 | 后续回执版本真实联调、真实 429、编辑与媒体发送 |
 | 微信公众号 / 微信客服 | 设计 | 数据模型与接入差异说明 | Adapter 代码和真实联调 |
 | Tool 治理与审批 | 自动测试 / 本地集成；只读 Tool 与审批基础真实联调 | 参数绑定、会话隔离、批准/拒绝/重复/过期；权限允许后预留执行；直接回执、Journal 驱动结果与事务回滚测试；新版格式拦截/拒绝回执真实复验 | 新版批准结果正文复验、真实业务 Tool |
-| MCP | 设计 | 权限、密钥、超时和审计边界 | MCP Client/Server 的实际接入 |
+| 通用 MCP 工具平台化 | 设计 | 权限、密钥、超时和审计边界；企业微信专用发现命令已复用 tRPC MCP Client | 通用租户级 ToolSet 配置、生命周期与治理；专用通道发现不等同于通用 MCP 完成 |
 | 工具业务操作与对账 | 自动测试 / 本地 PostgreSQL 集成 | 内部 create_work_item、业务键唯一约束、Runner 审批、并发重放、响应/平台写入丢失恢复、Admin 查询/只读对账 | 外部业务 Provider、真实业务幂等契约与历史无事实记录的人工核对 |
 | OpenTelemetry | 真实联调（开发环境）+ 自动测试 | 真实 Telegram→模型→current_time→Session→回复的完整 trace，Tempo 实际读回；共享框架 tracer、审批 span link 与 Memory 组件测试、元数据过滤；现有 metrics/Dashboard/Alert Rule | 真实审批跨请求 link、Alertmanager 与实际通知渠道 |
 | Secret 管理 | 自动测试 | `env://` 精确租户/用途授权，Admin 保存前检查与运行时校验、角色用途收窄、S3/Embedding 隐式凭据拒绝 | Vault/KMS、在线轮换撤销、真实分角色账号权限 |

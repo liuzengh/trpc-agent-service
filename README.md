@@ -148,6 +148,7 @@
 - [数据同步、一致性和幂等策略](docs/data-consistency.md)
 - [多后端适配方案](docs/backend-adapters.md)
 - [企业微信、微信公众号和 Telegram 接入](docs/im-channels.md)
+- [企业微信消息 MCP 接入](docs/wecom-mcp.md)
 - [Telegram 手动测试运行手册](docs/telegram-manual-runbook.md)
 - [从聊天走到真实工具调用](docs/current-time-tool-walkthrough.md)
 - [Telegram 工具审批上手说明](docs/telegram-approval-walkthrough.md)
