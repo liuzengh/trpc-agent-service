@@ -12,6 +12,7 @@ var redactors = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/-]{8,}`),
 	regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|password|secret)(["']?\s*[:=]\s*["']?)[^\s,"'}]+`),
 	regexp.MustCompile(`(postgres(?:ql)?|redis|rediss)://([^:/@\s]+):([^@\s]+)@`),
+	regexp.MustCompile(`(?i)(https?://[^/\s]+/bot)[^/\s?"']+`),
 }
 
 func Redact(value string) string {
@@ -20,6 +21,7 @@ func Redact(value string) string {
 	result = redactors[1].ReplaceAllString(result, `${1}[REDACTED]`)
 	result = redactors[2].ReplaceAllString(result, `${1}${2}[REDACTED]`)
 	result = redactors[3].ReplaceAllString(result, `${1}://[REDACTED]@`)
+	result = redactors[4].ReplaceAllString(result, `${1}[REDACTED]`)
 	return result
 }
 

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"net/http"
 	"strings"
 
@@ -85,6 +86,28 @@ func (g *CallbackGateway) Handle(
 			message.ExternalThreadID,
 			message.ChatType,
 		)
+		// Count all verified callback messages once, including approval/control
+		// feedback which deliberately bypasses the normal Agent intake path.
+		if g.intake.quota != nil {
+			if err := g.intake.quota.AllowInbound(ctx, binding.TenantID, userID); err != nil {
+				if g.intake.audit != nil {
+					_ = g.intake.audit.Record(ctx, audit.Event{TenantID: binding.TenantID, Channel: binding.ChannelType, ChannelBindingID: binding.ID,
+						UserID: userID, SessionID: sessionID, MessageID: message.ExternalMessageID, TraceID: audit.TraceID(ctx), Decision: "inbound_rate_rejected", ErrorType: "tenant_quota"})
+				}
+				return channels.CallbackResult{}, fmt.Errorf("callback rate limit: %w", err)
+			}
+		}
+		if feedback := unsupportedMessageReply(message); feedback != "" {
+			if _, err := g.intake.Accept(ctx, IntakeRequest{
+				rateChecked: true,
+				BindingKey:  binding.CallbackKey, ExternalMessageID: message.ExternalMessageID,
+				UserID: userID, SessionID: sessionID, ChatType: message.ChatType,
+				Text: message.Text, ReplyTarget: message.ReplyTarget, DirectReply: feedback,
+			}); err != nil {
+				return channels.CallbackResult{}, fmt.Errorf("persist unsupported message feedback: %w", err)
+			}
+			continue
+		}
 		if g.approvals != nil {
 			scope, err := g.intake.resolveScope(ctx, binding.CallbackKey, userID, sessionID)
 			if err != nil {
@@ -110,6 +133,7 @@ func (g *CallbackGateway) Handle(
 			}
 		}
 		if _, err := g.intake.Accept(ctx, IntakeRequest{
+			rateChecked:       true,
 			BindingKey:        binding.CallbackKey,
 			ExternalMessageID: message.ExternalMessageID,
 			UserID:            userID,
@@ -125,4 +149,14 @@ func (g *CallbackGateway) Handle(
 		result.StatusCode = http.StatusOK
 	}
 	return result, nil
+}
+
+func unsupportedMessageReply(message channels.InboundEnvelope) string {
+	if message.Edited {
+		return "平台提示：当前不支持通过编辑消息修改已提交的请求或审批。本次编辑未触发 Agent 或工具，原任务状态不变；如需新请求，请另发一条文本消息。"
+	}
+	if message.MessageType != "" && message.MessageType != "text" {
+		return "平台提示：当前通道只处理文本，尚未下载或读取本条图片、文件或其他媒体，也未据此执行工具。请把需要处理的内容作为新的文本消息发送；附件说明不会被当作审批命令。"
+	}
+	return ""
 }

@@ -25,6 +25,9 @@ type IntakeRequest struct {
 	ReplyTarget       string
 	// AuthorizeScope is an internal pre-persistence check, never an HTTP field.
 	AuthorizeScope func(runtimecontext.Scope) error
+	// DirectReply is platform-authored unsupported-media/control feedback.
+	DirectReply string
+	rateChecked bool
 }
 
 // Intake resolves a binding and durably accepts its normalized message.
@@ -87,7 +90,7 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 		}
 	}
 	span.SetAttributes(attribute.String("tenant.id", scope.TenantID), attribute.String("agent.app.id", scope.AppID))
-	if i.quota != nil {
+	if i.quota != nil && !input.rateChecked {
 		if err := i.quota.AllowInbound(ctx, scope.TenantID, input.UserID); err != nil {
 			if i.audit != nil {
 				_ = i.audit.Record(ctx, audit.Event{
@@ -110,6 +113,7 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 		ChatType:          input.ChatType,
 		Text:              input.Text,
 		ReplyTarget:       input.ReplyTarget,
+		DirectReply:       input.DirectReply,
 	})
 	if err != nil {
 		return AcceptResult{}, err

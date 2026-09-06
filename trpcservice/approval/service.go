@@ -103,12 +103,20 @@ func (s *Service) HandleApprovalDecision(
 	}
 	feedbackInput := input
 	feedbackInput.Scope = scope
-	feedbackInput.ExternalMessageID = record.DecisionMessageID
+	// Provider redelivery keeps one receipt; a new user message gets a new
+	// deterministic status receipt without changing the original continuation.
+	feedbackInput.ExternalMessageID = input.ExternalMessageID
 	feedbackInput.Text = record.Status + " " + record.ApprovalID
 	feedbackInput.ReplyTarget = record.ReplyTarget
 	text := "平台确认：审批 " + record.ApprovalID + " 已拒绝。本审批不会创建工具执行任务。"
 	if record.Status == StatusApproved {
 		text = "平台确认：审批 " + record.ApprovalID + " 已批准，执行任务已提交。批准不等于执行成功，执行结果会单独返回。"
+	}
+	if input.ExternalMessageID != record.DecisionMessageID {
+		text = "平台提示：审批 " + record.ApprovalID + " 已拒绝。无需重复操作，本审批不会创建工具执行任务。"
+		if record.Status == StatusApproved {
+			text = "平台提示：审批 " + record.ApprovalID + " 已批准，本次重复确认不会额外创建执行任务；批准不等于执行成功，请查看原任务的执行结果。"
+		}
 	}
 	receipt, err := s.feedback(ctx, feedbackInput, text)
 	if err != nil {

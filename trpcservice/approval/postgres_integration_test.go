@@ -9,11 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"errors"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/database"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
 
 func TestPostgresDecisionContractIntegration(t *testing.T) {
@@ -152,6 +154,52 @@ CREATE TRIGGER fail_feedback BEFORE INSERT ON outbound_message FOR EACH ROW EXEC
 		}
 		if _, err := journal.Accept(ctx, request); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("terminal_failure_notice_atomicity", func(t *testing.T) {
+		accepted, err := journal.Accept(ctx, gateway.InboundRequest{Scope: runtimecontext.TutorialScope(), ExternalMessageID: "terminal-notice", UserID: "alice", SessionID: "notice", ChatType: "direct", Text: "hello"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		task := workqueue.AgentTask{Scope: runtimecontext.TutorialScope(), RequestID: accepted.RequestID, InboundID: accepted.InboundID, ConversationID: accepted.ConversationID, ReplyTarget: "alice"}
+		if err := journal.MarkRunRunning(ctx, task.RequestID, "owner"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := journal.TerminalFailRun(ctx, task, gateway.RunResult{WorkerID: "stale", Reply: "bad"}); !errors.Is(err, gateway.ErrRunSuperseded) {
+			t.Fatalf("stale terminal=%v", err)
+		}
+		if err := journal.FailRun(ctx, task.RequestID, "failed", nil, "stale"); !errors.Is(err, gateway.ErrRunSuperseded) {
+			t.Fatalf("stale failure=%v", err)
+		}
+		if err := journal.CompleteRun(ctx, task, gateway.RunResult{WorkerID: "stale", Reply: "bad"}); !errors.Is(err, gateway.ErrRunSuperseded) {
+			t.Fatalf("stale complete=%v", err)
+		}
+		if _, err := db.ExecContext(ctx, `CREATE FUNCTION fail_notice() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test notice persistence'; END $$;
+CREATE TRIGGER fail_notice BEFORE INSERT ON outbound_message FOR EACH ROW EXECUTE FUNCTION fail_notice();`); err != nil {
+			t.Fatal(err)
+		}
+		result := gateway.RunResult{WorkerID: "owner", Reply: "platform failure notice"}
+		if _, err := journal.TerminalFailRun(ctx, task, result); err == nil {
+			t.Fatal("expected notice persistence failure")
+		}
+		var status string
+		if err := db.QueryRowContext(ctx, `SELECT status FROM agent_run WHERE request_id=$1`, task.RequestID).Scan(&status); err != nil || status != "running" {
+			t.Fatalf("partial terminal commit: %s %v", status, err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER fail_notice ON outbound_message; DROP FUNCTION fail_notice();`); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 2; i++ {
+			if dead, err := journal.TerminalFailRun(ctx, task, result); err != nil || !dead {
+				t.Fatalf("terminal: %t %v", dead, err)
+			}
+		}
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM outbound_message WHERE request_id=$1`, task.RequestID).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("notices=%d %v", count, err)
+		}
+		if err := journal.MarkRunRunning(ctx, task.RequestID, "new-worker"); !errors.Is(err, gateway.ErrRunTerminal) {
+			t.Fatalf("dead run revived: %v", err)
 		}
 	})
 }

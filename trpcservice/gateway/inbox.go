@@ -16,6 +16,8 @@ import (
 var (
 	ErrMessageConflict = errors.New("external message ID was reused with different payload")
 	ErrJournalClosed   = errors.New("inbound journal is closed")
+	ErrRunTerminal     = errors.New("Agent run has exhausted automatic retries")
+	ErrRunSuperseded   = errors.New("Agent run is owned by another worker")
 )
 
 // InboundRequest is the normalized message accepted by the durable Gateway.
@@ -53,6 +55,7 @@ type QueueOutboxItem struct {
 
 // RunResult is the durable outcome written by an Agent Worker.
 type RunResult struct {
+	WorkerID         string
 	Reply            string
 	AgentName        string
 	FencingToken     int64
@@ -95,7 +98,8 @@ type Journal interface {
 	) error
 	MarkRunRunning(ctx context.Context, requestID string, workerID string) error
 	CompleteRun(ctx context.Context, task workqueue.AgentTask, result RunResult) error
-	FailRun(ctx context.Context, requestID string, errorType string, cause error) error
+	FailRun(ctx context.Context, requestID string, errorType string, cause error, expectedWorker ...string) error
+	TerminalFailRun(ctx context.Context, task workqueue.AgentTask, result RunResult) (bool, error)
 	ClaimOutbound(
 		ctx context.Context,
 		workerID string,

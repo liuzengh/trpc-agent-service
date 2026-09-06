@@ -9,13 +9,14 @@ import (
 )
 
 type MemoryRepository struct {
-	mu      sync.Mutex
-	closed  bool
-	records map[string]Record
+	mu        sync.Mutex
+	closed    bool
+	records   map[string]Record
+	decisions map[string]Decision
 }
 
 func NewMemoryRepository() *MemoryRepository {
-	return &MemoryRepository{records: make(map[string]Record)}
+	return &MemoryRepository{records: make(map[string]Record), decisions: make(map[string]Decision)}
 }
 
 func (r *MemoryRepository) Request(ctx context.Context, request Request) (Record, error) {
@@ -88,6 +89,9 @@ func (r *MemoryRepository) Decide(ctx context.Context, decision Decision) (Recor
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return Record{}, errors.New("approval repository is closed")
+	}
 	record, ok := r.records[decision.ApprovalID]
 	if !ok {
 		return Record{}, ErrNotFound
@@ -101,11 +105,16 @@ func (r *MemoryRepository) Decide(ctx context.Context, decision Decision) (Recor
 		r.records[record.ApprovalID] = record
 		return Record{}, ErrExpired
 	}
+	messageKey := decision.ChannelBindingID + "\x00" + decision.ExternalMessageID
+	if old, ok := r.decisions[messageKey]; ok && (old.ApprovalID != decision.ApprovalID || old.Status != decision.Status) {
+		return Record{}, ErrConflict
+	}
 	if record.Status != StatusPending {
 		if record.Status == StatusExpired {
 			return Record{}, ErrExpired
 		}
 		if record.Status == decision.Status {
+			r.decisions[messageKey] = decision
 			return record, nil
 		}
 		return Record{}, ErrConflict
@@ -121,6 +130,7 @@ func (r *MemoryRepository) Decide(ctx context.Context, decision Decision) (Recor
 	record.DecisionReason = decision.Reason
 	record.DecidedAt = time.Now().UTC()
 	r.records[record.ApprovalID] = record
+	r.decisions[messageKey] = decision
 	return record, nil
 }
 

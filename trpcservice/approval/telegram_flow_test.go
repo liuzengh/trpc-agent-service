@@ -294,7 +294,7 @@ func TestTelegramApprovalFlow(t *testing.T) {
 			if count, err := relay.RelayOnce(ctx); err != nil || count != 0 {
 				t.Fatalf("duplicate relay=%d err=%v", count, err)
 			}
-			if count, err := sender.ProcessOnce(ctx); err != nil || count != 0 {
+			if count, err := sender.ProcessOnce(ctx); err != nil || count != 1 {
 				t.Fatalf("duplicate send=%d err=%v", count, err)
 			}
 			succeeded := 0

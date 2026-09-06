@@ -113,6 +113,22 @@ func (r *PostgresRepository) Decide(ctx context.Context, decision Decision) (Rec
 		if record.Status != decision.Status {
 			return Record{}, ErrConflict
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO approval_decision_message(channel_binding_id,external_message_id,approval_id,status)
+VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, decision.ChannelBindingID, decision.ExternalMessageID, decision.ApprovalID, decision.Status); err != nil {
+		return Record{}, fmt.Errorf("record approval decision message: %w", err)
+	}
+	var targetID, targetStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT approval_id,status FROM approval_decision_message WHERE channel_binding_id=$1 AND external_message_id=$2`, decision.ChannelBindingID, decision.ExternalMessageID).Scan(&targetID, &targetStatus); err != nil {
+		return Record{}, err
+	}
+	if targetID != decision.ApprovalID || targetStatus != decision.Status {
+		return Record{}, ErrConflict
+	}
+	if record.Status != StatusPending {
+		if err := tx.Commit(); err != nil {
+			return Record{}, err
+		}
 		return record, nil
 	}
 	if _, err := tx.ExecContext(ctx, `

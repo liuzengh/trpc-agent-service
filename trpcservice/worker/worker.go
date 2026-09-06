@@ -90,14 +90,20 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		_ = delivery.Ack(ctx)
 		return true, fmt.Errorf("reject invalid task scope: %w", err)
 	}
+	if task.Attempt >= w.opts.MaxAttempts {
+		return true, w.retryOrAck(ctx, delivery, task, gateway.ErrRunTerminal)
+	}
 	if err := w.journal.MarkRunRunning(ctx, task.RequestID, w.opts.WorkerID); err != nil {
+		if errors.Is(err, gateway.ErrRunTerminal) {
+			return true, delivery.Ack(ctx)
+		}
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
 	releaseQuota := func() {}
 	if w.opts.Quota != nil {
 		release, quotaErr := w.opts.Quota.AcquireRun(ctx, task.Scope.TenantID)
 		if quotaErr != nil {
-			failErr := w.journal.FailRun(ctx, task.RequestID, "tenant_quota", quotaErr)
+			failErr := w.journal.FailRun(ctx, task.RequestID, "tenant_quota", quotaErr, w.opts.WorkerID)
 			auditErr := w.recordAudit(
 				ctx, task, gateway.RunResult{}, "run_rejected", "tenant_quota", started,
 			)
@@ -119,7 +125,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	})
 	if runErr != nil {
 		w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "failed", time.Since(started))
-		failErr := w.journal.FailRun(ctx, task.RequestID, "agent_execution", runErr)
+		failErr := w.journal.FailRun(ctx, task.RequestID, "agent_execution", runErr, w.opts.WorkerID)
 		auditErr := w.recordAudit(ctx, task, gateway.RunResult{}, "run_failed", "agent_execution", started)
 		return true, w.retryOrAck(ctx, delivery, task, errors.Join(runErr, failErr, auditErr))
 	}
@@ -145,6 +151,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		result.Reply = appendApprovalInstructions(result.Reply, pending)
 	}
 	if err := w.journal.CompleteRun(ctx, task, gateway.RunResult{
+		WorkerID:         w.opts.WorkerID,
 		Reply:            result.Reply,
 		AgentName:        result.AgentName,
 		FencingToken:     result.FencingToken,
@@ -313,24 +320,44 @@ func (w *Worker) retryOrAck(
 	task workqueue.AgentTask,
 	cause error,
 ) error {
+	if errors.Is(cause, gateway.ErrRunSuperseded) {
+		return delivery.Ack(ctx)
+	}
 	if task.Attempt+1 < w.opts.MaxAttempts {
-		if w.opts.RetryDelay > 0 {
-			timer := time.NewTimer(w.opts.RetryDelay)
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				return errors.Join(cause, context.Cause(ctx))
-			}
+		return errors.Join(cause, w.retryDelivery(ctx, delivery))
+	}
+	if ctx.Err() != nil {
+		return errors.Join(cause, context.Cause(ctx))
+	}
+	dead, err := w.journal.TerminalFailRun(ctx, task, gateway.RunResult{
+		WorkerID: w.opts.WorkerID,
+		Reply: "平台提示：本次处理未能完成，已停止自动执行重试。请求编号：" + task.RequestID +
+			"。如果涉及工具操作，请先按请求编号核对执行记录；这条提示不代表工具已经回滚，请勿直接重复发起有副作用的操作。",
+		TraceID: audit.TraceID(ctx), TraceParent: background.TraceParent(ctx),
+	})
+	if errors.Is(err, gateway.ErrRunSuperseded) {
+		return delivery.Ack(ctx)
+	}
+	if err != nil {
+		return errors.Join(cause, err, w.retryDelivery(ctx, delivery))
+	}
+	if dead {
+		if err := w.recordAudit(ctx, task, gateway.RunResult{}, "run_dead", "retry_exhausted", time.Now()); err != nil {
+			return errors.Join(cause, err, w.retryDelivery(ctx, delivery))
 		}
-		return errors.Join(cause, delivery.Retry(ctx))
 	}
 	return errors.Join(cause, delivery.Ack(ctx))
+}
+
+func (w *Worker) retryDelivery(ctx context.Context, delivery workqueue.Delivery) error {
+	timer := time.NewTimer(w.opts.RetryDelay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return delivery.Retry(ctx)
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
 }
 
 // Run keeps consuming until cancellation. Individual task errors do not stop

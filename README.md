@@ -153,6 +153,8 @@
 - [Telegram 工具审批上手说明](docs/telegram-approval-walkthrough.md)
 - [Telegram 完整链路追踪](docs/telegram-tracing-walkthrough.md)
 - [接口鉴权与租户密钥边界](docs/security-boundaries.md)
+- [工具业务幂等与对账](docs/tool-operations.md)
+- [IM 回执与媒体处理规则](docs/im-feedback.md)
 - [当前开发执行清单](docs/execution-plan.md)
 - [治理、安全、监控、故障恢复和部署](docs/governance-operations.md)
 - [生产风险清单](docs/risks.md)

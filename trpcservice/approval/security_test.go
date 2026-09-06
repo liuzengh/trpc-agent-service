@@ -125,6 +125,24 @@ func testDecisionContract(t *testing.T, repo Repository, base Request) {
 			t.Fatalf("valid decision after conflict: %v", err)
 		}
 	})
+	t.Run("repeat_message_cannot_decide_another_approval", func(t *testing.T) {
+		first, second := request("repeat-ledger-a", false), request("repeat-ledger-b", false)
+		decision := decisionFor(first)
+		if _, err := repo.Decide(ctx, decision); err != nil {
+			t.Fatal(err)
+		}
+		decision.ExternalMessageID += "-user-repeat"
+		if _, err := repo.Decide(ctx, decision); err != nil {
+			t.Fatal(err)
+		}
+		decision.ApprovalID = second.ApprovalID
+		if _, err := repo.Decide(ctx, decision); !errors.Is(err, ErrConflict) {
+			t.Fatalf("repeat ID reused: %v", err)
+		}
+		if _, err := repo.Decide(ctx, decisionFor(second)); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("pending_session_scope", func(t *testing.T) {
 		record := request("pending-session", false)
 		request("expired-session", true)
@@ -267,17 +285,17 @@ func TestServiceContinuationIsIdempotentAndAudited(t *testing.T) {
 			}
 			receiptID := ""
 			for i, event := range writer.Events() {
-				if event.Details["continuation_request_id"] != continuationID || event.Details["duplicate"] != (i > 0) {
+				if event.Details["continuation_request_id"] != continuationID || event.Details["duplicate"] != (i == 1) {
 					t.Fatalf("audit continuation link lost: %+v", event)
 				}
 				id, _ := event.Details["receipt_request_id"].(string)
-				if id == "" || (i > 0 && id != receiptID) {
+				if id == "" || (i == 1 && id != receiptID) || (i == 2 && id == receiptID) {
 					t.Fatal("receipt is missing or not idempotent")
 				}
 				receiptID = id
 			}
 			status, reply, ok := journal.RunStatus(receiptID)
-			if !ok || status != "completed" || !strings.HasPrefix(reply.Reply, "平台确认：") {
+			if !ok || status != "completed" || !strings.HasPrefix(reply.Reply, "平台提示：") {
 				t.Fatalf("receipt=%+v", reply)
 			}
 		})

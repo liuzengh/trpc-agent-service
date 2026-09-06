@@ -54,6 +54,7 @@ type InboundEnvelope struct {
 	ExternalThreadID  string
 	ChatType          string
 	MessageType       string
+	Edited            bool
 	Text              string
 	ReplyTarget       string
 	OccurredAt        time.Time

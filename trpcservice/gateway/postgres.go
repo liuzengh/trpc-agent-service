@@ -10,6 +10,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	platformlog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
 
@@ -345,7 +346,7 @@ func (j *PostgresJournal) MarkQueueOutboxFailed(
 ) error {
 	errorText := ""
 	if cause != nil {
-		errorText = cause.Error()
+		errorText = platformlog.Redact(cause.Error())
 		if len(errorText) > 2048 {
 			errorText = errorText[:2048]
 		}
@@ -386,7 +387,7 @@ func (j *PostgresJournal) MarkRunRunning(
 UPDATE agent_run
 SET status = 'running', worker_id = $2, started_at = COALESCE(started_at, now()),
     error_type = NULL, error_message = NULL
-WHERE request_id = $1 AND status <> 'completed'`, requestID, workerID)
+WHERE request_id = $1 AND status NOT IN ('completed','dead')`, requestID, workerID)
 	if err != nil {
 		return fmt.Errorf("mark Agent run running: %w", err)
 	}
@@ -408,6 +409,9 @@ WHERE request_id = $1 AND status <> 'completed'`, requestID, workerID)
 	if status == "completed" {
 		return nil
 	}
+	if status == "dead" {
+		return ErrRunTerminal
+	}
 	return fmt.Errorf("Agent run %q cannot start from status %q", requestID, status)
 }
 
@@ -426,7 +430,7 @@ UPDATE agent_run
 SET status = 'completed', fencing_token = $2, agent_name = $3,
     prompt_tokens = $4, completion_tokens = $5, cost = $6, trace_id = NULLIF($7, ''),
     completed_at = now(), error_type = NULL, error_message = NULL
-WHERE request_id = $1 AND fencing_token <= $2`,
+WHERE request_id = $1 AND fencing_token <= $2 AND status <> 'dead' AND ($8='' OR worker_id=$8 OR status='completed')`,
 		task.RequestID,
 		result.FencingToken,
 		result.AgentName,
@@ -434,12 +438,13 @@ WHERE request_id = $1 AND fencing_token <= $2`,
 		result.CompletionTokens,
 		result.Cost,
 		result.TraceID,
+		result.WorkerID,
 	)
 	if err != nil {
 		return fmt.Errorf("complete Agent run: %w", err)
 	}
 	if err := requireOneRow(updated, "stale or missing Agent run completion"); err != nil {
-		return err
+		return ErrRunSuperseded
 	}
 	payload, err := json.Marshal(map[string]any{
 		"text":         result.Reply,
@@ -484,20 +489,38 @@ func (j *PostgresJournal) FailRun(
 	requestID string,
 	errorType string,
 	cause error,
+	expectedWorker ...string,
 ) error {
 	errorText := ""
 	if cause != nil {
-		errorText = cause.Error()
+		errorText = platformlog.Redact(cause.Error())
 		if len(errorText) > 2048 {
 			errorText = errorText[:2048]
 		}
 	}
-	_, err := j.db.ExecContext(ctx, `
+	owner := ""
+	if len(expectedWorker) > 0 {
+		owner = expectedWorker[0]
+	}
+	result, err := j.db.ExecContext(ctx, `
 UPDATE agent_run
 SET status = 'failed', error_type = $2, error_message = $3, completed_at = now()
-WHERE request_id = $1 AND status <> 'completed'`, requestID, errorType, errorText)
+WHERE request_id = $1 AND status NOT IN ('completed','dead') AND ($4='' OR worker_id=$4)`, requestID, errorType, errorText, owner)
 	if err != nil {
 		return fmt.Errorf("fail Agent run: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 && owner != "" {
+		var status string
+		if err := j.db.QueryRowContext(ctx, `SELECT status FROM agent_run WHERE request_id=$1`, requestID).Scan(&status); err != nil {
+			return err
+		}
+		if status != "completed" && status != "dead" {
+			return ErrRunSuperseded
+		}
 	}
 	return nil
 }
@@ -593,7 +616,7 @@ func (j *PostgresJournal) MarkOutboundFailed(
 	errorType := "delivery"
 	errorText := ""
 	if cause != nil {
-		errorText = cause.Error()
+		errorText = platformlog.Redact(cause.Error())
 		if len(errorText) > 2048 {
 			errorText = errorText[:2048]
 		}

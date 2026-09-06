@@ -115,6 +115,7 @@ func (a *Adapter) Callback(
 		ExternalThreadID:  strconv.FormatInt(message.MessageThreadID, 10),
 		ChatType:          chatType,
 		MessageType:       messageType,
+		Edited:            update.Message == nil && update.EditedMessage != nil,
 		Text:              text,
 		ReplyTarget:       string(targetJSON),
 		OccurredAt:        time.Unix(message.Date, 0).UTC(),
@@ -138,6 +139,11 @@ type telegramMessage struct {
 	CaptionEntities []telegramMessageEntity `json:"caption_entities"`
 	Photo           []telegramPhoto         `json:"photo"`
 	Document        *telegramDocument       `json:"document"`
+	Voice           json.RawMessage         `json:"voice"`
+	Audio           json.RawMessage         `json:"audio"`
+	Video           json.RawMessage         `json:"video"`
+	Animation       json.RawMessage         `json:"animation"`
+	Sticker         json.RawMessage         `json:"sticker"`
 	From            *telegramUser           `json:"from"`
 	Chat            telegramChat            `json:"chat"`
 	ReplyToMessage  *telegramMessage        `json:"reply_to_message"`
@@ -176,6 +182,11 @@ func normalizedTelegramMessage(message *telegramMessage) (string, string) {
 		photo := message.Photo[len(message.Photo)-1]
 		if photo.FileID != "" {
 			return "image", fmt.Sprintf("[Telegram image file_id=%q] %s", photo.FileID, caption)
+		}
+	}
+	for kind, media := range map[string]json.RawMessage{"voice": message.Voice, "audio": message.Audio, "video": message.Video, "animation": message.Animation, "sticker": message.Sticker} {
+		if len(media) > 0 && string(media) != "null" {
+			return kind, "[Unsupported Telegram media]"
 		}
 	}
 	return "", ""

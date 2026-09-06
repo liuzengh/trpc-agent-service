@@ -32,6 +32,8 @@ type memoryQueueOutbox struct {
 }
 
 type memoryRun struct {
+	tenantID string
+	appID    string
 	status   string
 	workerID string
 	result   RunResult
@@ -150,7 +152,7 @@ func (j *MemoryJournal) Accept(
 	}
 	if request.DirectReply != "" {
 		j.inbound[inboundKey] = memoryInbound{result: result, payloadHash: payloadHash}
-		j.runs[result.RequestID] = &memoryRun{status: "completed", result: RunResult{
+		j.runs[result.RequestID] = &memoryRun{tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "completed", result: RunResult{
 			Reply: request.DirectReply, AgentName: "platform-control", TraceParent: traceParent, TraceID: audit.TraceID(ctx),
 		}}
 		outboundID := stableID("out_", result.RequestID)
@@ -170,7 +172,7 @@ func (j *MemoryJournal) Accept(
 		nextAttempt: time.Now(),
 	}
 	j.inbound[inboundKey] = memoryInbound{result: result, payloadHash: payloadHash}
-	j.runs[result.RequestID] = &memoryRun{status: "queued"}
+	j.runs[result.RequestID] = &memoryRun{tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "queued"}
 	return result, nil
 }
 
@@ -271,6 +273,9 @@ func (j *MemoryJournal) MarkRunRunning(
 	if run.status == "completed" {
 		return nil
 	}
+	if run.status == "dead" {
+		return ErrRunTerminal
+	}
 	run.status = "running"
 	run.workerID = workerID
 	return nil
@@ -286,6 +291,12 @@ func (j *MemoryJournal) CompleteRun(
 	run := j.runs[task.RequestID]
 	if run == nil {
 		return fmt.Errorf("Agent run not found")
+	}
+	if run.status == "dead" {
+		return ErrRunTerminal
+	}
+	if result.WorkerID != "" && run.workerID != result.WorkerID && run.status != "completed" {
+		return ErrRunSuperseded
 	}
 	if run.status == "completed" && run.result.FencingToken > result.FencingToken {
 		return fmt.Errorf("stale Agent run fencing token")
@@ -316,6 +327,7 @@ func (j *MemoryJournal) FailRun(
 	requestID string,
 	errorType string,
 	_ error,
+	expectedWorker ...string,
 ) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -323,11 +335,49 @@ func (j *MemoryJournal) FailRun(
 	if run == nil {
 		return fmt.Errorf("Agent run not found")
 	}
-	if run.status != "completed" {
+	if run.status != "completed" && run.status != "dead" {
+		if len(expectedWorker) > 0 && run.workerID != expectedWorker[0] {
+			return ErrRunSuperseded
+		}
 		run.status = "failed"
 		run.errType = errorType
 	}
 	return nil
+}
+
+func (j *MemoryJournal) TerminalFailRun(ctx context.Context, task workqueue.AgentTask, result RunResult) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := task.Scope.Validate(); err != nil {
+		return false, err
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return false, ErrJournalClosed
+	}
+	run := j.runs[task.RequestID]
+	if run == nil {
+		return false, fmt.Errorf("Agent run not found")
+	}
+	if run.status == "completed" {
+		return false, nil
+	}
+	if run.tenantID != task.Scope.TenantID || run.appID != task.Scope.AppID {
+		return false, ErrRunSuperseded
+	}
+	if run.status == "running" && result.WorkerID != "" && run.workerID != result.WorkerID {
+		return false, ErrRunSuperseded
+	}
+	run.status, run.errType = "dead", "retry_exhausted"
+	id := stableID("out_", task.RequestID)
+	if j.outbound[id] == nil {
+		j.outbound[id] = &memoryOutbound{item: OutboundItem{ID: id, RequestID: task.RequestID, TenantID: task.Scope.TenantID,
+			ChannelBindingID: task.Scope.ChannelBindingID, Text: result.Reply, ReplyTarget: task.ReplyTarget, TraceParent: result.TraceParent},
+			status: "pending", nextAttempt: time.Now()}
+	}
+	return true, nil
 }
 
 // RunStatus exposes the in-memory journal state to tests and local status APIs.
