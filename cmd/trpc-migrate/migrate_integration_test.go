@@ -90,7 +90,7 @@ func TestMigrateCommandAgainstRealPostgreSQL(t *testing.T) {
 	if exit != exitOK {
 		t.Fatalf("fresh init exit=%d output=%s", exit, output)
 	}
-	if !strings.Contains(output, "current_version=10") {
+	if !strings.Contains(output, "current_version=11") {
 		t.Fatalf("fresh init did not reach version 9: %s", output)
 	}
 	if strings.Contains(output, dsn) || strings.Contains(output, "postgres://") {
@@ -102,7 +102,7 @@ func TestMigrateCommandAgainstRealPostgreSQL(t *testing.T) {
 		"DATABASE_URL":    dsn,
 		"DATABASE_SCHEMA": schema,
 	})
-	if exit != exitOK || !strings.Contains(output, "current_version=10") {
+	if exit != exitOK || !strings.Contains(output, "current_version=11") {
 		t.Fatalf("idempotent rerun exit=%d output=%s", exit, output)
 	}
 

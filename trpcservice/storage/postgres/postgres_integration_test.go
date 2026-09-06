@@ -935,6 +935,7 @@ func TestPostgreSQLMigrations(t *testing.T) {
 		"000008_vector_rebuild_run.up.sql", "000008_vector_rebuild_run.down.sql",
 		"000009_p1_08_config_publication.up.sql", "000009_p1_08_config_publication.down.sql",
 		"000010_p2_01_row_level_security.up.sql", "000010_p2_01_row_level_security.down.sql",
+		"000011_p2_02_restore_trigger_compat.up.sql", "000011_p2_02_restore_trigger_compat.down.sql",
 	} {
 		data, readErr := fs.ReadFile(source, name)
 		if readErr != nil {
@@ -977,10 +978,11 @@ func TestPostgreSQLMigrations(t *testing.T) {
 		}
 		failedSource[name] = &fstest.MapFile{Data: data}
 	}
-	// Version 11 is the first unused version: the real P1-08 publication and
-	// P2-01 RLS migrations own versions 9 and 10 in the source tree.
-	failedSource["000011_broken.up.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE migration_failure_probe (id integer); SELECT * FROM missing_migration_table;")}
-	failedSource["000011_broken.down.sql"] = &fstest.MapFile{Data: []byte("DROP TABLE IF EXISTS migration_failure_probe;")}
+	// Version 12 is the first unused version: the real P1-08 publication,
+	// P2-01 RLS and P2-02 restore-compat migrations own versions 9, 10 and
+	// 11 in the source tree.
+	failedSource["000012_broken.up.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE migration_failure_probe (id integer); SELECT * FROM missing_migration_table;")}
+	failedSource["000012_broken.down.sql"] = &fstest.MapFile{Data: []byte("DROP TABLE IF EXISTS migration_failure_probe;")}
 	failedMigrator, err := NewMigratorWithPool(pool, cfg, failedSource)
 	if err != nil {
 		t.Fatal(err)
@@ -1000,7 +1002,7 @@ func TestPostgreSQLMigrations(t *testing.T) {
 	}
 	var failedVersionExists bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS (
-		SELECT 1 FROM schema_migration WHERE version = 11
+		SELECT 1 FROM schema_migration WHERE version = 12
 	)`).Scan(&failedVersionExists); err != nil {
 		t.Fatal(err)
 	}

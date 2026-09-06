@@ -239,6 +239,24 @@ func (m *migrator) Down(ctx context.Context, steps int) error {
 	})
 }
 
+// MigrationSet loads the ordered migration versions (version, name, checksum)
+// from the given trusted application source without touching any database.
+// P2-02 additive, read-only helper for recovery tooling: it reuses the exact
+// loadMigrations parsing and checksum algorithm so a manifest digest always
+// matches what the startup gate would validate. It does not change any
+// migration, gate or durable behavior.
+func MigrationSet(source fs.FS) ([]MigrationVersion, error) {
+	migrations, err := loadMigrations(source)
+	if err != nil {
+		return nil, err
+	}
+	versions := make([]MigrationVersion, 0, len(migrations))
+	for _, item := range migrations {
+		versions = append(versions, MigrationVersion{Version: item.version, Name: item.name, Checksum: item.checksum})
+	}
+	return versions, nil
+}
+
 func (m *migrator) Current(ctx context.Context) (MigrationVersion, error) {
 	var current MigrationVersion
 	err := m.withLock(ctx, func(conn *pgxpool.Conn) error {

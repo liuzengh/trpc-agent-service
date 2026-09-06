@@ -98,7 +98,7 @@ README/ARCHITECTURE 明确 Object Storage 是平台目标能力；本轮已完�
 | P1-08 | 配置发布、灰度和回滚 | verified（真实 PostgreSQL/Redis/Docker integration matrix 已通过；production rollout 未部署） |
 | P1-09 | Docker Compose 和运行文档 | verified（可重复本地 Compose 部署、生命周期、依赖健康、migration/config gate 与恢复边界已验证；production rollout 未部署） |
 | P2-01 | PostgreSQL RLS 和数据库强制租户隔离 | verified（本地 RLS + pooled tenant-context isolation boundary；production rollout 未执行） |
-| P2-02 | 备份恢复和事件回放 | 未开始 |
+| P2-02 | 备份恢复和事件回放 | verified（本地 PostgreSQL logical backup/restore + 有界 session-event replay/recovery drill 边界；production DR/PITR/RPO-RTO 未实现或未证明） |
 | P2-03 | 容量/故障保护 | 未开始 |
 | P2-04 | 集成/压力/安全测试和生产运维 | 未开始 |
 

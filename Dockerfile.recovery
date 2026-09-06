@@ -1,0 +1,49 @@
+# P2-02 recovery tool image: the offline operator environment for the local
+# backup/restore/replay drill. It is NOT the business runtime image and is
+# never part of the app startup/readiness path.
+#
+# Builder and runtime base images are tag+digest pinned. The runtime stage is
+# the official PostgreSQL 16 alpine image, so pg_dump/pg_restore always match
+# the server major; it additionally carries the trpc-recovery and trpc-migrate
+# binaries and the release migrations. Nothing else is copied.
+FROM golang:1.26.3-alpine AS builder
+WORKDIR /src
+ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY trpcservice ./trpcservice
+RUN go build -trimpath -ldflags "-s -w" -o /out/trpc-recovery ./cmd/trpc-recovery \
+    && go build -trimpath -ldflags "-s -w" -o /out/trpc-migrate ./cmd/trpc-migrate
+
+FROM postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+COPY --from=builder /out/trpc-recovery /usr/local/bin/trpc-recovery
+COPY --from=builder /out/trpc-migrate /usr/local/bin/trpc-migrate
+COPY migrations /app/migrations
+ENV P202_MIGRATIONS_DIR=/app/migrations
+USER root
+# The wrapper reads the 0600 Docker secrets, assembles the DSNs in the
+# environment (never argv), prepares the 0700 backup directory and drops to
+# the non-root postgres user before exec.
+RUN printf '%s\n' '#!/bin/sh' \
+    'set -eu' \
+    'export P202_SOURCE_URL="postgres://trpc_app:$(cat /run/secrets/p202_pg_password)@recovery-source:5432/trpc_agent?sslmode=disable"' \
+    'export P202_TARGET_URL="postgres://trpc_app:$(cat /run/secrets/p202_pg_password)@recovery-target:5432/trpc_agent?sslmode=disable"' \
+    'export P202_REPLAY_RUNTIME_URL="postgres://trpc_runtime:$(cat /run/secrets/p202_pg_runtime_password)@recovery-target:5432/trpc_agent?sslmode=disable"' \
+    'export P202_OUTPUT_DIR=/backups' \
+    'if [ "${1:-}" = "migrate" ]; then' \
+    '  export DATABASE_URL="$P202_TARGET_URL"' \
+    'elif [ "${1:-}" = "migrate-source" ]; then' \
+    '  export DATABASE_URL="$P202_SOURCE_URL"' \
+    'fi' \
+    'if [ "${1:-}" = "migrate" ] || [ "${1:-}" = "migrate-source" ]; then' \
+    '  shift' \
+    '  export MIGRATIONS_DIR="${P202_MIGRATIONS_DIR}"' \
+    '  export RUNTIME_ROLE=trpc_runtime' \
+    '  export RUNTIME_PASSWORD="$(cat /run/secrets/p202_pg_runtime_password)"' \
+    '  exec su-exec postgres /usr/local/bin/trpc-migrate' \
+    'fi' \
+    'mkdir -p /backups' \
+    'chown postgres:postgres /backups' \
+    'exec su-exec postgres /usr/local/bin/trpc-recovery "$@"' > /usr/local/bin/p202-wrapper \
+    && chmod 0755 /usr/local/bin/p202-wrapper

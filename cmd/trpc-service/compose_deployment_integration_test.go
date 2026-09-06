@@ -395,13 +395,13 @@ func TestComposeLifecycleAndRecovery(t *testing.T) {
 		return err == nil && strings.Contains(string(out), "PONG")
 	})
 
-	// 2. The standalone migration step applies versions 1..9 and exits 0.
+	// 2. The standalone migration step applies versions 1..11 and exits 0.
 	run.compose(t, 2*time.Minute, "up", "-d", "migrate")
 	if exit := run.waitServiceExited(t, "migrate", 2*time.Minute); exit != 0 {
 		t.Fatalf("migration step exit=%d", exit)
 	}
-	if logs := run.serviceLogs(t, "migrate"); !strings.Contains(logs, "current_version=10") {
-		t.Fatalf("migration step did not reach version 9: %s", tailString(logs, 800))
+	if logs := run.serviceLogs(t, "migrate"); !strings.Contains(logs, "current_version=11") {
+		t.Fatalf("migration step did not reach version 11: %s", tailString(logs, 800))
 	}
 
 	// 3. The application becomes ready only after the migration succeeded.
@@ -420,8 +420,8 @@ func TestComposeLifecycleAndRecovery(t *testing.T) {
 	}
 
 	// 4. Durable facts after a cold start.
-	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "10" {
-		t.Fatalf("schema_migration versions=%s want=10", got)
+	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "11" {
+		t.Fatalf("schema_migration versions=%s want=11", got)
 	}
 	for _, table := range []string{"job_queue", "execution_result", "outbox_message", "tenant", "agent_app", "tenant_config_rollout", "tenant_config_operation"} {
 		if got := run.psqlScalar(t, fmt.Sprintf("SELECT count(*) FROM information_schema.tables WHERE table_name='%s'", table)); got != "1" {
@@ -477,8 +477,8 @@ func TestComposeLifecycleAndRecovery(t *testing.T) {
 	})
 	run.compose(t, time.Minute, "start", "app")
 	run.waitForHealth(t, "/healthz", 200, 3*time.Minute)
-	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "10" {
-		t.Fatalf("schema_migration versions after SIGKILL=%s want=9", got)
+	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "11" {
+		t.Fatalf("schema_migration versions after SIGKILL=%s want=11", got)
 	}
 	if got := run.psqlScalar(t, "SELECT count(*) FROM tenant"); got != tenantMarker {
 		t.Fatalf("tenant rows changed after SIGKILL: %s want %s", got, tenantMarker)
