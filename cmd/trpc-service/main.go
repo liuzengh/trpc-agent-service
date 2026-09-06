@@ -126,26 +126,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	sessionConfig, err := config.LoadSessionConfigFromEnv()
+	backends, err := config.LoadRuntimeBackends(roles, len(wecomMCPTargets) > 0)
 	if err != nil {
-		return fmt.Errorf("load session config: %w", err)
+		return fmt.Errorf("load role backend config: %w", err)
 	}
-	coordinatorConfig, err := config.LoadCoordinatorConfigFromEnv()
-	if err != nil {
-		return fmt.Errorf("load coordinator config: %w", err)
-	}
-	idempotencyConfig, err := config.LoadIdempotencyConfigFromEnv()
-	if err != nil {
-		return fmt.Errorf("load idempotency config: %w", err)
-	}
+	sessionConfig, coordinatorConfig, idempotencyConfig := backends.Session, backends.Coordinator, backends.Idempotency
 	controlPlaneConfig, err := config.LoadControlPlaneConfigFromEnv()
 	if err != nil {
 		return fmt.Errorf("load control-plane config: %w", err)
 	}
-	queueConfig, err := config.LoadQueueConfigFromEnv()
-	if err != nil {
-		return fmt.Errorf("load queue config: %w", err)
-	}
+	queueConfig := backends.Queue
 	var adminConfig config.AdminConfig
 	if roles.Admin {
 		adminConfig, err = config.LoadAdminConfigFromEnv()
@@ -153,10 +143,7 @@ func run() error {
 			return fmt.Errorf("load Admin config: %w", err)
 		}
 	}
-	quotaConfig, err := config.LoadQuotaConfigFromEnv()
-	if err != nil {
-		return fmt.Errorf("load quota config: %w", err)
-	}
+	quotaConfig := backends.Quota
 	if roleName == config.RoleAdmin && !adminConfig.Enabled {
 		return fmt.Errorf("Admin role requires TRPC_AGENT_ADMIN_ENABLED=true")
 	}
@@ -517,7 +504,14 @@ func run() error {
 		_ = controlPlaneRepository.Close()
 		return fmt.Errorf("build callback Gateway: %w", err)
 	}
-	wecomPoller, err := gateway.NewWeComPoller(controlPlaneRepository, wecomMCPAdapter, callbackGateway, wecomMCPState, sessionCoordinator, gateway.WeComPollOptions{
+	pollStartup, cancelPollStartup := context.WithTimeout(context.Background(), 5*time.Second)
+	pollCoordinator, err := coordination.New(pollStartup, backends.PollCoordinator)
+	cancelPollStartup()
+	if err != nil {
+		return fmt.Errorf("build channel poll coordinator: %w", err)
+	}
+	defer func() { _ = pollCoordinator.Close() }()
+	wecomPoller, err := gateway.NewWeComPoller(controlPlaneRepository, wecomMCPAdapter, callbackGateway, wecomMCPState, pollCoordinator, gateway.WeComPollOptions{
 		Targets: wecomMCPTargets, Interval: 10 * time.Second, Window: time.Minute, Overlap: time.Minute, SettleDelay: 5 * time.Second, Timeout: 45 * time.Second, Audit: auditWriter, Metrics: metricRecorder,
 	})
 	if err != nil {

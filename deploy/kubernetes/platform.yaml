@@ -306,17 +306,80 @@ spec:
   policyTypes: [Egress]
   egress:
     - to:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
+    - to:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-dependency: telemetry}
+          podSelector:
+            matchLabels: {app: otel-collector}
+      ports:
         - {protocol: TCP, port: 4317}
+    - to:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-dependency: data}
+          podSelector:
+            matchLabels: {app: postgres}
+      ports:
         - {protocol: TCP, port: 5432}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: redis-egress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-service}
+    matchExpressions:
+      - {key: role, operator: In, values: [gateway, relay, worker, jobs]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-dependency: data}
+          podSelector:
+            matchLabels: {app: redis}
+      ports:
         - {protocol: TCP, port: 6379}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: knowledge-artifact-egress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-service}
+    matchExpressions:
+      - {key: role, operator: In, values: [worker, jobs, admin]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-dependency: data}
+          podSelector:
+            matchExpressions:
+              - {key: app, operator: In, values: [qdrant, minio]}
+      ports:
         - {protocol: TCP, port: 6334}
         - {protocol: TCP, port: 9000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: provider-https-egress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-service}
+    matchExpressions:
+      - {key: role, operator: In, values: [gateway, worker, sender, jobs, admin]}
+  policyTypes: [Egress]
+  egress:
     - to:
-        - ipBlock: {cidr: 0.0.0.0/0}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16]
       ports:
         - {protocol: TCP, port: 443}
 ---
@@ -356,8 +419,17 @@ spec:
   policyTypes: [Egress]
   egress:
     - to:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
+    - to:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-dependency: data}
+          podSelector:
+            matchLabels: {app: postgres}
+      ports:
         - {protocol: TCP, port: 5432}

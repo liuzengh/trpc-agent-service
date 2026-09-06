@@ -101,3 +101,63 @@ func TestManifestsUseRoleSpecificSecrets(t *testing.T) {
 		}
 	}
 }
+
+func TestNetworkPoliciesDoNotAllowEveryNamespace(t *testing.T) {
+	file, err := os.Open("platform.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	decoder := yaml.NewDecoder(file)
+	policies := 0
+	for {
+		var doc map[string]any
+		err := decoder.Decode(&doc)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if doc["kind"] != "NetworkPolicy" {
+			continue
+		}
+		policies++
+		spec := doc["spec"].(map[string]any)
+		for _, direction := range []string{"egress", "ingress"} {
+			rules, _ := spec[direction].([]any)
+			for _, r := range rules {
+				rule := r.(map[string]any)
+				peerKey := "to"
+				if direction == "ingress" {
+					peerKey = "from"
+				}
+				peers, _ := rule[peerKey].([]any)
+				for _, p := range peers {
+					peer := p.(map[string]any)
+					if value, ok := peer["namespaceSelector"]; ok {
+						selector, _ := value.(map[string]any)
+						if len(selector) == 0 {
+							t.Fatal("all namespaces allowed")
+						}
+					}
+					if value, ok := peer["ipBlock"]; ok {
+						block := value.(map[string]any)
+						if block["cidr"] == "0.0.0.0/0" {
+							if _, ok := block["except"]; !ok {
+								t.Fatal("public HTTPS includes internal IP ranges")
+							}
+							selector := spec["podSelector"].(map[string]any)
+							if _, ok := selector["matchExpressions"]; !ok {
+								t.Fatal("public provider access not restricted by role")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if policies < 8 {
+		t.Fatal("role-specific egress policies missing")
+	}
+}
