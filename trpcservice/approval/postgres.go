@@ -28,13 +28,13 @@ func (r *PostgresRepository) Request(ctx context.Context, request Request) (Reco
 INSERT INTO tool_approval(
     approval_id, tenant_id, app_id, revision_id, channel_binding_id,
     request_id, message_id, user_id, session_id, tool_call_id, tool_name,
-    arguments_hash, resume_text, reply_target, expires_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+    arguments_hash, resume_text, reply_target, expires_at, origin_traceparent
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 ON CONFLICT (tenant_id, request_id, tool_call_id) DO NOTHING`,
 		id, request.TenantID, request.AppID, request.RevisionID, request.ChannelBindingID,
 		request.RequestID, request.MessageID, request.UserID, request.SessionID,
 		request.ToolCallID, request.ToolName, request.ArgumentsHash, request.ResumeText,
-		request.ReplyTarget, request.ExpiresAt,
+		request.ReplyTarget, request.ExpiresAt, originTraceParent(ctx),
 	)
 	if err != nil {
 		return Record{}, fmt.Errorf("insert tool approval: %w", err)
@@ -180,7 +180,7 @@ const approvalSelect = `SELECT approval_id, tenant_id, app_id, revision_id,
 channel_binding_id, request_id, message_id, user_id, session_id, tool_call_id,
 tool_name, arguments_hash, resume_text, reply_target, status,
 COALESCE(decision_message_id,''), COALESCE(decision_reason,''), expires_at,
-created_at, decided_at, resumed_at FROM tool_approval `
+created_at, decided_at, resumed_at, origin_traceparent FROM tool_approval `
 
 func getWithQueryer(ctx context.Context, q queryer, id string, lock bool) (Record, error) {
 	suffix := `WHERE approval_id=$1`
@@ -200,7 +200,7 @@ func scanRecord(row scanner) (Record, error) {
 		&record.ChannelBindingID, &record.RequestID, &record.MessageID, &record.UserID,
 		&record.SessionID, &record.ToolCallID, &record.ToolName, &record.ArgumentsHash,
 		&record.ResumeText, &record.ReplyTarget, &record.Status, &record.DecisionMessageID,
-		&record.DecisionReason, &record.ExpiresAt, &record.CreatedAt, &decidedAt, &resumedAt,
+		&record.DecisionReason, &record.ExpiresAt, &record.CreatedAt, &decidedAt, &resumedAt, &record.OriginTraceParent,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Record{}, ErrNotFound

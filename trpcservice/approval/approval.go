@@ -43,6 +43,7 @@ type Request struct {
 }
 
 type Record struct {
+	OriginTraceParent string
 	ApprovalID        string
 	TenantID          string
 	AppID             string

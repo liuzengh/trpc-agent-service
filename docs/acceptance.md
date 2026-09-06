@@ -67,6 +67,7 @@ docker compose --profile observability config -q
 docker build -t trpc-agent-service:local .
 ./scripts/e2e-multiprocess.sh
 ./scripts/e2e-observability.sh
+./scripts/e2e-telegram-tracing.sh
 ./scripts/benchmark-local.sh
 ./scripts/e2e-backup-restore.sh
 ```
@@ -85,6 +86,8 @@ TEST_QDRANT_HOST=127.0.0.1 TEST_QDRANT_PORT=6334 go test ./trpcservice/storage -
 审批测试、真实模型预检、合法命令基础收发及新版格式拦截/拒绝回执复验见[审批验证记录](validation/approval-2026-09-06.md)。步骤见[审批上手说明](telegram-approval-walkthrough.md)，新版批准结果正文仍待真实 Telegram 复验。
 
 ## 7. tRPC-Agent-Go 复用边界
+
+完整追踪的本地组件预检、真实模型 HTTP 和已通过的真实 Telegram trace 证据见[追踪验证记录](validation/tracing-2026-09-06.md)，查看新请求的方法见[追踪上手说明](telegram-tracing-walkthrough.md)。
 
 直接复用：LLMAgent、Runner/Event、Session Redis/PostgreSQL、Memory Redis/PostgreSQL、Memory Tools/Extractor、Knowledge/VectorStore/Qdrant、Artifact/S3、Model/Tool Callbacks、PermissionPolicy、OpenTelemetry。
 

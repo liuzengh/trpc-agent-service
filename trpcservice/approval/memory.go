@@ -38,7 +38,8 @@ func (r *MemoryRepository) Request(ctx context.Context, request Request) (Record
 		return existing, nil
 	}
 	record := Record{
-		ApprovalID: id, TenantID: request.TenantID, AppID: request.AppID,
+		OriginTraceParent: originTraceParent(ctx),
+		ApprovalID:        id, TenantID: request.TenantID, AppID: request.AppID,
 		RevisionID: request.RevisionID, ChannelBindingID: request.ChannelBindingID,
 		RequestID: request.RequestID, MessageID: request.MessageID, UserID: request.UserID,
 		SessionID: request.SessionID, ToolCallID: request.ToolCallID, ToolName: request.ToolName,

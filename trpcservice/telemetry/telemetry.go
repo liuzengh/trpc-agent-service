@@ -15,6 +15,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
+	agenttrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
 type Shutdown func(context.Context) error
@@ -41,18 +43,18 @@ func Setup(ctx context.Context, cfg config.TelemetryConfig) (Shutdown, error) {
 	}
 	metricExporter, err := otlpmetricgrpc.New(ctx, metricOptions...)
 	if err != nil {
+		_ = exporter.Shutdown(ctx)
 		return nil, fmt.Errorf("create OTLP metric exporter: %w", err)
 	}
-	res, err := telemetryResource(cfg.ServiceName)
+	provider, err := NewTracerProvider(exporter, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("create telemetry resource: %w", err)
+		_ = metricExporter.Shutdown(ctx)
+		_ = exporter.Shutdown(ctx)
+		return nil, err
 	}
-	provider := tracesdk.NewTracerProvider(
-		tracesdk.WithBatcher(exporter),
-		tracesdk.WithResource(res),
-		tracesdk.WithSampler(tracesdk.ParentBased(tracesdk.TraceIDRatioBased(cfg.SampleRatio))),
-	)
 	otel.SetTracerProvider(provider)
+	BindFrameworkTracing(provider)
+	res, _ := telemetryResource(cfg.ServiceName)
 	meterProvider := metricsdk.NewMeterProvider(
 		metricsdk.WithResource(res),
 		metricsdk.WithReader(metricsdk.NewPeriodicReader(metricExporter)),
@@ -61,6 +63,39 @@ func Setup(ctx context.Context, cfg config.TelemetryConfig) (Shutdown, error) {
 	return func(ctx context.Context) error {
 		return errors.Join(meterProvider.Shutdown(ctx), provider.Shutdown(ctx))
 	}, nil
+}
+
+// NewTracerProvider also serves isolated preflight tests. All exports go through
+// the same metadata-only privacy boundary used by the live service.
+func NewTracerProvider(exporter tracesdk.SpanExporter, cfg config.TelemetryConfig) (*tracesdk.TracerProvider, error) {
+	res, err := telemetryResource(cfg.ServiceName)
+	if err != nil {
+		return nil, fmt.Errorf("create telemetry resource: %w", err)
+	}
+	return tracesdk.NewTracerProvider(
+		tracesdk.WithBatcher(metadataExporter{exporter}), tracesdk.WithResource(res),
+		tracesdk.WithSampler(tracesdk.ParentBased(tracesdk.TraceIDRatioBased(cfg.SampleRatio))),
+	), nil
+}
+
+// BindFrameworkTracing must run once at startup, before any Agent goroutines.
+// The framework has its own global noop tracer; setting otel's provider alone
+// does not enable LLMAgent/chat/execute_tool spans in the pinned version.
+func BindFrameworkTracing(provider trace.TracerProvider) {
+	agenttrace.TracerProvider = provider
+	agenttrace.Tracer = provider.Tracer("trpc-agent-go")
+	var policy agenttrace.SpanAttributePolicy
+	for _, op := range []agenttrace.SpanOperation{agenttrace.OperationChat, agenttrace.OperationInvokeAgent, agenttrace.OperationExecuteTool, agenttrace.OperationWorkflow} {
+		for _, key := range []agenttrace.AttributeKey{
+			agenttrace.AttrLLMRequest, agenttrace.AttrLLMResponse, agenttrace.AttrInputMessages,
+			agenttrace.AttrInputMessagesOTel, agenttrace.AttrOutputMessages, agenttrace.AttrOutputMessagesOTel,
+			"gen_ai.tool.call.arguments", "gen_ai.tool.call.result", "gen_ai.workflow.request", "gen_ai.workflow.response",
+			"trpc.go.agent.runner.input", "trpc.go.agent.runner.output",
+		} {
+			agenttrace.WithAttributeRule(op, key, agenttrace.Drop())(&policy)
+		}
+	}
+	agenttrace.SetSpanAttributePolicy(policy)
 }
 
 func telemetryResource(serviceName string) (*resource.Resource, error) {

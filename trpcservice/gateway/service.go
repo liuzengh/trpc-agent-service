@@ -10,6 +10,8 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // IntakeRequest is the untrusted Test Channel input before binding resolution.
@@ -67,6 +69,8 @@ func NewIntake(
 }
 
 func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult, error) {
+	ctx, span := otel.Tracer("trpc-agent-service/gateway").Start(ctx, "gateway.accept")
+	defer span.End()
 	input.BindingKey = strings.TrimSpace(input.BindingKey)
 	if input.BindingKey == "" {
 		return AcceptResult{}, fmt.Errorf("binding key is required")
@@ -75,6 +79,7 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 	if err != nil {
 		return AcceptResult{}, err
 	}
+	span.SetAttributes(attribute.String("tenant.id", scope.TenantID), attribute.String("agent.app.id", scope.AppID))
 	if i.quota != nil {
 		if err := i.quota.AllowInbound(ctx, scope.TenantID, input.UserID); err != nil {
 			if i.audit != nil {

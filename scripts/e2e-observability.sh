@@ -19,8 +19,8 @@ cleanup() {
     kill -TERM "$APP_PID" 2>/dev/null || true
     wait "$APP_PID" 2>/dev/null || true
   fi
-  docker compose --profile observability stop \
-    grafana prometheus otel-collector tempo >/dev/null 2>&1 || true
+  # These services may be shared with a manually running Agent. Leave the
+  # observability stack up; only the test-owned process is stopped here.
 }
 trap cleanup EXIT
 

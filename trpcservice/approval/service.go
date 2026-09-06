@@ -13,6 +13,9 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Service struct {
@@ -37,10 +40,14 @@ func (s *Service) HandleApprovalDecision(
 	input gateway.ApprovalDecisionInput,
 ) (bool, error) {
 	status, approvalID, ok := ParseDecisionCommand(input.Text)
+	if !ok && !looksLikeDecision(input.Text) {
+		return false, nil
+	}
+	ctx, span := otel.Tracer("trpc-agent-service/approval").Start(ctx, "approval.decide")
+	span.SetAttributes(attribute.String("tenant.id", input.TenantID), attribute.String("channel.binding.id", input.ChannelBindingID))
+	defer span.End()
 	if !ok {
-		if !looksLikeDecision(input.Text) {
-			return false, nil
-		}
+		span.SetAttributes(attribute.String("approval.decision", "invalid_command"))
 		return true, s.reject(ctx, input, "", "approval_invalid_command", formatHelp(input.Text))
 	}
 	record, err := s.repository.Decide(ctx, Decision{
@@ -61,6 +68,13 @@ func (s *Service) HandleApprovalDecision(
 		}
 		return true, err
 	}
+	// A human decision is a NEW inbound trace. Link it to the original tool
+	// request; do not keep a span open while waiting or reparent to an old run.
+	if origin := originSpanContext(record.OriginTraceParent); origin.IsValid() {
+		span.AddLink(trace.Link{SpanContext: origin})
+	}
+	span.SetAttributes(attribute.String("approval.id", record.ApprovalID),
+		attribute.String("approval.decision", record.Status), attribute.String("approval.origin_request_id", record.RequestID))
 	scope, err := runtimecontext.NewScope(
 		record.TenantID,
 		record.AppID,

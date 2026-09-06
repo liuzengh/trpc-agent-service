@@ -71,6 +71,8 @@ curl -sS https://telegram.4392845.xyz/healthz
 
 ## 检查 Telegram Webhook
 
+启用追踪后，每次手动启动还需启动本地采集栈；配置和 trace 查询步骤见[Telegram 完整链路追踪](telegram-tracing-walkthrough.md)。采集栈没有设置开机自启。
+
 只有手工调用 Telegram API 时才需要把 `.env` 加载到当前终端：
 
 ```bash

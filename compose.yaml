@@ -70,8 +70,8 @@ services:
       - ./deploy/compose/tempo.yaml:/etc/tempo.yaml:ro
       - tempo-data:/var/tempo
     ports:
-      - "3200:3200"
-      - "14317:4317"
+      - "127.0.0.1:3200:3200"
+      - "127.0.0.1:14317:4317"
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.136.0
@@ -82,9 +82,9 @@ services:
     depends_on:
       - tempo
     ports:
-      - "4317:4317"
-      - "4318:4318"
-      - "9464:9464"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:9464:9464"
 
   prometheus:
     image: prom/prometheus:v3.5.0
@@ -97,7 +97,7 @@ services:
     depends_on:
       - otel-collector
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
 
   grafana:
     image: grafana/grafana:12.1.1
@@ -114,7 +114,7 @@ services:
       - prometheus
       - tempo
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
 
 volumes:
   postgres-data:

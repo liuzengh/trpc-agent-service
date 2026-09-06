@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
 
@@ -55,7 +59,7 @@ func (r *OutboxRelay) RelayOnce(ctx context.Context) (int, error) {
 	published := 0
 	var relayErr error
 	for _, item := range items {
-		if err := r.queue.Publish(ctx, item.Task); err != nil {
+		if err := r.publish(ctx, item); err != nil {
 			markErr := r.journal.MarkQueueOutboxFailed(
 				ctx,
 				item.ID,
@@ -77,6 +81,18 @@ func (r *OutboxRelay) RelayOnce(ctx context.Context) (int, error) {
 		published++
 	}
 	return published, relayErr
+}
+
+func (r *OutboxRelay) publish(ctx context.Context, item QueueOutboxItem) error {
+	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier{
+		"traceparent": item.Task.TraceParent, "tracestate": item.Task.TraceState,
+	})
+	ctx, span := otel.Tracer("trpc-agent-service/queue").Start(ctx, "queue.publish")
+	defer span.End()
+	span.SetAttributes(attribute.String("tenant.id", item.Task.Scope.TenantID), attribute.String("gen_ai.request.id", item.Task.RequestID))
+	task := item.Task
+	task.TraceParent, task.TraceState = outboundTraceHeaders(ctx)
+	return r.queue.Publish(ctx, task)
 }
 
 // Run continuously relays committed outbox records until ctx is cancelled.

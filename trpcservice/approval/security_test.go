@@ -10,6 +10,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 func approvalFixture() Request {
@@ -142,6 +143,20 @@ func testDecisionContract(t *testing.T, repo Repository, base Request) {
 			if err != nil || len(pending) != 0 {
 				t.Fatalf("pending scope leak: %s", field)
 			}
+		}
+	})
+	t.Run("origin_trace_survives_replay", func(t *testing.T) {
+		const parent = "00-11111111111111111111111111111111-2222222222222222-01"
+		traced := propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": parent})
+		input := base
+		input.ToolCallID = "origin-trace"
+		first, err := repo.Request(traced, input)
+		if err != nil || first.OriginTraceParent != parent {
+			t.Fatalf("origin=%q err=%v", first.OriginTraceParent, err)
+		}
+		second, err := repo.Request(ctx, input)
+		if err != nil || second.OriginTraceParent != parent {
+			t.Fatalf("replay overwrote original trace: %q err=%v", second.OriginTraceParent, err)
 		}
 	})
 }

@@ -8,6 +8,8 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // CallbackGateway verifies provider callbacks and persists every decoded
@@ -56,6 +58,10 @@ func (g *CallbackGateway) Handle(
 	if binding.Status != controlplane.StatusActive || binding.ChannelType != channelType {
 		return channels.CallbackResult{}, fmt.Errorf("callback binding is unavailable")
 	}
+	ctx, span := otel.Tracer("trpc-agent-service/channel").Start(ctx, "channel.callback")
+	span.SetAttributes(attribute.String("tenant.id", binding.TenantID), attribute.String("channel.type", channelType),
+		attribute.String("channel.binding.id", binding.ID))
+	defer span.End()
 	adapter, err := g.registry.Get(channelType)
 	if err != nil {
 		return channels.CallbackResult{}, err

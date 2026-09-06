@@ -25,10 +25,14 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/reply"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
+	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	platformtrace "github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/toolexec"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
+	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -40,6 +44,7 @@ import (
 func TestTelegramApprovalFlow(t *testing.T) {
 	for _, command := range []string{"批准", "拒绝"} {
 		t.Run(command, func(t *testing.T) {
+			tracer, traceExporter := flowTracing(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			var executions, deliveries atomic.Int32
@@ -79,16 +84,33 @@ func TestTelegramApprovalFlow(t *testing.T) {
 			toolJournal := &countingToolJournal{MemoryJournal: toolexec.NewMemoryJournal()}
 			writer := audit.NewMemoryWriter()
 			queue := workqueue.NewMemoryQueue(8)
+			memories, err := platformstorage.NewMemoryRouter(repository, secret.StaticStore{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessions, err := platformstorage.NewSessionRouter(repository, secret.StaticStore{}, inmemory.NewSessionService(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			t.Cleanup(func() {
 				_ = queue.Close()
 				_ = journal.Close()
 				_ = toolJournal.Close()
 				_ = approvals.Close()
 				_ = repository.Close()
+				_ = memories.Close()
 			})
 			catalog, err := platformtool.NewCatalog(function.NewFunctionTool(
-				func(context.Context, platformtool.DangerousDemoInput) (platformtool.DangerousDemoOutput, error) {
+				func(ctx context.Context, _ platformtool.DangerousDemoInput) (platformtool.DangerousDemoOutput, error) {
 					executions.Add(1)
+					invocation, _ := agentcore.InvocationFromContext(ctx)
+					key := memory.UserKey{AppName: invocation.RunOptions.AppName, UserID: invocation.Session.UserID}
+					if err := memories.AddMemory(ctx, key, "memory-secret-canary", nil); err != nil {
+						return platformtool.DangerousDemoOutput{}, err
+					}
+					if _, err := memories.ReadMemories(ctx, key, 1); err != nil {
+						return platformtool.DangerousDemoOutput{}, err
+					}
 					return platformtool.DangerousDemoOutput{Accepted: true, Action: "demo"}, nil
 				}, function.WithName("dangerous_demo"), function.WithDescription("Test an approval-gated operation without side effects"),
 			))
@@ -104,7 +126,7 @@ func TestTelegramApprovalFlow(t *testing.T) {
 				t.Fatal(err)
 			}
 			runtime, err := agentruntime.NewRuntimeWithCompilerServices(selectedModel, compiler,
-				inmemory.NewSessionService(), coordination.NewLocalCoordinator(), idempotency.NewLocalStore(), false)
+				sessions, coordination.NewLocalCoordinator(), idempotency.NewLocalStore(), false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -152,6 +174,7 @@ func TestTelegramApprovalFlow(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			traceIDs := make(map[int64]string)
 			post := func(update, user, chat, thread int64, text string, replyToBot bool) {
 				t.Helper()
 				message := map[string]any{
@@ -167,9 +190,17 @@ func TestTelegramApprovalFlow(t *testing.T) {
 				}
 				request := httptest.NewRequest(http.MethodPost, "/callbacks/telegram/tutorial-http", bytes.NewReader(body))
 				request.Header.Set("X-Telegram-Bot-Api-Secret-Token", "fake-secret")
-				result, err := callback.Handle(ctx, "telegram", "tutorial-http", request)
-				if err != nil || result.StatusCode != http.StatusOK {
-					t.Fatalf("callback=%+v err=%v", result, err)
+				handler := platformtrace.HTTPMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					result, err := callback.Handle(r.Context(), "telegram", "tutorial-http", r)
+					if err != nil || result.StatusCode != http.StatusOK {
+						t.Errorf("callback=%+v err=%v", result, err)
+					}
+					w.WriteHeader(result.StatusCode)
+				}))
+				recorder := httptest.NewRecorder()
+				handler.ServeHTTP(recorder, request.WithContext(ctx))
+				if _, exists := traceIDs[update]; !exists {
+					traceIDs[update] = recorder.Header().Get("X-Trace-ID")
 				}
 			}
 			process := func(wantReplies int) {
@@ -275,6 +306,10 @@ func TestTelegramApprovalFlow(t *testing.T) {
 			if succeeded != int(wantExecutions) {
 				t.Fatalf("tool audit count=%d", succeeded)
 			}
+			if err := tracer.ForceFlush(ctx); err != nil {
+				t.Fatal(err)
+			}
+			verifyFlowTrace(t, traceExporter.GetSpans(), traceIDs[1], traceIDs[6], command)
 		})
 	}
 }
@@ -304,7 +339,7 @@ func (m *approvalModel) GenerateContent(ctx context.Context, request *model.Requ
 		finish = "tool_calls"
 		message = model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{
 			ID: fmt.Sprintf("call-%d", m.sequence.Add(1)), Type: "function",
-			Function: model.FunctionDefinitionParam{Name: "dangerous_demo", Arguments: []byte(`{"action":"demo"}`)},
+			Function: model.FunctionDefinitionParam{Name: "dangerous_demo", Arguments: []byte(`{"action":"argument-secret-canary"}`)},
 		}}}
 	}
 	responses := make(chan *model.Response, 1)
