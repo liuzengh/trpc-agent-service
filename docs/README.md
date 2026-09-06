@@ -7,6 +7,7 @@
 | [getting-started.md](getting-started.md) | 从 `POST /chat` 开始认识 Message、Runner、Event 和 Session |
 | [security-boundaries.md](security-boundaries.md) | HTTP 默认关闭、调用方授权、租户密钥用途与角色隔离 |
 | [deployment-permissions.md](deployment-permissions.md) | SQL/Redis 分角色权限生成器、隔离验证及网络部署边界 |
+| [monitoring.md](monitoring.md) | 积压、轮询、未知发送、采集失败与告警规则验证 |
 | [tool-operations.md](tool-operations.md) | 业务幂等、内部工作项、工具结果查询与只读对账 |
 | [im-feedback.md](im-feedback.md) | 主动重复审批提示、失败回执、媒体与编辑消息边界 |
 | [wecom-mcp.md](wecom-mcp.md) | 用户当前企业微信 MCP 入口、真实工具发现与后续通道接入边界 |

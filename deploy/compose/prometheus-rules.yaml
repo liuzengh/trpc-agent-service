@@ -39,7 +39,7 @@ groups:
       - alert: AgentReplyFailureRatioHigh
         expr: |
           sum by (tenant_id, channel_type) (
-            rate(agent_reply_deliveries_total{delivery_status="failed"}[5m])
+            rate(agent_reply_deliveries_total{delivery_status=~"failed|unknown"}[5m])
           )
           /
           clamp_min(
@@ -61,3 +61,66 @@ groups:
         annotations:
           summary: Duplicate inbound message rate is elevated
           description: Tenant {{ $labels.tenant_id }} channel {{ $labels.channel_type }} is replaying more than five messages per second.
+
+      - alert: AgentBacklogOldestWaitHigh
+        expr: max by (tenant_id, backlog_stage, backlog_state) (agent_backlog_oldest_age_seconds{backlog_stage=~"queue|run|outbound|background",backlog_state=~"pending|publishing|queued|running"}) > 120
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Agent backlog is not draining
+          description: Pending work has remained older than two minutes for five minutes.
+
+      - alert: AgentDeadOrUnknownWork
+        expr: max by (tenant_id, backlog_stage, backlog_state) (agent_backlog_items{backlog_state=~"dead|unknown"}) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: Agent work needs operator review
+          description: Dead or unknown work exists; do not blindly replay external side effects.
+
+      - alert: AgentDeliveryAttemptStuck
+        expr: max by (tenant_id) (agent_backlog_oldest_age_seconds{backlog_stage="delivery",backlog_state="attempting"}) > 60
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: A channel send attempt has no confirmed result
+          description: Inspect delivery evidence; an expired process does not prove the message was not sent.
+
+      - alert: AgentChannelCheckpointStalled
+        expr: max by (tenant_id) (agent_backlog_oldest_age_seconds{backlog_stage="checkpoint",backlog_state="active"}) > 120
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: Channel checkpoint is falling behind
+          description: Active channel progress is more than two minutes behind; inspect poll failures before recovery.
+
+      - alert: AgentChannelPollingErrors
+        expr: sum by (tenant_id, channel_type) (increase(agent_channel_polls_total{poll_status="failed"}[5m])) > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: Channel polling is failing
+          description: The receiver retained its checkpoint after a failed window.
+
+      - alert: AgentChannelRejectedMessages
+        expr: sum by (tenant_id, channel_type, rejection_reason) (increase(agent_channel_rejections_total[5m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: Channel messages were quarantined
+          description: Inspect metadata-only rejection records; messages were not passed to the Agent.
+
+      - alert: AgentBacklogSnapshotFailed
+        expr: min(agent_backlog_snapshot_up) == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: Backlog metrics cannot read their source
+          description: Missing measurements must not be interpreted as an empty queue.
+
+      - alert: AgentBacklogSnapshotStale
+        expr: (time() - max(agent_backlog_snapshot_timestamp_seconds) > 180) or absent_over_time(agent_backlog_snapshot_timestamp_seconds[5m])
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: Backlog metrics are stale or absent
+          description: PostgreSQL deployments require an active Gateway or Admin backlog observer.

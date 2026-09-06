@@ -667,6 +667,13 @@ func run() error {
 		}
 	}()
 
+	if roles.Gateway || roles.Admin {
+		unregister, err := platformmetrics.RegisterBacklog(controlPlaneRepository)
+		if err != nil {
+			return fmt.Errorf("register backlog metrics: %w", err)
+		}
+		defer unregister()
+	}
 	handlerOptions := []web.Option{
 		web.WithRouteResolver(routeResolver),
 		web.WithQuotaGuard(quotaGuard),

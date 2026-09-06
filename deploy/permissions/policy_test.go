@@ -12,6 +12,9 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/database"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 )
 
 func TestPolicyRenderingFailsClosed(t *testing.T) {
@@ -98,11 +101,41 @@ func TestPostgresRolePermissionsIntegration(t *testing.T) {
 		t.Fatal("apply isolated role policy: ", err)
 	}
 	createdRoles = true
+	journal, _ := gateway.NewPostgresJournal(scoped)
+	accepted, err := journal.Accept(ctx, gateway.InboundRequest{Scope: runtimecontext.TutorialScope(), ExternalMessageID: "metrics-test", UserID: "user", SessionID: "session", ChatType: "direct", Text: "synthetic message"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := metrics.SQLBacklogSource(scoped)
+	snapshot, err := source(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := func(stage, state string) int64 {
+		for _, row := range snapshot {
+			if row.TenantID == "tutorial-tenant" && row.Stage == stage && row.State == state {
+				return row.Items
+			}
+		}
+		return -1
+	}
+	if count("queue", "pending") != 1 || count("run", "queued") != 1 || count("delivery", "unknown") != 0 {
+		t.Fatal("backlog view counts are incorrect")
+	}
+	if _, err := scoped.ExecContext(ctx, `UPDATE queue_outbox SET status='published' WHERE payload->>'request_id'=$1`, accepted.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = source(ctx)
+	if err != nil || count("queue", "pending") != 0 {
+		t.Fatal("drained backlog did not emit explicit zero")
+	}
 	for _, tc := range []struct {
 		role, statement string
 		allow           bool
 	}{
 		{"gateway", "SELECT tenant_id FROM tenant", true},
+		{"gateway", "SELECT items FROM platform_backlog", true},
+		{"relay", "SELECT items FROM platform_backlog", false},
 		{"gateway", "UPDATE agent_app SET status='active' WHERE false", false},
 		{"gateway", "UPDATE channel_delivery_attempt SET status='sent' WHERE false", false},
 		{"worker", "UPDATE agent_run SET status='running' WHERE false", true},

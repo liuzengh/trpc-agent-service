@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -54,7 +55,7 @@ func Setup(ctx context.Context, cfg config.TelemetryConfig) (Shutdown, error) {
 	}
 	otel.SetTracerProvider(provider)
 	BindFrameworkTracing(provider)
-	res, _ := telemetryResource(cfg.ServiceName)
+	res := metricsResource(cfg.ServiceName)
 	meterProvider := metricsdk.NewMeterProvider(
 		metricsdk.WithResource(res),
 		metricsdk.WithReader(metricsdk.NewPeriodicReader(metricExporter)),
@@ -63,6 +64,12 @@ func Setup(ctx context.Context, cfg config.TelemetryConfig) (Shutdown, error) {
 	return func(ctx context.Context) error {
 		return errors.Join(meterProvider.Shutdown(ctx), provider.Shutdown(ctx))
 	}, nil
+}
+
+func metricsResource(serviceName string) *resource.Resource {
+	// A random process identity separates cumulative counters across nodes.
+	// Do not copy host/process/environment resource attributes into metrics.
+	return resource.NewSchemaless(semconv.ServiceName(serviceName), semconv.ServiceInstanceID(uuid.NewString()), semconv.TelemetrySDKLanguageGo, semconv.TelemetrySDKName("opentelemetry"))
 }
 
 // NewTracerProvider also serves isolated preflight tests. All exports go through
