@@ -149,12 +149,13 @@
 - [多后端适配方案](docs/backend-adapters.md)
 - [企业微信、微信公众号和 Telegram 接入](docs/im-channels.md)
 - [Telegram 手动测试运行手册](docs/telegram-manual-runbook.md)
+- [从聊天走到真实工具调用](docs/current-time-tool-walkthrough.md)
 - [治理、安全、监控、故障恢复和部署](docs/governance-operations.md)
 - [生产风险清单](docs/risks.md)
 - [代码实施路线和验收映射](docs/implementation-roadmap.md)
 - [功能实现与验证状态](docs/feature-status.md)
 
-仓库中的“已编码”“自动测试”“本地集成”和“真实联调”是不同状态。例如企业微信和 Telegram 已完成 Adapter 代码与模拟协议测试，但仍需要真实账号和公网回调才能视为完成实际接入。具体边界以[功能实现与验证状态](docs/feature-status.md)为准。
+仓库中的“已编码”“自动测试”“本地集成”和“真实联调”是不同状态。Telegram 已完成开发环境真实 Bot 基础联调，企业微信仍处于 Adapter 代码与模拟协议测试阶段。各项能力的具体边界以[功能实现与验证状态](docs/feature-status.md)为准。
 
 ## 快速开始
 
@@ -203,7 +204,17 @@ OPENAI_API_KEY="你的 API Key"
 OPENAI_BASE_URL="https://your-provider.example/v1"
 ```
 
-先单独检查模型凭据和连通性，再启动完整服务：
+如果模型由本机的 `workbuddy2api` 提供，先在一个终端启动转换服务：
+
+```bash
+./start-workbuddy2api.sh
+```
+
+脚本默认进入 `~/workbuddy2api`，执行 `uv run converter.py --desensitize --log converter.log --api-key 0`，以前台方式运行，按 `Ctrl+C` 停止。日志保存在 `~/workbuddy2api/converter.log`。它不会自动启动 Agent，也不会修改 `.env`。安装目录不同时，可以通过 `WORKBUDDY2API_DIR=/实际路径 ./start-workbuddy2api.sh` 指定（这是脚本环境变量，不从项目 `.env` 读取）。
+
+沿用上述 `--api-key 0` 参数时，Agent 的 `.env` 使用 `OPENAI_API_KEY="0"` 和 `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`，模型 ID 保留已验证可用的配置。该简单 Key 仅用于本地测试，不要将转换服务暴露到公网。
+
+保持转换服务终端运行，再在另一个终端检查模型凭据和连通性、启动完整服务：
 
 ```bash
 ./check-model.sh

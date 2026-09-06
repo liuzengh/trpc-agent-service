@@ -16,7 +16,16 @@
 
 ## 每次开始测试
 
-第一个终端启动数据依赖和 Agent：
+如果使用本机 `workbuddy2api` 提供模型，先在一个独立终端启动它：
+
+```bash
+cd /home/shiyu/trpc-agent-service
+./start-workbuddy2api.sh
+```
+
+脚本默认使用 `~/workbuddy2api/converter.py`，参数与原手动命令相同。日志在 `~/workbuddy2api/converter.log`；测试期间保持这个终端运行。转换服务配置不会因重启电脑而丢失，但进程需要重新启动。
+
+另开终端启动数据依赖和 Agent：
 
 ```bash
 cd /home/shiyu/trpc-agent-service
@@ -38,7 +47,7 @@ curl -sS http://127.0.0.1:8080/readyz
 {"status":"ready"}
 ```
 
-第二个终端以前台方式启动固定 Tunnel：
+再开一个终端以前台方式启动固定 Tunnel：
 
 ```bash
 cloudflared tunnel \
@@ -177,6 +186,12 @@ TRPC_AGENT_ADMIN_ENABLED=false
 
 关闭 Telegram Privacy Mode、移出并重新加入 Bot 后，验证：普通群消息不产生 Inbox；正确 @、`/ask@bot` 和回复 Bot 会进入；非白名单群和其他 Bot 消息被忽略。
 
+## 下一阶段：真实工具调用
+
+群策略验证后，可以在新 Topic 中测试只开放 `current_time` 的 Agent Revision。配置、运行链路拆解、SQL 核对和回滚说明见[从聊天走到真实工具调用](current-time-tool-walkthrough.md)。
+
+新版本不会替换旧 Telegram 会话锁定的 Revision；测试时需要新 Topic。不要仅凭 Bot 回复了时间，就判定工具已经执行，还应核对 Tool Journal、审计和发送状态。
+
 ## 查看完整处理状态
 
 ```bash
@@ -260,11 +275,13 @@ cd /home/shiyu/trpc-agent-service
 docker compose stop postgres redis
 ```
 
+如果本轮启动了 `workbuddy2api`，最后在它的终端按 `Ctrl+C`。`stop.sh` 只停止 Agent，不会停止模型转换服务。
+
 `docker compose stop` 不会删除数据。下次仍然使用同一个固定域名、Webhook、Channel Binding 和历史数据库。
 
 ## 电脑重启后的操作
 
-重启后只需要重新执行：
+重启后，如果使用本机 `workbuddy2api`，先在独立终端运行 `./start-workbuddy2api.sh`。随后重新执行：
 
 ```bash
 cd /home/shiyu/trpc-agent-service
@@ -299,4 +316,6 @@ Webhook pending: 0
 
 已覆盖私聊、多轮 Session、进程重启恢复、重复 Update、群聊、Topic、Webhook 暂时不可用后的恢复，以及 Quick Tunnel 到固定 Named Tunnel 的切换。
 
-尚未覆盖新增群过滤策略的真实复验、Telegram 真实 429、媒体发送、消息编辑和长期稳定性压测。
+2026-09-06：群过滤策略已更新为 Binding v2，用户反馈测试通过；真实模型 `current_time` HTTP 预检、Telegram 工具完整收发和模拟 Telegram 429 的 Sender 重试链路自动测试通过，详见[验证记录](validation/current-time-2026-09-06.md)。
+
+尚未覆盖 Telegram 危险工具审批、真实 429、媒体发送、消息编辑和长期稳定性压测。

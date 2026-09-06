@@ -24,9 +24,9 @@
 | Knowledge | 本地集成 | InMemory、Qdrant、切块、过滤和本地 Qdrant 集成 | 外部 Embedding 服务和远端 Qdrant 联调 |
 | Artifact | 本地集成 | InMemory、MinIO/S3-compatible、版本锁 | AWS S3 或其他云对象存储联调 |
 | 企业微信 | 自动测试 | URL 验证、签名、解密、文本入站、Token 获取、文本发送模拟 | 真实企业账号、公网回调、真实收发、媒体与卡片发送 |
-| Telegram | 真实联调 + 过滤自动测试 | 固定域名、私聊/群聊/Topic、重启/去重/Webhook 恢复；群白名单、require_mention、回复 Bot、其他 Bot 过滤和 429 分类已自动测试 | 新过滤策略真实复验、编辑和媒体发送 |
+| Telegram | 真实联调 + 自动测试 | 固定域名、私聊/群聊/Topic、重启/去重/Webhook 恢复；群策略用户反馈复验通过；current_time 工具真实完整收发；模拟 429 延迟重试、跨 Sender 实例接手、审计和终态已测试 | 真实 429、危险工具审批、编辑和媒体发送 |
 | 微信公众号 / 微信客服 | 设计 | 数据模型与接入差异说明 | Adapter 代码和真实联调 |
-| Tool 治理与审批 | 自动测试 / 本地集成 | Tool 白名单、参数哈希审批、Journal、审计 | 真实业务 Tool 和真实 IM 审批 |
+| Tool 治理与审批 | 自动测试 / 本地集成；只读 Tool 真实联调 | Tool 白名单、参数哈希审批、Journal、审计；真实模型经 HTTP 和 Telegram 调用 current_time，Journal/审计成功、HTTP 重复请求未重复执行 | 真实业务 Tool 和真实 IM 审批 |
 | MCP | 设计 | 权限、密钥、超时和审计边界 | MCP Client/Server 的实际接入 |
 | OpenTelemetry | 本地集成 | traceparent 传播、Tempo HTTP/Session spans、租户级 metrics、Grafana Dashboard、Prometheus Alert Rule | Alertmanager 和实际通知渠道 |
 | Secret 管理 | 已编码 | `env://` 和测试用 Static Store | Vault、KMS 或云 Secret Manager Adapter |
@@ -35,6 +35,8 @@
 | 容量与故障恢复 | 本地集成 | Worker 切换、readiness 故障演练、1000 请求 Mock 基线、PostgreSQL/Redis 隔离备份恢复 | 真实模型/多 Worker 压测、主库及 MinIO/Qdrant 恢复和完整故障矩阵 |
 
 ## IM 能力边界
+
+2026-09-06 的 HTTP 工具预检、Telegram 工具真实收发、Sender 重试自动测试和群策略用户反馈见[验证记录](validation/current-time-2026-09-06.md)。HTTP 工具预检不能替代 Telegram 全链路验收，模拟 429 也不能标为真实 Telegram 限流验证。
 
 `Capabilities` 描述的是 Reply Sender 当前真正可以调用的出站能力，不代表 Adapter 能识别同类型的入站消息。
 

@@ -25,7 +25,7 @@
 ## 3. IM 接入
 
 - 企业微信 Adapter：SHA1 验签、时间窗、AES-CBC/PKCS7、CorpID、Token cache、应用文本消息、429/Token 刷新；当前由模拟协议测试覆盖，真实企业账号联调待完成；
-- Telegram Adapter：Webhook Secret、private/group/topic Session、sendMessage、Retry-After、群白名单、mention/command/reply 识别和其他 Bot 过滤；真实 Bot 已完成私聊/群聊/Topic 基础联调，新增过滤策略待真实复验；
+- Telegram Adapter：Webhook Secret、private/group/topic Session、sendMessage、Retry-After、群白名单、mention/command/reply 识别和其他 Bot 过滤；真实 Bot 已完成基础联调，群策略用户反馈复验通过；429 调度与重试终态由模拟 API + MemoryJournal 测试覆盖，真实限流待验证；
 - 用户/群/线程经 binding-scoped hash 生成隔离身份；
 - 文本、图片和文件 ID 可规范化；当前出站仅支持文本，默认不自动下载媒体；
 - 重复 callback 由 `(channel_binding_id, external_message_id)` 唯一约束处理；
@@ -58,6 +58,7 @@
 ## 6. 自动与真实验收命令
 
 ```bash
+go test ./trpcservice/reply -run TestSenderTelegramRetryLifecycle -count=1 -v
 go test -race ./...
 go vet ./...
 ./lint.sh
@@ -77,6 +78,8 @@ TEST_POSTGRES_URL='postgres://...' go test ./trpcservice/storage ./trpcservice/c
 TEST_S3_ENDPOINT=http://127.0.0.1:9000 go test ./trpcservice/storage -run S3Integration
 TEST_QDRANT_HOST=127.0.0.1 TEST_QDRANT_PORT=6334 go test ./trpcservice/storage -run QdrantIntegration
 ```
+
+只读工具的真实模型预检和已通过的 Telegram 工具验收步骤见[工具调用上手说明](current-time-tool-walkthrough.md)，实际证据见[2026-09-06 验证记录](validation/current-time-2026-09-06.md)。
 
 ## 7. tRPC-Agent-Go 复用边界
 
