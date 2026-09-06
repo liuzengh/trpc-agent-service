@@ -1,0 +1,115 @@
+# 本地运行与升级手册
+
+这份文档是日常操作入口。按手动测试方式运行，不设置开机自启；模型服务、Agent、数据依赖和公网 Tunnel 是不同的进程。学习内部链路看[上手指南](getting-started.md)，核对完成范围看[功能状态](feature-status.md)。
+
+## 1. 第一次安装和配置
+
+需要 Go（以 `go.mod` 为准，当前声明 1.24；Docker 构建使用 1.25）、Docker Compose 和 curl。使用本机 workbuddy2api 时还需要已配置好的 `uv` 和 converter；使用 Telegram Webhook 时需要公网 HTTPS 入口。企业微信消息 MCP 是主动拉取，不需要公网回调。
+
+在仓库根目录运行，已有 `.env` 不要覆盖：
+
+```bash
+test -f .env || cp .env.example .env
+chmod 600 .env
+./build.sh
+```
+
+`.env.example` 默认是内存后端 + Mock，HTTP/Admin 和 MCP 轮询默认关闭。真正的日常 IM 配置包含以下几组，不是只填模型三项就能完成接入：
+
+| 配置组 | 保存位置与作用 |
+| --- | --- |
+| 模型 | `.env` 的 provider/name/key/base URL；本地转换服务使用已验证的模型 ID |
+| PostgreSQL | 控制面、Inbox/Run/Outbox、审批、审计、接收与发送事实；连接信息只在 `.env`/Secret |
+| Redis | Session、Coordinator、Idempotency、Queue、Quota 的后端开关和 URL/prefix |
+| IM 凭据与授权 | `.env` 保存 Token/完整 MCP URL；`TRPC_AGENT_SECRET_GRANTS_JSON` 精确授权租户和用途 |
+| Channel Binding | 保存在 PostgreSQL，含租户/App、账号、群/成员白名单、SecretRef；不把 Token 填进 Binding |
+| 接收开关 | Telegram 用已登记的 Webhook；企业微信另需 `TRPC_AGENT_WECOM_MCP_TARGETS_JSON` |
+| 本地运维 | HTTP/Admin 默认关闭；按需启用、鉴权；OTel 指向本地 Collector |
+
+仅在全新的开发数据库上，设置 PostgreSQL 控制面、`TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=true` 后执行一次 `./bin/trpc-migrate` 创建教学租户；随后改回 `false`，不要覆盖已经发布的教学配置。新通道按 [Telegram 手册](telegram-manual-runbook.md)或[企业微信 MCP 配置](wecom-mcp-runtime.md)绑定。生产不使用教学账号或自动 bootstrap。
+
+一般配置优先级是命令行参数 > 已导出的环境变量 > `.env` > 默认值。`start-real.sh` / `check-model.sh` 会清掉旧的模型环境变量并强制 OpenAI-compatible 模式，让模型配置取自选定的 env 文件；**其他变量仍遵循环境优先**。不需要为正常启动 `source .env`。
+
+## 2. 每次启动
+
+终端 A，模型来自本机 workbuddy2api 时：
+
+```bash
+./start-workbuddy2api.sh
+```
+
+保持这个前台终端运行。默认目录是 `~/workbuddy2api`；参数是原来的 `--desensitize --log converter.log --api-key 0`。`WORKBUDDY2API_DIR` 是启动脚本自己的环境变量，不从项目 `.env` 加载。Key `0` 仅用于本机测试，不应对公网开放转换服务。
+
+终端 B，已经配置好日常 PostgreSQL/Redis 后端时：
+
+```bash
+docker compose up -d postgres redis
+./check-model.sh
+./start-real.sh
+curl -fsS http://127.0.0.1:8080/readyz
+```
+
+模型检查会真实调用一次模型，但不启用 Bot。`start-real.sh` 会等待已经存在的 Compose PostgreSQL/Redis 健康，**不会替你创建依赖**。已在运行时不会覆盖进程；二进制存在时也不会重新编译源码。
+
+需要 trace/metrics，再按需启动监控组件：
+
+```bash
+docker compose --profile observability up -d otel-collector prometheus tempo grafana
+```
+
+修改过 Compose 端口/网络配置后，`up` 可能重建相关容器。不要在聊天或业务操作进行中更新共享依赖；数据卷需保留。`/healthz` 仅表明进程存活，`/readyz` 才检查本角色所需依赖；两者都不能证明模型或 IM 平台此刻可用。
+
+终端 C，仅 Telegram 需要，使用你已经保存的 Named Tunnel 配置：
+
+```bash
+cloudflared tunnel --config /home/shiyu/.cloudflared/config.yml run trpc-agent-telegram
+```
+
+这个路径和名称属于本机示例，其他机器换成自己的配置。企业微信 MCP 无需启动这个 Tunnel，也不用把 MCP URL 填成回调地址。
+
+正常使用只需要从已授权的 Telegram/企业微信群发送消息，不必再重复配置 Binding、重新设置 Webhook或开启 HTTP 调试入口。
+
+## 3. 修改代码或 `.env` 后怎样升级
+
+改文件不会热更新已有进程。先确认没有正在等待的模型/危险工具操作；不要在真实群测试中运行其他实验脚本抢消费同一条队列。
+
+1. 保存私有 `.env`、当前二进制及数据库备份，备份权限设为仅本人可读。旧备份保留，不在公共日志输出内容。
+2. 用 `./stop.sh` 发起 Agent 的优雅退出。当前脚本只发信号，不等待全部退出；确认旧进程确实停止后再继续。模型转换服务和 Tunnel 可保持运行。
+3. 执行 `./build.sh` 编译新二进制。
+4. PostgreSQL 升级使用 `./bin/trpc-migrate`；它从仓库根目录 `.env` 和进程环境加载配置。确认 `TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=false`。分角色部署必须用独立迁移凭据，不能给 runtime 提升 DDL 权限。
+5. 执行 `./start-real.sh`，再检查 `/readyz`；确认没有反复启动失败，再发一条新的测试消息。
+
+本轮代码包含 migration **015、016**，分别是异常隔离/检查点恢复和积压聚合视图。迁移只新增表、列和视图，不删除既有会话与发送事实。不要修改已应用 migration 的内容，也不要为回滚二进制反向删除新表。检查点锁键空间也已分离，分角色部署应有序停旧接收器再启新接收器。
+
+上述是升级流程，不代表编写文档时已经升级日常实例。真实生产 SQL/Redis 账号、网络策略和告警通知接收方都需要部署者核对，见[部署权限](deployment-permissions.md)和[监控](monitoring.md)。
+
+## 4. 测试结束如何停止
+
+```bash
+./stop.sh
+```
+
+确认 Agent 已退出后，在 Tunnel 与 workbuddy2api 的前台终端分别按 Ctrl+C。如果没有其他程序使用这些依赖，再执行：
+
+```bash
+docker compose stop postgres redis
+docker compose --profile observability stop otel-collector prometheus tempo grafana
+```
+
+不删除 `.env`、Tunnel 凭据或数据卷，不执行 `down -v`。停止模型或数据库不会自动停止 Agent；错误恢复测试之外，应先停 Agent 再停依赖。
+
+## 5. 常见问题
+
+| 现象 | 先检查什么 |
+| --- | --- |
+| 6379 connection refused / Redis LOADING | Redis 是否启动并 healthy；不要只重新填写模型 Key |
+| 模型检查通过，Agent 启动失败 | PostgreSQL/Redis、迁移权限、端口占用和角色配置；模型检查不覆盖这些 |
+| cloudflared 8080 connection refused | 本地 Agent 是否启动；这不是域名 DNS 配置成功就能解决的 |
+| 已改 `.env` 但行为没变 | 旧进程未重启、已有环境变量覆盖、选错 env 文件或运行的是旧二进制 |
+| HTTP 401/403/404 | 调试入口默认关闭；核对调用方 Token、Binding/租户/用户授权和进程角色 |
+| Telegram 群不回复 | Privacy Mode 的投递规则、Bot 是否在群、Binding 白名单、@/command/reply 条件 |
+| 企业微信 MCP 不回复 | 目标列表、群/人类白名单、精确 @ 前缀、Binding 状态、检查点和隔离记录 |
+| unknown/attempting 发送状态 | 先核对发送证据；超时不代表没发出，禁止直接删记录或盲目重发 |
+| 没看到告警通知 | 当前只有指标/规则，尚未配置真实通知接收方 |
+
+日志在 `data/trpc-service.log`；分享排障信息时只给错误类型、request_id/trace_id 和相关时间，不粘贴完整 `.env`、MCP URL、Bot Token、数据库 URL 或原始聊天内容。更多恢复入口见[通道恢复](channel-recovery.md)。

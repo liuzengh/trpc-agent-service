@@ -1,5 +1,7 @@
 .git
-.env
+.env*
+**/.env*
+**/*.env
 bin
 data
 coverage.out

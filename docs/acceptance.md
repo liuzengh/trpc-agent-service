@@ -32,6 +32,8 @@
 - Reply Sender 长度切分、重试、provider receipt；
 - 危险 Tool 使用原 IM 会话文本批准/拒绝。
 
+另有 **`wecom_mcp`**：复用 tRPC MCP Client，主动读取已授权群文本并以机器人身份发送；基础真实模型自动回复、数据库状态与完整 trace 已核对。指纹去重、单条异常隔离、页级失败保留进度、版本化恢复和 unknown 不重发均有自动测试。它不是上面的企业微信自建应用回调，不能混写验证状态；细节见[运行链路](wecom-mcp-runtime.md)。
+
 ## 4. 治理、监控和安全
 
 - tRPC-Agent-Go ToolFilter、PermissionPolicy、MaxRunDuration；
@@ -43,11 +45,13 @@
 - tenant-scoped Audit Query 和必需审计字段；
 - Secret 不写日志、trace、配置仓库。
 
+新增分角色 SQL/Redis 权限生成器与隔离正反向测试、按角色初始化依赖、收窄网络模板、SQL 聚合积压指标和离线 Prometheus 规则测试。真实账号/集群应用和实际通知接收方仍待配置。
+
 ## 5. 故障恢复与运维
 
 - SIGINT/SIGTERM root Context + errgroup；
 - Runner Event channel 始终消费到关闭；
-- Worker/Job/Outbox lease 到期后可 reclaim；
+- Worker 队列/Job/Outbox lease 到期后可 reclaim；**MCP 外部发送尝试没有到期自动重发机制**，unknown/attempting 必须核对；
 - Redis/PostgreSQL 不可用时 readiness 退出，不创建空 Session；
 - 模型/Tool/IM 错误分类、退避、dead 状态和人工 retry；
 - Revision 乐观锁发布、canary、回滚；
@@ -55,15 +59,22 @@
 - Kubernetes HPA/PDB/NetworkPolicy/resources；
 - load generator、容量公式、fault drill。
 
+本轮还通过了 Worker 取消接管、完成确认丢失、不可用队列退避和独立 PostgreSQL 全部平台 schema/合成业务数据恢复测试。恢复点之后的外部副作用不能凭旧备份恢复安全性推断，详见[恢复证据](validation/recovery-2026-09-06.md)。
+
 ## 6. 自动与真实验收命令
 
 ```bash
-go test ./trpcservice/reply -run TestSenderTelegramRetryLifecycle -count=1 -v
-go test -race ./...
-go vet ./...
-./lint.sh
+# 默认不加载 .env、不启用继承来的集成环境、不重启服务。
+./scripts/regression.sh
+# 可选：只增加独立测试容器和离线告警规则，要求镜像已缓存。
+TRPC_AGENT_VERIFY_ISOLATED=1 ./scripts/regression.sh
 ./build.sh
 docker compose --profile observability config -q
+```
+
+以下命令属于**另外的实验环境/真实联调操作**，不要整段粘贴到日常聊天环境运行。部分历史脚本会加载 `.env`、启动 Compose 或迁移目标库；测试 Redis prefix 不等于隔离了 SQL/IM 通道。需要独立工作目录、测试配置和数据后端，外部读发必须有明确授权：
+
+```bash
 docker build -t trpc-agent-service:local .
 ./scripts/e2e-multiprocess.sh
 ./scripts/e2e-observability.sh
@@ -80,6 +91,8 @@ TEST_POSTGRES_URL='postgres://...' go test ./trpcservice/approval -run TestPostg
 TEST_S3_ENDPOINT=http://127.0.0.1:9000 go test ./trpcservice/storage -run S3Integration
 TEST_QDRANT_HOST=127.0.0.1 TEST_QDRANT_PORT=6334 go test ./trpcservice/storage -run QdrantIntegration
 ```
+
+这些 DSN/端点只指向受控测试实例；并非所有旧集成测试都会自己创建隔离 schema。近期收尾测试结果见[候选版本记录](validation/release-candidate-2026-09-06.md)，不要把被跳过的外部集成计为通过。
 
 只读工具的真实模型预检和已通过的 Telegram 工具验收步骤见[工具调用上手说明](current-time-tool-walkthrough.md)，实际证据见[2026-09-06 验证记录](validation/current-time-2026-09-06.md)。
 

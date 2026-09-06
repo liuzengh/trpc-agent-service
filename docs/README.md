@@ -4,6 +4,8 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [operations-runbook.md](operations-runbook.md) | 统一的安装、配置、手动启停、版本升级和排障入口 |
+| [validation/release-candidate-2026-09-06.md](validation/release-candidate-2026-09-06.md) | 0.2.0-rc.1 交付范围、集中回归与尚需人工验证项 |
 | [getting-started.md](getting-started.md) | 从 `POST /chat` 开始认识 Message、Runner、Event 和 Session |
 | [security-boundaries.md](security-boundaries.md) | HTTP 默认关闭、调用方授权、租户密钥用途与角色隔离 |
 | [deployment-permissions.md](deployment-permissions.md) | SQL/Redis 分角色权限生成器、隔离验证及网络部署边界 |

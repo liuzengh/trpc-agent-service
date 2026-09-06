@@ -14,7 +14,7 @@ go run ./cmd/trpc-permissions -format sql -schema agent_platform -role-prefix tr
 | --- | --- | --- |
 | Gateway | 路由配置只读、Inbox/Run/Outbox 创建、审批决策、接收检查点 | 修改 Agent 发布配置、修改发送尝试结果 |
 | Worker | 路由只读、Run 完成、回复创建、工具与审批记录 | 发布新 Revision、标记回复已发送 |
-| Relay | Queue Outbox 查询和投递状态更新 | 读取聊天正文或业务工具数据 |
+| Relay | Queue Outbox 查询和投递状态更新（其中任务 payload 含待处理文本） | 读取独立 Inbox/Session 表或业务工具数据 |
 | Sender | 租户/应用/Binding 查询、出站状态、发送尝试 | 读取 Inbox 正文、修改 Agent 配置 |
 | Jobs | 后台任务、迁移状态、后端切换 | 修改 Agent 发布配置 |
 | Admin | 控制面 CRUD、审计查询、业务操作只读对账所需更新 | 执行业务工作项插入、删改审计 |

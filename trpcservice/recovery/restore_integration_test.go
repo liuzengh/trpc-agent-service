@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -21,6 +22,45 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 )
+
+// Run legacy PostgreSQL contracts only against a database created here. Some
+// framework adapter tests use fixed table prefixes and must not use live DSNs.
+func TestIsolatedPostgresContracts(t *testing.T) {
+	if os.Getenv("TEST_RECOVERY_DOCKER") != "1" {
+		t.Skip("TEST_RECOVERY_DOCKER not enabled")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	_, addr := isolatedPostgres(t, ctx)
+	dsn := "postgres://drill@" + addr + "/source?sslmode=disable"
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal("open isolated contract database")
+	}
+	defer db.Close()
+	for db.PingContext(ctx) != nil {
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+			t.Fatal("isolated contract database startup timeout")
+		}
+	}
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(ctx, "go", "test", "-race", "-count=1",
+		"./deploy/permissions", "./trpcservice/channels/wecommcp", "./trpcservice/approval",
+		"./trpcservice/toolexec", "./trpcservice/background", "./trpcservice/controlplane", "./trpcservice/storage")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "TEST_POSTGRES_URL="+dsn, "TEST_PERMISSIONS_DOCKER=0", "TEST_RECOVERY_DOCKER=0",
+		"TEST_S3_ENDPOINT=", "TEST_QDRANT_HOST=", "TEST_TRACE_OTLP_ENDPOINT=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("isolated PostgreSQL contracts: %v\n%s", err, out)
+	}
+	t.Logf("isolated PostgreSQL contracts passed:\n%s", out)
+}
 
 func TestIsolatedBusinessBackupRestore(t *testing.T) {
 	if os.Getenv("TEST_RECOVERY_DOCKER") != "1" {

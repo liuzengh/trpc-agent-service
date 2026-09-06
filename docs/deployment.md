@@ -1,5 +1,7 @@
 # 部署、可观测性与发布
 
+本机日常测试使用[运行与升级手册](operations-runbook.md)。本篇侧重部署拓扑和生产差异，示例不是已经在真实集群执行过的操作。
+
 ## 本地最小部署
 
 最小闭环使用一个 `-role all` 进程，加 PostgreSQL 和 Redis；需要 Artifact/Knowledge 时再启动 MinIO/Qdrant：
@@ -36,6 +38,16 @@ docker run --rm trpc-agent-service:local -role worker
 
 镜像采用 Go build stage 和非 root Alpine runtime，包含 `trpc-service` 与只执行 migration 的 `trpc-migrate`。`.env`、本地数据和构建产物不会进入镜像。
 
+`.dockerignore` 同时排除 `.env.*` 和子目录 `*.env`，不要把真实配置写入 Dockerfile 或构建参数。如果本机联网必须通过 loopback HTTP 代理，普通构建容器的 `127.0.0.1` 并不是宿主机；在支持 host 网络的 Linux 构建环境，可以仅对构建过程使用宿主网络并传入已有代理变量：
+
+```bash
+docker build --network host --force-rm --pull=false \
+  --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY \
+  -t trpc-agent-service:0.2.0-rc.1 .
+```
+
+这不是生产容器使用 host 网络的建议，也不改变运行时网络策略；代理值不写入 Dockerfile，应用密钥不作为构建参数。禁网构建还要求依赖缓存已准备好，`go mod download` 失败不等同于业务代码编译失败。
+
 ## Kubernetes
 
 文件：
@@ -55,7 +67,7 @@ deploy/kubernetes/migration-job.yaml
 5. 应用六类 Deployment/Service/HPA/PDB；
 6. 配置 Ingress，只公开 Gateway；Admin 通过内网和额外身份代理访问。
 
-Gateway 默认只接受 IM 回调，不挂载 Admin 或同步 `/chat`，且不需要模型 API Key。需要 HTTP 异步调用时为它显式启用 `/inbound` 并注入受限调用方凭据。Admin 只有自身角色启用管理接口。当前模板仍需按真实后端划分 SQL GRANT、Redis ACL 与外连目标策略；模板存在不等于这些账号或网络策略已经在集群验证。
+Gateway 默认只接受 IM 回调，不挂载 Admin 或同步 `/chat`，且不需要模型 API Key。需要 HTTP 异步调用时为它显式启用 `/inbound` 并注入受限调用方凭据。Admin 只有自身角色启用管理接口。仓库现已提供[SQL/Redis 权限生成器和角色网络模板](deployment-permissions.md)，但登录账号、密码、真实依赖标签和外连地址仍由部署者配置；隔离测试通过不等于已经应用到真实集群。
 
 ```bash
 kubectl apply -f deploy/kubernetes/platform.yaml
@@ -82,7 +94,7 @@ kubectl wait --for=condition=complete job/trpc-agent-migrate -n trpc-agent --tim
 
 脚本仅创建三个带本次运行标签的独立容器：PostgreSQL、Redis 源和 Redis 恢复实例，均不连接网络或暴露端口。PostgreSQL 将合成数据 dump 后恢复到另一个新数据库；Redis 只导出合成测试键的 RDB，再读入恢复实例，不读取业务 Redis 全量数据。结束时核对容器 ID 和运行标签，只移除本次资源；不执行共享 Compose 的 start/stop/down。
 
-它需要本机已缓存本仓库的 `postgres:16-alpine` 和 `redis:7-alpine`，不会自动拉取或升级镜像。默认验证的是备份恢复工具链，不是实际业务库的全量恢复、PITR 或灾难恢复时间目标。结果与安全边界见[运维记录](validation/operations-2026-09-06.md)。
+它需要本机已缓存本仓库的 `postgres:16-alpine` 和 `redis:7-alpine`，不会自动拉取或升级镜像。默认验证的是备份恢复工具链。新增 `TEST_RECOVERY_DOCKER=1 go test -race -count=1 ./trpcservice/recovery` 使用所有平台迁移及合成业务数据，在独立 PostgreSQL 中验证 Inbox/Run/Outbox、检查点和发送状态恢复，见[业务恢复记录](validation/recovery-2026-09-06.md)。这仍不是实际业务库全量恢复、PITR 或灾难恢复时间目标达标证明。
 
 - PostgreSQL：每日全量 + WAL/PITR，季度恢复到独立集群；
 - Redis：AOF everysec + 副本，Session 的最终耐久事实可选 PostgreSQL；
@@ -91,5 +103,7 @@ kubectl wait --for=condition=complete job/trpc-agent-migrate -n trpc-agent --tim
 - Secret：轮换采用双凭据窗口，日志和 trace 做 DLP 扫描。
 
 ## 告警
+
+已实现的积压、轮询、未知发送及采集失败规则、离线测试和多节点聚合方式见[监控说明](monitoring.md)。实际通知接收方尚未配置，不阻塞本地开发；下列完整生产告警集合仍需按基础设施和 SLO 补齐。
 
 最低告警集合：5xx、Runner p95、模型错误/429、Session backend p95、Redis Stream pending、background dead、outbound delivery failure、repair backlog、每日成本使用率、审计写失败、Pod 重启和 readiness 失败。

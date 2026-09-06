@@ -10,7 +10,7 @@
 - Cloudflare Named Tunnel 为 `trpc-agent-telegram`；
 - Tunnel 配置保存在 `/home/shiyu/.cloudflared/config.yml`；
 - Tunnel 凭据保存在 `/home/shiyu/.cloudflared/<Tunnel-UUID>.json`；
-- Admin API 和 tutorial 重复 bootstrap 已关闭。
+- tutorial 重复 bootstrap 应保持关闭；Admin 仅配置/排障时启用，不假定当前 `.env` 一定关闭。
 
 这些配置不会因关闭终端或正常重启电脑而消失。不要删除 `.env`、Cloudflare 凭据文件或 Docker Volume，也不要执行 `docker compose down -v`。
 

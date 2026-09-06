@@ -1,5 +1,7 @@
 # 核心消息时序
 
+本文是原始生产方案时序，包含计划中的队列分区、卡片和自建应用回调；不是当前每条真实请求的逐步代码记录。当前实际队列为 Redis Streams 消费组，不保证按 conversation 分区；同 Session 依靠 Coordinator 协调。已真实接入的企业微信群采用主动消息 MCP，实际接收/发送顺序见[运行链路](wecom-mcp-runtime.md)，没有加密 callback。当前 Sender 只发文本，不能把图中的卡片渲染视为已实现。
+
 ## 1. 企业微信消息完整链路
 
 ```mermaid
