@@ -24,6 +24,9 @@ var errPollRetention = errors.New("WeCom MCP checkpoint exceeds source retention
 type WeComWindowReader interface {
 	ReadWindow(context.Context, controlplane.ChannelBinding, string, time.Time, time.Time) ([]channels.InboundEnvelope, error)
 }
+type WeComBatchReader interface {
+	ReadWindowBatch(context.Context, controlplane.ChannelBinding, string, time.Time, time.Time) (wecommcp.WindowBatch, error)
+}
 type PolledIntake interface {
 	AcceptPolled(context.Context, controlplane.ChannelBinding, channels.InboundEnvelope) error
 }
@@ -138,15 +141,38 @@ func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBi
 	if from.Before(cfg.Start()) {
 		from = cfg.Start()
 	}
+	if from.Before(checkpoint.Floor) {
+		from = checkpoint.Floor
+	}
 	if from.Before(now.Add(-7 * 24 * time.Hour)) {
 		return 0, errPollRetention
 	}
-	messages, err := p.reader.ReadWindow(ctx, b, chat, from, to)
+	var batch wecommcp.WindowBatch
+	if reader, ok := p.reader.(WeComBatchReader); ok {
+		batch, err = reader.ReadWindowBatch(ctx, b, chat, from, to)
+	} else {
+		batch.Messages, err = p.reader.ReadWindow(ctx, b, chat, from, to)
+	}
 	if err != nil {
 		return 0, err
 	}
 	count := 0
-	for _, message := range messages {
+	for _, rejected := range batch.Rejected {
+		rejected.TraceID = audit.TraceID(ctx)
+		fresh, err := p.state.RecordRejection(ctx, key, rejected)
+		if err != nil {
+			return 0, err
+		}
+		if fresh {
+			p.opts.Metrics.RecordChannelRejection(ctx, b.TenantID, rejected.Reason)
+			// The rejection row itself is the durable audit fact. This secondary
+			// event is useful for the unified audit view but contains no raw input.
+			if p.opts.Audit != nil {
+				_ = p.opts.Audit.Record(ctx, audit.Event{TenantID: b.TenantID, Channel: wecommcp.ChannelType, ChannelBindingID: b.ID, MessageID: rejected.Fingerprint, TraceID: rejected.TraceID, Decision: "channel_message_quarantined", ErrorType: rejected.Reason})
+			}
+		}
+	}
+	for _, message := range batch.Messages {
 		seen, err := p.state.Seen(ctx, key, message.ExternalMessageID)
 		if err != nil {
 			return count, err

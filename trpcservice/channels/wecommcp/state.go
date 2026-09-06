@@ -14,9 +14,14 @@ var ErrStateConflict = errors.New("WeCom MCP state conflict; operator review req
 
 type PollKey struct{ TenantID, BindingID, ChatHash string }
 type Checkpoint struct {
-	ConfigHash string
-	Through    time.Time
-	Version    int64
+	ConfigHash string    `json:"config_hash"`
+	Through    time.Time `json:"through_at"`
+	Version    int64     `json:"version"`
+	Floor      time.Time `json:"floor_at"`
+}
+type CheckpointView struct {
+	ChatHash string `json:"chat_hash"`
+	Checkpoint
 }
 type DeliveryKey struct{ TenantID, BindingID, OutboundID string }
 type DeliveryState struct {
@@ -31,6 +36,10 @@ type Store interface {
 	Advance(context.Context, PollKey, Checkpoint, time.Time) error
 	Seen(context.Context, PollKey, string) (bool, error)
 	MarkSeen(context.Context, PollKey, string) error
+	RecordRejection(context.Context, PollKey, RejectedMessage) (bool, error)
+	ListRejections(context.Context, string, string, int) ([]RejectedMessage, error)
+	ListCheckpoints(context.Context, string, string) ([]CheckpointView, error)
+	RecoverCheckpoint(context.Context, controlplane.ChannelBinding, string, int64, string, time.Time, bool) (Checkpoint, error)
 	BeginDelivery(context.Context, DeliveryKey, string) (DeliveryState, bool, error)
 	FinishDelivery(context.Context, DeliveryKey, string, string) error
 	Ready(context.Context) error
@@ -54,10 +63,11 @@ type MemoryStore struct {
 	checkpoints map[PollKey]Checkpoint
 	seen        map[PollKey]map[string]bool
 	deliveries  map[DeliveryKey]DeliveryState
+	rejections  map[PollKey]map[string]RejectedMessage
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{checkpoints: map[PollKey]Checkpoint{}, seen: map[PollKey]map[string]bool{}, deliveries: map[DeliveryKey]DeliveryState{}}
+	return &MemoryStore{checkpoints: map[PollKey]Checkpoint{}, seen: map[PollKey]map[string]bool{}, deliveries: map[DeliveryKey]DeliveryState{}, rejections: map[PollKey]map[string]RejectedMessage{}}
 }
 func (s *MemoryStore) Checkpoint(ctx context.Context, key PollKey, hash string, start time.Time) (Checkpoint, error) {
 	if err := ctx.Err(); err != nil {
@@ -67,7 +77,7 @@ func (s *MemoryStore) Checkpoint(ctx context.Context, key PollKey, hash string, 
 	defer s.mu.Unlock()
 	value, ok := s.checkpoints[key]
 	if !ok {
-		value = Checkpoint{hash, start, 1}
+		value = Checkpoint{ConfigHash: hash, Through: start, Version: 1, Floor: start}
 		s.checkpoints[key] = value
 	}
 	if value.ConfigHash != hash {

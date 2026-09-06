@@ -3,6 +3,7 @@ package wecommcp
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -69,5 +70,61 @@ func TestPostgresMCPStateIntegration(t *testing.T) {
 	}
 	if _, err := store.Checkpoint(ctx, PollKey{"wrong-tenant", "tutorial-http-binding", "chat"}, "cfg", time.Now()); err == nil {
 		t.Fatal("cross-tenant binding foreign key not enforced")
+	}
+	testPostgresRecoveryAudit(t, db)
+}
+
+func testPostgresRecoveryAudit(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	b := fixtureBinding()
+	b.ID = "recovery-binding"
+	b.TenantID = "tutorial-tenant"
+	b.AppID = "tutorial-app"
+	b.CallbackKey = "recovery-route"
+	b.Status = "disabled"
+	b.Version = 2
+	cfg, _ := ParseBinding(b)
+	cfg.StartAt = now.Add(-time.Hour).Format(time.RFC3339)
+	b.Config, _ = json.Marshal(cfg)
+	repo, _ := controlplane.NewPostgresRepository(db)
+	if err := repo.CreateChannelBinding(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	s := &PostgresStore{db: db}
+	key := PollKey{b.TenantID, b.ID, endpointHash("group-1")}
+	cp, err := s.Checkpoint(ctx, key, ConfigFingerprint(b, cfg), cfg.Start())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE FUNCTION reject_recovery_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test audit unavailable'; END $$;
+CREATE TRIGGER reject_recovery BEFORE INSERT ON channel_checkpoint_recovery FOR EACH ROW EXECUTE FUNCTION reject_recovery_audit();`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecoverCheckpoint(ctx, b, key.ChatHash, cp.Version, "resume", now.Add(-time.Minute), true); err == nil {
+		t.Fatal("recovery succeeded without durable audit")
+	}
+	unchanged, err := s.Checkpoint(ctx, key, cp.ConfigHash, cfg.Start())
+	if err != nil || unchanged.Version != cp.Version || !unchanged.Through.Equal(cp.Through) {
+		t.Fatal("failed recovery changed checkpoint")
+	}
+	if _, err := db.Exec(`DROP TRIGGER reject_recovery ON channel_checkpoint_recovery; DROP FUNCTION reject_recovery_audit();`); err != nil {
+		t.Fatal(err)
+	}
+	next, err := s.RecoverCheckpoint(ctx, b, key.ChatHash, cp.Version, "resume", now.Add(-time.Minute), true)
+	if err != nil || next.Version != cp.Version+1 {
+		t.Fatal("recovery failed: ", err)
+	}
+	var records int
+	if err := db.QueryRow(`SELECT count(*) FROM channel_checkpoint_recovery WHERE tenant_id=$1 AND channel_binding_id=$2`, b.TenantID, b.ID).Scan(&records); err != nil || records != 1 {
+		t.Fatal("missing recovery audit")
+	}
+	if _, err := repo.UpdateChannelBinding(ctx, b.TenantID, b.ID, b.Config, "active", b.Version); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecoverCheckpoint(ctx, b, key.ChatHash, next.Version, "resume", now, true); err == nil {
+		t.Fatal("stale disabled binding bypassed server recheck")
 	}
 }

@@ -62,6 +62,7 @@ func roleGrants(role string) map[string][]string {
 		add("SELECT", control...)
 		add("SELECT,INSERT,UPDATE", "conversation", "inbound_message", "agent_run", "tool_approval", "approval_decision_message", "channel_poll_checkpoint")
 		add("SELECT,INSERT", "queue_outbox", "outbound_message", "channel_poll_seen")
+		add("SELECT,INSERT", "channel_message_rejection")
 	case "worker":
 		add("SELECT", control...)
 		add("SELECT", "conversation")
@@ -86,6 +87,9 @@ func roleGrants(role string) map[string][]string {
 		add("SELECT", "audit_log", "work_item", "channel_poll_checkpoint", "channel_delivery_attempt")
 		add("SELECT,UPDATE", "tool_execution", "tool_operation")
 		add("SELECT,INSERT,UPDATE", "background_job")
+		add("SELECT", "channel_message_rejection", "channel_checkpoint_recovery")
+		add("INSERT", "channel_checkpoint_recovery")
+		add("UPDATE", "channel_poll_checkpoint")
 	}
 	return m
 }

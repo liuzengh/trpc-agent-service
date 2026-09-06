@@ -171,3 +171,48 @@ func TestPollerRunStopsOnContextCancellation(t *testing.T) {
 		t.Fatal("receiver goroutine did not exit")
 	}
 }
+
+type rejectedBatchReader struct{ windowReaderFunc }
+
+func (r rejectedBatchReader) ReadWindowBatch(_ context.Context, _ controlplane.ChannelBinding, _ string, from, to time.Time) (wecommcp.WindowBatch, error) {
+	return wecommcp.WindowBatch{Messages: []channels.InboundEnvelope{{ExternalMessageID: "normal-text"}}, Rejected: []wecommcp.RejectedMessage{{Fingerprint: "bad-record", Reason: "unsupported_type", WindowFrom: from, WindowTo: to}}}, nil
+}
+
+type failRejectionStore struct {
+	wecommcp.Store
+	fail bool
+}
+
+func (s *failRejectionStore) RecordRejection(ctx context.Context, k wecommcp.PollKey, r wecommcp.RejectedMessage) (bool, error) {
+	if s.fail {
+		return false, errors.New("rejection storage unavailable")
+	}
+	return s.Store.RecordRejection(ctx, k, r)
+}
+
+func TestRejectedRecordsMustPersistBeforeWindowAdvances(t *testing.T) {
+	state := &failRejectionStore{Store: wecommcp.NewMemoryStore(), fail: true}
+	accepted := 0
+	reader := rejectedBatchReader{windowReaderFunc(func(context.Context, controlplane.ChannelBinding, string, time.Time, time.Time) ([]channels.InboundEnvelope, error) {
+		t.Fatal("legacy reader used")
+		return nil, nil
+	})}
+	p, _, b, _ := pollFixture(t, reader, polledIntakeFunc(func(context.Context, controlplane.ChannelBinding, channels.InboundEnvelope) error {
+		accepted++
+		return nil
+	}), state)
+	if _, err := p.ProcessOnce(context.Background()); err == nil || accepted != 0 {
+		t.Fatal("window advanced without durable rejected record")
+	}
+	state.fail = false
+	if n, err := p.ProcessOnce(context.Background()); err != nil || n != 1 || accepted != 1 {
+		t.Fatal("normal text blocked by rejected message")
+	}
+	if n, err := p.ProcessOnce(context.Background()); err != nil || n != 0 || accepted != 1 {
+		t.Fatal("replay re-executed normal text")
+	}
+	rejected, err := state.ListRejections(context.Background(), b.TenantID, b.ID, 100)
+	if err != nil || len(rejected) != 1 {
+		t.Fatal("rejection was lost or duplicated")
+	}
+}

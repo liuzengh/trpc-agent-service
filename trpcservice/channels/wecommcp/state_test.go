@@ -36,6 +36,19 @@ func testStateContract(t *testing.T, store Store) {
 	if err := store.MarkSeen(ctx, key, "message"); err != nil {
 		t.Fatal(err)
 	}
+	r := RejectedMessage{Fingerprint: "rejected", Reason: "unsupported_type", WindowFrom: start, WindowTo: start.Add(time.Minute), TraceID: "test-trace"}
+	if fresh, err := store.RecordRejection(ctx, key, r); err != nil || !fresh {
+		t.Fatal("rejection not saved")
+	}
+	if fresh, err := store.RecordRejection(ctx, key, r); err != nil || fresh {
+		t.Fatal("rejection replay not idempotent")
+	}
+	if rows, err := store.ListRejections(ctx, key.TenantID, key.BindingID, 100); err != nil || len(rows) != 1 {
+		t.Fatal("missing rejection metadata")
+	}
+	if rows, err := store.ListRejections(ctx, "other-tenant", key.BindingID, 100); err != nil || len(rows) != 0 {
+		t.Fatal("rejection metadata crossed tenant")
+	}
 	if seen, err := store.Seen(ctx, key, "message"); err != nil || !seen {
 		t.Fatal("seen message lost")
 	}

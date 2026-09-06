@@ -50,6 +50,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/admin/channel-rejections/list", "/admin/channel-checkpoints/list", "/admin/channel-checkpoints/recover":
+		h.handleChannelState(w, r)
 	case "/admin/tool-executions/list", "/admin/tool-operations/list", "/admin/tool-operations/get", "/admin/tool-operations/reconcile":
 		h.handleToolOperations(w, r)
 	case "/admin/tenants/get":

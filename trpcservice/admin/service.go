@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
@@ -31,14 +32,15 @@ var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var ErrInvalid = errors.New("invalid Admin request")
 
 type Service struct {
-	repository  controlplane.MutableRepository
-	tools       *platformtool.Catalog
-	audit       audit.Writer
-	knowledge   *platformstorage.KnowledgeRouter
-	jobs        background.Repository
-	secrets     secret.Authorizer
-	operations  *toolexec.Operations
-	toolJournal toolexec.Journal
+	repository   controlplane.MutableRepository
+	tools        *platformtool.Catalog
+	audit        audit.Writer
+	knowledge    *platformstorage.KnowledgeRouter
+	jobs         background.Repository
+	secrets      secret.Authorizer
+	operations   *toolexec.Operations
+	toolJournal  toolexec.Journal
+	channelState wecommcp.Store
 }
 
 func (s *Service) WithToolOperations(operations *toolexec.Operations, journal toolexec.Journal) *Service {

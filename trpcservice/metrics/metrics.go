@@ -12,17 +12,18 @@ import (
 )
 
 type Recorder struct {
-	inbound          metric.Int64Counter
-	idempotentHit    metric.Int64Counter
-	runs             metric.Int64Counter
-	runLatency       metric.Float64Histogram
-	deliveries       metric.Int64Counter
-	deliveryLatency  metric.Float64Histogram
-	promptTokens     metric.Int64Counter
-	completionTokens metric.Int64Counter
-	cost             metric.Float64Counter
-	channelPolls     metric.Int64Counter
-	channelLag       metric.Float64Histogram
+	inbound           metric.Int64Counter
+	idempotentHit     metric.Int64Counter
+	runs              metric.Int64Counter
+	runLatency        metric.Float64Histogram
+	deliveries        metric.Int64Counter
+	deliveryLatency   metric.Float64Histogram
+	promptTokens      metric.Int64Counter
+	completionTokens  metric.Int64Counter
+	cost              metric.Float64Counter
+	channelPolls      metric.Int64Counter
+	channelLag        metric.Float64Histogram
+	channelRejections metric.Int64Counter
 }
 
 func New() (*Recorder, error) {
@@ -71,13 +72,24 @@ func New() (*Recorder, error) {
 	if err != nil {
 		return nil, err
 	}
+	channelRejections, err := meter.Int64Counter("agent.channel.rejections")
+	if err != nil {
+		return nil, err
+	}
 	return &Recorder{
 		inbound: inbound, idempotentHit: idempotentHit,
 		runs: runs, runLatency: runLatency,
 		deliveries: deliveries, deliveryLatency: deliveryLatency,
 		promptTokens: promptTokens, completionTokens: completionTokens, cost: cost,
-		channelPolls: channelPolls, channelLag: channelLag,
+		channelPolls: channelPolls, channelLag: channelLag, channelRejections: channelRejections,
 	}, nil
+}
+
+func (r *Recorder) RecordChannelRejection(ctx context.Context, tenantID, reason string) {
+	if r == nil {
+		return
+	}
+	r.channelRejections.Add(ctx, 1, metric.WithAttributes(attribute.String("tenant.id", tenantID), attribute.String("channel.type", "wecom_mcp"), attribute.String("rejection.reason", reason)))
 }
 
 func (r *Recorder) RecordChannelPoll(ctx context.Context, tenantID, status string, lag time.Duration) {

@@ -171,6 +171,30 @@ func TestDisplayNameSpacesAndAdjacentMentionAreExplicit(t *testing.T) {
 	}
 }
 
+func TestBatchQuarantinesIndividualRecordsWithoutLosingText(t *testing.T) {
+	b := fixtureBinding()
+	cfg, _ := ParseBinding(b)
+	from := cfg.Start()
+	media := fixtureMessage("human-1", "secret-media-canary", "2026-09-06 00:00:02")
+	media["msg_type"] = "image"
+	broken := fixtureMessage("human-1", "secret-canary", "2026-09-06 00:00:03")
+	broken["text"] = 123
+	raw, _ := json.Marshal(fixturePage([]any{fixtureMessage("human-1", "@testbot first", "2026-09-06 00:00:01"), media, broken, 123, fixtureMessage("other-human", "ignored", "bad-date"), fixtureMessage("human-1", "@testbot last", "2026-09-06 00:00:04")}, false, ""))
+	batch, _, _, count, err := decodePageBatch(raw, b, cfg, "group-1", from, from.Add(time.Minute))
+	if err != nil || count != 6 || len(batch.Messages) != 2 || len(batch.Rejected) != 3 {
+		t.Fatalf("batch lost messages: %+v %v", batch, err)
+	}
+	encoded, _ := json.Marshal(batch.Rejected)
+	if strings.Contains(string(encoded), "canary") || strings.Contains(string(encoded), "human-1") {
+		t.Fatal("quarantine leaked message content or sender")
+	}
+	for _, r := range batch.Rejected {
+		if !validRejection(r) {
+			t.Fatal("invalid rejection metadata")
+		}
+	}
+}
+
 type finishFailStore struct{ Store }
 
 func (s finishFailStore) FinishDelivery(context.Context, DeliveryKey, string, string) error {

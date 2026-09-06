@@ -20,6 +20,19 @@ import (
 
 var ErrSourceContract = errors.New("WeCom MCP source contract unsupported")
 
+type RejectedMessage struct {
+	Fingerprint string    `json:"fingerprint"`
+	Reason      string    `json:"reason"`
+	ObservedAt  time.Time `json:"observed_at"`
+	WindowFrom  time.Time `json:"window_from"`
+	WindowTo    time.Time `json:"window_to"`
+	TraceID     string    `json:"trace_id,omitempty"`
+}
+type WindowBatch struct {
+	Messages []channels.InboundEnvelope
+	Rejected []RejectedMessage
+}
+
 type Adapter struct {
 	secrets secret.Store
 	state   Store
@@ -109,18 +122,30 @@ func (a *Adapter) Send(ctx context.Context, b controlplane.ChannelBinding, messa
 // ReadWindow fetches an explicit [from,to) group window completely before
 // returning oldest-first messages. Missing/repeated cursors fail closed.
 func (a *Adapter) ReadWindow(ctx context.Context, b controlplane.ChannelBinding, chat string, from, to time.Time) ([]channels.InboundEnvelope, error) {
+	batch, err := a.ReadWindowBatch(ctx, b, chat, from, to)
+	if err != nil {
+		return nil, err
+	}
+	if len(batch.Rejected) > 0 {
+		return nil, fmt.Errorf("%w: batch reader required for rejected records", ErrSourceContract)
+	}
+	return batch.Messages, nil
+}
+
+func (a *Adapter) ReadWindowBatch(ctx context.Context, b controlplane.ChannelBinding, chat string, from, to time.Time) (WindowBatch, error) {
 	ctx, span := otel.Tracer("trpc-agent-service/channel").Start(ctx, "wecom_mcp.read")
 	defer span.End()
 	span.SetAttributes(attribute.String("tenant.id", b.TenantID), attribute.String("channel.binding.id", b.ID))
 	cfg, err := ParseBinding(b)
 	if err != nil || b.Status != controlplane.StatusActive || !slices.Contains(cfg.AllowedChatIDs, chat) || !to.After(from) || to.Sub(from) > 2*time.Minute || from.Nanosecond() != 0 || to.Nanosecond() != 0 {
-		return nil, errors.New("invalid WeCom MCP read scope or window")
+		return WindowBatch{}, errors.New("invalid WeCom MCP read scope or window")
 	}
 	endpoint, err := a.endpoint(ctx, b, secret.WeComMCPRead)
 	if err != nil {
-		return nil, err
+		return WindowBatch{}, err
 	}
 	var messages []channels.InboundEnvelope
+	var rejected []RejectedMessage
 	cursors := map[string]bool{}
 	cursor := ""
 	total := 0
@@ -131,17 +156,18 @@ func (a *Adapter) ReadWindow(ctx context.Context, b controlplane.ChannelBinding,
 		}
 		payload, isError, err := callRuntime(ctx, endpoint, a.client, messagesTool, args)
 		if err != nil || isError {
-			return nil, errors.New("WeCom MCP message read failed")
+			return WindowBatch{}, errors.New("WeCom MCP message read failed")
 		}
-		items, next, more, count, err := decodePage(payload, b, cfg, chat, from, to)
+		batch, next, more, count, err := decodePageBatch(payload, b, cfg, chat, from, to)
 		if err != nil {
-			return nil, err
+			return WindowBatch{}, err
 		}
 		total += count
 		if total > 1000 {
-			return nil, errors.New("WeCom MCP window message limit exceeded")
+			return WindowBatch{}, errors.New("WeCom MCP window message limit exceeded")
 		}
-		messages = append(messages, items...)
+		messages = append(messages, batch.Messages...)
+		rejected = append(rejected, batch.Rejected...)
 		if !more {
 			slices.SortFunc(messages, func(x, y channels.InboundEnvelope) int {
 				if c := x.OccurredAt.Compare(y.OccurredAt); c != 0 {
@@ -149,18 +175,26 @@ func (a *Adapter) ReadWindow(ctx context.Context, b controlplane.ChannelBinding,
 				}
 				return strings.Compare(x.ExternalMessageID, y.ExternalMessageID)
 			})
-			return messages, nil
+			return WindowBatch{Messages: messages, Rejected: rejected}, nil
 		}
 		if next == "" || len(next) > 256 || cursors[next] {
-			return nil, fmt.Errorf("%w: pagination cursor missing or repeated", ErrSourceContract)
+			return WindowBatch{}, fmt.Errorf("%w: pagination cursor missing or repeated", ErrSourceContract)
 		}
 		cursors[next] = true
 		cursor = next
 	}
-	return nil, fmt.Errorf("%w: pagination limit exceeded", ErrSourceContract)
+	return WindowBatch{}, fmt.Errorf("%w: pagination limit exceeded", ErrSourceContract)
 }
 
 func decodePage(payload []byte, b controlplane.ChannelBinding, cfg BindingConfig, chat string, from, to time.Time) ([]channels.InboundEnvelope, string, bool, int, error) {
+	batch, next, more, count, err := decodePageBatch(payload, b, cfg, chat, from, to)
+	if err == nil && len(batch.Rejected) > 0 {
+		err = fmt.Errorf("%w: rejected message", ErrSourceContract)
+	}
+	return batch.Messages, next, more, count, err
+}
+
+func decodePageBatch(payload []byte, b controlplane.ChannelBinding, cfg BindingConfig, chat string, from, to time.Time) (WindowBatch, string, bool, int, error) {
 	var page struct {
 		ErrorCode *int              `json:"errcode"`
 		Count     *int              `json:"messages_count"`
@@ -169,10 +203,32 @@ func decodePage(payload []byte, b controlplane.ChannelBinding, cfg BindingConfig
 		Messages  []json.RawMessage `json:"messages"`
 	}
 	if json.Unmarshal(payload, &page) != nil || page.ErrorCode == nil || *page.ErrorCode != 0 || page.Count == nil || *page.Count != len(page.Messages) || page.HasMore == nil {
-		return nil, "", false, 0, fmt.Errorf("%w: invalid message page", ErrSourceContract)
+		return WindowBatch{}, "", false, 0, fmt.Errorf("%w: invalid message page", ErrSourceContract)
 	}
 	result := []channels.InboundEnvelope{}
+	rejected := []RejectedMessage{}
+	reject := func(raw json.RawMessage, reason string) {
+		var fields map[string]json.RawMessage
+		canonical := raw
+		if json.Unmarshal(raw, &fields) == nil && fields != nil {
+			delete(fields, "user_name")
+			delete(fields, "extra_identity_context")
+			canonical, _ = json.Marshal(fields)
+		}
+		identity, _ := json.Marshal([]string{b.TenantID, b.ID, chat, string(canonical)})
+		rejected = append(rejected, RejectedMessage{Fingerprint: "mcp_reject1_" + endpointHash(string(identity)), Reason: reason, WindowFrom: from, WindowTo: to})
+	}
 	for _, raw := range page.Messages {
+		var header struct {
+			UserID string `json:"userid"`
+		}
+		if json.Unmarshal(raw, &header) != nil || header.UserID == "" {
+			reject(raw, "invalid_identity")
+			continue
+		}
+		if !slices.Contains(cfg.AllowedUserIDs, header.UserID) {
+			continue
+		}
 		var m struct {
 			UserID string `json:"userid"`
 			Type   string `json:"msg_type"`
@@ -182,7 +238,8 @@ func decodePage(payload []byte, b controlplane.ChannelBinding, cfg BindingConfig
 			} `json:"text"`
 		}
 		if json.Unmarshal(raw, &m) != nil {
-			return nil, "", false, 0, fmt.Errorf("%w: invalid message", ErrSourceContract)
+			reject(raw, "invalid_message")
+			continue
 		}
 		// Human-ID allowlist is mandatory. No reliance on names, model output,
 		// unverified is_bot fields or an assumption that bots are never returned.
@@ -191,15 +248,25 @@ func decodePage(payload []byte, b controlplane.ChannelBinding, cfg BindingConfig
 		}
 		stamp, err := time.ParseInLocation("2006-01-02 15:04:05", m.Time, cfg.Location())
 		if err != nil || m.Type == "" {
-			return nil, "", false, 0, fmt.Errorf("%w: invalid message fields", ErrSourceContract)
+			reject(raw, "invalid_timestamp_or_type")
+			continue
 		}
 		if stamp.Before(from) || !stamp.Before(to) {
 			continue
 		}
-		// Only the observed text contract is enabled. Unknown/media contracts
-		// stop the window visibly instead of dropping messages or downloading.
+		if m.Type == "text" && m.Text.Content == "" {
+			reject(raw, "invalid_message")
+			continue
+		}
+		// Unknown individual records become durable rejection metadata. The
+		// receiver must persist it before advancing, without downloading media.
 		if m.Type != "text" || len(m.Text.Content) > 32768 {
-			return nil, "", false, 0, fmt.Errorf("%w: text-only message size/type limit", ErrSourceContract)
+			reason := "unsupported_type"
+			if m.Type == "text" {
+				reason = "oversized_text"
+			}
+			reject(raw, reason)
+			continue
 		}
 		body := strings.TrimSpace(m.Text.Content)
 		if !strings.HasPrefix(body, cfg.MentionPrefix) {
@@ -220,5 +287,5 @@ func decodePage(payload []byte, b controlplane.ChannelBinding, cfg BindingConfig
 		identity, _ := json.Marshal([]string{b.TenantID, b.ID, chat, m.UserID, m.Time, m.Type, m.Text.Content})
 		result = append(result, channels.InboundEnvelope{ExternalMessageID: "mcp_fp1_" + endpointHash(string(identity)), ExternalUserID: m.UserID, ExternalChatID: chat, ChatType: "group", MessageType: "text", Text: text, ReplyTarget: chat, OccurredAt: stamp.UTC()})
 	}
-	return result, page.Next, *page.HasMore, len(page.Messages), nil
+	return WindowBatch{Messages: result, Rejected: rejected}, page.Next, *page.HasMore, len(page.Messages), nil
 }

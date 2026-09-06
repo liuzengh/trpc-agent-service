@@ -528,6 +528,7 @@ func run() error {
 			return fmt.Errorf("build Admin service: %w", err)
 		}
 		adminService.WithAuditWriter(auditWriter)
+		adminService.WithChannelState(wecomMCPState)
 		adminService.WithKnowledgeRouter(knowledgeRouter)
 		adminService.WithBackgroundJobs(backgroundJobs)
 		adminService.WithToolOperations(operations, toolExecutionJournal)
