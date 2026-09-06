@@ -17,6 +17,7 @@ import (
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
+	agentmetric "trpc.group/trpc-go/trpc-agent-go/telemetry/metric"
 	agenttrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
@@ -58,8 +59,14 @@ func Setup(ctx context.Context, cfg config.TelemetryConfig) (Shutdown, error) {
 	res := metricsResource(cfg.ServiceName)
 	meterProvider := metricsdk.NewMeterProvider(
 		metricsdk.WithResource(res),
+		metricsdk.WithView(frameworkMetricView),
 		metricsdk.WithReader(metricsdk.NewPeriodicReader(metricExporter)),
 	)
+	if err := agentmetric.InitMeterProvider(meterProvider); err != nil {
+		_ = meterProvider.Shutdown(ctx)
+		_ = provider.Shutdown(ctx)
+		return nil, fmt.Errorf("initialize framework metrics: %w", err)
+	}
 	otel.SetMeterProvider(meterProvider)
 	return func(ctx context.Context) error {
 		return errors.Join(meterProvider.Shutdown(ctx), provider.Shutdown(ctx))

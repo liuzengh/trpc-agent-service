@@ -60,7 +60,7 @@ func NewSessionRouter(
 		return nil, errors.New("session router dependencies are required")
 	}
 	return &SessionRouter{
-		repository: repository, secrets: secretStore, startup: startup,
+		repository: repository, secrets: secretStore, startup: observeSession(startup, "startup"),
 		summarizer: summarizer, services: make(map[string]session.Service),
 	}, nil
 }
@@ -542,6 +542,7 @@ func (r *SessionRouter) cachedService(
 		if err != nil {
 			return nil, err
 		}
+		built = observeSession(built, binding.BackendType)
 		r.mu.Lock()
 		if r.closed {
 			r.mu.Unlock()
