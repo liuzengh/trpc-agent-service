@@ -145,6 +145,10 @@ type discoveryHTTP struct {
 	mu         sync.Mutex
 	methods    map[string]int
 	lastStatus int
+	// Nil for discovery. Sampling grants an exact tool + argument set and a
+	// one-call budget; no generic tools/call permission is exposed to callers.
+	allowedCalls map[string]map[string]any
+	callBudget   map[string]int
 }
 
 func (g *discoveryHTTP) Handle(ctx context.Context, _ *http.Client, req *http.Request) (*http.Response, error) {
@@ -164,19 +168,40 @@ func (g *discoveryHTTP) Handle(ctx context.Context, _ *http.Client, req *http.Re
 	}
 	var envelope struct {
 		Method string `json:"method"`
+		Params struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		} `json:"params"`
 	}
 	if json.Unmarshal(data, &envelope) != nil {
 		return nil, errors.New("invalid MCP discovery request")
 	}
 	switch envelope.Method {
 	case "initialize", "notifications/initialized", "tools/list":
+	case "tools/call":
+		g.mu.Lock()
+		expected, ok := g.allowedCalls[envelope.Params.Name]
+		actualJSON, _ := json.Marshal(envelope.Params.Arguments)
+		expectedJSON, _ := json.Marshal(expected)
+		allowed := ok && bytes.Equal(actualJSON, expectedJSON) && g.callBudget[envelope.Params.Name] > 0
+		if allowed {
+			g.callBudget[envelope.Params.Name]--
+		}
+		g.mu.Unlock()
+		if !allowed {
+			return nil, errors.New("unapproved MCP sampling tool or arguments blocked")
+		}
 	default:
 		return nil, errors.New("business MCP method blocked during discovery")
 	}
 	req = req.Clone(ctx)
 	req.Body = io.NopCloser(bytes.NewReader(data))
 	g.mu.Lock()
-	g.methods[envelope.Method]++
+	methodName := envelope.Method
+	if envelope.Method == "tools/call" {
+		methodName += "/" + envelope.Params.Name
+	}
+	g.methods[methodName]++
 	g.mu.Unlock()
 	response, err := g.client.Do(req)
 	if err != nil {
