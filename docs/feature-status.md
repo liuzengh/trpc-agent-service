@@ -34,7 +34,7 @@
 | OpenTelemetry | 真实联调（开发环境）+ 自动测试 | 真实 Telegram→模型→current_time→Session→回复的完整 trace，Tempo 实际读回；共享框架 tracer、审批 span link 与 Memory 组件测试、元数据过滤；现有 metrics/Dashboard/Alert Rule | 真实审批跨请求 link、Alertmanager 与实际通知渠道 |
 | Secret 管理 | 自动测试 | `env://` 精确租户/用途授权，Admin 保存前检查与运行时校验、角色用途收窄、S3/Embedding 隐式凭据拒绝 | Vault/KMS、在线轮换撤销、真实分角色账号权限 |
 | 分角色数据/网络权限 | 自动测试 + 本地隔离集成 | SQL GRANT/Redis ACL 生成器、允许与拒绝测试、按角色初始化后端和网络模板 | 真实 LOGIN/Redis 账号、CNI 与依赖标签的部署验证；不是租户 RLS |
-| MCP 异常隔离/恢复 | 自动测试 + 本地 PostgreSQL 集成；图片不阻塞文本真实联调 | 检查点 CAS、禁用/版本检查、恢复审计原子性；发现动态 media_id 导致重复隔离，rc.2 的稳定分组通过自动测试与原真实窗口只读复验 | rc.2 新媒体写入全链路、其他媒体类型/真实分页；不支持媒体分析或下载 |
+| MCP 异常隔离/恢复 | 自动测试 + 本地 PostgreSQL 集成；图片隔离与去重真实联调 | 检查点 CAS、禁用/版本检查、恢复审计原子性；图片不阻塞文字；rc.2 新图片持久隔离经完整重叠读取仍只产生一条隔离/审计，不调用 Agent 或发送回复 | 其他媒体类型/真实分页；不支持媒体分析或下载；同人同秒同类型附件可能合并 |
 | 积压与异常告警 | 自动测试 + 本地 SQL/规则验证与启用 | 聚合积压、unknown/attempting、检查点停滞、快照失败/过期、多节点去重聚合；候选实例快照 up=1，13 条规则加载健康 | 生产部署、阈值/SLO、实际通知渠道 |
 | Docker Compose | 本地集成 | 依赖启动、镜像构建、非 root 运行 | 长时间稳定性验证 |
 | Kubernetes | 配置 | Deployment、HPA、PDB、NetworkPolicy YAML 校验 | 测试或生产集群部署 |
@@ -51,6 +51,8 @@
 `Capabilities` 描述的是 Reply Sender 当前真正可以调用的出站能力，不代表 Adapter 能识别同类型的入站消息。
 
 企业微信 MCP 的真实单次读发证据见[取样记录](validation/wecom-sample-2026-09-06.md)，平台接入与默认关闭方式见[运行链路](wecom-mcp-runtime.md)。未知发送不自动重发，指纹不是源消息唯一 ID。现有媒体固定反馈不覆盖 MCP 尚未取得样例的媒体格式。
+
+MCP 图片采用隔离、不回复策略，与自建应用/Telegram 的媒体能力提示不同。rc.2 新图片在真实接收器、PostgreSQL 和重叠轮询中的去重结果见[媒体联调记录](validation/wecom-media-2026-09-06.md)，不代表图片内容已交给模型理解。
 
 - 企业微信当前可以验证和解密回调、规范化文本及媒体 ID，并发送应用文本消息；不声明卡片或文件发送能力。
 - Telegram 当前可以解析文本、图片/文件 ID 和 edited update，并通过 `sendMessage` 发送文本；不声明消息编辑或文件发送能力。
