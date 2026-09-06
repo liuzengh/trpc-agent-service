@@ -343,7 +343,7 @@ func (c *RevisionCompiler) RunPolicyOptions(
 		policy.AllowedTools = append(policy.AllowedTools, "knowledge_search")
 	}
 	var recorder governance.DecisionRecorder
-	if c.auditWriter != nil || c.approvals != nil {
+	if c.auditWriter != nil || c.approvals != nil || c.toolJournal != nil {
 		recorder = func(ctx context.Context, decision governance.ToolDecision) error {
 			approvalID := ""
 			if decision.Action == "ask" && c.approvals != nil {
@@ -391,12 +391,24 @@ func (c *RevisionCompiler) RunPolicyOptions(
 			})
 		}
 	}
+	// Run the reservation last, after permission audit succeeds. BeforeTool
+	// callbacks run too early to distinguish an allowed call from an ask/deny.
+	reserve := func(ctx context.Context, decision governance.ToolDecision) error {
+		if decision.Action != "allow" || c.toolJournal == nil {
+			return nil
+		}
+		return toolexec.StartAuthorized(ctx, c.toolJournal, toolexec.Execution{
+			RevisionID: revision.ID, ToolCallID: decision.ToolCallID,
+			ToolName: decision.ToolName, ArgumentsHash: decision.ArgumentsHash,
+		})
+	}
 	return governance.RunOptionsWithApprovals(
 		policy,
 		input.UserID,
 		input.ApprovedTools,
 		input.ApprovedToolCalls,
 		recorder,
+		reserve,
 	), nil
 }
 

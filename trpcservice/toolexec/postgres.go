@@ -88,6 +88,33 @@ FROM tool_execution WHERE request_id=$1 AND tool_call_id=$2`, requestID, toolCal
 }
 
 func (j *PostgresJournal) Ready(ctx context.Context) error { return j.db.PingContext(ctx) }
-func (j *PostgresJournal) Close() error                    { return nil }
+
+func (j *PostgresJournal) ListByRequest(ctx context.Context, tenantID, requestID string) ([]Execution, error) {
+	rows, err := j.db.QueryContext(ctx, `
+SELECT execution_id,tenant_id,request_id,revision_id,tool_call_id,tool_name,
+       arguments_hash,status,COALESCE(result_hash,''),COALESCE(error_type,''),
+       started_at,completed_at FROM tool_execution
+WHERE tenant_id=$1 AND request_id=$2 ORDER BY tool_call_id`, tenantID, requestID)
+	if err != nil {
+		return nil, fmt.Errorf("read tool outcomes: %w", err)
+	}
+	defer rows.Close()
+	result := make([]Execution, 0)
+	for rows.Next() {
+		var item Execution
+		var completedAt sql.NullTime
+		if err := rows.Scan(&item.ID, &item.TenantID, &item.RequestID, &item.RevisionID,
+			&item.ToolCallID, &item.ToolName, &item.ArgumentsHash, &item.Status, &item.ResultHash,
+			&item.ErrorType, &item.StartedAt, &completedAt); err != nil {
+			return nil, err
+		}
+		if completedAt.Valid {
+			item.CompletedAt = completedAt.Time
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+func (j *PostgresJournal) Close() error { return nil }
 
 var _ Journal = (*PostgresJournal)(nil)

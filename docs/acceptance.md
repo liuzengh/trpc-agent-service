@@ -75,11 +75,14 @@ docker build -t trpc-agent-service:local .
 
 ```bash
 TEST_POSTGRES_URL='postgres://...' go test ./trpcservice/storage ./trpcservice/controlplane ./trpcservice/background ./trpcservice/toolexec
+TEST_POSTGRES_URL='postgres://...' go test ./trpcservice/approval -run TestPostgresDecisionContractIntegration
 TEST_S3_ENDPOINT=http://127.0.0.1:9000 go test ./trpcservice/storage -run S3Integration
 TEST_QDRANT_HOST=127.0.0.1 TEST_QDRANT_PORT=6334 go test ./trpcservice/storage -run QdrantIntegration
 ```
 
 只读工具的真实模型预检和已通过的 Telegram 工具验收步骤见[工具调用上手说明](current-time-tool-walkthrough.md)，实际证据见[2026-09-06 验证记录](validation/current-time-2026-09-06.md)。
+
+审批测试、真实模型预检、合法命令基础收发及新版格式拦截/拒绝回执复验见[审批验证记录](validation/approval-2026-09-06.md)。步骤见[审批上手说明](telegram-approval-walkthrough.md)，新版批准结果正文仍待真实 Telegram 复验。
 
 ## 7. tRPC-Agent-Go 复用边界
 

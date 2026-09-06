@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type PostgresRepository struct{ db *sql.DB }
@@ -92,7 +94,7 @@ func (r *PostgresRepository) Decide(ctx context.Context, decision Decision) (Rec
 		return Record{}, err
 	}
 	if record.TenantID != decision.TenantID || record.ChannelBindingID != decision.ChannelBindingID ||
-		record.UserID != decision.UserID {
+		record.UserID != decision.UserID || record.SessionID != decision.SessionID {
 		return Record{}, ErrForbidden
 	}
 	if record.Status == StatusPending && !record.ExpiresAt.After(time.Now()) {
@@ -105,6 +107,9 @@ func (r *PostgresRepository) Decide(ctx context.Context, decision Decision) (Rec
 		return Record{}, ErrExpired
 	}
 	if record.Status != StatusPending {
+		if record.Status == StatusExpired {
+			return Record{}, ErrExpired
+		}
 		if record.Status != decision.Status {
 			return Record{}, ErrConflict
 		}
@@ -115,12 +120,35 @@ UPDATE tool_approval
 SET status=$2, decision_message_id=$3, decision_reason=$4, decided_at=now()
 WHERE approval_id=$1 AND status='pending'`, record.ApprovalID, decision.Status,
 		decision.ExternalMessageID, decision.Reason); err != nil {
+		var constraintErr *pgconn.PgError
+		if errors.As(err, &constraintErr) && constraintErr.Code == "23505" {
+			return Record{}, ErrConflict
+		}
 		return Record{}, fmt.Errorf("update tool approval decision: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Record{}, fmt.Errorf("commit approval decision: %w", err)
 	}
 	return r.get(ctx, record.ApprovalID, false)
+}
+
+func (r *PostgresRepository) ListPendingBySession(ctx context.Context, tenantID, bindingID, userID, sessionID string) ([]Record, error) {
+	rows, err := r.db.QueryContext(ctx, approvalSelect+`
+WHERE tenant_id=$1 AND channel_binding_id=$2 AND user_id=$3 AND session_id=$4
+    AND status='pending' AND expires_at > now() ORDER BY created_at LIMIT 10`, tenantID, bindingID, userID, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list session approvals: %w", err)
+	}
+	defer rows.Close()
+	result := make([]Record, 0)
+	for rows.Next() {
+		record, err := scanRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, record)
+	}
+	return result, rows.Err()
 }
 
 func (r *PostgresRepository) MarkResumed(ctx context.Context, approvalID string) error {

@@ -2501,15 +2501,15 @@ agent.model.cost
   → Tool PermissionPolicy 判断需要审批
   → 写 tool_approval(status=pending)
   → 本轮 Runner 正常结束
-  → Worker 查询本 request 的 pending approval
-  → 回复中附加 approval_id 和操作命令
+  → Worker 查询当前用户在本会话的 pending approval
+  → 用平台提示展示 approval_id 和可直接复制的命令
   → 用户在原 IM 会话回复“批准 apr_xxx”或“拒绝 apr_xxx”
   → Channel Adapter 完成验签和身份标准化
-  → Approval Service 校验 tenant + binding + user
+  → Approval Service 校验 tenant + binding + user + session
   → approved/denied 状态原子更新
-  → 生成新的持久化 AgentTask
-  → approved 任务携带不可伪造的批准凭证
-  → Runner 继续执行或确认取消
+  → 拒绝：直接持久化平台回执，不运行模型
+  → 批准：持久化平台回执 + 携带批准凭证的 AgentTask
+  → Runner 执行，Worker 按 Tool Journal 生成执行结果回复
 ```
 
 支持的严格命令是：
@@ -2523,7 +2523,7 @@ deny apr_0123456789abcdef0123456789abcdef
 reject apr_0123456789abcdef0123456789abcdef
 ```
 
-只有整条消息符合命令格式才会进入审批逻辑。普通聊天中出现“帮我 approve 一下”不会被误判。批准者必须是发起请求的同一个标准化 IM 用户，而且必须来自同一 Channel Binding；跨租户、跨企业微信账号或另一个 Telegram Bot 的审批都会返回身份不匹配。
+只有整条消息符合严格命令格式才会改变审批状态。包含审批编号或被识别为审批/取消意图但格式错误的消息，只收到平台格式提示，不会让模型推断决定。批准者必须来自同一租户、Channel Binding、标准化 IM 用户和 Session；跨群或 Topic 也不能批准。Telegram 群聊应使用“回复 Bot 消息”发送严格命令，不在正文前额外加 @。
 
 批准凭证不是只绑定工具名，而是绑定：
 
@@ -2541,9 +2541,9 @@ pending → denied
 pending → expired
 ```
 
-默认十五分钟过期。`decision_message_id` 在 Channel Binding 内唯一，用来处理 IM 重复投递；第一次决策成功后，同方向重复消息会复用第一次决策消息创建的 continuation，反向决策则冲突。`resumed_at` 表示 continuation 已经可靠写入 Inbox/Outbox 链路。即使进程在“更新审批状态”后崩溃，IM 平台重投同一消息时也会用稳定 ID 再次执行幂等入站，不会产生两个有效 Tool 调用。
+默认十五分钟过期。`decision_message_id` 在 Channel Binding 内唯一。同方向重复消息复用第一次的任务/回执 ID，反向决策冲突。批准生成 continuation 和独立的平台回执，拒绝只生成回执、不调用模型；`resumed_at` 表示本次决策所需的持久化工作已完成。更新审批后如果后续持久化失败，重投使用同一 ID 补齐，不重复排队；这不等于任意外部工具的 exactly-once 保证。
 
-当前文本确认流程已经通过 Adapter 级自动测试，且不依赖平台特有卡片；真实 IM 账号上的审批仍待联调。后续实现按钮卡片发送后才能启用 `SupportsCard`，按钮回调最终仍必须进入同一审批状态机，不能绕过身份、过期时间和参数哈希校验。
+合法批准/拒绝已完成 Telegram 基础联调，但非规范拒绝曾被普通聊天误报为已取消。修正后，格式错误、拒绝和审批错误都由平台直接回复；等待状态与恢复执行结果也根据待批记录和 Tool Journal 渲染，不依赖模型原话。这些新分支已通过组件链路与 PostgreSQL 事务测试，真实 Bot 复验见[审批上手说明](telegram-approval-walkthrough.md)。基础设施错误仍保留重试；按钮回调将来也不能绕过身份、会话、过期时间和参数校验。
 
 离线 `TutorialModel` 不会主动生成 Tool Call；要端到端观察审批，需要使用支持 function calling 的真实模型，并在 Revision 中把 `dangerous_demo` 同时放入 `allowed_tools` 和 `dangerous_tools`。`dangerous_demo` 没有真实副作用，只用于安全验证。
 
@@ -3186,7 +3186,7 @@ Admin 使用 `POST /admin/apps/rollout` 和 expected version 发布。Resolver �
 }
 ```
 
-BeforeModel 在调用供应商前阻断输入，AfterModel 克隆并脱敏 Response，不修改共享对象。Go regexp 使用 RE2。Tool 另有 `tool_execution` journal：BeforeTool 记录 request/tool_call/arguments hash，AfterTool 保存 succeeded/failed 和 result hash；相同 request/tool_call 再次出现时 fail closed，要求查询下游或人工对账，不盲目重放副作用。
+BeforeModel 在调用供应商前阻断输入，AfterModel 克隆并脱敏 Response，不修改共享对象。Go regexp 使用 RE2。Tool 另有 `tool_execution` journal：最终权限策略允许后，由 `StartAuthorized` 记录 request/tool_call/arguments hash，AfterTool 保存 succeeded/failed 和 result hash；相同 request/tool_call 再次出现时 fail closed，要求查询下游或人工对账，不盲目重放副作用。不能在 BeforeTool 提前记为 running：当前框架版本的 BeforeTool 先于权限检查运行，ask/deny 会跳过 AfterTool。
 
 第四，企业微信和 Telegram 会识别图片/文件消息。默认只把受信任 provider media/file ID 与文件名/MIME/caption 转成占位文本，不自动访问 URL。真正下载必须经过独立 Artifact downloader、大小/MIME/病毒扫描；这避免 callback 直接触发 SSRF。
 

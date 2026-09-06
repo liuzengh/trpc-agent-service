@@ -1,10 +1,14 @@
 package gateway
 
-import "context"
+import (
+	"context"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+)
 
 // ApprovalDecisionInput carries one already verified and normalized IM text
 // message to the approval subsystem.
 type ApprovalDecisionInput struct {
+	Scope             runtimecontext.Scope
 	TenantID          string
 	ChannelType       string
 	ChannelBindingID  string

@@ -44,13 +44,23 @@ func TestCallbacksJournalAndAuditToolExecution(t *testing.T) {
 	if _, err := callbacks.RunBeforeTool(ctx, args); err != nil {
 		t.Fatalf("before tool: %v", err)
 	}
+	if len(journal.records) != 0 {
+		t.Fatal("BeforeTool must not record an execution before permission checks")
+	}
+	execution := Execution{
+		RevisionID: "revision-a", ToolCallID: args.ToolCallID,
+		ToolName: args.ToolName, ArgumentsHash: Hash(args.Arguments),
+	}
+	if err := StartAuthorized(ctx, journal, execution); err != nil {
+		t.Fatalf("reserve authorized call: %v", err)
+	}
 	if _, err := callbacks.RunAfterTool(ctx, &tool.AfterToolArgs{
 		ToolCallID: args.ToolCallID, ToolName: args.ToolName,
 		Arguments: args.Arguments, Result: map[string]any{"ok": true},
 	}); err != nil {
 		t.Fatalf("after tool: %v", err)
 	}
-	if _, err := callbacks.RunBeforeTool(ctx, args); !errors.Is(err, ErrReplayBlocked) {
+	if err := StartAuthorized(ctx, journal, execution); !errors.Is(err, ErrReplayBlocked) {
 		t.Fatalf("replay error=%v", err)
 	}
 	events := auditWriter.Events()

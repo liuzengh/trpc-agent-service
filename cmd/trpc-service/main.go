@@ -407,6 +407,7 @@ func run() error {
 		Audit:       auditWriter,
 		Metrics:     metricRecorder,
 		Approvals:   approvalRepository,
+		ToolJournal: toolExecutionJournal,
 		Jobs:        backgroundJobs,
 		Quota:       quotaGuard,
 	})

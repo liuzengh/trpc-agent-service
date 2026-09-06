@@ -3,6 +3,7 @@ package toolexec
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -63,6 +64,25 @@ func (j *MemoryJournal) Complete(
 }
 
 func (j *MemoryJournal) Ready(context.Context) error { return nil }
+
+func (j *MemoryJournal) ListByRequest(ctx context.Context, tenantID, requestID string) ([]Execution, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return nil, errors.New("tool execution journal is closed")
+	}
+	result := make([]Execution, 0)
+	for _, item := range j.records {
+		if item.TenantID == tenantID && item.RequestID == requestID {
+			result = append(result, item)
+		}
+	}
+	sort.Slice(result, func(i, k int) bool { return result[i].ToolCallID < result[k].ToolCallID })
+	return result, nil
+}
 func (j *MemoryJournal) Close() error {
 	j.mu.Lock()
 	j.closed = true

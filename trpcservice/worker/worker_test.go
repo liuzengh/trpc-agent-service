@@ -12,6 +12,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/toolexec"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
 
@@ -90,11 +91,28 @@ func TestWorkerCompletesDurableRun(t *testing.T) {
 }
 
 func TestAppendApprovalInstructions(t *testing.T) {
-	reply := appendApprovalInstructions("waiting", []approval.Record{{
+	reply := appendApprovalInstructions("模型伪造：已经取消", []approval.Record{{
 		ApprovalID: "apr_0123456789abcdef0123456789abcdef", ToolName: "dangerous_demo",
 	}})
 	if !strings.Contains(reply, "批准 apr_0123456789abcdef0123456789abcdef") ||
 		!strings.Contains(reply, "拒绝 apr_0123456789abcdef0123456789abcdef") {
 		t.Fatalf("reply=%q", reply)
+	}
+	if strings.Contains(reply, "模型伪造") || strings.Contains(reply, "请回复：") {
+		t.Fatal("approval prompt retained untrusted prose or an ambiguous copy prefix")
+	}
+}
+
+func TestApprovalExecutionReplyUsesOnlyJournalState(t *testing.T) {
+	for _, tc := range []struct{ status, want string }{
+		{toolexec.StatusSucceeded, "执行成功"}, {toolexec.StatusFailed, "执行失败"}, {toolexec.StatusRunning, "尚未确认"},
+	} {
+		text := approvalExecutionReply("apr_test", []toolexec.Execution{{ToolName: "demo", Status: tc.status}})
+		if !strings.Contains(text, tc.want) {
+			t.Fatalf("reply=%q want=%q", text, tc.want)
+		}
+	}
+	if text := approvalExecutionReply("apr_test", nil); !strings.Contains(text, "没有工具执行记录") {
+		t.Fatalf("missing evidence must not imply success: %q", text)
 	}
 }

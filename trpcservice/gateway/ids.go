@@ -15,7 +15,7 @@ func stableID(prefix string, values ...string) string {
 }
 
 func inboundPayloadHash(request InboundRequest) string {
-	return stableID(
+	hash := stableID(
 		"sha256_",
 		request.Scope.TenantID,
 		request.Scope.AppID,
@@ -25,4 +25,10 @@ func inboundPayloadHash(request InboundRequest) string {
 		request.ChatType,
 		request.Text,
 	)
+	if request.DirectReply != "" {
+		// Preserve hashes for existing Agent messages. A control message cannot
+		// be replayed as an Agent task; its first persisted reply is immutable.
+		return stableID("sha256_", hash, "platform-reply")
+	}
+	return hash
 }

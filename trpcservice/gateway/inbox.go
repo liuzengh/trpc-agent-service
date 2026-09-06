@@ -30,6 +30,9 @@ type InboundRequest struct {
 	ApprovedTools     []string
 	ApprovedToolCalls []governance.ApprovedToolCall
 	ApprovalID        string
+	// DirectReply is server-generated control-plane feedback, never decoded
+	// from an HTTP/IM payload. It bypasses the Agent queue and model entirely.
+	DirectReply string
 }
 
 // AcceptResult identifies the durable records created for an inbound message.
@@ -136,6 +139,9 @@ func validateInbound(request *InboundRequest) error {
 	}
 	if request.ReplyTarget == "" {
 		request.ReplyTarget = request.UserID
+	}
+	if request.DirectReply != "" && (len(request.ApprovedTools) > 0 || len(request.ApprovedToolCalls) > 0) {
+		return fmt.Errorf("direct platform replies cannot grant tool permissions")
 	}
 	return nil
 }

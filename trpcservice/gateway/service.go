@@ -71,15 +71,7 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 	if input.BindingKey == "" {
 		return AcceptResult{}, fmt.Errorf("binding key is required")
 	}
-	var scope runtimecontext.Scope
-	var err error
-	if resolver, ok := i.resolver.(routing.RequestResolver); ok {
-		scope, err = resolver.ResolveFor(
-			ctx, input.BindingKey, input.UserID+"\x00"+input.SessionID,
-		)
-	} else {
-		scope, err = i.resolver.Resolve(ctx, input.BindingKey)
-	}
+	scope, err := i.resolveScope(ctx, input.BindingKey, input.UserID, input.SessionID)
 	if err != nil {
 		return AcceptResult{}, err
 	}
@@ -132,6 +124,13 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 	}
 	i.metrics.RecordInbound(ctx, scope.TenantID, scope.ChannelType, result.Duplicate)
 	return result, nil
+}
+
+func (i *Intake) resolveScope(ctx context.Context, bindingKey, userID, sessionID string) (runtimecontext.Scope, error) {
+	if resolver, ok := i.resolver.(routing.RequestResolver); ok {
+		return resolver.ResolveFor(ctx, bindingKey, userID+"\x00"+sessionID)
+	}
+	return i.resolver.Resolve(ctx, bindingKey)
 }
 
 func (i *Intake) Ready(ctx context.Context) error {

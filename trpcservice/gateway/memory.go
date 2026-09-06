@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
@@ -146,6 +147,20 @@ func (j *MemoryJournal) Accept(
 		ApprovedTools:     append([]string(nil), request.ApprovedTools...),
 		ApprovedToolCalls: append([]governance.ApprovedToolCall(nil), request.ApprovedToolCalls...),
 		ApprovalID:        request.ApprovalID,
+	}
+	if request.DirectReply != "" {
+		j.inbound[inboundKey] = memoryInbound{result: result, payloadHash: payloadHash}
+		j.runs[result.RequestID] = &memoryRun{status: "completed", result: RunResult{
+			Reply: request.DirectReply, AgentName: "platform-control", TraceParent: traceParent, TraceID: audit.TraceID(ctx),
+		}}
+		outboundID := stableID("out_", result.RequestID)
+		j.outbound[outboundID] = &memoryOutbound{
+			item: OutboundItem{ID: outboundID, RequestID: result.RequestID,
+				TenantID: scope.TenantID, ChannelBindingID: scope.ChannelBindingID,
+				Text: request.DirectReply, ReplyTarget: request.ReplyTarget, TraceParent: traceParent},
+			status: "pending", nextAttempt: time.Now(),
+		}
+		return result, nil
 	}
 	outboxID := stableID("qout_", result.RequestID)
 	j.outbox[outboxID] = &memoryQueueOutbox{

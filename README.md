@@ -150,6 +150,7 @@
 - [企业微信、微信公众号和 Telegram 接入](docs/im-channels.md)
 - [Telegram 手动测试运行手册](docs/telegram-manual-runbook.md)
 - [从聊天走到真实工具调用](docs/current-time-tool-walkthrough.md)
+- [Telegram 工具审批上手说明](docs/telegram-approval-walkthrough.md)
 - [治理、安全、监控、故障恢复和部署](docs/governance-operations.md)
 - [生产风险清单](docs/risks.md)
 - [代码实施路线和验收映射](docs/implementation-roadmap.md)

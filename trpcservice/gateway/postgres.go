@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
@@ -161,6 +162,38 @@ INSERT INTO agent_run(
 	scope := request.Scope
 	scope.RevisionID = pinnedRevisionID
 	traceParent, traceState := outboundTraceHeaders(ctx)
+	if request.DirectReply != "" {
+		// Commit Inbox, completed control Run and Outbound together. There is
+		// no queue_outbox row, so no Worker/model can reinterpret this reply.
+		if _, err := tx.ExecContext(ctx, `
+UPDATE inbound_message SET status='processed', processed_at=now() WHERE inbound_id=$1`, inboundID); err != nil {
+			return AcceptResult{}, fmt.Errorf("complete control inbound: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE agent_run SET status='completed', agent_name='platform-control',
+    started_at=now(), completed_at=now(), trace_id=NULLIF($2,'') WHERE request_id=$1`, requestID, audit.TraceID(ctx)); err != nil {
+			return AcceptResult{}, fmt.Errorf("complete control run: %w", err)
+		}
+		outbound, err := json.Marshal(map[string]any{
+			"text": request.DirectReply, "reply_target": request.ReplyTarget,
+			"agent_name": "platform-control", "event_count": 0, "traceparent": traceParent,
+		})
+		if err != nil {
+			return AcceptResult{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO outbound_message(outbound_id, tenant_id, app_id, channel_binding_id,
+    request_id, conversation_id, payload, status)
+VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,'pending')`, stableID("out_", requestID),
+			scope.TenantID, scope.AppID, scope.ChannelBindingID, requestID, conversationID, string(outbound)); err != nil {
+			return AcceptResult{}, fmt.Errorf("insert control reply: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return AcceptResult{}, fmt.Errorf("commit control reply: %w", err)
+		}
+		return AcceptResult{InboundID: inboundID, RequestID: requestID, ConversationID: conversationID,
+			RevisionID: pinnedRevisionID, TurnSeq: turnSeq}, nil
+	}
 	task := workqueue.AgentTask{
 		InboundID:         inboundID,
 		RequestID:         requestID,

@@ -194,6 +194,8 @@ TRPC_AGENT_ADMIN_ENABLED=false
 
 ## 查看完整处理状态
 
+只读工具调用通过后，下一项是[Telegram 工具审批](telegram-approval-walkthrough.md)。测试使用无外部副作用的演示工具；群聊批准/拒绝必须通过 Telegram 的“回复”操作发送，不要把普通 @ 消息当作审批命令。
+
 ```bash
 docker compose exec -T postgres \
   psql -U trpc_agent -d trpc_agent \
@@ -318,4 +320,4 @@ Webhook pending: 0
 
 2026-09-06：群过滤策略已更新为 Binding v2，用户反馈测试通过；真实模型 `current_time` HTTP 预检、Telegram 工具完整收发和模拟 Telegram 429 的 Sender 重试链路自动测试通过，详见[验证记录](validation/current-time-2026-09-06.md)。
 
-尚未覆盖 Telegram 危险工具审批、真实 429、媒体发送、消息编辑和长期稳定性压测。
+危险工具的合法批准/拒绝已完成基础收发验收。非规范命令误报取消的问题修正后，格式拦截和确定性拒绝回执也已真实复验，见[审批验证记录](validation/approval-2026-09-06.md)。新版批准结果正文、重复操作提示、真实 429、媒体发送、消息编辑和长期稳定性压测仍待完善或验证。

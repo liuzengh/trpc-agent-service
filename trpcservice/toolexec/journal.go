@@ -41,6 +41,7 @@ type StartResult struct {
 type Journal interface {
 	Start(ctx context.Context, execution Execution) (StartResult, error)
 	Complete(ctx context.Context, executionID string, status string, resultHash string, errorType string) error
+	ListByRequest(ctx context.Context, tenantID, requestID string) ([]Execution, error)
 	Ready(ctx context.Context) error
 	Close() error
 }

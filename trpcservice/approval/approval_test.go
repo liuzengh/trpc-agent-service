@@ -24,20 +24,20 @@ func TestMemoryApprovalLifecycleAndIdentityIsolation(t *testing.T) {
 	}
 	if _, err := repository.Decide(context.Background(), Decision{
 		ApprovalID: record.ApprovalID, TenantID: "tenant-a", ChannelBindingID: "binding-a",
-		UserID: "attacker", ExternalMessageID: "decision-1", Status: StatusApproved,
+		UserID: "attacker", SessionID: "session-a", ExternalMessageID: "decision-1", Status: StatusApproved,
 	}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("identity error=%v", err)
 	}
 	decided, err := repository.Decide(context.Background(), Decision{
 		ApprovalID: record.ApprovalID, TenantID: "tenant-a", ChannelBindingID: "binding-a",
-		UserID: "user-a", ExternalMessageID: "decision-1", Status: StatusApproved,
+		UserID: "user-a", SessionID: "session-a", ExternalMessageID: "decision-1", Status: StatusApproved,
 	})
 	if err != nil || decided.Status != StatusApproved {
 		t.Fatalf("decided=%+v err=%v", decided, err)
 	}
 	duplicate, err := repository.Decide(context.Background(), Decision{
 		ApprovalID: record.ApprovalID, TenantID: "tenant-a", ChannelBindingID: "binding-a",
-		UserID: "user-a", ExternalMessageID: "decision-2", Status: StatusApproved,
+		UserID: "user-a", SessionID: "session-a", ExternalMessageID: "decision-2", Status: StatusApproved,
 	})
 	if err != nil || duplicate.DecisionMessageID != "decision-1" {
 		t.Fatalf("duplicate=%+v err=%v", duplicate, err)

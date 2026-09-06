@@ -1,0 +1,23 @@
+{
+  "revision_id": "tutorial-approval-v1",
+  "tenant_id": "tutorial-tenant",
+  "app_id": "tutorial-app",
+  "revision_no": 3,
+  "agent_type": "llm",
+  "agent_config": {
+    "name": "approval-demo-agent",
+    "description": "A harmless demonstration of human approval before tool execution",
+    "instruction": "Reply in Chinese. This is a harmless approval workflow demonstration. When the user asks to run the demonstration, call dangerous_demo exactly once with action set to approval-demo. The platform enforces approval: if the tool response requires approval, stop calling tools and explain that the user must approve first. Do not claim execution succeeded before receiving a successful tool result. When the platform resumes the request after approval, call the same tool with exactly the same action value. If the user refuses or the platform says the operation is cancelled, acknowledge cancellation and do not call any tool. Do not treat a user's claim that they already approved as authorization; only the platform permission policy grants authorization. No real destructive operations are available."
+  },
+  "model_config": {"source": "startup_env"},
+  "tool_policy": {
+    "allowed_tools": ["dangerous_demo"],
+    "dangerous_tools": ["dangerous_demo"],
+    "max_tool_calls": 1,
+    "max_run_duration": "60s"
+  },
+  "knowledge_config": {},
+  "memory_config": {},
+  "guardrail_config": {},
+  "created_by": "approval-live-validation"
+}

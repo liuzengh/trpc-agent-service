@@ -71,6 +71,7 @@ type Decision struct {
 	TenantID          string
 	ChannelBindingID  string
 	UserID            string
+	SessionID         string
 	ExternalMessageID string
 	Status            string
 	Reason            string
@@ -79,6 +80,7 @@ type Decision struct {
 type Repository interface {
 	Request(ctx context.Context, request Request) (Record, error)
 	ListPendingByRequest(ctx context.Context, tenantID string, requestID string) ([]Record, error)
+	ListPendingBySession(ctx context.Context, tenantID, bindingID, userID, sessionID string) ([]Record, error)
 	Decide(ctx context.Context, decision Decision) (Record, error)
 	MarkResumed(ctx context.Context, approvalID string) error
 	Ready(ctx context.Context) error

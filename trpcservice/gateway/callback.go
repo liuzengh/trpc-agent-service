@@ -80,7 +80,12 @@ func (g *CallbackGateway) Handle(
 			message.ChatType,
 		)
 		if g.approvals != nil {
+			scope, err := g.intake.resolveScope(ctx, binding.CallbackKey, userID, sessionID)
+			if err != nil {
+				return channels.CallbackResult{}, err
+			}
 			handled, err := g.approvals.HandleApprovalDecision(ctx, ApprovalDecisionInput{
+				Scope:             scope,
 				TenantID:          binding.TenantID,
 				ChannelType:       binding.ChannelType,
 				ChannelBindingID:  binding.ID,

@@ -17,6 +17,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/toolexec"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -35,6 +36,7 @@ type Options struct {
 	Audit       audit.Writer
 	Metrics     *platformmetrics.Recorder
 	Approvals   approval.Repository
+	ToolJournal toolexec.Journal
 	Jobs        background.Repository
 	Quota       *tenant.Guard
 }
@@ -121,9 +123,21 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		auditErr := w.recordAudit(ctx, task, gateway.RunResult{}, "run_failed", "agent_execution", started)
 		return true, w.retryOrAck(ctx, delivery, task, errors.Join(runErr, failErr, auditErr))
 	}
+	if task.ApprovalID != "" {
+		if w.opts.ToolJournal == nil {
+			return true, w.retryOrAck(ctx, delivery, task, fmt.Errorf("approval result journal is unavailable"))
+		}
+		executions, err := w.opts.ToolJournal.ListByRequest(ctx, task.Scope.TenantID, task.RequestID)
+		if err != nil {
+			return true, w.retryOrAck(ctx, delivery, task, err)
+		}
+		result.Reply = approvalExecutionReply(task.ApprovalID, executions)
+	}
 	if w.opts.Approvals != nil {
-		pending, approvalErr := w.opts.Approvals.ListPendingByRequest(
-			ctx, task.Scope.TenantID, task.RequestID,
+		// Also cover free-form replies such as "never mind" about an earlier
+		// approval: a model's cancellation prose cannot override pending state.
+		pending, approvalErr := w.opts.Approvals.ListPendingBySession(
+			ctx, task.Scope.TenantID, task.Scope.ChannelBindingID, task.UserID, task.SessionID,
 		)
 		if approvalErr != nil {
 			return true, w.retryOrAck(ctx, delivery, task, approvalErr)
@@ -208,16 +222,39 @@ func appendApprovalInstructions(reply string, records []approval.Record) string 
 		return reply
 	}
 	var builder strings.Builder
-	builder.WriteString(strings.TrimSpace(reply))
+	// Do not prepend the model's prose: it may claim cancellation/success even
+	// though these rows prove the tools are still waiting for approval.
+	builder.WriteString("平台提示：以下工具尚未执行，正在等待你的审批。")
 	for _, record := range records {
 		builder.WriteString("\n\n需要人工审批工具：")
 		builder.WriteString(record.ToolName)
-		builder.WriteString("\n批准请回复：批准 ")
+		builder.WriteString("\n请在原会话操作。Telegram 群聊请使用“回复”此消息，再发送以下命令，不要额外添加 @ 或其他文字。")
+		builder.WriteString("\n请仅复制下面其中一行命令：\n\n批准 ")
 		builder.WriteString(record.ApprovalID)
-		builder.WriteString("\n拒绝请回复：拒绝 ")
+		builder.WriteString("\n\n拒绝 ")
 		builder.WriteString(record.ApprovalID)
 	}
 	return builder.String()
+}
+
+func approvalExecutionReply(approvalID string, executions []toolexec.Execution) string {
+	var result strings.Builder
+	result.WriteString("平台执行结果（审批 " + approvalID + "）：")
+	if len(executions) == 0 {
+		result.WriteString("本轮没有工具执行记录，不能认定执行成功。")
+		return result.String()
+	}
+	for _, execution := range executions {
+		status := "执行结果尚未确认，请勿重复发起操作"
+		switch execution.Status {
+		case toolexec.StatusSucceeded:
+			status = "执行成功"
+		case toolexec.StatusFailed:
+			status = "执行失败"
+		}
+		result.WriteString("\n" + execution.ToolName + "：" + status)
+	}
+	return result.String()
 }
 
 func (w *Worker) recordAudit(

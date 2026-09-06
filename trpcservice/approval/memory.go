@@ -92,7 +92,7 @@ func (r *MemoryRepository) Decide(ctx context.Context, decision Decision) (Recor
 		return Record{}, ErrNotFound
 	}
 	if record.TenantID != decision.TenantID || record.ChannelBindingID != decision.ChannelBindingID ||
-		record.UserID != decision.UserID {
+		record.UserID != decision.UserID || record.SessionID != decision.SessionID {
 		return Record{}, ErrForbidden
 	}
 	if record.Status == StatusPending && !record.ExpiresAt.After(time.Now()) {
@@ -101,10 +101,19 @@ func (r *MemoryRepository) Decide(ctx context.Context, decision Decision) (Recor
 		return Record{}, ErrExpired
 	}
 	if record.Status != StatusPending {
+		if record.Status == StatusExpired {
+			return Record{}, ErrExpired
+		}
 		if record.Status == decision.Status {
 			return record, nil
 		}
 		return Record{}, ErrConflict
+	}
+	for _, existing := range r.records {
+		if existing.ChannelBindingID == decision.ChannelBindingID &&
+			existing.DecisionMessageID == decision.ExternalMessageID {
+			return Record{}, ErrConflict
+		}
 	}
 	record.Status = decision.Status
 	record.DecisionMessageID = decision.ExternalMessageID
@@ -112,6 +121,29 @@ func (r *MemoryRepository) Decide(ctx context.Context, decision Decision) (Recor
 	record.DecidedAt = time.Now().UTC()
 	r.records[record.ApprovalID] = record
 	return record, nil
+}
+
+func (r *MemoryRepository) ListPendingBySession(ctx context.Context, tenantID, bindingID, userID, sessionID string) ([]Record, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil, errors.New("approval repository is closed")
+	}
+	result := make([]Record, 0)
+	for _, record := range r.records {
+		if record.TenantID == tenantID && record.ChannelBindingID == bindingID && record.UserID == userID &&
+			record.SessionID == sessionID && record.Status == StatusPending && record.ExpiresAt.After(time.Now()) {
+			result = append(result, record)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
+	if len(result) > 10 {
+		result = result[:10]
+	}
+	return result, nil
 }
 
 func (r *MemoryRepository) MarkResumed(ctx context.Context, approvalID string) error {
