@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 )
@@ -47,6 +48,36 @@ func TestAdminRejectsUnassignedSecretsBeforeSaving(t *testing.T) {
 	backend.ID, backend.ResourceType = "allowed-backend", "memory"
 	if _, err := service.CreateBackendBinding(ctx, backend); err != nil {
 		t.Fatalf("authorized metadata must not need credential values: %v", err)
+	}
+}
+
+func TestAdminWeComMCPRequiresBothGrantsAndStrictConfig(t *testing.T) {
+	ctx := context.Background()
+	repo := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
+	t.Cleanup(func() { _ = repo.Close() })
+	service, _ := New(repo)
+	cfg := wecommcp.BindingConfig{AllowedChatIDs: []string{"group"}, AllowedUserIDs: []string{"human"}, MentionPrefix: "@bot", Timezone: "UTC", StartAt: "2026-09-06T00:00:00Z", DedupeMode: "fingerprint-v1"}
+	raw, _ := json.Marshal(cfg)
+	b := controlplane.ChannelBinding{ID: "mcp-binding", TenantID: "tutorial-tenant", AppID: "tutorial-app", AccountID: "mcp-bot", CallbackKey: "mcp-route", ChannelType: wecommcp.ChannelType, SecretRef: "env://MCP", Config: raw}
+	readGrant := secret.Grant{TenantID: b.TenantID, Purpose: secret.WeComMCPRead, Reference: b.SecretRef}
+	sendGrant := secret.Grant{TenantID: b.TenantID, Purpose: secret.WeComMCPSend, Reference: b.SecretRef}
+	readOnly, _ := secret.NewEnvStore([]secret.Grant{readGrant})
+	service.WithSecretAuthorizer(readOnly)
+	if _, err := service.CreateChannelBinding(ctx, b); !errors.Is(err, secret.ErrForbidden) {
+		t.Fatal("one-purpose grant allowed creation")
+	}
+	both, _ := secret.NewEnvStore([]secret.Grant{readGrant, sendGrant})
+	service.WithSecretAuthorizer(both)
+	created, err := service.CreateChannelBinding(ctx, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.WithSecretAuthorizer(secret.EnvStore{})
+	if _, err := service.UpdateChannelBinding(ctx, b.TenantID, b.ID, json.RawMessage(`{"mcp_url":"credential-canary"}`), controlplane.StatusDisabled, created.Version); err == nil {
+		t.Fatal("disabled binding bypassed config shape validation")
+	}
+	if _, err := service.UpdateChannelBinding(ctx, b.TenantID, b.ID, raw, controlplane.StatusDisabled, created.Version); err != nil {
+		t.Fatal("cannot disable after credential revocation")
 	}
 }
 

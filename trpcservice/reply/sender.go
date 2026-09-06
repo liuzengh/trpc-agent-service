@@ -91,6 +91,17 @@ func (s *Sender) sendOne(ctx context.Context, item gateway.OutboundItem) error {
 	if binding.Status != controlplane.StatusActive {
 		return s.fail(ctx, item, binding.ChannelType, true, started, fmt.Errorf("channel binding is disabled"))
 	}
+	tenant, err := s.repository.GetTenant(ctx, binding.TenantID)
+	if err != nil {
+		return s.fail(ctx, item, binding.ChannelType, false, started, fmt.Errorf("tenant delivery check unavailable"))
+	}
+	app, err := s.repository.GetAgentApp(ctx, binding.TenantID, binding.AppID)
+	if err != nil {
+		return s.fail(ctx, item, binding.ChannelType, false, started, fmt.Errorf("app delivery check unavailable"))
+	}
+	if tenant.Status != controlplane.StatusActive || app.Status != controlplane.StatusActive {
+		return s.fail(ctx, item, binding.ChannelType, true, started, fmt.Errorf("tenant or app delivery is disabled"))
+	}
 	adapter, err := s.registry.Get(binding.ChannelType)
 	if err != nil {
 		return s.fail(ctx, item, binding.ChannelType, true, started, err)
@@ -111,7 +122,9 @@ func (s *Sender) sendOne(ctx context.Context, item gateway.OutboundItem) error {
 				started, sendErr,
 			)
 		}
-		providerIDs = append(providerIDs, receipt.ProviderMessageID)
+		if receipt.ProviderMessageID != "" {
+			providerIDs = append(providerIDs, receipt.ProviderMessageID)
+		}
 	}
 	if err := s.journal.MarkOutboundSent(
 		ctx, item.ID, s.opts.WorkerID, strings.Join(providerIDs, ","),
@@ -151,15 +164,21 @@ func (s *Sender) fail(
 ) error {
 	retryAt := time.Now().Add(s.opts.RetryDelay)
 	var deliveryErr *channels.DeliveryError
+	unknown := errors.As(cause, &deliveryErr) && deliveryErr.Unknown
+	if unknown {
+		terminal = true
+	}
 	if errors.As(cause, &deliveryErr) && deliveryErr.RetryAfter > 0 {
 		retryAt = time.Now().Add(deliveryErr.RetryAfter)
 	}
 	markErr := s.journal.MarkOutboundFailed(
 		ctx, item.ID, s.opts.WorkerID, retryAt, terminal, cause,
 	)
-	s.opts.Metrics.RecordDelivery(
-		ctx, item.TenantID, channelType, "failed", time.Since(started),
-	)
+	status, decision, errorType := "failed", "reply_failed", "channel_delivery"
+	if unknown {
+		status, decision, errorType = "unknown", "reply_delivery_unknown", "channel_delivery_unknown"
+	}
+	s.opts.Metrics.RecordDelivery(ctx, item.TenantID, channelType, status, time.Since(started))
 	var auditErr error
 	if s.opts.Audit != nil {
 		auditErr = s.opts.Audit.Record(ctx, audit.Event{
@@ -168,9 +187,9 @@ func (s *Sender) fail(
 			ChannelBindingID: item.ChannelBindingID,
 			RequestID:        item.RequestID,
 			TraceID:          audit.TraceID(ctx),
-			Decision:         "reply_failed",
+			Decision:         decision,
 			Latency:          time.Since(started),
-			ErrorType:        "channel_delivery",
+			ErrorType:        errorType,
 			Details: map[string]any{
 				"outbound_id": item.ID,
 				"terminal":    terminal,

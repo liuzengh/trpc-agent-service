@@ -72,6 +72,9 @@ TRPC_AGENT_SECRET_GRANTS_JSON='[{"tenant_id":"tutorial-tenant","purpose":"telegr
 | `knowledge`、`embedding` | 向量库 Key、Embedding Key，分别授权 |
 | `telegram_webhook`、`telegram_bot` | 入站验签、出站 Bot Token，分别授权 |
 | `wecom_callback`、`wecom_aes`、`wecom_app` | 回调 Token、AES Key、应用 Secret，分别授权 |
+| `wecom_mcp_read`、`wecom_mcp_send` | 托管消息 MCP 的接收与发送用途，分别授权 |
+
+托管 MCP 的 URL 本身可能同时具有上游读写能力；这里的两个用途是本平台的软件限制，不是两种由企业微信签发的权限 Token。只有启用该通道的 Gateway/Sender 注入 URL，Worker/Jobs/Admin 不需要其真实值，见[运行说明](wecom-mcp-runtime.md)。
 
 例如，租户模型使用 `api_key_ref: "env://TENANT_A_MODEL_KEY"`，需要该租户的 `model` grant。旧的 `api_key_env` 仍可使用，但也转换成同样的引用并经过授权，不再直接调用 `os.LookupEnv`。把已有的数据库 grant 填到模型配置中会被拒绝。
 
@@ -84,7 +87,7 @@ Admin 创建 Revision、Channel Binding、Backend Binding，以及更新启用�
 | 角色 | 对外入口与可读取的租户密钥用途 |
 | --- | --- |
 | `all` | 本地完整链路；按开关提供 HTTP 调试、回调和 Admin |
-| `gateway` | 回调、可选 `/inbound`；只读取 IM 入站验证密钥，不提供 `/chat` 或 Admin |
+| `gateway` | 回调、可选 `/inbound`、显式启用的 MCP 拉取；读取入站验证密钥/MCP read 用途，不提供 `/chat` 或 Admin |
 | `worker` | 无 HTTP 监听；模型、Session/Memory/Knowledge/Artifact/Embedding |
 | `sender` | 无 HTTP 监听；只读取 IM 出站凭据 |
 | `jobs` | 无 HTTP 监听；后台模型和数据后端 |

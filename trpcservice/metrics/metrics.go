@@ -21,6 +21,8 @@ type Recorder struct {
 	promptTokens     metric.Int64Counter
 	completionTokens metric.Int64Counter
 	cost             metric.Float64Counter
+	channelPolls     metric.Int64Counter
+	channelLag       metric.Float64Histogram
 }
 
 func New() (*Recorder, error) {
@@ -61,12 +63,32 @@ func New() (*Recorder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create model cost counter: %w", err)
 	}
+	channelPolls, err := meter.Int64Counter("agent.channel.polls")
+	if err != nil {
+		return nil, err
+	}
+	channelLag, err := meter.Float64Histogram("agent.channel.checkpoint_lag", metric.WithUnit("s"))
+	if err != nil {
+		return nil, err
+	}
 	return &Recorder{
 		inbound: inbound, idempotentHit: idempotentHit,
 		runs: runs, runLatency: runLatency,
 		deliveries: deliveries, deliveryLatency: deliveryLatency,
 		promptTokens: promptTokens, completionTokens: completionTokens, cost: cost,
+		channelPolls: channelPolls, channelLag: channelLag,
 	}, nil
+}
+
+func (r *Recorder) RecordChannelPoll(ctx context.Context, tenantID, status string, lag time.Duration) {
+	if r == nil {
+		return
+	}
+	attrs := metric.WithAttributes(attribute.String("tenant.id", tenantID), attribute.String("channel.type", "wecom_mcp"), attribute.String("poll.status", status))
+	r.channelPolls.Add(ctx, 1, attrs)
+	if status == "ok" {
+		r.channelLag.Record(ctx, lag.Seconds(), attrs)
+	}
 }
 
 func (r *Recorder) RecordUsage(

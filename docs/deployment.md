@@ -80,7 +80,9 @@ kubectl wait --for=condition=complete job/trpc-agent-migrate -n trpc-agent --tim
 ./scripts/e2e-backup-restore.sh
 ```
 
-脚本为 PostgreSQL 创建临时数据库，执行 `pg_dump`、删除、重建和 `pg_restore`；Redis RDB 会恢复到独立临时容器。它不会清空 `trpc_agent` 主数据库或现有 Redis 数据卷，结束后只清理本次演练资源。
+脚本仅创建三个带本次运行标签的独立容器：PostgreSQL、Redis 源和 Redis 恢复实例，均不连接网络或暴露端口。PostgreSQL 将合成数据 dump 后恢复到另一个新数据库；Redis 只导出合成测试键的 RDB，再读入恢复实例，不读取业务 Redis 全量数据。结束时核对容器 ID 和运行标签，只移除本次资源；不执行共享 Compose 的 start/stop/down。
+
+它需要本机已缓存本仓库的 `postgres:16-alpine` 和 `redis:7-alpine`，不会自动拉取或升级镜像。默认验证的是备份恢复工具链，不是实际业务库的全量恢复、PITR 或灾难恢复时间目标。结果与安全边界见[运维记录](validation/operations-2026-09-06.md)。
 
 - PostgreSQL：每日全量 + WAL/PITR，季度恢复到独立集群；
 - Redis：AOF everysec + 副本，Session 的最终耐久事实可选 PostgreSQL；

@@ -28,9 +28,9 @@ func (r Roles) SecretGrants(grants []secret.Grant) []secret.Grant {
 	for _, grant := range grants {
 		allowed := false
 		switch grant.Purpose {
-		case secret.TelegramWebhook, secret.WeComCallback, secret.WeComAES:
+		case secret.TelegramWebhook, secret.WeComCallback, secret.WeComAES, secret.WeComMCPRead:
 			allowed = r.Gateway
-		case secret.TelegramBot, secret.WeComApp:
+		case secret.TelegramBot, secret.WeComApp, secret.WeComMCPSend:
 			allowed = r.Sender
 		case secret.Model:
 			allowed = r.Worker || r.Jobs

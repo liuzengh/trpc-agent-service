@@ -1,80 +1,103 @@
 #!/usr/bin/env bash
+# Isolated toolchain drill: no application data, shared containers or ports.
 set -euo pipefail
-
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
-
-RUN_ID="$(date +%s)-$$"
-DB_NAME="backup_drill_${RUN_ID//-/_}"
-REDIS_KEY="backup:drill:$RUN_ID"
-MARKER="restored-$RUN_ID"
-RESTORE_CONTAINER="trpc-agent-redis-restore-$RUN_ID"
-TEMP_DIR="$(mktemp -d)"
+umask 077
+DRILL_DIR="$(mktemp -d /tmp/trpc-backup-drill.XXXXXXXX)"
+DRILL_ID="$(basename "$DRILL_DIR")"
+DRILL_MARKER="restored-$DRILL_ID"
 
 cleanup() {
-  docker rm -f "$RESTORE_CONTAINER" >/dev/null 2>&1 || true
-  docker compose exec -T postgres \
-    dropdb -U trpc_agent --if-exists "$DB_NAME" >/dev/null 2>&1 || true
-  docker compose exec -T redis redis-cli DEL "$REDIS_KEY" >/dev/null 2>&1 || true
-  docker compose stop redis postgres >/dev/null 2>&1 || true
-  rm -rf "$TEMP_DIR"
+  local original_status=$?
+  local cid_file container_id label cleanup_failed=0
+  trap - EXIT INT TERM
+  for cid_file in "$DRILL_DIR/postgres.cid" "$DRILL_DIR/redis-source.cid" "$DRILL_DIR/redis-restore.cid"; do
+    [[ -s "$cid_file" ]] || continue
+    read -r container_id <"$cid_file" || true
+    if [[ ! "$container_id" =~ ^[a-f0-9]{64}$ ]]; then cleanup_failed=1; continue; fi
+    if ! label="$(docker inspect --format '{{index .Config.Labels "trpc-agent.backup-drill"}}' "$container_id" 2>/dev/null)"; then
+      cleanup_failed=1
+      continue
+    fi
+    if [[ "$label" != "$DRILL_ID" ]]; then cleanup_failed=1; continue; fi
+    docker rm -f "$container_id" >/dev/null 2>&1 || cleanup_failed=1
+  done
+  if [[ "$cleanup_failed" == 0 ]]; then
+    rm -f -- "$DRILL_DIR/postgres.cid" "$DRILL_DIR/redis-source.cid" \
+      "$DRILL_DIR/redis-restore.cid" "$DRILL_DIR/dump.rdb"
+    rmdir -- "$DRILL_DIR" || cleanup_failed=1
+  fi
+  if [[ "$cleanup_failed" != 0 ]]; then
+    echo "drill cleanup needs review; only test artifacts retained in $DRILL_DIR" >&2
+    [[ "$original_status" != 0 ]] || original_status=1
+  else
+    echo "removed only this drill's synthetic containers/data; shared services unchanged"
+  fi
+  exit "$original_status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-docker compose up -d postgres redis
-for _ in $(seq 1 60); do
-  pg_health="$(docker inspect --format '{{.State.Health.Status}}' trpc-agent-service-postgres-1 2>/dev/null || true)"
-  redis_health="$(docker inspect --format '{{.State.Health.Status}}' trpc-agent-service-redis-1 2>/dev/null || true)"
-  [[ "$pg_health" == "healthy" && "$redis_health" == "healthy" ]] && break
-  sleep 1
+# Use repository baseline images already cached; no automatic pulls or updates.
+docker image inspect postgres:16-alpine >/dev/null
+docker image inspect redis:7-alpine >/dev/null
+docker run -d --pull=never --network none \
+  --name "$DRILL_ID-postgres" --label "trpc-agent.backup-drill=$DRILL_ID" \
+  --cidfile "$DRILL_DIR/postgres.cid" --tmpfs /var/lib/postgresql/data:rw \
+  -e POSTGRES_USER=drill -e POSTGRES_DB=drill_source \
+  -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine >/dev/null
+read -r PG_CONTAINER <"$DRILL_DIR/postgres.cid" || true
+pg_ready=false
+for _ in {1..80}; do
+  if docker exec "$PG_CONTAINER" pg_isready -h 127.0.0.1 -U drill -d drill_source >/dev/null 2>&1; then pg_ready=true; break; fi
+  sleep 0.25
 done
-if [[ "$pg_health" != "healthy" || "$redis_health" != "healthy" ]]; then
-  echo "PostgreSQL or Redis did not become healthy" >&2
-  exit 1
-fi
+[[ "$pg_ready" == true ]] || { echo "isolated PostgreSQL not ready" >&2; exit 1; }
+docker exec "$PG_CONTAINER" psql -U drill -d drill_source -v ON_ERROR_STOP=1 -c \
+  "CREATE TABLE restore_probe(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+   INSERT INTO restore_probe(id,value) VALUES(1,'$DRILL_MARKER');" >/dev/null
+docker exec "$PG_CONTAINER" pg_dump -U drill -Fc -f /tmp/source.dump drill_source
+docker exec "$PG_CONTAINER" createdb -U drill drill_restored
+docker exec "$PG_CONTAINER" pg_restore --exit-on-error -U drill -d drill_restored /tmp/source.dump
+pg_marker="$(docker exec "$PG_CONTAINER" psql -U drill -d drill_restored -Atc 'SELECT value FROM restore_probe WHERE id=1')"
+[[ "$pg_marker" == "$DRILL_MARKER" ]] || { echo "PostgreSQL restore mismatch" >&2; exit 1; }
+echo "isolated PostgreSQL dump/restore passed"
 
-docker compose exec -T postgres createdb -U trpc_agent "$DB_NAME"
-docker compose exec -T postgres psql -U trpc_agent -d "$DB_NAME" \
-  -v ON_ERROR_STOP=1 -c "
-    CREATE TABLE restore_probe(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
-    INSERT INTO restore_probe(id, value) VALUES (1, '$MARKER');" >/dev/null
-docker compose exec -T postgres pg_dump -U trpc_agent -Fc "$DB_NAME" \
-  >"$TEMP_DIR/postgres.dump"
-if [[ ! -s "$TEMP_DIR/postgres.dump" ]]; then
-  echo "PostgreSQL dump is empty" >&2
-  exit 1
-fi
-
-docker compose exec -T postgres dropdb -U trpc_agent "$DB_NAME"
-docker compose exec -T postgres createdb -U trpc_agent "$DB_NAME"
-docker compose exec -T postgres pg_restore -U trpc_agent -d "$DB_NAME" \
-  <"$TEMP_DIR/postgres.dump"
-postgres_marker="$(docker compose exec -T postgres psql -U trpc_agent -d "$DB_NAME" \
-  -Atc 'SELECT value FROM restore_probe WHERE id = 1')"
-if [[ "$postgres_marker" != "$MARKER" ]]; then
-  echo "PostgreSQL restore marker mismatch" >&2
-  exit 1
-fi
-
-docker compose exec -T redis redis-cli SET "$REDIS_KEY" "$MARKER" >/dev/null
-docker compose exec -T redis rm -f /tmp/backup-drill.rdb
-docker compose exec -T redis redis-cli --rdb /tmp/backup-drill.rdb >/dev/null 2>&1
-docker compose cp redis:/tmp/backup-drill.rdb "$TEMP_DIR/dump.rdb" >/dev/null 2>&1
-chmod 644 "$TEMP_DIR/dump.rdb"
-docker compose exec -T redis redis-cli DEL "$REDIS_KEY" >/dev/null
-
-docker run -d --rm --name "$RESTORE_CONTAINER" \
-  --user "$(id -u):$(id -g)" \
-  -v "$TEMP_DIR:/data" \
-  redis:7-alpine redis-server --appendonly no >/dev/null
-for _ in $(seq 1 30); do
-  docker exec "$RESTORE_CONTAINER" redis-cli ping >/dev/null 2>&1 && break
-  sleep 0.2
+docker run -d --pull=never --network none \
+  --name "$DRILL_ID-redis-source" --label "trpc-agent.backup-drill=$DRILL_ID" \
+  --cidfile "$DRILL_DIR/redis-source.cid" --tmpfs /data:rw \
+  redis:7-alpine redis-server --appendonly no --save '' >/dev/null
+read -r REDIS_SOURCE <"$DRILL_DIR/redis-source.cid" || true
+redis_ready=false
+for _ in {1..40}; do
+  if [[ "$(docker exec "$REDIS_SOURCE" redis-cli ping 2>/dev/null)" == PONG ]]; then redis_ready=true; break; fi
+  sleep 0.25
 done
-redis_marker="$(docker exec "$RESTORE_CONTAINER" redis-cli GET "$REDIS_KEY")"
-if [[ "$redis_marker" != "$MARKER" ]]; then
-  echo "Redis restore marker mismatch" >&2
-  exit 1
-fi
+[[ "$redis_ready" == true ]] || { echo "isolated Redis not ready" >&2; exit 1; }
+docker exec "$REDIS_SOURCE" redis-cli -e SET restore-probe "$DRILL_MARKER" >/dev/null
+docker exec "$REDIS_SOURCE" redis-cli -e SAVE
+# Docker archive/cp cannot reliably read a container's tmpfs mounts. Move a
+# copy into this isolated container's writable layer before exporting it.
+docker exec "$REDIS_SOURCE" test -s /data/dump.rdb
+docker exec "$REDIS_SOURCE" cp /data/dump.rdb /tmp/drill.rdb
+docker cp "$REDIS_SOURCE:/tmp/drill.rdb" "$DRILL_DIR/dump.rdb" >/dev/null
+chmod 600 "$DRILL_DIR/dump.rdb"
 
-echo "backup restore e2e passed: postgres=ok redis=ok run_id=$RUN_ID"
+# Bind only a synthetic snapshot read-only; no application data volume.
+docker run -d --pull=never --network none \
+  --name "$DRILL_ID-redis-restore" --label "trpc-agent.backup-drill=$DRILL_ID" \
+  --cidfile "$DRILL_DIR/redis-restore.cid" --user "$(id -u):$(id -g)" \
+  --tmpfs /data:rw,mode=1777 \
+  --mount "type=bind,source=$DRILL_DIR/dump.rdb,target=/data/dump.rdb,readonly" \
+  redis:7-alpine redis-server --appendonly no --save '' >/dev/null
+read -r REDIS_RESTORE <"$DRILL_DIR/redis-restore.cid" || true
+redis_ready=false
+for _ in {1..40}; do
+  if [[ "$(docker exec "$REDIS_RESTORE" redis-cli ping 2>/dev/null)" == PONG ]]; then redis_ready=true; break; fi
+  sleep 0.25
+done
+[[ "$redis_ready" == true ]] || { echo "restored Redis not ready" >&2; exit 1; }
+redis_marker="$(docker exec "$REDIS_RESTORE" redis-cli GET restore-probe)"
+[[ "$redis_marker" == "$DRILL_MARKER" ]] || { echo "Redis restore mismatch" >&2; exit 1; }
+echo "isolated Redis RDB restore passed"
+echo "backup restore drill passed: postgres=ok redis=ok no_shared_data_access=true"

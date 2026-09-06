@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 )
@@ -64,6 +65,16 @@ func (s *Service) authorizeChannelSecrets(ctx context.Context, binding controlpl
 	}
 	var fields map[string]string
 	switch binding.ChannelType {
+	case wecommcp.ChannelType:
+		if _, err := wecommcp.ParseBinding(binding); err != nil {
+			return invalidf("invalid WeCom MCP binding config")
+		}
+		for _, purpose := range []string{secret.WeComMCPRead, secret.WeComMCPSend} {
+			if err := s.authorizeSecret(ctx, binding.TenantID, purpose, binding.SecretRef); err != nil {
+				return err
+			}
+		}
+		return nil
 	case "telegram":
 		fields = map[string]string{"bot_token_ref": secret.TelegramBot, "webhook_secret_ref": secret.TelegramWebhook}
 	case "wecom":
@@ -80,6 +91,15 @@ func (s *Service) authorizeChannelSecrets(ctx context.Context, binding controlpl
 		}
 		if err := s.authorizeSecret(ctx, binding.TenantID, purpose, ref); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validateChannelShape(binding controlplane.ChannelBinding) error {
+	if binding.ChannelType == wecommcp.ChannelType {
+		if _, err := wecommcp.ParseBinding(binding); err != nil {
+			return invalidf("invalid WeCom MCP binding config")
 		}
 	}
 	return nil

@@ -34,6 +34,8 @@ data:
   TRPC_AGENT_HTTP_API_ENABLED: "false"
   # Full reference grants (metadata only) are provisioned by platform operators.
   TRPC_AGENT_SECRET_GRANTS_JSON: "[]"
+  # Explicit receiver targets; no hosted-MCP background access by default.
+  TRPC_AGENT_WECOM_MCP_TARGETS_JSON: "[]"
   TRPC_AGENT_OTEL_ENABLED: "true"
   TRPC_AGENT_OTEL_SERVICE_NAME: trpc-agent-service
   TRPC_AGENT_OTEL_ENDPOINT: otel-collector.observability.svc.cluster.local:4317

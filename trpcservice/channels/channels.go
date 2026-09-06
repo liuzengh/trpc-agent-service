@@ -84,6 +84,8 @@ type DeliveryError struct {
 	Cause      error
 	Retryable  bool
 	RetryAfter time.Duration
+	// Unknown means the provider may have delivered; do not blindly resend.
+	Unknown bool
 }
 
 func (e *DeliveryError) Error() string {

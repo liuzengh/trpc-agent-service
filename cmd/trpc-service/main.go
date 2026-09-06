@@ -21,6 +21,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
@@ -102,7 +103,12 @@ func run() error {
 		}
 	}
 	var httpAPIConfig config.HTTPAPIConfig
+	var wecomMCPTargets []config.WeComMCPTarget
 	if roles.Gateway {
+		wecomMCPTargets, err = config.LoadWeComMCPTargetsFromEnv()
+		if err != nil {
+			return err
+		}
 		httpAPIConfig, err = config.LoadHTTPAPIConfigFromEnv()
 		if err != nil {
 			return fmt.Errorf("load HTTP API config: %w", err)
@@ -465,10 +471,19 @@ func run() error {
 		_ = controlPlaneRepository.Close()
 		return fmt.Errorf("build Telegram Adapter: %w", err)
 	}
+	wecomMCPState, err := wecommcp.NewStore(controlPlaneRepository)
+	if err != nil {
+		return err
+	}
+	wecomMCPAdapter, err := wecommcp.New(secretStore, wecomMCPState, nil)
+	if err != nil {
+		return err
+	}
 	channelRegistry, err := channels.NewRegistry(
 		channels.NewTestAdapter(),
 		wecomAdapter,
 		telegramAdapter,
+		wecomMCPAdapter,
 	)
 	if err != nil {
 		_ = agentQueue.Close()
@@ -501,6 +516,12 @@ func run() error {
 		_ = gatewayIntake.Close()
 		_ = controlPlaneRepository.Close()
 		return fmt.Errorf("build callback Gateway: %w", err)
+	}
+	wecomPoller, err := gateway.NewWeComPoller(controlPlaneRepository, wecomMCPAdapter, callbackGateway, wecomMCPState, sessionCoordinator, gateway.WeComPollOptions{
+		Targets: wecomMCPTargets, Interval: 10 * time.Second, Window: time.Minute, Overlap: time.Minute, SettleDelay: 5 * time.Second, Timeout: 45 * time.Second, Audit: auditWriter, Metrics: metricRecorder,
+	})
+	if err != nil {
+		return fmt.Errorf("build WeCom MCP receiver: %w", err)
 	}
 	var adminHandler http.Handler
 	if adminConfig.Enabled {
@@ -584,6 +605,7 @@ func run() error {
 		idempotencyConfig.CompletedTTL,
 	)
 	fmt.Printf("control-plane backend=%s\n", controlPlaneConfig.Backend)
+	fmt.Printf("wecom_mcp receiver bindings=%d (empty means disabled)\n", len(wecomMCPTargets))
 	fmt.Printf("queue backend=%s stream=%s group=%s\n", queueConfig.Backend, queueConfig.Stream, queueConfig.Group)
 	serverEnabled := roles.Gateway || roles.Admin
 	if serverEnabled {
@@ -670,6 +692,9 @@ func run() error {
 		handlerOptions = append(handlerOptions,
 			web.WithAPIAccess(apiAccess), web.WithSynchronousChat(roles.Worker),
 			web.WithGatewayIntake(gatewayIntake), web.WithCallbackGateway(callbackGateway))
+		if len(wecomMCPTargets) > 0 {
+			handlerOptions = append(handlerOptions, web.WithReadinessCheck("wecom-mcp-state", wecomMCPState.Ready))
+		}
 	}
 	if adminHandler != nil {
 		handlerOptions = append(handlerOptions, web.WithAdminHandler(adminHandler))
@@ -710,6 +735,9 @@ func run() error {
 	}
 	if roles.Relay {
 		group.Go(func() error { return ignoreCancellation(outboxRelay.Run(groupCtx)) })
+	}
+	if roles.Gateway && len(wecomMCPTargets) > 0 {
+		group.Go(func() error { return ignoreCancellation(wecomPoller.Run(groupCtx)) })
 	}
 	if roles.Worker {
 		group.Go(func() error { return ignoreCancellation(agentWorker.Run(groupCtx)) })

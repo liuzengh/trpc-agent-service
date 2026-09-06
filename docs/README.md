@@ -9,6 +9,7 @@
 | [tool-operations.md](tool-operations.md) | 业务幂等、内部工作项、工具结果查询与只读对账 |
 | [im-feedback.md](im-feedback.md) | 主动重复审批提示、失败回执、媒体与编辑消息边界 |
 | [wecom-mcp.md](wecom-mcp.md) | 用户当前企业微信 MCP 入口、真实工具发现与后续通道接入边界 |
+| [wecom-mcp-runtime.md](wecom-mcp-runtime.md) | MCP 群消息到 Runner/Sender 的运行链路、检查点、未知发送与启用配置 |
 | [execution-plan.md](execution-plan.md) | 当前收尾顺序与已完成项，不扩张原始交付范围 |
 | [architecture.md](architecture.md) | 总体架构、组件职责、节点拓扑、租户隔离和框架复用边界 |
 | [sequence.md](sequence.md) | 企业微信消息进入平台后的完整执行时序，以及取消和故障处理 |

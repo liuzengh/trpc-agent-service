@@ -40,6 +40,7 @@ type privateSnapshot struct {
 	IsError      bool            `json:"is_error"`
 	Payload      json.RawMessage `json:"payload"`
 	EndpointHash string          `json:"endpoint_hash"`
+	ChatHash     string          `json:"chat_hash,omitempty"`
 }
 
 // ReadSessionSnapshot is explicitly user-authorized sampling, not discovery.
@@ -60,6 +61,12 @@ func sample(ctx context.Context, endpoint string, httpClient *http.Client, toolN
 	if toolName != sessionsTool && toolName != messagesTool {
 		return SnapshotReport{}, errors.New("only explicitly scoped message reads may be sampled")
 	}
+	return sampleCall(ctx, endpoint, httpClient, toolName, args, outputDirectory)
+}
+
+// sampleCall is shared transport/response handling. Sending is reachable only
+// through the fixed, explicitly authorized probe with a durable attempt guard.
+func sampleCall(ctx context.Context, endpoint string, httpClient *http.Client, toolName string, args map[string]any, outputDirectory string) (SnapshotReport, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return SnapshotReport{}, errors.New("invalid sample endpoint")
@@ -122,7 +129,11 @@ func sample(ctx context.Context, endpoint string, httpClient *http.Client, toolN
 		return SnapshotReport{}, errors.New("cannot create private sample")
 	}
 	defer func() { _ = file.Close() }()
-	if err := json.NewEncoder(file).Encode(privateSnapshot{Tool: toolName, CapturedAt: time.Now().UTC(), IsError: result.IsError, Payload: payload, EndpointHash: endpointHash(endpoint)}); err != nil {
+	chatHash := ""
+	if chat, ok := args["chat_id"].(string); ok && chat != "" {
+		chatHash = endpointHash(chat)
+	}
+	if err := json.NewEncoder(file).Encode(privateSnapshot{Tool: toolName, CapturedAt: time.Now().UTC(), IsError: result.IsError, Payload: payload, EndpointHash: endpointHash(endpoint), ChatHash: chatHash}); err != nil {
 		return SnapshotReport{}, errors.New("cannot save private sample")
 	}
 	if err := file.Sync(); err != nil {
@@ -151,7 +162,7 @@ func sampleStatus(value any) map[string]any {
 		return nil
 	}
 	result := map[string]any{}
-	for _, key := range []string{"errcode", "sessions_count", "messages_count", "has_more"} {
+	for _, key := range []string{"errcode", "sessions_count", "messages_count", "has_more", "success"} {
 		switch value := object[key].(type) {
 		case json.Number:
 			result[key] = value
@@ -238,6 +249,17 @@ func InspectSessionCandidates(fileName string) ([]SessionCandidate, error) {
 // It uses the provider's own time representation for a four-minute window;
 // the receiver's timestamp/timezone contract still requires message evidence.
 func ReadUniqueTestMessageSnapshot(ctx context.Context, endpoint, sessionsFile, outputDirectory string) (SnapshotReport, error) {
+	return readTestMessageSnapshot(ctx, endpoint, sessionsFile, outputDirectory, testMessageQuery)
+}
+
+// ReadUniqueTestGroupMessageSnapshot is for an explicitly authorized, dedicated
+// test group. It requires exactly one group in the recent-session snapshot; it
+// never chooses the newest among multiple groups or reads private conversations.
+func ReadUniqueTestGroupMessageSnapshot(ctx context.Context, endpoint, sessionsFile, outputDirectory string) (SnapshotReport, error) {
+	return readTestMessageSnapshot(ctx, endpoint, sessionsFile, outputDirectory, testGroupMessageQuery)
+}
+
+func readTestMessageSnapshot(ctx context.Context, endpoint, sessionsFile, outputDirectory string, buildQuery func(privateSnapshot, sessionListPayload, time.Time) (map[string]any, error)) (SnapshotReport, error) {
 	if err := ValidateEndpoint(endpoint); err != nil {
 		return SnapshotReport{}, err
 	}
@@ -251,7 +273,7 @@ func ReadUniqueTestMessageSnapshot(ctx context.Context, endpoint, sessionsFile, 
 	if snapshot.EndpointHash == "" {
 		return SnapshotReport{}, errors.New("legacy snapshot lacks endpoint binding; obtain a new authorized snapshot")
 	}
-	args, err := testMessageQuery(snapshot, payload, time.Now())
+	args, err := buildQuery(snapshot, payload, time.Now())
 	if err != nil {
 		return SnapshotReport{}, err
 	}
@@ -267,10 +289,31 @@ func testMessageQuery(snapshot privateSnapshot, payload sessionListPayload, now 
 		return nil, errors.New("test session is ambiguous; no messages were read")
 	}
 	item := payload.Sessions[0]
-	if item.ChatID == "" || len(item.ChatID) > 512 || strings.ContainsAny(item.ChatID, "\x00\r\n") || (item.ChatType != "single" && item.ChatType != "direct" && item.ChatType != "private") {
+	if item.ChatType != "single" && item.ChatType != "direct" && item.ChatType != "private" {
 		return nil, errors.New("sole session is not a recognized private session")
 	}
-	stamp, err := time.Parse("2006-01-02 15:04:05", item.LastMessageTime)
+	return recentMessageQuery(snapshot, item.ChatID, item.LastMessageTime, now)
+}
+
+func testGroupMessageQuery(snapshot privateSnapshot, payload sessionListPayload, now time.Time) (map[string]any, error) {
+	groups := sessionListPayload{}
+	for _, item := range payload.Sessions {
+		if item.ChatType == "group" {
+			groups.Sessions = append(groups.Sessions, item)
+		}
+	}
+	if len(groups.Sessions) != 1 {
+		return nil, errors.New("test group is ambiguous; no messages were read")
+	}
+	item := groups.Sessions[0]
+	return recentMessageQuery(snapshot, item.ChatID, item.LastMessageTime, now)
+}
+
+func recentMessageQuery(snapshot privateSnapshot, chatID, lastMessageTime string, now time.Time) (map[string]any, error) {
+	if chatID == "" || len(chatID) > 512 || strings.ContainsAny(chatID, "\x00\r\n") {
+		return nil, errors.New("invalid test session identifier")
+	}
+	stamp, err := time.Parse("2006-01-02 15:04:05", lastMessageTime)
 	if err != nil {
 		return nil, errors.New("cannot scope message query to a reliable timestamp")
 	}
@@ -288,7 +331,7 @@ func testMessageQuery(snapshot privateSnapshot, payload sessionListPayload, now 
 	if !recent {
 		return nil, errors.New("session does not match the recent test window")
 	}
-	args := map[string]any{"chat_id": item.ChatID, "begin_time": stamp.Add(-2 * time.Minute).Format("2006-01-02 15:04:05"), "end_time": stamp.Add(2 * time.Minute).Format("2006-01-02 15:04:05")}
+	args := map[string]any{"chat_id": chatID, "begin_time": stamp.Add(-2 * time.Minute).Format("2006-01-02 15:04:05"), "end_time": stamp.Add(2 * time.Minute).Format("2006-01-02 15:04:05")}
 	return args, nil
 }
 

@@ -26,6 +26,8 @@ const (
 	WeComCallback   = "wecom_callback"
 	WeComAES        = "wecom_aes"
 	WeComApp        = "wecom_app"
+	WeComMCPRead    = "wecom_mcp_read"
+	WeComMCPSend    = "wecom_mcp_send"
 )
 
 // Grant is deployment-owned authorization, never tenant-editable metadata.
@@ -52,7 +54,7 @@ var referencePattern = regexp.MustCompile(`^env://[A-Z][A-Z0-9_]{0,127}$`)
 
 func ValidPurpose(value string) bool {
 	switch value {
-	case Model, Session, Memory, Artifact, Knowledge, Embedding, TelegramWebhook, TelegramBot, WeComCallback, WeComAES, WeComApp:
+	case Model, Session, Memory, Artifact, Knowledge, Embedding, TelegramWebhook, TelegramBot, WeComCallback, WeComAES, WeComApp, WeComMCPRead, WeComMCPSend:
 		return true
 	}
 	return false

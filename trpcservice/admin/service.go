@@ -568,6 +568,9 @@ func (s *Service) UpdateChannelBinding(
 		return controlplane.ChannelBinding{}, err
 	}
 	current.Config = config
+	if err := validateChannelShape(current); err != nil {
+		return controlplane.ChannelBinding{}, err
+	}
 	// Disabling remains possible after a grant has been revoked.
 	if status == controlplane.StatusActive {
 		if err := s.authorizeChannelSecrets(ctx, current); err != nil {

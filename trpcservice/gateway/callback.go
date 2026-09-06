@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -76,79 +77,97 @@ func (g *CallbackGateway) Handle(
 		return channels.CallbackResult{}, err
 	}
 	for _, message := range result.Messages {
-		if strings.TrimSpace(message.Text) == "" {
-			continue
-		}
-		userID, sessionID := channels.RuntimeIdentity(
-			binding.ID,
-			message.ExternalUserID,
-			message.ExternalChatID,
-			message.ExternalThreadID,
-			message.ChatType,
-		)
-		// Count all verified callback messages once, including approval/control
-		// feedback which deliberately bypasses the normal Agent intake path.
-		if g.intake.quota != nil {
-			if err := g.intake.quota.AllowInbound(ctx, binding.TenantID, userID); err != nil {
-				if g.intake.audit != nil {
-					_ = g.intake.audit.Record(ctx, audit.Event{TenantID: binding.TenantID, Channel: binding.ChannelType, ChannelBindingID: binding.ID,
-						UserID: userID, SessionID: sessionID, MessageID: message.ExternalMessageID, TraceID: audit.TraceID(ctx), Decision: "inbound_rate_rejected", ErrorType: "tenant_quota"})
-				}
-				return channels.CallbackResult{}, fmt.Errorf("callback rate limit: %w", err)
-			}
-		}
-		if feedback := unsupportedMessageReply(message); feedback != "" {
-			if _, err := g.intake.Accept(ctx, IntakeRequest{
-				rateChecked: true,
-				BindingKey:  binding.CallbackKey, ExternalMessageID: message.ExternalMessageID,
-				UserID: userID, SessionID: sessionID, ChatType: message.ChatType,
-				Text: message.Text, ReplyTarget: message.ReplyTarget, DirectReply: feedback,
-			}); err != nil {
-				return channels.CallbackResult{}, fmt.Errorf("persist unsupported message feedback: %w", err)
-			}
-			continue
-		}
-		if g.approvals != nil {
-			scope, err := g.intake.resolveScope(ctx, binding.CallbackKey, userID, sessionID)
-			if err != nil {
-				return channels.CallbackResult{}, err
-			}
-			handled, err := g.approvals.HandleApprovalDecision(ctx, ApprovalDecisionInput{
-				Scope:             scope,
-				TenantID:          binding.TenantID,
-				ChannelType:       binding.ChannelType,
-				ChannelBindingID:  binding.ID,
-				ExternalMessageID: message.ExternalMessageID,
-				UserID:            userID,
-				SessionID:         sessionID,
-				ChatType:          message.ChatType,
-				Text:              message.Text,
-				ReplyTarget:       message.ReplyTarget,
-			})
-			if err != nil {
-				return channels.CallbackResult{}, fmt.Errorf("handle approval decision: %w", err)
-			}
-			if handled {
-				continue
-			}
-		}
-		if _, err := g.intake.Accept(ctx, IntakeRequest{
-			rateChecked:       true,
-			BindingKey:        binding.CallbackKey,
-			ExternalMessageID: message.ExternalMessageID,
-			UserID:            userID,
-			SessionID:         sessionID,
-			ChatType:          message.ChatType,
-			Text:              message.Text,
-			ReplyTarget:       message.ReplyTarget,
-		}); err != nil {
-			return channels.CallbackResult{}, fmt.Errorf("persist callback message: %w", err)
+		if err := g.acceptVerifiedMessage(ctx, binding, message); err != nil {
+			return channels.CallbackResult{}, err
 		}
 	}
 	if result.StatusCode == 0 {
 		result.StatusCode = http.StatusOK
 	}
 	return result, nil
+}
+
+// AcceptPolled is an internal ingress, not a new HTTP endpoint. Recheck the
+// binding version after network I/O, so disabled/reconfigured subscriptions do
+// not enqueue stale messages. The adapter has already enforced group/sender scope.
+func (g *CallbackGateway) AcceptPolled(ctx context.Context, binding controlplane.ChannelBinding, message channels.InboundEnvelope) error {
+	current, err := g.repository.GetChannelBinding(ctx, binding.TenantID, binding.ID)
+	if err != nil || current.Status != controlplane.StatusActive || current.ChannelType != wecommcp.ChannelType || current.Version != binding.Version || current.AppID != binding.AppID || current.CallbackKey != binding.CallbackKey {
+		return fmt.Errorf("polled channel binding changed or unavailable")
+	}
+	return g.acceptVerifiedMessage(ctx, current, message)
+}
+
+func (g *CallbackGateway) acceptVerifiedMessage(ctx context.Context, binding controlplane.ChannelBinding, message channels.InboundEnvelope) error {
+	if strings.TrimSpace(message.Text) == "" {
+		return nil
+	}
+	userID, sessionID := channels.RuntimeIdentity(
+		binding.ID,
+		message.ExternalUserID,
+		message.ExternalChatID,
+		message.ExternalThreadID,
+		message.ChatType,
+	)
+	// Count all verified callback messages once, including approval/control
+	// feedback which deliberately bypasses the normal Agent intake path.
+	if g.intake.quota != nil {
+		if err := g.intake.quota.AllowInbound(ctx, binding.TenantID, userID); err != nil {
+			if g.intake.audit != nil {
+				_ = g.intake.audit.Record(ctx, audit.Event{TenantID: binding.TenantID, Channel: binding.ChannelType, ChannelBindingID: binding.ID,
+					UserID: userID, SessionID: sessionID, MessageID: message.ExternalMessageID, TraceID: audit.TraceID(ctx), Decision: "inbound_rate_rejected", ErrorType: "tenant_quota"})
+			}
+			return fmt.Errorf("callback rate limit: %w", err)
+		}
+	}
+	if feedback := unsupportedMessageReply(message); feedback != "" {
+		if _, err := g.intake.Accept(ctx, IntakeRequest{
+			rateChecked: true,
+			BindingKey:  binding.CallbackKey, ExternalMessageID: message.ExternalMessageID,
+			UserID: userID, SessionID: sessionID, ChatType: message.ChatType,
+			Text: message.Text, ReplyTarget: message.ReplyTarget, DirectReply: feedback,
+		}); err != nil {
+			return fmt.Errorf("persist unsupported message feedback: %w", err)
+		}
+		return nil
+	}
+	if g.approvals != nil {
+		scope, err := g.intake.resolveScope(ctx, binding.CallbackKey, userID, sessionID)
+		if err != nil {
+			return err
+		}
+		handled, err := g.approvals.HandleApprovalDecision(ctx, ApprovalDecisionInput{
+			Scope:             scope,
+			TenantID:          binding.TenantID,
+			ChannelType:       binding.ChannelType,
+			ChannelBindingID:  binding.ID,
+			ExternalMessageID: message.ExternalMessageID,
+			UserID:            userID,
+			SessionID:         sessionID,
+			ChatType:          message.ChatType,
+			Text:              message.Text,
+			ReplyTarget:       message.ReplyTarget,
+		})
+		if err != nil {
+			return fmt.Errorf("handle approval decision: %w", err)
+		}
+		if handled {
+			return nil
+		}
+	}
+	if _, err := g.intake.Accept(ctx, IntakeRequest{
+		rateChecked:       true,
+		BindingKey:        binding.CallbackKey,
+		ExternalMessageID: message.ExternalMessageID,
+		UserID:            userID,
+		SessionID:         sessionID,
+		ChatType:          message.ChatType,
+		Text:              message.Text,
+		ReplyTarget:       message.ReplyTarget,
+	}); err != nil {
+		return fmt.Errorf("persist callback message: %w", err)
+	}
+	return nil
 }
 
 func unsupportedMessageReply(message channels.InboundEnvelope) string {

@@ -1,0 +1,15 @@
+{
+  "errcode": 0,
+  "errmsg": "ok",
+  "has_more": false,
+  "messages_count": 1,
+  "messages": [
+    {
+      "msg_type": "text",
+      "send_time": "2026-09-06 15:59:38",
+      "text": {"content": "@synthetic-bot TRPC-WECOM-TEST-001"},
+      "user_name": "synthetic-user",
+      "userid": "synthetic-user-id"
+    }
+  ]
+}
