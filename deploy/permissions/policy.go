@@ -79,9 +79,11 @@ func roleGrants(role string) map[string][]string {
 		add("SELECT,INSERT,UPDATE", "channel_delivery_attempt")
 	case "jobs":
 		add("SELECT", control...)
+		add("SELECT,INSERT,UPDATE", "background_watermark")
 		add("UPDATE", "backend_binding", "backend_migration")
 		add("SELECT,INSERT,UPDATE", "background_job")
 	case "admin":
+		add("SELECT", "background_watermark")
 		add("SELECT", "platform_backlog")
 		add("SELECT", control...)
 		add("INSERT", "tenant", "agent_app", "agent_revision", "channel_binding", "backend_binding", "backend_migration")
@@ -109,6 +111,7 @@ func Redis(prefix, keyPrefix string) (string, error) {
 	base := "reset off -@all +ping +hello +select +client|setinfo +client|setname"
 	commands := "+get +set +del +exists +incr +decr +incrby +incrbyfloat +expire +pexpire +psetex +mget +eval +evalsha +script|load"
 	selector := func(pattern, cmds string) string { return " (~" + keyPrefix + pattern + " " + cmds + ")" }
+	queueCommands := "+exists +eval +evalsha +script|load +xgroup|create +xinfo|groups +xpending +xlen +xtrim +xadd"
 	for _, role := range roles {
 		fmt.Fprintf(&out, "user %s_%s %s", prefix, role, base)
 		switch role {
@@ -120,9 +123,9 @@ func Redis(prefix, keyPrefix string) (string, error) {
 			out.WriteString(selector(":quota:*", commands))
 			out.WriteString(selector(":coord:session:*", commands))
 			out.WriteString(selector(":idempotency:message:*", commands))
-			out.WriteString(selector(":stream:*", "+xgroup|create +xreadgroup +xautoclaim +xack +xadd"))
+			out.WriteString(selector(":stream:*", queueCommands+" +xreadgroup +xautoclaim +xclaim +xack +xdel"))
 		case "relay":
-			out.WriteString(selector(":stream:*", "+xgroup|create +xadd"))
+			out.WriteString(selector(":stream:*", queueCommands))
 		}
 		if role == "worker" || role == "jobs" {
 			dataCommands := commands + " +hget +hgetall +hmget +hset +hdel +hexists +hscan +hincrby +zadd +zrange +zrevrange +zrangebyscore +zrevrangebyscore +zcard +zrem +zscore +sadd +srem +smembers +sscan +scard +persist +pttl +ttl +multi +exec +discard +watch +unwatch"

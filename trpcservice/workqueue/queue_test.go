@@ -69,6 +69,11 @@ func TestRedisQueueReclaimsPendingDelivery(t *testing.T) {
 	if _, err := first.Receive(context.Background()); err != nil {
 		t.Fatalf("first receive: %v", err)
 	}
+	// A live consumer now renews its delivery. Stop its transport to model
+	// process loss before expecting another consumer to reclaim the task.
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(30 * time.Millisecond)
 	reclaimed, err := second.Receive(context.Background())
 	if err != nil || reclaimed.Task().RequestID != "recover" {

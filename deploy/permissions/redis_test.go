@@ -148,6 +148,12 @@ func TestRedisACLIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal("consume under worker ACL: ", err)
 	}
+	// Exercise heartbeat XCLAIM/XPENDING under the real Redis ACL, not just
+	// a fast ACK which might finish before the first renewal.
+	time.Sleep(1200 * time.Millisecond)
+	if delivery.(workqueue.LeasedDelivery).Context().Err() != nil {
+		t.Fatal("delivery could not renew under worker ACL")
+	}
 	if err := delivery.Ack(ctx); err != nil {
 		t.Fatal(err)
 	}

@@ -26,6 +26,7 @@ type ProcessorOptions struct {
 	ClaimLease   time.Duration
 	PollInterval time.Duration
 	RetryDelay   time.Duration
+	Watermarks   Watermarks
 }
 
 type Processor struct {
@@ -39,6 +40,7 @@ type Processor struct {
 	extractor       extractor.MemoryExtractor
 	audit           audit.Writer
 	options         ProcessorOptions
+	watermarks      Watermarks
 }
 
 func NewProcessor(
@@ -72,12 +74,16 @@ func NewProcessor(
 		return nil, errors.New("background processor requires platform MemoryRouter")
 	}
 	sessionMigrator, _ := sessions.(*platformstorage.SessionRouter)
+	if options.Watermarks == nil {
+		options.Watermarks = NewWatermarks(control)
+	}
 	return &Processor{
 		jobs: jobs, control: control, sessions: sessions, memories: memories,
 		memoryMigrator: memoryMigrator, sessionMigrator: sessionMigrator,
 		knowledge: knowledgeRouter,
 		extractor: memoryExtractor, audit: auditWriter,
-		options: options,
+		options:    options,
+		watermarks: options.Watermarks,
 	}, nil
 }
 
@@ -128,13 +134,20 @@ func (p *Processor) process(ctx context.Context, job Job) error {
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
 			return err
 		}
+		if _, err := watermarkKey(job, payload); err != nil {
+			return err
+		}
 		return p.processSummary(ctx, revision, payload)
 	case JobMemoryExtract:
 		var payload SessionJobPayload
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
 			return err
 		}
-		return p.processMemory(ctx, revision, payload)
+		key, err := watermarkKey(job, payload)
+		if err != nil {
+			return err
+		}
+		return p.processMemory(ctx, revision, payload, key)
 	case JobKnowledgeUpsert:
 		var payload KnowledgeUpsertPayload
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
@@ -321,6 +334,7 @@ func (p *Processor) processMemory(
 	ctx context.Context,
 	revision controlplane.AgentRevision,
 	payload SessionJobPayload,
+	progressKey WatermarkKey,
 ) error {
 	var config memoryBackgroundConfig
 	if err := json.Unmarshal(revision.MemoryConfig, &config); err != nil {
@@ -337,7 +351,21 @@ func (p *Processor) processMemory(
 	if err != nil {
 		return err
 	}
-	lastExtractAt := parseWatermark(sess.State[memory.SessionStateKeyAutoMemoryLastExtractAt])
+	lastExtractAt, exists, err := p.watermarks.Read(ctx, progressKey)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		// One-time adoption of the old Session value. GREATEST also protects
+		// two processes adopting old state while a newer extraction finishes.
+		legacy := parseWatermark(sess.State[memory.SessionStateKeyAutoMemoryLastExtractAt])
+		if !legacy.IsZero() {
+			lastExtractAt, err = p.watermarks.Advance(ctx, progressKey, legacy)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	messages, latest := sessionMessagesAfter(sess.Events, lastExtractAt)
 	if len(messages) == 0 {
 		return nil
@@ -359,9 +387,10 @@ func (p *Processor) processMemory(
 	if latest.IsZero() {
 		latest = time.Now().UTC()
 	}
-	return p.sessions.UpdateSessionState(ctx, key, session.StateMap{
-		memory.SessionStateKeyAutoMemoryLastExtractAt: []byte(latest.UTC().Format(time.RFC3339Nano)),
-	})
+	// Do not mirror this into Session with a last-write-wins update: an old
+	// worker could undo newer progress. Control-plane watermark is authoritative.
+	_, err = p.watermarks.Advance(ctx, progressKey, latest)
+	return err
 }
 
 func (p *Processor) applyMemoryOperation(
@@ -381,16 +410,8 @@ func (p *Processor) applyMemoryOperation(
 		return p.memories.AddMemory(
 			ctx, userKey, operation.Memory, operation.Topics, memory.WithMetadata(metadata),
 		)
-	case extractor.OperationUpdate:
-		return p.memories.UpdateMemory(ctx, memory.Key{
-			AppName: userKey.AppName, UserID: userKey.UserID, MemoryID: operation.MemoryID,
-		}, operation.Memory, operation.Topics, memory.WithUpdateMetadata(metadata))
-	case extractor.OperationDelete:
-		return p.memories.DeleteMemory(ctx, memory.Key{
-			AppName: userKey.AppName, UserID: userKey.UserID, MemoryID: operation.MemoryID,
-		})
-	case extractor.OperationClear:
-		return p.memories.ClearMemories(ctx, userKey)
+	case extractor.OperationUpdate, extractor.OperationDelete, extractor.OperationClear:
+		return errors.New("automatic Memory extraction permits only idempotent additions")
 	default:
 		return fmt.Errorf("unsupported memory operation %q", operation.Type)
 	}

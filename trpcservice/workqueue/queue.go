@@ -22,3 +22,11 @@ type Delivery interface {
 	Ack(ctx context.Context) error
 	Retry(ctx context.Context) error
 }
+
+// LeasedDelivery cancels its context when transport ownership is lost. Close
+// stops renewal without acknowledging; a later consumer may reclaim the task.
+type LeasedDelivery interface {
+	Delivery
+	Context() context.Context
+	Close()
+}

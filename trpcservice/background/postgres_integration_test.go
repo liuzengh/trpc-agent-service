@@ -25,6 +25,7 @@ func TestPostgresRepositoryIntegration(t *testing.T) {
 		t.Fatalf("control plane: %v", err)
 	}
 	t.Cleanup(func() { _ = control.Close() })
+	watermarkContract(t, NewWatermarks(control), NewWatermarks(control))
 	repository, err := NewForControlPlane(control)
 	if err != nil {
 		t.Fatalf("new jobs: %v", err)

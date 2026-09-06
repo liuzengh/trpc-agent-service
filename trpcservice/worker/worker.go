@@ -75,6 +75,10 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	task := delivery.Task()
+	if leased, ok := delivery.(workqueue.LeasedDelivery); ok {
+		defer leased.Close()
+		ctx = leased.Context()
+	}
 	ctx = taskContext(ctx, task)
 	ctx, span := otel.Tracer("trpc-agent-service/worker").Start(ctx, "worker.agent.run")
 	span.SetAttributes(

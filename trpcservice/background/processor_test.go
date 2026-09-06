@@ -218,9 +218,9 @@ func TestProcessorExtractsMemoryAndAdvancesWatermark(t *testing.T) {
 	if err != nil || len(entries) != 1 || entries[0].Memory.Memory != "User likes tea" {
 		t.Fatalf("entries=%+v err=%v", entries, err)
 	}
-	stored, _ := sessions.GetSession(context.Background(), key)
-	if len(stored.State[memory.SessionStateKeyAutoMemoryLastExtractAt]) == 0 {
-		t.Fatal("memory extraction watermark was not stored")
+	mark, exists, err := processor.watermarks.Read(context.Background(), WatermarkKey{"tutorial-tenant", "tutorial-app", key.UserID, key.SessionID, JobMemoryExtract})
+	if err != nil || !exists || mark.IsZero() {
+		t.Fatal("authoritative Memory watermark was not stored")
 	}
 }
 
