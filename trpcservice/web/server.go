@@ -224,6 +224,13 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result := s.AsyncIngress.Handle(r.Context(), parts[1], parts[2], r, body)
+		if result.RetryAfter > 0 {
+			seconds := int(result.RetryAfter / time.Second)
+			if seconds < 1 {
+				seconds = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		}
 		writeRaw(w, result.Status, result.ContentType, result.Body)
 		return
 	}

@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/admission"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/ratelimit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
@@ -32,7 +34,29 @@ type WebhookResult struct {
 	Status      int
 	ContentType string
 	Body        []byte
+	// RetryAfter is a bounded, server-owned retry hint in seconds. Zero
+	// means no header. It is only set for the two overload outcomes
+	// (rate_limited, capacity_exhausted) and is clamped by the ingress.
+	RetryAfter time.Duration
 }
+
+// IngressAdmissionTelemetry is the narrow optional capacity observability
+// surface. Outcome values are a bounded enum; no tenant, binding or chat
+// identifier ever crosses it.
+type IngressAdmissionTelemetry interface {
+	IngressAdmission(outcome string)
+}
+
+// Bounded Retry-After contract: the limiter's own window remainder, clamped
+// into [minRateLimitRetryAfter, maxRateLimitRetryAfter]; never a raw
+// provider or backend value.
+const (
+	minRateLimitRetryAfter = time.Second
+	maxRateLimitRetryAfter = time.Hour
+	// capacityRetryAfter is the fixed, server-owned hint attached to
+	// capacity_exhausted rejections.
+	capacityRetryAfter = time.Second
+)
 
 // IngressConfig contains server-owned dependencies. Tenant, binding, and
 // internal identity values are resolved from this boundary, never from body.
@@ -48,6 +72,16 @@ type IngressConfig struct {
 	ClaimTTL     time.Duration
 	JobTimeout   time.Duration
 	Now          func() time.Time
+	// RateLimiter is the optional server-owned three-dimensional Redis
+	// quota gate (tenant, channel-binding, external chat). Nil keeps the
+	// historical unthrottled behavior for compositions without Redis.
+	RateLimiter *ratelimit.RateLimiter
+	// Admission is the optional process-local bounded slot budget. Nil
+	// keeps historical behavior; production compositions always wire it.
+	Admission *admission.Gate
+	// Telemetry is the optional capacity observability surface. Nil
+	// disables capacity metrics; it never changes outcomes.
+	Telemetry IngressAdmissionTelemetry
 }
 
 type Ingress struct {
@@ -62,6 +96,9 @@ type Ingress struct {
 	claimTTL     time.Duration
 	jobTimeout   time.Duration
 	now          func() time.Time
+	rateLimiter  *ratelimit.RateLimiter
+	admission    *admission.Gate
+	telemetry    IngressAdmissionTelemetry
 }
 
 func NewIngress(config IngressConfig) (*Ingress, error) {
@@ -90,7 +127,7 @@ func NewIngress(config IngressConfig) (*Ingress, error) {
 		}
 		adapters[channel] = adapter
 	}
-	return &Ingress{resolver: config.Resolver, identity: config.Identity, audit: config.Audit, claims: config.Claims, gateway: config.Gateway, resolveAgent: config.ResolveAgent, adapters: adapters, ownerID: config.OwnerID, claimTTL: config.ClaimTTL, jobTimeout: config.JobTimeout, now: config.Now}, nil
+	return &Ingress{resolver: config.Resolver, identity: config.Identity, audit: config.Audit, claims: config.Claims, gateway: config.Gateway, resolveAgent: config.ResolveAgent, adapters: adapters, ownerID: config.OwnerID, claimTTL: config.ClaimTTL, jobTimeout: config.JobTimeout, now: config.Now, rateLimiter: config.RateLimiter, admission: config.Admission, telemetry: config.Telemetry}, nil
 }
 
 func (i *Ingress) Handle(ctx context.Context, channel, externalAppID string, request *http.Request, body []byte) WebhookResult {
@@ -148,6 +185,43 @@ func (i *Ingress) Handle(ctx context.Context, channel, externalAppID string, req
 	tc.SessionID = channels.SessionIDWithThread(tc.TenantID, channel, incoming.UserID, incoming.ChatID, incoming.ThreadID)
 	if err := tc.Validate(); err != nil {
 		return failureResult(http.StatusUnauthorized)
+	}
+	// P2-03 capacity boundary: both gates sit strictly after the server-owned
+	// TenantContext resolution and strictly before the dedup claim and the
+	// durable enqueue, so a rejected or overloaded request never claims, never
+	// submits and never reaches a runner, tool or sender.
+	//
+	// Order is fixed: rate limit (shared Redis quota) first, then the
+	// process-local admission budget. Admission acquisition is
+	// global -> tenant -> binding and the release is deferred, so the slot is
+	// held until the fast ACK (or any failure/panic/cancellation return path)
+	// and released exactly once.
+	if i.rateLimiter != nil {
+		decision, limitErr := i.rateLimiter.Allow(ctx, ratelimit.LimitRequest{TenantID: tc.TenantID, BindingID: tc.BindingID, Channel: channel, ExternalChatID: incoming.ChatID, Cost: rateLimitRequestCost})
+		i.observeAdmission(limitOutcome(limitErr))
+		if limitErr != nil {
+			if errors.Is(limitErr, ratelimit.ErrRateLimited) {
+				// Quota exhausted: bounded retry hint, never a claim.
+				return rateLimitedResult(clampRetryAfter(decision.RetryAfter))
+			}
+			// Backend unavailable (timeout, protocol error, cancel) is
+			// dependency_unavailable: fail closed as 503, never as allowed
+			// and never as an ordinary rate limit.
+			return failureResult(http.StatusServiceUnavailable)
+		}
+	}
+	if i.admission != nil {
+		release, admitErr := i.admission.Acquire(ctx, tc.TenantID, channel+"/"+tc.BindingID)
+		if admitErr != nil {
+			i.observeAdmission(admissionOutcome(admitErr))
+			if errors.Is(admitErr, admission.ErrContextDone) {
+				return failureResult(http.StatusServiceUnavailable)
+			}
+			// Process budget exhausted: bounded fast reject before any claim.
+			return capacityResult()
+		}
+		i.observeAdmission("allowed")
+		defer release()
 	}
 	agentSpec, err := i.resolveAgent(ctx, tc)
 	if err != nil {
@@ -213,4 +287,72 @@ func acceptedResult(accepted *Accepted, duplicate bool) WebhookResult {
 
 func failureResult(status int) WebhookResult {
 	return WebhookResult{Status: status, ContentType: "application/json", Body: []byte(`{"error":"webhook request rejected"}`)}
+}
+
+// rateLimitRequestCost is the bounded per-request quota cost. One webhook
+// consumes exactly one unit in every dimension; body size is bounded
+// separately by the transport limit.
+const rateLimitRequestCost = int64(1)
+
+func clampRetryAfter(value time.Duration) time.Duration {
+	if value < minRateLimitRetryAfter {
+		return minRateLimitRetryAfter
+	}
+	if value > maxRateLimitRetryAfter {
+		return maxRateLimitRetryAfter
+	}
+	return value
+}
+
+func limitOutcome(err error) string {
+	switch {
+	case err == nil:
+		return "allowed"
+	case errors.Is(err, ratelimit.ErrRateLimited):
+		return "rate_limited"
+	default:
+		return "backend_unavailable"
+	}
+}
+
+func admissionOutcome(err error) string {
+	switch {
+	case err == nil:
+		return "allowed"
+	case errors.Is(err, admission.ErrContextDone):
+		return "dependency_unavailable"
+	default:
+		return "capacity_exhausted"
+	}
+}
+
+func (i *Ingress) observeAdmission(outcome string) {
+	if i == nil || i.telemetry == nil {
+		return
+	}
+	i.telemetry.IngressAdmission(outcome)
+}
+
+// rateLimitedResult is the quota outcome: HTTP 429 with a bounded
+// server-owned Retry-After and a stable, non-sensitive body. The request
+// never reached the dedup claim.
+func rateLimitedResult(retryAfter time.Duration) WebhookResult {
+	return WebhookResult{
+		Status:      http.StatusTooManyRequests,
+		ContentType: "application/json",
+		Body:        []byte(`{"error":"webhook request rejected","reason":"rate_limited"}`),
+		RetryAfter:  retryAfter,
+	}
+}
+
+// capacityResult is the process-budget outcome: HTTP 429 with the fixed
+// bounded capacity hint and a stable, non-sensitive body. The request never
+// reached the dedup claim and no admission slot was taken.
+func capacityResult() WebhookResult {
+	return WebhookResult{
+		Status:      http.StatusTooManyRequests,
+		ContentType: "application/json",
+		Body:        []byte(`{"error":"webhook request rejected","reason":"capacity_exhausted"}`),
+		RetryAfter:  capacityRetryAfter,
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/admission"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/lark"
@@ -23,6 +24,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/outbox"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/platform"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/queue"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/ratelimit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	pgstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/s3object"
@@ -31,6 +33,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/vector"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
+	"github.com/redis/go-redis/v9"
 )
 
 type productionRuntime struct {
@@ -47,8 +50,13 @@ type productionRuntime struct {
 	dispatcherStartHook func()
 	beginDrainingHook   func()
 	poolCloseOnce       sync.Once
-	forceMu             sync.Mutex
-	forceErr            error
+	closeLimiterOnce    sync.Once
+	closeLimiter        func()
+	// admission is the P2-03 process-local ingress budget wired into the
+	// webhook ingress; exposed for bounded capacity observation.
+	admission *admission.Gate
+	forceMu   sync.Mutex
+	forceErr  error
 }
 
 func (r *productionRuntime) Start(ctx context.Context) error {
@@ -175,6 +183,12 @@ func (r *productionRuntime) rememberForceError(err error) {
 func (r *productionRuntime) closePool() {
 	if r != nil && r.pool != nil {
 		r.poolCloseOnce.Do(r.pool.Close)
+	}
+	if r != nil && r.closeLimiter != nil {
+		// The P2-03 rate limit Redis client is a bounded, non-fact-source
+		// auxiliary connection: it is closed together with the pool on both
+		// the graceful and the forced path.
+		r.closeLimiterOnce.Do(r.closeLimiter)
 	}
 }
 
@@ -462,6 +476,10 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 		return nil, fmt.Errorf("runtime role limits: %w", err)
 	}
 	closeOnError := true
+	// closeRateLimiter is assigned once the optional P2-03 rate limit
+	// client is built further below; the deferred cleanup above closes it
+	// together with the pool when assembly fails.
+	var closeRateLimiter func()
 	metadataRegistry, err := pgstore.NewTenantRegistry(pool)
 	if err != nil {
 		return nil, errors.New("tenant metadata repository initialization failed")
@@ -482,6 +500,9 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 	defer func() {
 		if closeOnError {
 			pool.Close()
+			if closeRateLimiter != nil {
+				closeRateLimiter()
+			}
 		}
 	}()
 	artifactRepository, err := pgstore.NewArtifactMetadataRepository(pool, objectStore)
@@ -547,9 +568,30 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 			fallback: bootstrapResolver.agentSpec,
 		}
 	}
+	workerConcurrency, workerConcurrencyErr := boundedIntEnv("WORKER_CONCURRENCY", 4, 1, 64)
+	if workerConcurrencyErr != nil {
+		return nil, workerConcurrencyErr
+	}
+	dispatcherConcurrency, dispatcherConcurrencyErr := boundedIntEnv("DISPATCHER_CONCURRENCY", 1, 1, 32)
+	if dispatcherConcurrencyErr != nil {
+		return nil, dispatcherConcurrencyErr
+	}
+	dispatcherBatch, dispatcherBatchErr := boundedIntEnv("DISPATCHER_CLAIM_BATCH_SIZE", int64(storage.DefaultOutboxBatchSize), 1, int64(outbox.MaxDispatcherBatchSize))
+	if dispatcherBatchErr != nil {
+		return nil, dispatcherBatchErr
+	}
+	admissionGate, admissionGateErr := admissionGateFromEnv()
+	if admissionGateErr != nil {
+		return nil, admissionGateErr
+	}
+	rateLimiter, closeRateLimiterFn, rateLimiterErr := rateLimiterFromEnv()
+	if rateLimiterErr != nil {
+		return nil, rateLimiterErr
+	}
+	closeRateLimiter = closeRateLimiterFn
 	workerConfig := worker.Config{
 		WorkerID:           config.ownerID,
-		Concurrency:        4,
+		Concurrency:        workerConcurrency,
 		VisibilityTimeout:  lifecycleDuration("WORKER_VISIBILITY_TIMEOUT", 2*time.Minute),
 		LeaseTTL:           lifecycleDuration("WORKER_LEASE_TTL", 2*time.Minute),
 		ShutdownTimeout:    lifecycleDuration("WORKER_SHUTDOWN_TIMEOUT", 10*time.Second),
@@ -611,7 +653,9 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 		return nil, errors.New("channel sender initialization failed")
 	}
 	dispatcher, err := outbox.NewDispatcher(oRepository, channelSender, outbox.Config{
-		OwnerID: config.ownerID, Tenants: []tenant.TenantContext{baseTenantContext(config)}, ClaimInterval: lifecycleDuration("DISPATCHER_CLAIM_INTERVAL", time.Second), ShutdownTimeout: lifecycleDuration("DISPATCHER_SHUTDOWN_TIMEOUT", 5*time.Second),
+		OwnerID: config.ownerID, Tenants: []tenant.TenantContext{baseTenantContext(config)},
+		ClaimBatchSize: dispatcherBatch, Concurrency: dispatcherConcurrency,
+		ClaimInterval: lifecycleDuration("DISPATCHER_CLAIM_INTERVAL", time.Second), ShutdownTimeout: lifecycleDuration("DISPATCHER_SHUTDOWN_TIMEOUT", 5*time.Second),
 	})
 	if err != nil {
 		return nil, errors.New("dispatcher initialization failed")
@@ -652,7 +696,7 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 		}
 		ingressResolveAgent = snapshotResolver.ResolveForIngress
 	}
-	ingress, err := gateway.NewIngress(gateway.IngressConfig{Claims: coordination, Gateway: asyncGateway, Resolver: resolver, Identity: identityResolver, Audit: metadataRegistry, ResolveAgent: ingressResolveAgent, Adapters: adapters, OwnerID: config.ownerID})
+	ingress, err := gateway.NewIngress(gateway.IngressConfig{Claims: coordination, Gateway: asyncGateway, Resolver: resolver, Identity: identityResolver, Audit: metadataRegistry, ResolveAgent: ingressResolveAgent, Adapters: adapters, OwnerID: config.ownerID, RateLimiter: rateLimiter, Admission: admissionGate, Telemetry: capacityTelemetryAdapter{metrics: telemetryRuntime.Metrics()}})
 	if err != nil {
 		return nil, errors.New("webhook ingress initialization failed")
 	}
@@ -667,6 +711,7 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 	runtime := &productionRuntime{
 		telemetry: telemetryRuntime,
 		pool:      pool, objectStore: objectStore, artifactRepository: artifactRepository, resolver: resolver, ingress: ingress, worker: durableWorker, dispatcher: dispatcher, vector: vectorRuntime,
+		closeLimiter: closeRateLimiter, admission: admissionGate,
 		dispatcherStartHook: dependencies.dispatcherStartHook,
 		readiness: &productionReadiness{
 			migration: migrationReady, pool: pool, jobQueue: jobQueue, worker: durableWorker, dispatcher: dispatcher, objectProbe: objectProbe, vectorProbe: vectorProbe,
@@ -692,6 +737,112 @@ func (r *productionRuntime) TelemetryWebMiddleware() func(http.Handler) http.Han
 type runtimeResponderAdapter struct{ value platform.RuntimeResponder }
 
 func (r runtimeResponderAdapter) Factory() agent.AgentFactory { return r.value.Factory }
+
+// boundedIntEnv parses one strictly validated integer environment variable.
+// Empty selects the safe default; any other value that is not an integer in
+// [minimum, maximum] fails closed at startup instead of silently falling
+// back, so a capacity misconfiguration can never weaken protection.
+func boundedIntEnv(name string, fallback, minimum, maximum int64) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return int(fallback), nil
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer in [%d,%d]", name, minimum, maximum)
+	}
+	if parsed < minimum || parsed > maximum {
+		return 0, fmt.Errorf("%s must be an integer in [%d,%d]", name, minimum, maximum)
+	}
+	return int(parsed), nil
+}
+
+// boundedDurationEnv parses one strictly validated duration environment
+// variable with the same fail-closed semantics as boundedIntEnv.
+func boundedDurationEnv(name string, fallback, minimum, maximum time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed < minimum || parsed > maximum {
+		return 0, fmt.Errorf("%s must be a duration in [%s,%s]", name, minimum, maximum)
+	}
+	return parsed, nil
+}
+
+// capacityTelemetryAdapter forwards the bounded P2-03 admission outcomes to
+// the low-cardinality telemetry registry. It never carries identifiers.
+type capacityTelemetryAdapter struct{ metrics telemetry.Metrics }
+
+func (a capacityTelemetryAdapter) IngressAdmission(outcome string) {
+	if a.metrics != nil {
+		a.metrics.IngressAdmission(outcome)
+	}
+}
+
+// admissionGateFromEnv builds the process-local P2-03 admission budget.
+// Defaults are always on; invalid relationships fail closed.
+func admissionGateFromEnv() (*admission.Gate, error) {
+	global, err := boundedIntEnv("INGRESS_MAX_INFLIGHT", 64, 1, admission.MaxSlots)
+	if err != nil {
+		return nil, err
+	}
+	perTenant, err := boundedIntEnv("INGRESS_MAX_INFLIGHT_PER_TENANT", 32, 1, admission.MaxSlots)
+	if err != nil {
+		return nil, err
+	}
+	perBinding, err := boundedIntEnv("INGRESS_MAX_INFLIGHT_PER_BINDING", 16, 1, admission.MaxSlots)
+	if err != nil {
+		return nil, err
+	}
+	return admission.New(global, perTenant, perBinding)
+}
+
+// rateLimiterFromEnv builds the optional server-owned three-dimensional
+// Redis quota gate. An unset RATE_LIMIT_REDIS_URL keeps rate limiting
+// disabled (documented composition choice); a set but invalid URL, window
+// or limit fails closed at startup. The client uses bounded timeouts and a
+// small pool: the limiter is auxiliary state, never a business fact source.
+func rateLimiterFromEnv() (*ratelimit.RateLimiter, func(), error) {
+	rawURL := strings.TrimSpace(os.Getenv("RATE_LIMIT_REDIS_URL"))
+	if rawURL == "" {
+		return nil, func() {}, nil
+	}
+	options, err := redis.ParseURL(rawURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("RATE_LIMIT_REDIS_URL is not a valid redis URL")
+	}
+	options.DialTimeout = time.Second
+	options.ReadTimeout = time.Second
+	options.WriteTimeout = time.Second
+	options.PoolSize = 4
+	window, err := boundedDurationEnv("RATE_LIMIT_WINDOW", time.Minute, time.Second, time.Hour)
+	if err != nil {
+		return nil, nil, err
+	}
+	tenantLimit, err := boundedIntEnv("RATE_LIMIT_TENANT_LIMIT", 600, 1, 1000000)
+	if err != nil {
+		return nil, nil, err
+	}
+	bindingLimit, err := boundedIntEnv("RATE_LIMIT_BINDING_LIMIT", 300, 1, 1000000)
+	if err != nil {
+		return nil, nil, err
+	}
+	chatLimit, err := boundedIntEnv("RATE_LIMIT_CHAT_LIMIT", 120, 1, 1000000)
+	if err != nil {
+		return nil, nil, err
+	}
+	client := redis.NewClient(options)
+	limiter, err := ratelimit.New(client, "trpc-ingress", ratelimit.LimitPolicy{
+		TenantLimit: int64(tenantLimit), BindingLimit: int64(bindingLimit), ChatLimit: int64(chatLimit), Window: window,
+	})
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, fmt.Errorf("rate limiter configuration is invalid")
+	}
+	return limiter, func() { _ = client.Close() }, nil
+}
 
 func optionalBoolEnv(name string, fallback bool) (bool, error) {
 	value := strings.TrimSpace(os.Getenv(name))

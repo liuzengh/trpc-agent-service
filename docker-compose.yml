@@ -60,6 +60,20 @@ x-app-env: &app-env
   OTEL_EXPORTER_OTLP_ENDPOINT: ${P109_TELEMETRY_ENDPOINT:-}
   TELEMETRY_MODE: ${P109_TELEMETRY_MODE:-}
   TELEMETRY_INSECURE_LOCAL: ${P109_TELEMETRY_INSECURE_LOCAL:-}
+  # P2-03 capacity protection: the core deployment wires the three-dimensional
+  # Redis rate limiter and the process-local admission budget with safe
+  # defaults. Invalid values fail closed at startup.
+  RATE_LIMIT_REDIS_URL: redis://redis:6379/3
+  RATE_LIMIT_WINDOW: 1m
+  RATE_LIMIT_TENANT_LIMIT: "600"
+  RATE_LIMIT_BINDING_LIMIT: "300"
+  RATE_LIMIT_CHAT_LIMIT: "120"
+  INGRESS_MAX_INFLIGHT: "64"
+  INGRESS_MAX_INFLIGHT_PER_TENANT: "32"
+  INGRESS_MAX_INFLIGHT_PER_BINDING: "16"
+  WORKER_CONCURRENCY: "4"
+  DISPATCHER_CONCURRENCY: "1"
+  DISPATCHER_CLAIM_BATCH_SIZE: "100"
 
 services:
   postgres:

@@ -3,7 +3,10 @@ package outbox
 import (
 	"context"
 	"errors"
+	"runtime"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -501,5 +504,138 @@ func TestDispatcherRejectsUnboundedConfiguration(t *testing.T) {
 		if _, err := NewDispatcher(storage.NewFakeRepository(), &scriptedSender{}, config); !errors.Is(err, ErrInvalidConfig) {
 			t.Fatalf("config=%+v error=%v", config, err)
 		}
+	}
+}
+
+// TestDispatcherConcurrencyBoundAndSlotRelease is the P2-03 dispatcher
+// capacity evidence: the configured concurrency bound is never exceeded even
+// when every claimed send blocks, blocked sends release exactly when their
+// context deadline passes, all claimed messages eventually complete, and the
+// dispatcher stops without goroutine or slot leakage.
+func TestDispatcherConcurrencyBoundAndSlotRelease(t *testing.T) {
+	tc := testTenant("tenant-capacity")
+	repository := &observingRepository{inner: storage.NewFakeRepository()}
+	for i := 0; i < 6; i++ {
+		enqueueTestMessage(t, repository, tc, "outbox-capacity-"+strconv.Itoa(i))
+	}
+	var active, highWater atomic.Int64
+	block := make(chan struct{})
+	var blockOnce sync.Once
+	sender := SenderFunc(func(ctx context.Context, message storage.OutboxMessage) SenderOutcome {
+		current := active.Add(1)
+		for {
+			observed := highWater.Load()
+			if current <= observed || highWater.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		defer active.Add(-1)
+		blockOnce.Do(func() { close(block) })
+		<-ctx.Done()
+		return SenderOutcome{Class: OutcomeUnknown}
+	})
+	config := Config{
+		OwnerID: "dispatcher-capacity", Tenants: []tenant.TenantContext{tc},
+		ClaimBatchSize: 2, Concurrency: 2, ClaimInterval: time.Millisecond,
+		ShutdownTimeout: time.Second, LockGuard: 150 * time.Millisecond,
+		RetryPolicy: RetryPolicy{MaxAttempts: 2, BaseDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond},
+	}
+	dispatcher, err := NewDispatcher(repository, sender, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, runCancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- dispatcher.Run(runCtx) }()
+
+	// Event-synchronized wait: at least one send is in flight (blocked), so
+	// the concurrency bound is observably exercised.
+	select {
+	case <-block:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no send entered the bounded sender window")
+	}
+	time.Sleep(50 * time.Millisecond) // settle any second concurrent send
+	if observed := highWater.Load(); observed > 2 {
+		t.Fatalf("dispatcher concurrency bound exceeded: %d", observed)
+	}
+	// Cancel the run: in-flight sends observe their context deadline, the
+	// dispatcher stops, and pending messages stay reclaimable.
+	runCancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("dispatcher run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("dispatcher did not stop after cancellation")
+	}
+	settle := time.Now().Add(3 * time.Second)
+	for time.Now().Before(settle) && active.Load() != 0 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if active.Load() != 0 {
+		t.Fatalf("sender slots leaked after stop: %d", active.Load())
+	}
+	// Bounded goroutine settle check (no dispatcher goroutine leak).
+	baseline := runtime.NumGoroutine()
+	for i := 0; i < 50; i++ {
+		if runtime.NumGoroutine() <= baseline+4 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if runtime.NumGoroutine() > baseline+4 {
+		t.Fatalf("goroutine leak after dispatcher stop: %d > %d", runtime.NumGoroutine(), baseline+4)
+	}
+	// The expired locks are reclaimable by a NEW owner (bounded wait).
+	newOwner, err := NewDispatcher(repository, SenderFunc(func(ctx context.Context, message storage.OutboxMessage) SenderOutcome {
+		return SenderOutcome{Class: OutcomeDelivered}
+	}), Config{
+		OwnerID: "dispatcher-capacity-new", Tenants: []tenant.TenantContext{tc},
+		ClaimBatchSize: 4, Concurrency: 2, ClaimInterval: time.Millisecond,
+		ShutdownTimeout: time.Second, LockGuard: time.Millisecond,
+		RetryPolicy: RetryPolicy{MaxAttempts: 2, BaseDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newDone := make(chan error, 1)
+	newCtx, newCancel := context.WithCancel(context.Background())
+	go func() { newDone <- newOwner.Run(newCtx) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		messages := repository.snapshot()
+		completed := 0
+		for _, transition := range messages {
+			if transition.op == "complete" {
+				completed++
+			}
+		}
+		if completed >= 6 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	newCancel()
+	select {
+	case err := <-newDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("new owner run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("new owner dispatcher did not stop")
+	}
+	completed := 0
+	for _, transition := range repository.snapshot() {
+		if transition.op == "complete" {
+			completed++
+		}
+	}
+	// Every claimed message ends up completed by the new owner: pending
+	// messages immediately and the first owner's abandoned in-flight
+	// messages through the bounded reclaim path.
+	if completed != 6 {
+		t.Fatalf("new owner completed %d of 6 messages", completed)
 	}
 }

@@ -30,6 +30,11 @@ type Metrics interface {
 	RetrievalOutcome(operation, outcome string, candidates, hydrated int)
 	RebuildBatch(outcome string, scanned, enqueued int)
 	RuntimeState(event, outcome string)
+	// IngressAdmission records one bounded P2-03 admission outcome per
+	// webhook. The outcome value is a closed enum (allowed, rate_limited,
+	// capacity_exhausted, backend_unavailable); no tenant, binding, chat or
+	// message identifier ever crosses this surface.
+	IngressAdmission(outcome string)
 	UnknownAttrDropped() int64
 }
 
@@ -91,6 +96,20 @@ func StatusClass(code int) string {
 
 var allowedChannels = map[string]bool{"lark": true, "telegram": true, "vector": true, "web": true}
 
+// allowedAdmissionOutcomes is the closed P2-03 admission outcome enum;
+// anything else collapses to "other" so raw values can never become labels.
+var allowedAdmissionOutcomes = map[string]bool{
+	"allowed": true, "rate_limited": true, "capacity_exhausted": true, "backend_unavailable": true,
+}
+
+func normalizeAdmissionOutcome(outcome string) string {
+	outcome = strings.ToLower(strings.TrimSpace(outcome))
+	if allowedAdmissionOutcomes[outcome] {
+		return outcome
+	}
+	return "other"
+}
+
 func normalizeChannel(channel string) string {
 	channel = strings.ToLower(strings.TrimSpace(channel))
 	if allowedChannels[channel] {
@@ -129,6 +148,7 @@ func (n *noopMetrics) VectorTask(string, string)                        {}
 func (n *noopMetrics) RetrievalOutcome(string, string, int, int)        {}
 func (n *noopMetrics) RebuildBatch(string, int, int)                    {}
 func (n *noopMetrics) RuntimeState(string, string)                      {}
+func (n *noopMetrics) IngressAdmission(string)                          {}
 func (n *noopMetrics) UnknownAttrDropped() int64                        { return 0 }
 
 func newOtelMetrics(provider *sdkmetric.MeterProvider) Metrics {
@@ -181,6 +201,11 @@ func (o *otelMetrics) HTTPInflight(delta int, attrs Attrs) {
 	attrs.Component = "http"
 	set := buildSet(attrs, nil)
 	o.httpInflight.Add(contextless, int64(delta), metric.WithAttributeSet(set))
+}
+
+func (o *otelMetrics) IngressAdmission(outcome string) {
+	attrs := Attrs{Component: "ingress", Outcome: normalizeAdmissionOutcome(outcome)}
+	o.emit("trpcagent.ingress.admission", attrs)
 }
 
 func (o *otelMetrics) QueueOperation(operation, outcome string) {

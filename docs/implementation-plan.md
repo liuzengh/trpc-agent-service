@@ -99,7 +99,7 @@ README/ARCHITECTURE 明确 Object Storage 是平台目标能力；本轮已完�
 | P1-09 | Docker Compose 和运行文档 | verified（可重复本地 Compose 部署、生命周期、依赖健康、migration/config gate 与恢复边界已验证；production rollout 未部署） |
 | P2-01 | PostgreSQL RLS 和数据库强制租户隔离 | verified（本地 RLS + pooled tenant-context isolation boundary；production rollout 未执行） |
 | P2-02 | 备份恢复和事件回放 | verified（本地 PostgreSQL logical backup/restore + 有界 session-event replay/recovery drill 边界；production DR/PITR/RPO-RTO 未实现或未证明） |
-| P2-03 | 容量/故障保护 | 未开始 |
+| P2-03 | 容量/故障保护 | verified（本地有界容量、准入控制与依赖故障保护边界；production capacity/autoscaling/HA/SLO 未实现或未证明） |
 | P2-04 | 集成/压力/安全测试和生产运维 | 未开始 |
 
 原计划的 `P1-01 企业微信 Adapter` 已改为当前路线的 `P0-09G-B1 飞书（Lark）Adapter`；原计划的 `P1-02 Telegram Adapter` 改为 `P0-09G-B2 Telegram Adapter`。原 `P1-03 Web Chat、SSE 和 API 鉴权` 已从当前生产计划删除，不再安排 Web Chat 异步或 SSE 实现。认证和 TenantContext 保护仍需在 Lark/Telegram 生产入口及后续管理接口中单独完成。
