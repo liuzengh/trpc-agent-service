@@ -2,6 +2,8 @@
 
 本文映射的是题目要求、代码和可重复测试，不等同于所有外部系统已经完成生产联调。企业微信、Telegram、Kubernetes、云 Secret Manager 等能力的实际验证层级见[功能实现与验证状态](feature-status.md)。
 
+`0.2.0-rc.3` 已补齐此前核对的六类代码缺口，配置、代码入口和自动/隔离验证见[补齐记录](code-gap-closure.md)。本次不把新代码标记为已部署到日常实例。
+
 ## 1. 多租户与节点化
 
 - Tenant/App/Revision/Channel/Backend/Audit/Quota 模型：`controlplane`、migration 001；

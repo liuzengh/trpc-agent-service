@@ -13,6 +13,8 @@
 
 ## 当前状态
 
+本轮新增的六类代码补齐及配置说明见[代码缺口补齐记录](code-gap-closure.md)：调用级指标、模型预算与后台用量、Memory 单调水位、租户审计策略、Knowledge 自动迁移、Redis 队列所有权/背压。它们已做自动测试与隔离依赖测试，**没有重启当前业务实例，也没有把历史 IM 联调结论自动转移到新版本**。
+
 | 能力 | 当前状态 | 已验证范围 | 尚未完成 |
 | --- | --- | --- | --- |
 | tRPC-Agent-Go LLMAgent / Runner / Event | 本地集成 | Mock Model、多轮 Session、Event 消费与关闭 | Graph/Chain/Parallel/Cycle 的平台化注册 |
@@ -32,6 +34,8 @@
 | 通用 MCP 工具平台化 | 设计 | 权限、密钥、超时和审计边界；企业微信专用发现命令已复用 tRPC MCP Client | 通用租户级 ToolSet 配置、生命周期与治理；专用通道发现不等同于通用 MCP 完成 |
 | 工具业务操作与对账 | 自动测试 / 本地 PostgreSQL 集成 | 内部 create_work_item、业务键唯一约束、Runner 审批、并发重放、响应/平台写入丢失恢复、Admin 查询/只读对账 | 外部业务 Provider、真实业务幂等契约与历史无事实记录的人工核对 |
 | OpenTelemetry | 真实联调（开发环境）+ 自动测试 | 真实 Telegram→模型→current_time→Session→回复的完整 trace，Tempo 实际读回；共享框架 tracer、审批 span link 与 Memory 组件测试、元数据过滤；现有 metrics/Dashboard/Alert Rule | 真实审批跨请求 link、Alertmanager 与实际通知渠道 |
+| 调用预算与租户审计策略 | 自动测试 + 隔离 PostgreSQL/Redis 集成 | 模型调用预留/结算，Summary/Memory/Embedding 用量；审计分级、私有缓冲、受限保留期和带版本策略更新 | 生产价格配置、账单对账、节点持久卷、真实故障与容量验证 |
+| Knowledge 自动迁移 | 自动测试 + 隔离 Qdrant/PostgreSQL 集成 | 现存 chunk/vector 回填、修复意图、游标、逐项及检索校验、服务器切换门禁 | 远端大数据量演练；当前单 app 上限 100000 chunks，更换 embedding 需重建 |
 | Secret 管理 | 自动测试 | `env://` 精确租户/用途授权，Admin 保存前检查与运行时校验、角色用途收窄、S3/Embedding 隐式凭据拒绝 | Vault/KMS、在线轮换撤销、真实分角色账号权限 |
 | 分角色数据/网络权限 | 自动测试 + 本地隔离集成 | SQL GRANT/Redis ACL 生成器、允许与拒绝测试、按角色初始化后端和网络模板 | 真实 LOGIN/Redis 账号、CNI 与依赖标签的部署验证；不是租户 RLS |
 | MCP 异常隔离/恢复 | 自动测试 + 本地 PostgreSQL 集成；图片隔离与去重真实联调 | 检查点 CAS、禁用/版本检查、恢复审计原子性；图片不阻塞文字；rc.2 新图片持久隔离经完整重叠读取仍只产生一条隔离/审计，不调用 Agent 或发送回复 | 其他媒体类型/真实分页；不支持媒体分析或下载；同人同秒同类型附件可能合并 |

@@ -16,10 +16,10 @@ go run ./cmd/trpc-permissions -format sql -schema agent_platform -role-prefix tr
 | Worker | 路由只读、Run 完成、回复创建、工具与审批记录 | 发布新 Revision、标记回复已发送 |
 | Relay | Queue Outbox 查询和投递状态更新（其中任务 payload 含待处理文本） | 读取独立 Inbox/Session 表或业务工具数据 |
 | Sender | 租户/应用/Binding 查询、出站状态、发送尝试 | 读取 Inbox 正文、修改 Agent 配置 |
-| Jobs | 后台任务、迁移状态、后端切换 | 修改 Agent 发布配置 |
+| Jobs | 后台任务、迁移状态、后端切换、Memory 水位、Knowledge 修复状态、受限审计清理函数 | 修改 Agent 发布配置、任意删改审计表 |
 | Admin | 控制面 CRUD、审计查询、业务操作只读对账所需更新 | 执行业务工作项插入、删改审计 |
 
-角色均为 NOLOGIN、非超级用户，不授予 CREATE/DELETE/GRANT OPTION，不自动向新表开放权限。部署者另建 LOGIN 用户，分别加入对应角色；迁移用户独立管理，应用角色必须关闭 `TRPC_AGENT_POSTGRES_AUTO_MIGRATE`。升级增表时需要更新授权清单，不能用 `GRANT ALL` 绕过。
+角色均为 NOLOGIN、非超级用户，不授予表级 CREATE/DELETE/GRANT OPTION，不自动向新表开放权限。审计写入改为执行幂等 append 函数；Jobs 的 prune 函数只按已有租户策略清理并留下事务回执；Admin 更新租户策略只能执行带版本和原子审计的函数。部署者另建 LOGIN 用户，分别加入对应角色；迁移用户独立管理，应用角色必须关闭 `TRPC_AGENT_POSTGRES_AUTO_MIGRATE`。017–020 升级时需补充授权，不能用 `GRANT ALL` 绕过。
 
 这是节点职责隔离，不是 PostgreSQL 租户 RLS。共享角色仍服务其负责的租户，逐条查询的租户过滤、BackendBinding/Secret grant 仍必需。Session/Memory 使用独立 SQL 后端时，还要为框架数据表单独准备 schema 和账号，不能直接复用控制面权限。对象权限与成员授权语义见 [PostgreSQL GRANT](https://www.postgresql.org/docs/16/sql-grant.html)。
 
@@ -33,8 +33,8 @@ go run ./cmd/trpc-permissions -format redis-acl -role-prefix trpc -redis-prefix 
 
 - Gateway 只能访问限流、预算读取和 `:channel-poll:coord:session:*` 轮询锁。
 - Worker 可操作执行锁、幂等键、配额、队列及固定版本框架的数据键。
-- Relay 只建队列 group 和追加 Stream，不消费队列或读取 Session。
-- Jobs 可操作固定框架数据键；Sender/Admin 不使用平台 Redis 状态键。
+- Relay 可检查唯一 group、确认安全裁剪前缀及追加 Stream，不消费队列或读取 Session。Worker 可保活 pending、确认所有权及原子 ACK/Delete/Retry。
+- Jobs 可操作固定框架数据键和模型预算 usage 键；Sender/Admin 不使用平台 Redis 状态键。
 - 禁止 FLUSHDB/FLUSHALL、KEYS、全局 SCAN、CONFIG、ACL 修改和任意 `~*`；Lua 仍受命令与键范围约束。
 
 基线覆盖当前 Redis Session（hashidx/已启用用户索引）与 Memory 的键族；兼容模式或其他租户自定义 prefix 需要追加经审核的单独凭据，不能全局放开。逻辑 Redis DB 编号不是 ACL 隔离边界。selector 及授权累计规则见 [Redis ACL 文档](https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/)。

@@ -157,6 +157,8 @@ planned → dual_write → backfill → verify → cutover → completed
 
 ## 9. 本地向量库到远端向量库
 
+代码现状：已实现同 embedding/维度的历史 chunk/vector 自动回填、持久化游标、写意图修复和服务器校验门禁，见[当前迁移实现及边界](code-gap-closure.md#3-knowledge-回填与校验)。下面的原始文档重建和业务 top-k 影子评估用于更换 Embedder 或生产质量验证，不能与已实现的后端复制混为一谈。
+
 向量迁移以原始文档和 chunk 元数据为真相，不把旧库向量结果当成唯一来源。新旧库必须使用相同 embedding 模型和维度；如果 embedding 模型也变化，需要重新计算向量，不能直接复制。
 
 迁移步骤包括：

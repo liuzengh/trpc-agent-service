@@ -2831,7 +2831,7 @@ Memory Config 控制自动抽取：
 }
 ```
 
-Memory Job 只读取 `memory:last_extract_at` 之后的 Session Event，使用 tRPC-Agent-Go `memory/extractor` 生成操作。自动路径只允许幂等的 `memory_add`，不会让后台模型自行执行 clear/delete；写入全部成功后才推进 Session State 水位。若在写入后、水位前崩溃，重试的 Add 仍由 Memory backend 的 canonical ID 保证幂等。
+Memory Job 从独立的 `background_watermark` 读取当前水位，只提取水位之后的 Session Event；首次运行可导入旧 Session State 的提取时间。它使用当前任务 revision 对应、带预算计量的 tRPC-Agent-Go `memory/extractor`，只允许幂等 `memory_add`。写入全部成功后，PostgreSQL 使用 `GREATEST` 单调推进纳秒水位，不再无条件写回 Session State。旧节点晚完成不会覆盖新水位；在写入后、水位前崩溃时，重试 Add 仍依靠 canonical ID 幂等。
 
 Knowledge Admin API 现在默认返回 `202 Accepted`：
 
@@ -2923,7 +2923,7 @@ Backfill Job 从 source 读取用户全部有效 Memory，保留 fact/episode me
 
 Memory 和 Knowledge 的在线写都会在迁移阶段双写。Secondary 失败时当前调用返回可重试错误，同时 `repair_backlog` 原子加一；Background Job 或 Agent 消息重试依靠 canonical ID / document replacement 保持幂等。Verify 全部通过后 repair backlog 清零。`backend_migration` 查询会显示 checkpoint、verification、repair backlog、state 和 version。
 
-Knowledge 迁移对新 Upsert/Delete 实施同样的源读双写和目标读反向双写。历史 Knowledge 回填应从原始文档源重新提交 Knowledge Job，而不是从向量反推文本；这能同时重算新 Embedder/新维度。InMemory → Qdrant 或 Qdrant collection 迁移因此可以使用相同状态机。
+Knowledge 迁移对新 Upsert/Delete 实施源读双写和目标读反向双写。同 embedding/同维度搬迁现在由 `backfill-knowledge` 作业从现有 chunk 正文、metadata 和向量自动回填，随后执行服务端校验；修改 Embedder/维度仍需从原始文档重建。持久化写意图、批次游标和迁移证明见[代码缺口补齐说明](code-gap-closure.md#3-knowledge-回填与校验)。
 
 生产切换顺序：
 
@@ -3081,7 +3081,7 @@ Audit Query 必须带 tenant ID，可按 decision、trace ID 和 limit 过滤；
 
 `TRPC_AGENT_QUOTA_BACKEND=local` 用于单进程教程；生产设置为 `redis`，复用 `REDIS_URL` 和 `REDIS_KEY_PREFIX`。Gateway 在持久化新入站前按 tenant/user/minute 限流；Worker 在 Runner 前检查 tenant 并发和当日已用 token/cost。同步 `/chat` Test Channel 同样执行两层检查。
 
-并发计数使用 Redis Lua 原子 INCR/回滚并设置五分钟兜底 TTL，进程崩溃不会永久占槽。Usage 用 `tenant + UTC date + request_id` SET NX 幂等记账，因此 Agent Queue 重试不会重复增加成本。一次调用可以把余额推过阈值，但下一次 Runner 会被拒绝；这是“已发生调用必须记账、未来调用 fail closed”的边界。
+并发计数仍使用 Redis Lua 和五分钟兜底 TTL。预算检查则已下沉到每次模型调用：`RevisionCompiler → modelops → tRPC Model` 先原子预扣，再按可信 usage 幂等结算；工具循环的每次调用、后台摘要/Memory、Embedding 都在同一租户账本内。未知用量保守占用，已预扣调用不再由 Worker 按整轮重复记账。配置、估算边界和升级方式见[预算实现](code-gap-closure.md#1-模型调用与预算)。
 
 运行日志经过统一 Redacting Writer，当前会屏蔽：
 

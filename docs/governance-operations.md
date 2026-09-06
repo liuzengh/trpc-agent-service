@@ -53,7 +53,7 @@ nonce
 - 每用户、每 App、每租户分钟/小时/日额度；
 - 模型和工具的金额预算。
 
-BeforeModel 在发送请求前预留预算，AfterModel 根据实际 usage 结算，多退少补。预留失败直接返回受控错误。模型调用链中存在 Tool 循环时，每次调用都重新检查剩余额度。
+设计上在模型调用前预留预算、调用后按 usage 结算。当前实现采用 `modelops.Model` 装饰器包裹 `GenerateContent`，而不是依赖只在 Runner 内触发的 BeforeModel/AfterModel：这样摘要、Memory 等后台直接调用也不能漏账。预留失败返回受控错误，Tool 循环每次重新预留；未知用量保守占用。配置、估算边界及 Embedding 记账见[当前预算实现](code-gap-closure.md#1-模型调用与预算)。
 
 ### 敏感信息处理
 
