@@ -31,6 +31,9 @@ func (j *MemoryJournal) Start(ctx context.Context, execution Execution) (StartRe
 		return StartResult{}, errors.New("tool execution journal is closed")
 	}
 	if existing, ok := j.records[execution.ID]; ok {
+		if !sameExecution(existing, execution) {
+			return StartResult{}, ErrConflict
+		}
 		return StartResult{Execution: existing, Existing: true}, nil
 	}
 	execution.Status = StatusRunning
@@ -49,11 +52,23 @@ func (j *MemoryJournal) Complete(
 	if ctx != nil && ctx.Err() != nil {
 		return context.Cause(ctx)
 	}
+	if !validOutcome(status) {
+		return ErrConflict
+	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if j.closed {
+		return errors.New("tool execution journal is closed")
+	}
 	execution, ok := j.records[executionID]
 	if !ok {
-		return errors.New("tool execution not found")
+		return ErrNotFound
+	}
+	if terminal(execution.Status) {
+		if execution.Status == status && execution.ResultHash == resultHash && execution.ErrorType == errorType {
+			return nil
+		}
+		return ErrConflict
 	}
 	execution.Status = status
 	execution.ResultHash = resultHash
@@ -87,6 +102,69 @@ func (j *MemoryJournal) Close() error {
 	j.mu.Lock()
 	j.closed = true
 	j.mu.Unlock()
+	return nil
+}
+
+func (j *MemoryJournal) Get(ctx context.Context, tenantID, id string) (Execution, error) {
+	if err := ctx.Err(); err != nil {
+		return Execution{}, err
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return Execution{}, errors.New("tool execution journal is closed")
+	}
+	record, ok := j.records[id]
+	if !ok || record.TenantID != tenantID {
+		return Execution{}, ErrNotFound
+	}
+	return record, nil
+}
+
+func (j *MemoryJournal) LinkOperation(ctx context.Context, tenantID, id, operationID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if operationID == "" {
+		return ErrConflict
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return errors.New("tool execution journal is closed")
+	}
+	record, ok := j.records[id]
+	if !ok || record.TenantID != tenantID {
+		return ErrNotFound
+	}
+	if record.OperationID != "" && record.OperationID != operationID {
+		return ErrConflict
+	}
+	record.OperationID = operationID
+	j.records[id] = record
+	return nil
+}
+
+func (j *MemoryJournal) ResolveOperation(ctx context.Context, tenantID, operationID, status, resultHash, errorType string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if operationID == "" || !validOutcome(status) {
+		return ErrConflict
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return errors.New("tool execution journal is closed")
+	}
+	for id, record := range j.records {
+		if record.TenantID != tenantID || record.OperationID != operationID || terminal(record.Status) {
+			continue
+		}
+		record.Status, record.ResultHash, record.ErrorType = status, resultHash, errorType
+		record.CompletedAt = time.Now().UTC()
+		j.records[id] = record
+	}
 	return nil
 }
 

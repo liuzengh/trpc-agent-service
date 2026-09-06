@@ -349,6 +349,11 @@ func (c *RevisionCompiler) RunPolicyOptions(
 	if revisionKnowledgeEnabled(revision.KnowledgeConfig) {
 		policy.AllowedTools = append(policy.AllowedTools, "knowledge_search")
 	}
+	for _, name := range policy.AllowedTools {
+		if c.toolCatalog.IsManagedSideEffect(name) {
+			policy.DangerousTools = append(policy.DangerousTools, name)
+		}
+	}
 	var recorder governance.DecisionRecorder
 	if c.auditWriter != nil || c.approvals != nil || c.toolJournal != nil {
 		recorder = func(ctx context.Context, decision governance.ToolDecision) error {
@@ -407,7 +412,7 @@ func (c *RevisionCompiler) RunPolicyOptions(
 		return toolexec.StartAuthorized(ctx, c.toolJournal, toolexec.Execution{
 			RevisionID: revision.ID, ToolCallID: decision.ToolCallID,
 			ToolName: decision.ToolName, ArgumentsHash: decision.ArgumentsHash,
-		})
+		}, c.toolCatalog.IsManagedSideEffect(decision.ToolName))
 	}
 	return governance.RunOptionsWithApprovals(
 		policy,

@@ -253,6 +253,9 @@ func approvalExecutionReply(approvalID string, executions []toolexec.Execution) 
 			status = "执行失败"
 		}
 		result.WriteString("\n" + execution.ToolName + "：" + status)
+		if execution.OperationID != "" {
+			result.WriteString("（业务操作编号：" + execution.OperationID + "）")
+		}
 	}
 	return result.String()
 }

@@ -341,7 +341,11 @@ func run() error {
 		_ = sessionCoordinator.Close()
 		return fmt.Errorf("build Gateway intake: %w", err)
 	}
-	toolCatalog := platformtool.DefaultCatalog()
+	operations, err := toolexec.NewOperationsForControlPlane(controlPlaneRepository, toolExecutionJournal, auditWriter)
+	if err != nil {
+		return fmt.Errorf("build business operation service: %w", err)
+	}
+	toolCatalog := platformtool.DefaultCatalog(platformtool.NewWorkItemTool(operations))
 	revisionCompiler, err := agentservice.NewRevisionCompiler(
 		controlPlaneRepository,
 		selectedModel,
@@ -511,6 +515,7 @@ func run() error {
 		adminService.WithAuditWriter(auditWriter)
 		adminService.WithKnowledgeRouter(knowledgeRouter)
 		adminService.WithBackgroundJobs(backgroundJobs)
+		adminService.WithToolOperations(operations, toolExecutionJournal)
 		// Admin checks grants but cannot resolve model/IM values on an Admin-only node.
 		grantAuthorizer, _ := secret.NewEnvStore(secretGrants)
 		adminService.WithSecretAuthorizer(grantAuthorizer)
@@ -659,6 +664,7 @@ func run() error {
 		web.WithReadinessCheck("session-router", sessionRouter.Ready),
 		web.WithReadinessCheck("quota", quotaGuard.Ready),
 		web.WithReadinessCheck("tool-execution", toolExecutionJournal.Ready),
+		web.WithReadinessCheck("tool-operations", operations.Ready),
 	}
 	if roles.Gateway {
 		handlerOptions = append(handlerOptions,

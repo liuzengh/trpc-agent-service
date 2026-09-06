@@ -86,7 +86,7 @@ type DangerousDemoOutput struct {
 	Action   string `json:"action"`
 }
 
-func DefaultCatalog() *Catalog {
+func DefaultCatalog(additional ...agenttool.Tool) *Catalog {
 	catalog, err := NewCatalog(
 		function.NewFunctionTool(
 			func(_ context.Context, input EchoInput) (EchoOutput, error) {
@@ -118,6 +118,12 @@ func DefaultCatalog() *Catalog {
 	)
 	if err != nil {
 		panic(err)
+	}
+	for _, item := range additional {
+		if item == nil || item.Declaration() == nil || item.Declaration().Name == "" || catalog.tools[item.Declaration().Name] != nil {
+			panic("invalid additional platform tool")
+		}
+		catalog.tools[item.Declaration().Name] = item
 	}
 	return catalog
 }

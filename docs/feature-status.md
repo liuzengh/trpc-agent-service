@@ -29,6 +29,7 @@
 | 微信公众号 / 微信客服 | 设计 | 数据模型与接入差异说明 | Adapter 代码和真实联调 |
 | Tool 治理与审批 | 自动测试 / 本地集成；只读 Tool 与审批基础真实联调 | 参数绑定、会话隔离、批准/拒绝/重复/过期；权限允许后预留执行；直接回执、Journal 驱动结果与事务回滚测试；新版格式拦截/拒绝回执真实复验 | 新版批准结果正文复验、真实业务 Tool |
 | MCP | 设计 | 权限、密钥、超时和审计边界 | MCP Client/Server 的实际接入 |
+| 工具业务操作与对账 | 自动测试 / 本地 PostgreSQL 集成 | 内部 create_work_item、业务键唯一约束、Runner 审批、并发重放、响应/平台写入丢失恢复、Admin 查询/只读对账 | 外部业务 Provider、真实业务幂等契约与历史无事实记录的人工核对 |
 | OpenTelemetry | 真实联调（开发环境）+ 自动测试 | 真实 Telegram→模型→current_time→Session→回复的完整 trace，Tempo 实际读回；共享框架 tracer、审批 span link 与 Memory 组件测试、元数据过滤；现有 metrics/Dashboard/Alert Rule | 真实审批跨请求 link、Alertmanager 与实际通知渠道 |
 | Secret 管理 | 自动测试 | `env://` 精确租户/用途授权，Admin 保存前检查与运行时校验、角色用途收窄、S3/Embedding 隐式凭据拒绝 | Vault/KMS、在线轮换撤销、真实分角色账号权限 |
 | Docker Compose | 本地集成 | 依赖启动、镜像构建、非 root 运行 | 长时间稳定性验证 |

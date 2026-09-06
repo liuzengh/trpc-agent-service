@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
@@ -17,7 +18,7 @@ import (
 // and denied/approval-required calls skip AfterTool entirely. Starting there
 // would leave a misleading running row for a tool that never executed.
 // Identity comes from the live invocation, including generated request IDs.
-func StartAuthorized(ctx context.Context, journal Journal, execution Execution) error {
+func StartAuthorized(ctx context.Context, journal Journal, execution Execution, managedReplay ...bool) error {
 	if journal == nil {
 		return nil
 	}
@@ -36,7 +37,7 @@ func StartAuthorized(ctx context.Context, journal Journal, execution Execution) 
 	if err != nil {
 		return err
 	}
-	if started.Existing {
+	if started.Existing && (len(managedReplay) == 0 || !managedReplay[0]) {
 		return fmt.Errorf("%w: status=%s", ErrReplayBlocked, started.Execution.Status)
 	}
 	return nil
@@ -61,14 +62,36 @@ func NewCallbacks(
 		if !ok || invocation == nil || invocation.Session == nil || args == nil {
 			return nil, errors.New("tool execution context is incomplete")
 		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		tenantID, _, err := runtimecontext.ParseStorageScope(invocation.RunOptions.AppName)
+		if err != nil {
+			return nil, err
+		}
+		executionID := StableID(invocation.RunOptions.RequestID, args.ToolCallID)
+		stored, err := journal.Get(ctx, tenantID, executionID)
+		if err != nil {
+			return nil, err
+		}
 		status, errorType := StatusSucceeded, ""
 		if args.Error != nil {
-			status, errorType = StatusFailed, "tool_error"
+			status, errorType = StatusUnknown, "tool_outcome_unknown"
+			if errors.Is(args.Error, ErrOperationRejected) || errors.Is(args.Error, ErrOperationConflict) {
+				status, errorType = StatusFailed, "tool_rejected"
+			}
 		}
 		resultJSON, _ := json.Marshal(args.Result)
-		executionID := StableID(invocation.RunOptions.RequestID, args.ToolCallID)
-		if err := journal.Complete(ctx, executionID, status, Hash(resultJSON), errorType); err != nil {
-			return nil, err
+		resultHash := Hash(resultJSON)
+		if stored.OperationID != "" && stored.Status != StatusRunning {
+			// Business facts were already committed/reconciled by Operations.
+			status, errorType, resultHash = stored.Status, stored.ErrorType, stored.ResultHash
+		} else {
+			if stored.OperationID != "" {
+				status, errorType = StatusUnknown, "business_outcome_unknown"
+			}
+			if err := journal.Complete(ctx, executionID, status, resultHash, errorType); err != nil {
+				return nil, err
+			}
 		}
 		if auditWriter != nil {
 			tenantID, _, _ := runtimecontext.ParseStorageScope(invocation.RunOptions.AppName)
@@ -81,7 +104,8 @@ func NewCallbacks(
 				Details: map[string]any{
 					"tool_call_id":   args.ToolCallID,
 					"arguments_hash": Hash(args.Arguments),
-					"result_hash":    Hash(resultJSON),
+					"result_hash":    resultHash,
+					"operation_id":   stored.OperationID,
 				},
 			}); err != nil {
 				return nil, err

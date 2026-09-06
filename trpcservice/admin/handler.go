@@ -12,6 +12,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/toolexec"
 )
 
 type Handler struct {
@@ -49,6 +50,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/admin/tool-executions/list", "/admin/tool-operations/list", "/admin/tool-operations/get", "/admin/tool-operations/reconcile":
+		h.handleToolOperations(w, r)
 	case "/admin/tenants/get":
 		var input struct {
 			TenantID string `json:"tenant_id"`
@@ -403,6 +406,10 @@ func (h *Handler) writeResult(w http.ResponseWriter, success int, value any, err
 	switch {
 	case errors.Is(err, secret.ErrForbidden):
 		status = http.StatusForbidden
+	case errors.Is(err, toolexec.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, toolexec.ErrConflict), errors.Is(err, toolexec.ErrOperationConflict):
+		status = http.StatusConflict
 	case errors.Is(err, ErrInvalid):
 		status = http.StatusBadRequest
 	case errors.Is(err, controlplane.ErrConflict):
