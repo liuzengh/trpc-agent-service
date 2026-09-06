@@ -210,13 +210,25 @@ func decodePageBatch(payload []byte, b controlplane.ChannelBinding, cfg BindingC
 	reject := func(raw json.RawMessage, reason string) {
 		var fields map[string]json.RawMessage
 		canonical := raw
+		prefix := "mcp_reject1_"
 		if json.Unmarshal(raw, &fields) == nil && fields != nil {
 			delete(fields, "user_name")
 			delete(fields, "extra_identity_context")
+			if reason == "unsupported_type" {
+				// Observed responses rotate image.media_id on repeated reads;
+				// it cannot serve as a stable source message ID.
+				// Unsupported-media rejections aggregate by verified envelope:
+				// same sender/second/type can coalesce multiple attachments.
+				// Version this narrower identity; never rewrite old audit facts.
+				fields = map[string]json.RawMessage{
+					"userid": fields["userid"], "send_time": fields["send_time"], "msg_type": fields["msg_type"],
+				}
+				prefix = "mcp_reject2_"
+			}
 			canonical, _ = json.Marshal(fields)
 		}
 		identity, _ := json.Marshal([]string{b.TenantID, b.ID, chat, string(canonical)})
-		rejected = append(rejected, RejectedMessage{Fingerprint: "mcp_reject1_" + endpointHash(string(identity)), Reason: reason, WindowFrom: from, WindowTo: to})
+		rejected = append(rejected, RejectedMessage{Fingerprint: prefix + endpointHash(string(identity)), Reason: reason, WindowFrom: from, WindowTo: to})
 	}
 	for _, raw := range page.Messages {
 		var header struct {

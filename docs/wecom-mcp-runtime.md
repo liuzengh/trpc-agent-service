@@ -136,7 +136,9 @@ TRPC_AGENT_WECOM_MCP_TARGETS_JSON='[{"tenant_id":"tutorial-tenant","binding_id":
 
 完整 trace 串起 `wecom_mcp.poll/read`、Gateway、队列、Worker、Runner、Session event、`reply.send` 和 `wecom_mcp.send`。不记录 URL、原始聊天内容或成员姓名。新增 `agent.channel.polls`、`agent.channel.checkpoint_lag`；`channel_poll_failed` 审计区分源格式、配置冲突、保留期等错误，未知发送单独分类。真实告警通知尚未配置。
 
-目前只支持群文本。新异常隔离代码会把单条媒体/格式问题保存为不含原文的隔离记录，继续处理正常文本；整页或分页异常仍保留检查点。隔离记录不是图片理解或媒体回执能力，不下载文件、不进入模型。私聊、卡片、文件发送和编辑语义未开放；真实媒体联调尚未完成。
+目前只支持群文本。异常隔离代码会把媒体/格式问题保存为不含原文的隔离记录，继续处理正常文本；整页或分页异常仍保留检查点。隔离记录不是图片理解或媒体回执能力，不下载文件、不进入模型。私聊、卡片、文件发送和编辑语义未开放。真实图片未阻塞文本已验证，后续去重修正的验证边界见下文。
+
+后续真实图片/文本测试见[媒体联调记录](validation/wecom-media-2026-09-06.md)：图片未阻塞文字，但暴露了每次读取图片 `media_id` 都变化的问题。`0.2.0-rc.2` 改为稳定信封字段的媒体隔离分组，具体合并语义见[通道恢复](channel-recovery.md)；图片内容理解仍未实现。
 
 一个进程内按绑定/群有界串行轮询，慢群会影响其他群，需要配置目标分片并观察延迟。seen 和发送记录暂无自动清理，需评估增长和备份，不能随意删去重状态。[权限生成器](deployment-permissions.md)、[积压监控](monitoring.md)、[隔离业务恢复](validation/recovery-2026-09-06.md)现已实现和验证；真实分角色账号部署、生产容量压测和完整灾难恢复仍未完成。
 
