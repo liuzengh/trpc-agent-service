@@ -125,6 +125,9 @@ func TestMemoryRouterMigrationDualWriteAndCutover(t *testing.T) {
 	if err != nil || len(targetEntries) != 1 {
 		t.Fatalf("target entries=%+v err=%v", targetEntries, err)
 	}
+	if verified, err := router.VerifyUser(context.Background(), "tutorial-tenant", migration.ID, "alice"); err != nil || !verified.Passed {
+		t.Fatalf("verify=%+v err=%v", verified, err)
+	}
 	if _, err := repository.TransitionBackendMigration(
 		context.Background(), "tutorial-tenant", migration.ID,
 		controlplane.MigrationCutover, 1, nil, nil,

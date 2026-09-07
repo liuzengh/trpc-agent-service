@@ -51,6 +51,7 @@ type memoryOutbound struct {
 // MemoryJournal is a process-local transactional model for tests and the
 // dependency-free tutorial.
 type MemoryJournal struct {
+	parts         map[string]OutboundPart
 	mu            sync.Mutex
 	closed        bool
 	inbound       map[string]memoryInbound
@@ -430,11 +431,12 @@ func (j *MemoryJournal) MarkOutboundSent(
 	outboundID string,
 	workerID string,
 	_ string,
+	expectedAttempt ...int,
 ) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	outbound := j.outbound[outboundID]
-	if outbound == nil || outbound.lockedBy != workerID {
+	if outbound == nil || outbound.lockedBy != workerID || outbound.status != "sending" || (len(expectedAttempt) > 0 && outbound.item.AttemptCount != expectedAttempt[0]) {
 		return fmt.Errorf("outbound ownership mismatch")
 	}
 	outbound.status = "sent"
@@ -450,11 +452,12 @@ func (j *MemoryJournal) MarkOutboundFailed(
 	retryAt time.Time,
 	terminal bool,
 	_ error,
+	expectedAttempt ...int,
 ) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	outbound := j.outbound[outboundID]
-	if outbound == nil || outbound.lockedBy != workerID {
+	if outbound == nil || outbound.lockedBy != workerID || outbound.status != "sending" || (len(expectedAttempt) > 0 && outbound.item.AttemptCount != expectedAttempt[0]) {
 		return fmt.Errorf("outbound ownership mismatch")
 	}
 	if terminal {

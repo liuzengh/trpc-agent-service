@@ -51,7 +51,7 @@ func TestIsolatedPostgresContracts(t *testing.T) {
 	}
 	cmd := exec.CommandContext(ctx, "go", "test", "-race", "-count=1",
 		"./deploy/permissions", "./trpcservice/channels/wecommcp", "./trpcservice/approval",
-		"./trpcservice/toolexec", "./trpcservice/background", "./trpcservice/controlplane", "./trpcservice/storage", "./trpcservice/audit")
+		"./trpcservice/toolexec", "./trpcservice/background", "./trpcservice/controlplane", "./trpcservice/storage", "./trpcservice/audit", "./trpcservice/gateway")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "TEST_POSTGRES_URL="+dsn, "TEST_PERMISSIONS_DOCKER=0", "TEST_RECOVERY_DOCKER=0",
 		"TEST_S3_ENDPOINT=", "TEST_QDRANT_HOST=", "TEST_TRACE_OTLP_ENDPOINT=")

@@ -502,6 +502,19 @@ func (r *PostgresRepository) TransitionBackendMigration(
 			}
 		}
 	}
+	if validResource(current.ResourceType) {
+		if _, err = tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", ResourceLockName(tenantID, current.AppID, current.ResourceType)); err != nil {
+			return BackendMigration{}, err
+		}
+		if nextState == MigrationCutover || nextState == MigrationCompleted {
+			var raw []byte
+			var s ResourceSync
+			err = tx.QueryRowContext(ctx, "SELECT state FROM resource_sync WHERE tenant_id=$1 AND app_id=$2 AND resource_type=$3", tenantID, current.AppID, current.ResourceType).Scan(&raw)
+			if err != nil || json.Unmarshal(raw, &s) != nil || !validResourceProof(s, current) {
+				return BackendMigration{}, errors.New("migration requires current complete server verification")
+			}
+		}
+	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE backend_migration
 SET state=$3,

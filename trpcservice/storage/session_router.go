@@ -47,6 +47,7 @@ type SessionMigrationVerification struct {
 	TargetEvents   int    `json:"target_events"`
 	StateMatched   bool   `json:"state_matched"`
 	SummaryMatched bool   `json:"summary_matched"`
+	EventsMatched  bool   `json:"events_matched"`
 	Passed         bool   `json:"passed"`
 }
 
@@ -60,7 +61,7 @@ func NewSessionRouter(
 		return nil, errors.New("session router dependencies are required")
 	}
 	return &SessionRouter{
-		repository: repository, secrets: secretStore, startup: observeSession(startup, "startup"),
+		repository: repository, secrets: secretStore, startup: &portableSession{Service: observeSession(startup, "startup"), repo: repository, bindingID: "startup"},
 		summarizer: summarizer, services: make(map[string]session.Service),
 	}, nil
 }
@@ -71,6 +72,15 @@ func (r *SessionRouter) CreateSession(
 	state session.StateMap,
 	opts ...session.Option,
 ) (*session.Session, error) {
+	if err := rejectPrivateState(state); err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(key.SessionID, stagingSessionPrefix) {
+		return nil, errors.New("reserved Session ID")
+	}
+	if !resourceHeld(ctx, key.AppName, "session") {
+		return resourceValue(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), true, func(ctx context.Context) (*session.Session, error) { return r.CreateSession(ctx, key, state, opts...) })
+	}
 	ctx, span := startStorageSpan(ctx, "session.create", key.AppName)
 	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
@@ -85,6 +95,10 @@ func (r *SessionRouter) GetSession(
 	key session.Key,
 	opts ...session.Option,
 ) (*session.Session, error) {
+
+	if !resourceHeld(ctx, key.AppName, "session") {
+		return resourceValue(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), false, func(ctx context.Context) (*session.Session, error) { return r.GetSession(ctx, key, opts...) })
+	}
 	ctx, span := startStorageSpan(ctx, "session.get", key.AppName)
 	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
@@ -99,6 +113,10 @@ func (r *SessionRouter) ListSessions(
 	key session.UserKey,
 	opts ...session.Option,
 ) ([]*session.Session, error) {
+
+	if !resourceHeld(ctx, key.AppName, "session") {
+		return resourceValue(ctx, r.repository, key.AppName, "session", "", false, func(ctx context.Context) ([]*session.Session, error) { return r.ListSessions(ctx, key, opts...) })
+	}
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return nil, err
@@ -111,6 +129,10 @@ func (r *SessionRouter) DeleteSession(
 	key session.Key,
 	opts ...session.Option,
 ) error {
+
+	if !resourceHeld(ctx, key.AppName, "session") {
+		return resourceDo(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), true, func(ctx context.Context) error { return r.DeleteSession(ctx, key, opts...) })
+	}
 	ctx, span := startStorageSpan(ctx, "session.delete", key.AppName)
 	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
@@ -125,6 +147,10 @@ func (r *SessionRouter) UpdateAppState(
 	appName string,
 	state session.StateMap,
 ) error {
+
+	if appName != readinessAppName && !resourceHeld(ctx, appName, "session") {
+		return resourceDo(ctx, r.repository, appName, "session", "", true, func(ctx context.Context) error { return r.UpdateAppState(ctx, appName, state) })
+	}
 	service, err := r.serviceFor(ctx, appName)
 	if err != nil {
 		return err
@@ -133,6 +159,10 @@ func (r *SessionRouter) UpdateAppState(
 }
 
 func (r *SessionRouter) DeleteAppState(ctx context.Context, appName string, key string) error {
+
+	if appName != readinessAppName && !resourceHeld(ctx, appName, "session") {
+		return resourceDo(ctx, r.repository, appName, "session", "", true, func(ctx context.Context) error { return r.DeleteAppState(ctx, appName, key) })
+	}
 	service, err := r.serviceFor(ctx, appName)
 	if err != nil {
 		return err
@@ -141,6 +171,10 @@ func (r *SessionRouter) DeleteAppState(ctx context.Context, appName string, key 
 }
 
 func (r *SessionRouter) ListAppStates(ctx context.Context, appName string) (session.StateMap, error) {
+
+	if appName != readinessAppName && !resourceHeld(ctx, appName, "session") {
+		return resourceValue(ctx, r.repository, appName, "session", "", false, func(ctx context.Context) (session.StateMap, error) { return r.ListAppStates(ctx, appName) })
+	}
 	service, err := r.serviceFor(ctx, appName)
 	if err != nil {
 		return nil, err
@@ -153,6 +187,10 @@ func (r *SessionRouter) UpdateUserState(
 	key session.UserKey,
 	state session.StateMap,
 ) error {
+
+	if !resourceHeld(ctx, key.AppName, "session") {
+		return resourceDo(ctx, r.repository, key.AppName, "session", "", true, func(ctx context.Context) error { return r.UpdateUserState(ctx, key, state) })
+	}
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return err
@@ -164,6 +202,10 @@ func (r *SessionRouter) ListUserStates(
 	ctx context.Context,
 	key session.UserKey,
 ) (session.StateMap, error) {
+
+	if !resourceHeld(ctx, key.AppName, "session") {
+		return resourceValue(ctx, r.repository, key.AppName, "session", "", false, func(ctx context.Context) (session.StateMap, error) { return r.ListUserStates(ctx, key) })
+	}
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return nil, err
@@ -176,6 +218,10 @@ func (r *SessionRouter) DeleteUserState(
 	key session.UserKey,
 	stateKey string,
 ) error {
+
+	if !resourceHeld(ctx, key.AppName, "session") {
+		return resourceDo(ctx, r.repository, key.AppName, "session", "", true, func(ctx context.Context) error { return r.DeleteUserState(ctx, key, stateKey) })
+	}
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
 		return err
@@ -188,6 +234,12 @@ func (r *SessionRouter) UpdateSessionState(
 	key session.Key,
 	state session.StateMap,
 ) error {
+	if err := rejectPrivateState(state); err != nil {
+		return err
+	}
+	if !resourceHeld(ctx, key.AppName, "session") {
+		return resourceDo(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), true, func(ctx context.Context) error { return r.UpdateSessionState(ctx, key, state) })
+	}
 	ctx, span := startStorageSpan(ctx, "session.state.update", key.AppName)
 	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
@@ -206,6 +258,17 @@ func (r *SessionRouter) AppendEvent(
 	if sess == nil {
 		return session.ErrNilSession
 	}
+	if item != nil {
+		if err := rejectPrivateState(item.StateDelta); err != nil {
+			return err
+		}
+	}
+	if !resourceHeld(ctx, sess.AppName, "session") {
+		return resourceDo(ctx, r.repository, sess.AppName, "session", resourceSubject(sess.UserID, sess.ID), true, func(ctx context.Context) error { return r.AppendEvent(ctx, sess, item, opts...) })
+	}
+	if sess == nil {
+		return session.ErrNilSession
+	}
 	ctx, span := startStorageSpan(ctx, "session.event.append", sess.AppName)
 	defer span.End()
 	service, err := r.serviceFor(ctx, sess.AppName)
@@ -221,6 +284,12 @@ func (r *SessionRouter) CreateSessionSummary(
 	filterKey string,
 	force bool,
 ) error {
+	if sess == nil {
+		return session.ErrNilSession
+	}
+	if !resourceHeld(ctx, sess.AppName, "session") {
+		return resourceDo(ctx, r.repository, sess.AppName, "session", resourceSubject(sess.UserID, sess.ID), true, func(ctx context.Context) error { return r.CreateSessionSummary(ctx, sess, filterKey, force) })
+	}
 	if sess == nil {
 		return session.ErrNilSession
 	}
@@ -275,72 +344,6 @@ func (r *SessionRouter) Ready(ctx context.Context) error {
 	return err
 }
 
-func (r *SessionRouter) BackfillSession(
-	ctx context.Context,
-	tenantID string,
-	migrationID string,
-	item SessionMigrationItem,
-) (SessionMigrationVerification, error) {
-	migration, source, target, err := r.migrationServices(ctx, tenantID, migrationID)
-	if err != nil {
-		return SessionMigrationVerification{}, err
-	}
-	key := session.Key{
-		AppName: "t/" + migration.TenantID + "/a/" + migration.AppID,
-		UserID:  item.UserID, SessionID: item.SessionID,
-	}
-	sourceSession, err := source.GetSession(ctx, key)
-	if err != nil {
-		return SessionMigrationVerification{}, err
-	}
-	_ = target.DeleteSession(ctx, key)
-	targetSession, err := target.CreateSession(ctx, key, cloneStateMap(sourceSession.State))
-	if err != nil {
-		return SessionMigrationVerification{}, err
-	}
-	for index := range sourceSession.Events {
-		if err := target.AppendEvent(ctx, targetSession, sourceSession.Events[index].Clone()); err != nil {
-			return SessionMigrationVerification{}, fmt.Errorf("backfill session event %d: %w", index, err)
-		}
-	}
-	appState, err := source.ListAppStates(ctx, key.AppName)
-	if err == nil && len(appState) > 0 {
-		if err := target.UpdateAppState(ctx, key.AppName, cloneStateMap(appState)); err != nil {
-			return SessionMigrationVerification{}, err
-		}
-	}
-	userKey := session.UserKey{AppName: key.AppName, UserID: key.UserID}
-	userState, err := source.ListUserStates(ctx, userKey)
-	if err == nil && len(userState) > 0 {
-		if err := target.UpdateUserState(ctx, userKey, cloneStateMap(userState)); err != nil {
-			return SessionMigrationVerification{}, err
-		}
-	}
-	if _, ok := source.GetSessionSummaryText(ctx, sourceSession); ok {
-		if err := target.CreateSessionSummary(ctx, targetSession, "", true); err != nil {
-			return SessionMigrationVerification{}, err
-		}
-	}
-	return verifySessionServices(ctx, migration.ID, key, source, target)
-}
-
-func (r *SessionRouter) VerifySession(
-	ctx context.Context,
-	tenantID string,
-	migrationID string,
-	item SessionMigrationItem,
-) (SessionMigrationVerification, error) {
-	migration, source, target, err := r.migrationServices(ctx, tenantID, migrationID)
-	if err != nil {
-		return SessionMigrationVerification{}, err
-	}
-	key := session.Key{
-		AppName: "t/" + migration.TenantID + "/a/" + migration.AppID,
-		UserID:  item.UserID, SessionID: item.SessionID,
-	}
-	return verifySessionServices(ctx, migration.ID, key, source, target)
-}
-
 func (r *SessionRouter) migrationServices(
 	ctx context.Context,
 	tenantID string,
@@ -376,6 +379,17 @@ func verifySessionServices(
 	source session.Service,
 	target session.Service,
 ) (SessionMigrationVerification, error) {
+	a, err := sessionExists(ctx, source, key)
+	if err != nil {
+		return SessionMigrationVerification{}, err
+	}
+	b, err := sessionExists(ctx, target, key)
+	if err != nil {
+		return SessionMigrationVerification{}, err
+	}
+	if !a || !b {
+		return SessionMigrationVerification{MigrationID: migrationID, UserID: key.UserID, SessionID: key.SessionID, Passed: !a && !b, EventsMatched: !a && !b, SummaryMatched: !a && !b, StateMatched: !a && !b}, nil
+	}
 	sourceSession, err := source.GetSession(ctx, key)
 	if err != nil {
 		return SessionMigrationVerification{}, err
@@ -387,13 +401,12 @@ func verifySessionServices(
 	result := SessionMigrationVerification{
 		MigrationID: migrationID, UserID: key.UserID, SessionID: key.SessionID,
 		SourceEvents: len(sourceSession.Events), TargetEvents: len(targetSession.Events),
-		StateMatched: stateMapsEqual(sourceSession.State, targetSession.State),
+		StateMatched:  stateMapsEqual(logicalState(sourceSession.State), logicalState(targetSession.State)),
+		EventsMatched: sameEvents(sourceSession, targetSession),
 	}
-	_, sourceSummary := source.GetSessionSummaryText(ctx, sourceSession)
-	_, targetSummary := target.GetSessionSummaryText(ctx, targetSession)
-	result.SummaryMatched = sourceSummary == targetSummary
+	result.SummaryMatched = sameSummaries(sourceSession, targetSession)
 	result.Passed = result.SourceEvents == result.TargetEvents &&
-		result.StateMatched && result.SummaryMatched
+		result.StateMatched && result.SummaryMatched && result.EventsMatched
 	return result, nil
 }
 
@@ -520,7 +533,7 @@ func (r *SessionRouter) cachedService(
 	if binding.BackendType == "startup_config" {
 		return r.startup, nil
 	}
-	cacheKey := binding.ID + "\x00" + fmt.Sprint(binding.Version)
+	cacheKey := binding.TenantID + "\x00" + binding.ID + "\x00" + dataDigest(binding.Config)
 	r.mu.RLock()
 	service := r.services[cacheKey]
 	closed := r.closed
@@ -543,6 +556,7 @@ func (r *SessionRouter) cachedService(
 			return nil, err
 		}
 		built = observeSession(built, binding.BackendType)
+		built = &portableSession{Service: built, repo: r.repository, bindingID: binding.ID}
 		r.mu.Lock()
 		if r.closed {
 			r.mu.Unlock()

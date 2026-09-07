@@ -164,7 +164,7 @@ func (s *dualSessionService) AppendEvent(
 	if err != nil {
 		return s.secondaryError(ctx, err)
 	}
-	if err := s.secondary.AppendEvent(ctx, secondarySession, item.Clone(), opts...); err != nil {
+	if err := s.secondary.AppendEvent(ctx, secondarySession, copyStoredEvent(item), opts...); err != nil {
 		return s.secondaryError(ctx, err)
 	}
 	return nil
@@ -184,7 +184,18 @@ func (s *dualSessionService) CreateSessionSummary(
 	if err != nil {
 		return s.secondaryError(ctx, err)
 	}
-	if err := s.secondary.CreateSessionSummary(ctx, secondarySession, filterKey, force); err != nil {
+	primary, err := s.primary.GetSession(ctx, key)
+	if err != nil {
+		return err
+	}
+	_ = secondarySession
+	copier, ok := s.secondary.(interface {
+		CopySummaries(context.Context, session.Key, *session.Session) error
+	})
+	if !ok {
+		return fmt.Errorf("secondary summary import unavailable")
+	}
+	if err := copier.CopySummaries(ctx, key, primary); err != nil {
 		return s.secondaryError(ctx, err)
 	}
 	return nil

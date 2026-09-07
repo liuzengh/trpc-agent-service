@@ -241,6 +241,10 @@ func (l *redisLease) FencingToken() int64 {
 	return l.token
 }
 
+// DistributedFencing distinguishes durable Redis sequence tokens from local
+// process counters, which cannot be compared after a process restart.
+func (l *redisLease) DistributedFencing() bool { return true }
+
 func (l *redisLease) renewLoop() {
 	defer close(l.renewDone)
 	ticker := time.NewTicker(l.renewInterval)

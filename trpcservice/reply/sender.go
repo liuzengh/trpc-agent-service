@@ -3,6 +3,9 @@ package reply
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -62,8 +65,16 @@ func (s *Sender) ProcessOnce(ctx context.Context) (int, error) {
 	}
 	sent := 0
 	var sendErr error
-	for _, item := range items {
-		if err := s.sendOne(ctx, item); err != nil {
+	contexts := make([]context.Context, len(items))
+	stops := make([]func(), len(items))
+	for i, item := range items {
+		contexts[i], stops[i] = s.protectOutbound(ctx, item)
+		defer stops[i]()
+	}
+	for i, item := range items {
+		err := s.sendOne(contexts[i], item)
+		stops[i]()
+		if err != nil {
 			sendErr = errors.Join(sendErr, err)
 			continue
 		}
@@ -109,12 +120,49 @@ func (s *Sender) sendOne(ctx context.Context, item gateway.OutboundItem) error {
 	parts := splitText(item.Text, adapter.Capabilities().MaxTextRunes)
 	providerIDs := make([]string, 0, len(parts))
 	for index, part := range parts {
+		current, err := s.repository.GetChannelBinding(ctx, binding.TenantID, binding.ID)
+		if err != nil || current.Version != binding.Version || current.Status != controlplane.StatusActive {
+			return s.fail(ctx, item, binding.ChannelType, true, started, errors.New("binding changed during multipart delivery"))
+		}
+		identity, _ := json.Marshal([]any{binding.TenantID, binding.ID, binding.Version, binding.ChannelType, item.ReplyTarget, item.Text, len(parts), index})
+		digest := sha256.Sum256(identity)
+		attempt, owner, err := s.journal.BeginPart(ctx, item, s.opts.WorkerID, index, len(parts), hex.EncodeToString(digest[:]))
+		if err != nil {
+			return s.fail(ctx, item, binding.ChannelType, true, started, &channels.DeliveryError{Cause: err, Unknown: true})
+		}
+		if !owner {
+			if attempt.Status == "sent" {
+				if attempt.ProviderID != "" {
+					providerIDs = append(providerIDs, attempt.ProviderID)
+				}
+				continue
+			}
+			return s.fail(ctx, item, binding.ChannelType, true, started, &channels.DeliveryError{Cause: errors.New("outbound part requires reconciliation"), Unknown: attempt.Status != "rejected"})
+		}
 		receipt, sendErr := adapter.Send(ctx, binding, channels.OutboundMessage{
 			OutboundID:  partID(item.ID, index, len(parts)),
 			RequestID:   item.RequestID,
 			Text:        part,
 			ReplyTarget: item.ReplyTarget,
 		})
+		status := "sent"
+		if sendErr != nil {
+			status = "rejected"
+			var deliveryErr *channels.DeliveryError
+			if errors.As(sendErr, &deliveryErr) {
+				if deliveryErr.Unknown {
+					status = "unknown"
+				} else if deliveryErr.Retryable {
+					status = "pending"
+				}
+			}
+		}
+		finalize, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		persistErr := s.journal.FinishPart(finalize, attempt, status, receipt.ProviderMessageID)
+		cancel()
+		if persistErr != nil {
+			return s.fail(ctx, item, binding.ChannelType, true, started, &channels.DeliveryError{Cause: errors.New("part outcome persistence failed"), Unknown: true})
+		}
 		if sendErr != nil {
 			return s.fail(
 				ctx, item, binding.ChannelType,
@@ -127,7 +175,7 @@ func (s *Sender) sendOne(ctx context.Context, item gateway.OutboundItem) error {
 		}
 	}
 	if err := s.journal.MarkOutboundSent(
-		ctx, item.ID, s.opts.WorkerID, strings.Join(providerIDs, ","),
+		ctx, item.ID, s.opts.WorkerID, strings.Join(providerIDs, ","), item.AttemptCount,
 	); err != nil {
 		return err
 	}
@@ -172,7 +220,7 @@ func (s *Sender) fail(
 		retryAt = time.Now().Add(deliveryErr.RetryAfter)
 	}
 	markErr := s.journal.MarkOutboundFailed(
-		ctx, item.ID, s.opts.WorkerID, retryAt, terminal, cause,
+		ctx, item.ID, s.opts.WorkerID, retryAt, terminal, cause, item.AttemptCount,
 	)
 	status, decision, errorType := "failed", "reply_failed", "channel_delivery"
 	if unknown {

@@ -175,16 +175,16 @@ func (j *recordingOutboundJournal) ClaimOutbound(ctx context.Context, workerID s
 	return items, err
 }
 
-func (j *recordingOutboundJournal) MarkOutboundFailed(ctx context.Context, id, workerID string, retryAt time.Time, terminal bool, cause error) error {
-	if err := j.MemoryJournal.MarkOutboundFailed(ctx, id, workerID, retryAt, terminal, cause); err != nil {
+func (j *recordingOutboundJournal) MarkOutboundFailed(ctx context.Context, id, workerID string, retryAt time.Time, terminal bool, cause error, expected ...int) error {
+	if err := j.MemoryJournal.MarkOutboundFailed(ctx, id, workerID, retryAt, terminal, cause, expected...); err != nil {
 		return err
 	}
 	j.failures = append(j.failures, outboundFailure{id, retryAt, terminal})
 	return nil
 }
 
-func (j *recordingOutboundJournal) MarkOutboundSent(ctx context.Context, id, workerID, providerMessageID string) error {
-	if err := j.MemoryJournal.MarkOutboundSent(ctx, id, workerID, providerMessageID); err != nil {
+func (j *recordingOutboundJournal) MarkOutboundSent(ctx context.Context, id, workerID, providerMessageID string, expected ...int) error {
+	if err := j.MemoryJournal.MarkOutboundSent(ctx, id, workerID, providerMessageID, expected...); err != nil {
 		return err
 	}
 	j.providerMessageID = providerMessageID

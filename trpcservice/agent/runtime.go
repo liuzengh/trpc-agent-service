@@ -442,10 +442,10 @@ func (r *Runtime) runChatTurn(
 			)
 		}
 	}()
-	leaseCtx := coordination.ContextWithFencingToken(
-		lease.Context(),
-		lease.FencingToken(),
-	)
+	leaseCtx := lease.Context()
+	if durable, ok := lease.(interface{ DistributedFencing() bool }); ok && durable.DistributedFencing() {
+		leaseCtx = coordination.ContextWithFencingToken(leaseCtx, lease.FencingToken())
+	}
 
 	runOptions := []agentcore.RunOption{
 		agentcore.WithAppName(input.Scope.StorageScope),

@@ -54,8 +54,8 @@ type Lease interface {
 type fencingTokenContextKey struct{}
 
 // ContextWithFencingToken makes the acquired token available to downstream
-// storage wrappers, plugins and tools. The current Session adapter does not yet
-// reject stale tokens; that enforcement is a later storage-boundary step.
+// storage wrappers, plugins and tools. SessionRouter persists the highest token
+// observed at its synchronized storage boundary and rejects older mutations.
 func ContextWithFencingToken(ctx context.Context, token int64) context.Context {
 	if ctx == nil {
 		ctx = context.Background()

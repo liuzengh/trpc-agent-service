@@ -75,6 +75,16 @@ func TestPostgresBackendMigrationIntegration(t *testing.T) {
 	if err != nil || active.ID != migration.ID {
 		t.Fatalf("active=%+v err=%v", active, err)
 	}
+	if _, err := mutable.TransitionBackendMigration(context.Background(), tenantID, migration.ID, MigrationCompleted, 1, nil, []byte(`{"passed":true}`)); err == nil {
+		t.Fatal("unverified migration completed")
+	}
+	if err := repository.(ResourceSyncRepository).WithResourceSync(context.Background(), tenantID, appID, "memory", func(_ context.Context, s *ResourceSync, save func() error) error {
+		s.Subjects["fixture"] = true
+		RecordResourceProof(s, migration, "fixture", "fixture-verified")
+		return save()
+	}); err != nil {
+		t.Fatal(err)
+	}
 	completed, err := mutable.TransitionBackendMigration(
 		context.Background(), tenantID, migration.ID, MigrationCompleted, 1, nil,
 		json.RawMessage(`{"passed":true}`),

@@ -547,6 +547,7 @@ WITH candidates AS (
 )
 UPDATE outbound_message o
 SET status = 'sending', locked_by = $2,
+	 delivery_protocol=CASE WHEN o.attempt_count=0 THEN 1 ELSE o.delivery_protocol END,
     locked_until = now() + $3::interval,
     attempt_count = attempt_count + 1
 FROM candidates c
@@ -587,14 +588,19 @@ func (j *PostgresJournal) MarkOutboundSent(
 	outboundID string,
 	workerID string,
 	providerMessageID string,
+	expectedAttempt ...int,
 ) error {
+	expected := 0
+	if len(expectedAttempt) > 0 {
+		expected = expectedAttempt[0]
+	}
 	result, err := j.db.ExecContext(ctx, `
 UPDATE outbound_message
 SET status = 'sent', provider_message_id = $3, sent_at = now(),
     locked_by = NULL, locked_until = NULL,
     last_error_type = NULL, last_error_message = NULL
-WHERE outbound_id = $1 AND locked_by = $2 AND status = 'sending'`,
-		outboundID, workerID, providerMessageID)
+WHERE outbound_id = $1 AND locked_by = $2 AND status = 'sending' AND ($4=0 OR attempt_count=$4)`,
+		outboundID, workerID, providerMessageID, expected)
 	if err != nil {
 		return fmt.Errorf("mark outbound sent: %w", err)
 	}
@@ -608,7 +614,12 @@ func (j *PostgresJournal) MarkOutboundFailed(
 	retryAt time.Time,
 	terminal bool,
 	cause error,
+	expectedAttempt ...int,
 ) error {
+	expected := 0
+	if len(expectedAttempt) > 0 {
+		expected = expectedAttempt[0]
+	}
 	status := "pending"
 	if terminal {
 		status = "dead"
@@ -625,8 +636,8 @@ func (j *PostgresJournal) MarkOutboundFailed(
 UPDATE outbound_message
 SET status = $3, next_attempt_at = $4, locked_by = NULL,
     locked_until = NULL, last_error_type = $5, last_error_message = $6
-WHERE outbound_id = $1 AND locked_by = $2 AND status = 'sending'`,
-		outboundID, workerID, status, retryAt, errorType, errorText)
+WHERE outbound_id = $1 AND locked_by = $2 AND status = 'sending' AND ($7=0 OR attempt_count=$7)`,
+		outboundID, workerID, status, retryAt, errorType, errorText, expected)
 	if err != nil {
 		return fmt.Errorf("mark outbound failed: %w", err)
 	}

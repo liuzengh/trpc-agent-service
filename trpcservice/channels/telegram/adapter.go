@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -326,7 +327,7 @@ func (a *Adapter) Send(
 	request.Header.Set("Content-Type", "application/json")
 	response, err := a.client.Do(request)
 	if err != nil {
-		return channels.DeliveryReceipt{}, &channels.DeliveryError{Cause: err, Retryable: true}
+		return channels.DeliveryReceipt{}, &channels.DeliveryError{Cause: errors.New("Telegram delivery outcome unknown"), Unknown: true}
 	}
 	defer response.Body.Close()
 	var result struct {
@@ -342,8 +343,11 @@ func (a *Adapter) Send(
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
 		return channels.DeliveryReceipt{}, &channels.DeliveryError{
-			Cause: err, Retryable: response.StatusCode >= 500,
+			Cause: errors.New("Telegram delivery response unreadable"), Unknown: true,
 		}
+	}
+	if (!result.OK && result.ErrorCode == 0) || (result.OK && result.Result.MessageID <= 0) {
+		return channels.DeliveryReceipt{}, &channels.DeliveryError{Cause: errors.New("Telegram delivery response incomplete"), Unknown: true}
 	}
 	if !result.OK {
 		retryable := response.StatusCode >= 500 || result.ErrorCode == 429

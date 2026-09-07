@@ -64,6 +64,9 @@ func (r *MemoryRouter) AddMemory(
 	topics []string,
 	opts ...memory.AddOption,
 ) error {
+	if !resourceHeld(ctx, key.AppName, "memory") {
+		return resourceDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.AddMemory(ctx, key, value, topics, opts...) })
+	}
 	ctx, span := startStorageSpan(ctx, "memory.add", key.AppName)
 	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
@@ -80,6 +83,9 @@ func (r *MemoryRouter) UpdateMemory(
 	topics []string,
 	opts ...memory.UpdateOption,
 ) error {
+	if !resourceHeld(ctx, key.AppName, "memory") {
+		return resourceDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.UpdateMemory(ctx, key, value, topics, opts...) })
+	}
 	ctx, span := startStorageSpan(ctx, "memory.update", key.AppName)
 	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
@@ -90,6 +96,9 @@ func (r *MemoryRouter) UpdateMemory(
 }
 
 func (r *MemoryRouter) DeleteMemory(ctx context.Context, key memory.Key) error {
+	if !resourceHeld(ctx, key.AppName, "memory") {
+		return resourceDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.DeleteMemory(ctx, key) })
+	}
 	ctx, span := startStorageSpan(ctx, "memory.delete", key.AppName)
 	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
@@ -100,6 +109,9 @@ func (r *MemoryRouter) DeleteMemory(ctx context.Context, key memory.Key) error {
 }
 
 func (r *MemoryRouter) ClearMemories(ctx context.Context, key memory.UserKey) error {
+	if !resourceHeld(ctx, key.AppName, "memory") {
+		return resourceDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.ClearMemories(ctx, key) })
+	}
 	ctx, span := startStorageSpan(ctx, "memory.clear", key.AppName)
 	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
@@ -114,6 +126,9 @@ func (r *MemoryRouter) ReadMemories(
 	key memory.UserKey,
 	limit int,
 ) ([]*memory.Entry, error) {
+	if !resourceHeld(ctx, key.AppName, "memory") {
+		return resourceValue(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), false, func(ctx context.Context) ([]*memory.Entry, error) { return r.ReadMemories(ctx, key, limit) })
+	}
 	ctx, span := startStorageSpan(ctx, "memory.read", key.AppName)
 	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
@@ -129,6 +144,9 @@ func (r *MemoryRouter) SearchMemories(
 	query string,
 	opts ...memory.SearchOption,
 ) ([]*memory.Entry, error) {
+	if !resourceHeld(ctx, key.AppName, "memory") {
+		return resourceValue(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), false, func(ctx context.Context) ([]*memory.Entry, error) { return r.SearchMemories(ctx, key, query, opts...) })
+	}
 	ctx, span := startStorageSpan(ctx, "memory.search", key.AppName)
 	defer span.End()
 	service, err := r.serviceFor(ctx, key.AppName)
@@ -166,15 +184,48 @@ func (r *MemoryRouter) BackfillUser(
 	migrationID string,
 	userID string,
 ) (MemoryMigrationVerification, error) {
+	m, err := r.repository.GetBackendMigration(ctx, tenantID, migrationID)
+	if err != nil {
+		return MemoryMigrationVerification{}, err
+	}
+	app := "t/" + tenantID + "/a/" + m.AppID
+	if !resourceHeld(ctx, app, "memory") {
+		return resourceValue(ctx, r.repository, app, "memory", resourceSubject(userID, ""), false, func(ctx context.Context) (MemoryMigrationVerification, error) {
+			return r.BackfillUser(ctx, tenantID, migrationID, userID)
+		})
+	}
 	migration, source, target, err := r.migrationServices(ctx, tenantID, migrationID)
 	if err != nil {
 		return MemoryMigrationVerification{}, err
 	}
 	appName := "t/" + migration.TenantID + "/a/" + migration.AppID
 	key := memory.UserKey{AppName: appName, UserID: userID}
-	entries, err := source.ReadMemories(ctx, key, 100000)
+	entries, err := source.ReadMemories(ctx, key, 100001)
 	if err != nil {
 		return MemoryMigrationVerification{}, err
+	}
+	if len(entries) > 100000 {
+		return MemoryMigrationVerification{}, errors.New("Memory migration exceeds scan bound")
+	}
+	targets, err := target.ReadMemories(ctx, key, 100001)
+	if err != nil {
+		return MemoryMigrationVerification{}, err
+	}
+	if len(targets) > 100000 {
+		return MemoryMigrationVerification{}, errors.New("Memory migration exceeds scan bound")
+	}
+	wanted := map[string]bool{}
+	for _, e := range entries {
+		if e != nil {
+			wanted[e.ID] = true
+		}
+	}
+	for _, e := range targets {
+		if e != nil && !wanted[e.ID] {
+			if err = target.DeleteMemory(ctx, memory.Key{AppName: key.AppName, UserID: key.UserID, MemoryID: e.ID}); err != nil {
+				return MemoryMigrationVerification{}, err
+			}
+		}
 	}
 	for _, entry := range entries {
 		if entry == nil || entry.Memory == nil {
@@ -201,6 +252,16 @@ func (r *MemoryRouter) VerifyUser(
 	migrationID string,
 	userID string,
 ) (MemoryMigrationVerification, error) {
+	m, err := r.repository.GetBackendMigration(ctx, tenantID, migrationID)
+	if err != nil {
+		return MemoryMigrationVerification{}, err
+	}
+	app := "t/" + tenantID + "/a/" + m.AppID
+	if !resourceHeld(ctx, app, "memory") {
+		return resourceValue(ctx, r.repository, app, "memory", resourceSubject(userID, ""), false, func(ctx context.Context) (MemoryMigrationVerification, error) {
+			return r.VerifyUser(ctx, tenantID, migrationID, userID)
+		})
+	}
 	migration, source, target, err := r.migrationServices(ctx, tenantID, migrationID)
 	if err != nil {
 		return MemoryMigrationVerification{}, err
@@ -209,7 +270,16 @@ func (r *MemoryRouter) VerifyUser(
 		AppName: "t/" + migration.TenantID + "/a/" + migration.AppID,
 		UserID:  userID,
 	}
-	return verifyMemoryServices(ctx, migration.ID, key, source, target)
+	result, err := verifyMemoryServices(ctx, migration.ID, key, source, target)
+	if err == nil && result.Passed {
+		s, save, e := resourceState(ctx, app, "memory")
+		if e != nil {
+			return result, e
+		}
+		controlplane.RecordResourceProof(s, migration, resourceSubject(userID, ""), dataDigest(result))
+		err = save()
+	}
+	return result, err
 }
 
 func (r *MemoryRouter) migrationServices(
@@ -247,13 +317,16 @@ func verifyMemoryServices(
 	source memory.Service,
 	target memory.Service,
 ) (MemoryMigrationVerification, error) {
-	sourceEntries, err := source.ReadMemories(ctx, key, 100000)
+	sourceEntries, err := source.ReadMemories(ctx, key, 100001)
 	if err != nil {
 		return MemoryMigrationVerification{}, err
 	}
-	targetEntries, err := target.ReadMemories(ctx, key, 100000)
+	targetEntries, err := target.ReadMemories(ctx, key, 100001)
 	if err != nil {
 		return MemoryMigrationVerification{}, err
+	}
+	if len(sourceEntries) > 100000 || len(targetEntries) > 100000 {
+		return MemoryMigrationVerification{}, errors.New("Memory verification exceeds scan bound")
 	}
 	targetByID := make(map[string]*memory.Entry, len(targetEntries))
 	for _, entry := range targetEntries {
@@ -274,14 +347,23 @@ func verifyMemoryServices(
 			result.Missing = append(result.Missing, sourceEntry.ID)
 			continue
 		}
-		if sourceEntry.Memory == nil || targetEntry.Memory == nil ||
-			sourceEntry.Memory.Memory != targetEntry.Memory.Memory {
+		if sourceEntry.Memory == nil || targetEntry.Memory == nil || sourceEntry.AppName != key.AppName || targetEntry.AppName != key.AppName || sourceEntry.UserID != key.UserID || targetEntry.UserID != key.UserID ||
+			memoryDigest(sourceEntry.Memory) != memoryDigest(targetEntry.Memory) {
 			result.Mismatched = append(result.Mismatched, sourceEntry.ID)
 		}
 	}
 	result.Passed = result.SourceCount == result.TargetCount &&
 		len(result.Missing) == 0 && len(result.Mismatched) == 0
 	return result, nil
+}
+
+func memoryDigest(m *memory.Memory) string {
+	if m == nil {
+		return ""
+	}
+	copy := *m
+	copy.LastUpdated = nil
+	return dataDigest(copy)
 }
 
 func (r *MemoryRouter) Close() error {
@@ -391,7 +473,7 @@ func (r *MemoryRouter) cachedService(
 	ctx context.Context,
 	binding controlplane.BackendBinding,
 ) (memory.Service, error) {
-	cacheKey := binding.ID + "\x00" + fmt.Sprint(binding.Version)
+	cacheKey := binding.TenantID + "\x00" + binding.ID + "\x00" + dataDigest(binding.Config)
 	r.mu.RLock()
 	service := r.services[cacheKey]
 	closed := r.closed

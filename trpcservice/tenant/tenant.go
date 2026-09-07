@@ -67,7 +67,6 @@ type Guard struct {
 type localQuota struct {
 	minute     string
 	requests   int
-	concurrent int
 	day        string
 	prompt     int64
 	completion int64

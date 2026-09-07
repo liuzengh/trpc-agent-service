@@ -327,25 +327,25 @@ func (a *Adapter) sendText(
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return "", false, &channels.DeliveryError{Cause: err, Retryable: true}
+		return "", false, &channels.DeliveryError{Cause: fmt.Errorf("WeCom delivery outcome unknown"), Unknown: true}
 	}
 	defer resp.Body.Close()
 	var payload struct {
-		ErrCode int    `json:"errcode"`
+		ErrCode *int   `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
 		MsgID   string `json:"msgid"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
-		return "", false, &channels.DeliveryError{Cause: err, Retryable: resp.StatusCode >= 500}
+		return "", false, &channels.DeliveryError{Cause: fmt.Errorf("WeCom delivery response unreadable"), Unknown: true}
 	}
-	if payload.ErrCode == 40014 || payload.ErrCode == 42001 {
-		return "", true, providerError("send", payload.ErrCode, payload.ErrMsg)
+	if payload.ErrCode == nil {
+		return "", false, &channels.DeliveryError{Cause: fmt.Errorf("WeCom delivery response incomplete"), Unknown: true}
 	}
-	if payload.ErrCode != 0 {
-		return "", false, providerError("send", payload.ErrCode, payload.ErrMsg)
+	if *payload.ErrCode == 40014 || *payload.ErrCode == 42001 {
+		return "", true, providerError("send", *payload.ErrCode, payload.ErrMsg)
 	}
-	if payload.MsgID == "" {
-		payload.MsgID = message.OutboundID
+	if *payload.ErrCode != 0 {
+		return "", false, providerError("send", *payload.ErrCode, payload.ErrMsg)
 	}
 	return payload.MsgID, false, nil
 }

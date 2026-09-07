@@ -32,6 +32,7 @@ func SQL(schema, prefix string) (string, error) {
 			fmt.Fprintf(&out, "GRANT EXECUTE ON FUNCTION %s.platform_audit_prune(TEXT,INTEGER) TO %s;\n", schema, name)
 		}
 		if role == "admin" {
+			fmt.Fprintf(&out, "GRANT EXECUTE ON FUNCTION %s.platform_reconcile_outbound_part(TEXT,TEXT,INTEGER,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT) TO %s;\n", schema, name)
 			fmt.Fprintf(&out, "GRANT EXECUTE ON FUNCTION %s.platform_tenant_policy_update(TEXT,BIGINT,JSONB,JSONB,TEXT,TEXT) TO %s;\n", schema, name)
 		}
 		grants := roleGrants(role)
@@ -72,6 +73,7 @@ func roleGrants(role string) map[string][]string {
 		add("SELECT,INSERT", "channel_message_rejection")
 	case "worker":
 		add("SELECT", control...)
+		add("SELECT,INSERT,UPDATE", "resource_sync")
 		add("SELECT", "conversation")
 		add("SELECT,UPDATE", "inbound_message", "agent_run")
 		add("SELECT,INSERT", "outbound_message", "work_item")
@@ -80,16 +82,20 @@ func roleGrants(role string) map[string][]string {
 	case "relay":
 		add("SELECT,UPDATE", "queue_outbox")
 	case "sender":
+		add("SELECT,INSERT,UPDATE", "outbound_part")
 		add("SELECT", "tenant", "agent_app", "channel_binding")
 		add("SELECT,UPDATE", "outbound_message")
 		add("SELECT,INSERT,UPDATE", "channel_delivery_attempt")
 	case "jobs":
 		add("SELECT", control...)
+		add("SELECT,INSERT,UPDATE", "resource_sync")
 		add("SELECT,INSERT,UPDATE", "knowledge_sync")
 		add("SELECT,INSERT,UPDATE", "background_watermark")
 		add("UPDATE", "backend_binding", "backend_migration")
 		add("SELECT,INSERT,UPDATE", "background_job")
 	case "admin":
+		add("SELECT", "outbound_part")
+		add("SELECT", "resource_sync")
 		add("SELECT", "knowledge_sync")
 		add("SELECT", "background_watermark")
 		add("SELECT", "platform_backlog")

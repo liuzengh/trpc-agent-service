@@ -532,6 +532,7 @@ func run() error {
 		}
 		adminService.WithAuditWriter(auditWriter)
 		adminService.WithChannelState(wecomMCPState)
+		adminService.WithOutboundParts(inboundJournal)
 		adminService.WithKnowledgeRouter(knowledgeRouter)
 		adminService.WithBackgroundJobs(backgroundJobs)
 		adminService.WithToolOperations(operations, toolExecutionJournal)

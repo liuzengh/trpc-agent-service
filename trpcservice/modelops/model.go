@@ -110,7 +110,7 @@ func (m *Model) GenerateContent(parent context.Context, request *model.Request) 
 		m.finish(parent, started, err)
 		return nil, errors.Join(errors.New("model provider call failed"), settleErr)
 	}
-	out := make(chan *model.Response)
+	out := make(chan *model.Response, 1)
 	go func() {
 		defer close(out)
 		defer cancel()
@@ -153,9 +153,18 @@ func (m *Model) GenerateContent(parent context.Context, request *model.Request) 
 		settleErr := m.settle(parent, r, p, c, m.cost(p, c), callErr != nil || !haveUsage)
 		m.finish(parent, started, errors.Join(callErr, settleErr))
 		if settleErr != nil || callErr != nil {
+			terminal := &model.Response{Done: true, Error: &model.ResponseError{Type: "model_accounting_error", Message: "model call or usage settlement failed"}}
+			// The provider timeout belongs to this wrapper, not the Runner's
+			// parent context. Never race the terminal error against an already
+			// canceled provider context and accidentally report partial success.
 			select {
-			case out <- &model.Response{Done: true, Error: &model.ResponseError{Type: "model_accounting_error", Message: "model call or usage settlement failed"}}:
-			case <-ctx.Done():
+			case out <- terminal:
+			default:
+				select {
+				case <-out:
+				default:
+				} // discard at most one unread partial
+				out <- terminal // only this goroutine produces; a slot is now free
 			}
 		}
 	}()

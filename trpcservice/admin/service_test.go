@@ -239,10 +239,24 @@ func TestAdminBackendMigrationStateMachine(t *testing.T) {
 	); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("cutover without verification error=%v", err)
 	}
+	if _, err := service.TransitionBackendMigration(context.Background(), migration.TenantID, migration.ID, controlplane.MigrationCutover, migration.Version, nil, json.RawMessage(`{"passed":true}`)); err == nil {
+		t.Fatal("caller-supplied proof accepted")
+	}
+	if err := repository.WithResourceSync(context.Background(), migration.TenantID, migration.AppID, "memory", func(_ context.Context, s *controlplane.ResourceSync, save func() error) error {
+		s.Subjects["fixture"] = true
+		controlplane.RecordResourceProof(s, migration, "fixture", "fixture-verified")
+		return save()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	migration, err = repository.TransitionBackendMigration(context.Background(), migration.TenantID, migration.ID, migration.State, migration.Version, nil, []byte(`{"passed":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
 	migration, err = service.TransitionBackendMigration(
 		context.Background(), migration.TenantID, migration.ID,
 		controlplane.MigrationCutover, migration.Version, nil,
-		json.RawMessage(`{"passed":true,"source_count":1,"target_count":1}`),
+		nil,
 	)
 	if err != nil || migration.State != controlplane.MigrationCutover {
 		t.Fatalf("cutover=%+v err=%v", migration, err)

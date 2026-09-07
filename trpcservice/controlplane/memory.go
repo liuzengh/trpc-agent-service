@@ -9,6 +9,7 @@ import (
 
 // MemoryRepository is an in-process control plane for tutorials and tests.
 type MemoryRepository struct {
+	resourceMemory  resourceMemory
 	knowledgeLock   chan struct{}
 	knowledgeStates map[string][]byte
 	mu              sync.RWMutex
@@ -448,6 +449,24 @@ func (r *MemoryRepository) TransitionBackendMigration(
 	checkpoint []byte,
 	verification []byte,
 ) (BackendMigration, error) {
+	current, err := r.GetBackendMigration(ctx, tenantID, migrationID)
+	if err != nil {
+		return BackendMigration{}, err
+	}
+	if validResource(current.ResourceType) {
+		if _, _, held := ResourceFromContext(ctx, tenantID, current.AppID, current.ResourceType); !held {
+			var out BackendMigration
+			err := r.WithResourceSync(ctx, tenantID, current.AppID, current.ResourceType, func(ctx context.Context, s *ResourceSync, _ func() error) error {
+				if (nextState == MigrationCutover || nextState == MigrationCompleted) && !validResourceProof(*s, current) {
+					return errors.New("migration requires current complete server verification")
+				}
+				var err error
+				out, err = r.TransitionBackendMigration(ctx, tenantID, migrationID, nextState, expectedVersion, checkpoint, verification)
+				return err
+			})
+			return out, err
+		}
+	}
 	select {
 	case r.knowledgeLock <- struct{}{}:
 	case <-ctx.Done():

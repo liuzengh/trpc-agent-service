@@ -81,6 +81,7 @@ type OutboundItem struct {
 
 // Journal atomically creates inbound, run and queue-outbox records.
 type Journal interface {
+	PartJournal
 	Accept(ctx context.Context, request InboundRequest) (AcceptResult, error)
 	ClaimQueueOutbox(
 		ctx context.Context,
@@ -111,6 +112,7 @@ type Journal interface {
 		outboundID string,
 		workerID string,
 		providerMessageID string,
+		expectedAttempt ...int,
 	) error
 	MarkOutboundFailed(
 		ctx context.Context,
@@ -119,6 +121,7 @@ type Journal interface {
 		retryAt time.Time,
 		terminal bool,
 		cause error,
+		expectedAttempt ...int,
 	) error
 	Ready(ctx context.Context) error
 	Close() error
