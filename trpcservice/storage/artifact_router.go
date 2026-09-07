@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -205,6 +206,7 @@ func (r *ArtifactRouter) withDistributedLock(
 			unlockCtx, `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, key,
 		).Scan(&unlocked)
 		if unlockErr != nil || !unlocked {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 			err = errors.Join(err, fmt.Errorf("release artifact advisory lock: %v", unlockErr))
 		}
 	}()

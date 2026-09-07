@@ -22,6 +22,7 @@ var (
 
 // InboundRequest is the normalized message accepted by the durable Gateway.
 type InboundRequest struct {
+	Media             *runtimecontext.MediaReference
 	Scope             runtimecontext.Scope
 	ExternalMessageID string
 	UserID            string
@@ -149,6 +150,9 @@ func validateInbound(request *InboundRequest) error {
 	}
 	if request.DirectReply != "" && (len(request.ApprovedTools) > 0 || len(request.ApprovedToolCalls) > 0) {
 		return fmt.Errorf("direct platform replies cannot grant tool permissions")
+	}
+	if request.Media != nil && (request.DirectReply != "" || len(request.ApprovedTools) > 0 || len(request.ApprovedToolCalls) > 0 || request.ApprovalID != "") {
+		return errors.New("attachments cannot carry approvals or control replies")
 	}
 	return nil
 }

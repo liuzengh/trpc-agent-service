@@ -16,6 +16,7 @@ var ErrForbidden = errors.New("secret access forbidden")
 
 const (
 	Model           = "model"
+	MCPServer       = "mcp_server"
 	Session         = "session"
 	Memory          = "memory"
 	Artifact        = "artifact"
@@ -23,6 +24,7 @@ const (
 	Embedding       = "embedding"
 	TelegramWebhook = "telegram_webhook"
 	TelegramBot     = "telegram_bot"
+	TelegramMedia   = "telegram_media"
 	WeComCallback   = "wecom_callback"
 	WeComAES        = "wecom_aes"
 	WeComApp        = "wecom_app"
@@ -54,7 +56,7 @@ var referencePattern = regexp.MustCompile(`^env://[A-Z][A-Z0-9_]{0,127}$`)
 
 func ValidPurpose(value string) bool {
 	switch value {
-	case Model, Session, Memory, Artifact, Knowledge, Embedding, TelegramWebhook, TelegramBot, WeComCallback, WeComAES, WeComApp, WeComMCPRead, WeComMCPSend:
+	case Model, MCPServer, Session, Memory, Artifact, Knowledge, Embedding, TelegramWebhook, TelegramBot, TelegramMedia, WeComCallback, WeComAES, WeComApp, WeComMCPRead, WeComMCPSend:
 		return true
 	}
 	return false

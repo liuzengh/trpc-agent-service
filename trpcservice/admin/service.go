@@ -411,7 +411,16 @@ func (s *Service) CreateRevision(
 	if err != nil {
 		return controlplane.AgentRevision{}, invalidf("tool_policy: %v", err)
 	}
-	if _, err := s.tools.Resolve(toolPolicy.AllowedTools); err != nil {
+	servers, err := platformtool.ParseMCPServers(revision.AgentConfig)
+	if err != nil {
+		return controlplane.AgentRevision{}, invalidf("invalid MCP configuration")
+	}
+	for _, server := range servers {
+		if err := s.authorizeSecret(ctx, revision.TenantID, secret.MCPServer, server.CredentialRef); err != nil {
+			return controlplane.AgentRevision{}, err
+		}
+	}
+	if _, err := s.tools.Resolve(platformtool.MCPLocalTools(servers, toolPolicy.AllowedTools)); err != nil {
 		return controlplane.AgentRevision{}, invalidf("tool_policy: %v", err)
 	}
 	if err := platformstorage.ValidateRevisionKnowledgeConfig(revision.KnowledgeConfig); err != nil {

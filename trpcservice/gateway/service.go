@@ -16,6 +16,7 @@ import (
 
 // IntakeRequest is the untrusted Test Channel input before binding resolution.
 type IntakeRequest struct {
+	Media             *runtimecontext.MediaReference
 	BindingKey        string
 	ExternalMessageID string
 	UserID            string
@@ -106,6 +107,7 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 		}
 	}
 	result, err := i.journal.Accept(ctx, InboundRequest{
+		Media:             input.Media,
 		Scope:             scope,
 		ExternalMessageID: input.ExternalMessageID,
 		UserID:            input.UserID,

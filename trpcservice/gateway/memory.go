@@ -135,6 +135,7 @@ func (j *MemoryJournal) Accept(
 	scope.RevisionID = conversation.revisionID
 	traceParent, traceState := outboundTraceHeaders(ctx)
 	task := workqueue.AgentTask{
+		Media:             request.Media,
 		InboundID:         result.InboundID,
 		RequestID:         result.RequestID,
 		ConversationID:    result.ConversationID,

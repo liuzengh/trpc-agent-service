@@ -24,29 +24,32 @@ import (
 const defaultAPIBase = "https://api.telegram.org"
 
 type bindingConfig struct {
-	BotTokenRef       string  `json:"bot_token_ref"`
-	WebhookSecretRef  string  `json:"webhook_secret_ref"`
-	APIBaseURL        string  `json:"api_base_url,omitempty"`
-	BotUserID         int64   `json:"bot_user_id,omitempty"`
-	BotUsername       string  `json:"bot_username,omitempty"`
-	AllowedChatIDs    []int64 `json:"allowed_chat_ids,omitempty"`
-	RequireMention    bool    `json:"require_mention,omitempty"`
-	IgnoreBotMessages bool    `json:"ignore_bot_messages,omitempty"`
+	AttachmentsEnabled bool    `json:"attachments_enabled,omitempty"`
+	BotTokenRef        string  `json:"bot_token_ref"`
+	WebhookSecretRef   string  `json:"webhook_secret_ref"`
+	APIBaseURL         string  `json:"api_base_url,omitempty"`
+	BotUserID          int64   `json:"bot_user_id,omitempty"`
+	BotUsername        string  `json:"bot_username,omitempty"`
+	AllowedChatIDs     []int64 `json:"allowed_chat_ids,omitempty"`
+	RequireMention     bool    `json:"require_mention,omitempty"`
+	IgnoreBotMessages  bool    `json:"ignore_bot_messages,omitempty"`
 }
 
 type Adapter struct {
-	secrets secret.Store
-	client  *http.Client
+	customClient bool
+	secrets      secret.Store
+	client       *http.Client
 }
 
 func New(secrets secret.Store, client *http.Client) (*Adapter, error) {
 	if secrets == nil {
 		return nil, fmt.Errorf("Telegram secret store is required")
 	}
+	custom := client != nil
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Adapter{secrets: secrets, client: client}, nil
+	return &Adapter{secrets: secrets, client: client, customClient: custom}, nil
 }
 
 func (a *Adapter) Type() string { return "telegram" }
@@ -110,6 +113,7 @@ func (a *Adapter) Callback(
 		MessageThreadID: message.MessageThreadID,
 	})
 	result.Messages = []channels.InboundEnvelope{{
+		Media:             telegramMedia(message, binding.Version),
 		ExternalMessageID: strconv.FormatInt(update.UpdateID, 10),
 		ExternalUserID:    strconv.FormatInt(message.From.ID, 10),
 		ExternalChatID:    strconv.FormatInt(message.Chat.ID, 10),
@@ -158,10 +162,12 @@ type telegramMessageEntity struct {
 }
 
 type telegramPhoto struct {
-	FileID string `json:"file_id"`
+	FileID   string `json:"file_id"`
+	FileSize int64  `json:"file_size"`
 }
 
 type telegramDocument struct {
+	FileSize int64  `json:"file_size"`
 	FileID   string `json:"file_id"`
 	FileName string `json:"file_name"`
 	MimeType string `json:"mime_type"`

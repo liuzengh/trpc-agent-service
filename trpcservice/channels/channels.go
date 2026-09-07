@@ -48,6 +48,7 @@ type Adapter interface {
 
 // InboundEnvelope is the protocol-neutral callback message passed to Gateway.
 type InboundEnvelope struct {
+	Media             *MediaReference
 	ExternalMessageID string
 	ExternalUserID    string
 	ExternalChatID    string

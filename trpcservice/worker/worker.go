@@ -30,6 +30,9 @@ type Runtime interface {
 }
 
 type Options struct {
+	Attachments interface {
+		Import(context.Context, workqueue.AgentTask) (string, error)
+	}
 	WorkerID          string
 	MaxAttempts       int
 	RetryDelay        time.Duration
@@ -105,7 +108,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
 	releaseQuota := func() {}
-	if w.opts.Quota != nil {
+	if w.opts.Quota != nil && task.Media == nil {
 		lease, quotaErr := w.opts.Quota.AcquireRunLease(ctx, task.Scope.TenantID)
 		if quotaErr != nil {
 			failErr := w.journal.FailRun(ctx, task.RequestID, "tenant_quota", quotaErr, w.opts.WorkerID)
@@ -118,17 +121,29 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		ctx = lease.Context()
 	}
 	defer releaseQuota()
-	result, runErr := w.runtime.ChatWithScope(ctx, agentruntime.ChatInput{
-		Scope:             task.Scope,
-		MessageID:         task.MessageID,
-		UserID:            task.UserID,
-		SessionID:         task.SessionID,
-		Text:              task.Text,
-		RequestID:         task.RequestID,
-		ApprovedTools:     append([]string(nil), task.ApprovedTools...),
-		ApprovedToolCalls: append([]governance.ApprovedToolCall(nil), task.ApprovedToolCalls...),
-		ReplyTarget:       task.ReplyTarget,
-	})
+	var result agentruntime.ChatResult
+	var runErr error
+	if task.Media != nil {
+		if w.opts.Attachments == nil {
+			runErr = errors.New("attachment import unavailable")
+		} else {
+			result.Reply, runErr = w.opts.Attachments.Import(ctx, task)
+		}
+		result.RequestID = task.RequestID
+		result.AgentName = "platform-attachment"
+	} else {
+		result, runErr = w.runtime.ChatWithScope(ctx, agentruntime.ChatInput{
+			Scope:             task.Scope,
+			MessageID:         task.MessageID,
+			UserID:            task.UserID,
+			SessionID:         task.SessionID,
+			Text:              task.Text,
+			RequestID:         task.RequestID,
+			ApprovedTools:     append([]string(nil), task.ApprovedTools...),
+			ApprovedToolCalls: append([]governance.ApprovedToolCall(nil), task.ApprovedToolCalls...),
+			ReplyTarget:       task.ReplyTarget,
+		})
+	}
 	if runErr != nil {
 		w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "failed", time.Since(started))
 		failErr := w.journal.FailRun(ctx, task.RequestID, "agent_execution", runErr, w.opts.WorkerID)
@@ -179,7 +194,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	}, "run_completed", "", started); err != nil {
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
-	if w.opts.Quota != nil && !w.opts.ModelUsageManaged {
+	if w.opts.Quota != nil && !w.opts.ModelUsageManaged && task.Media == nil {
 		if err := w.opts.Quota.RecordUsage(
 			ctx, task.Scope.TenantID, task.RequestID,
 			result.PromptTokens, result.CompletionTokens, result.Cost,
@@ -187,8 +202,10 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 			return true, w.retryOrAck(ctx, delivery, task, err)
 		}
 	}
-	if err := w.enqueueSessionJobs(ctx, task); err != nil {
-		return true, w.retryOrAck(ctx, delivery, task, err)
+	if task.Media == nil {
+		if err := w.enqueueSessionJobs(ctx, task); err != nil {
+			return true, w.retryOrAck(ctx, delivery, task, err)
+		}
 	}
 	w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "completed", time.Since(started))
 	if !w.opts.ModelUsageManaged {

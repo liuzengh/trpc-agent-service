@@ -16,6 +16,7 @@ import (
 	adminservice "github.com/liuzengh/trpc-agent-service/trpcservice/admin"
 	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/attachments"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
@@ -338,7 +339,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("build business operation service: %w", err)
 	}
-	toolCatalog := platformtool.DefaultCatalog(platformtool.NewWorkItemTool(operations))
+	attachmentService, err := attachments.New(controlPlaneRepository, artifactRouter, secretStore, auditWriter)
+	if err != nil {
+		return fmt.Errorf("build attachments: %w", err)
+	}
+	toolCatalog := platformtool.DefaultCatalog(platformtool.NewWorkItemTool(operations), attachmentService.ReadTool())
 	revisionCompiler, err := agentservice.NewRevisionCompiler(
 		controlPlaneRepository,
 		selectedModel,
@@ -427,6 +432,7 @@ func run() error {
 		return fmt.Errorf("build queue outbox relay: %w", err)
 	}
 	agentWorker, err := worker.New(agentQueue, inboundJournal, runtime, worker.Options{
+		Attachments:       attachmentService,
 		WorkerID:          "worker-" + nodeID,
 		MaxAttempts:       3,
 		RetryDelay:        250 * time.Millisecond,

@@ -93,3 +93,35 @@ func TestMediaAndEditsDoNotReachApprovalOrAgent(t *testing.T) {
 		})
 	}
 }
+
+func TestEnabledAttachmentIsQueuedWithoutParsingCaptionAsApproval(t *testing.T) {
+	data := controlplane.DefaultBootstrapData()
+	binding := data.ChannelBindings[0]
+	binding.ChannelType = "telegram"
+	binding.Config = json.RawMessage(`{"attachments_enabled":true}`)
+	binding.Version = 3
+	data.ChannelBindings[0] = binding
+	repo := controlplane.NewMemoryRepository(data)
+	defer repo.Close()
+	journal := NewMemoryJournal()
+	defer journal.Close()
+	resolver, _ := routing.NewControlPlaneResolver(repo)
+	intake, _ := NewIntake(resolver, journal)
+	approvals := &approvalDecisionTestHandler{}
+	registry, _ := channels.NewRegistry(callbackTestAdapter{})
+	g, _ := NewCallbackGateway(repo, registry, intake, WithApprovalDecisionHandler(approvals))
+	message := channels.InboundEnvelope{ExternalMessageID: "attachment-id", ExternalUserID: "user", ExternalChatID: "chat", ChatType: "direct", MessageType: "file", Text: "批准 apr_00000000000000000000000000000000", Media: &channels.MediaReference{FileID: "provider-file"}, ReplyTarget: "chat"}
+	for i := 0; i < 2; i++ {
+		if err := g.acceptVerifiedMessage(context.Background(), binding, message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tasks := journal.Tasks()
+	if approvals.calls != 0 || len(tasks) != 1 || tasks[0].Media == nil || tasks[0].Media.BindingVersion != 3 {
+		t.Fatal("attachment crossed approval/queue boundary")
+	}
+	message.Media = &channels.MediaReference{FileID: "different"}
+	if err := g.acceptVerifiedMessage(context.Background(), binding, message); !errors.Is(err, ErrMessageConflict) {
+		t.Fatal("changed attachment replay accepted")
+	}
+}

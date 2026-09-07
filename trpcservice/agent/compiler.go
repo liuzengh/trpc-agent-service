@@ -253,12 +253,13 @@ func (c *RevisionCompiler) Invalidate(tenantID string, revisionID string) {
 }
 
 type revisionAgentConfig struct {
-	Name              string `json:"name"`
-	Description       string `json:"description"`
-	Instruction       string `json:"instruction"`
-	Stream            *bool  `json:"stream,omitempty"`
-	PreloadMemory     int    `json:"preload_memory,omitempty"`
-	SummaryEveryTurns int    `json:"summary_every_turns,omitempty"`
+	MCPServers        []platformtool.MCPServerSpec `json:"mcp_servers,omitempty"`
+	Name              string                       `json:"name"`
+	Description       string                       `json:"description"`
+	Instruction       string                       `json:"instruction"`
+	Stream            *bool                        `json:"stream,omitempty"`
+	PreloadMemory     int                          `json:"preload_memory,omitempty"`
+	SummaryEveryTurns int                          `json:"summary_every_turns,omitempty"`
 }
 
 type revisionModelConfig struct {
@@ -311,16 +312,25 @@ func (c *RevisionCompiler) compileRevision(
 	if err != nil {
 		return nil, err
 	}
+	servers, err := platformtool.ParseMCPServers(revision.AgentConfig)
+	if err != nil {
+		return nil, err
+	}
 	var tools []agenttool.Tool
 	if len(policy.AllowedTools) > 0 {
 		if c.toolCatalog == nil {
 			return nil, fmt.Errorf("Agent revision declares tools but no tool catalog is configured")
 		}
-		tools, err = c.toolCatalog.Resolve(policy.AllowedTools)
+		tools, err = c.toolCatalog.Resolve(platformtool.MCPLocalTools(servers, policy.AllowedTools))
 		if err != nil {
 			return nil, err
 		}
 	}
+	remoteTools, err := platformtool.BuildMCPTools(ctx, c.secrets, scope, servers, policy.AllowedTools)
+	if err != nil {
+		return nil, err
+	}
+	tools = append(tools, remoteTools...)
 	agentOptions := []llmagent.Option{
 		llmagent.WithModel(selectedModel),
 		llmagent.WithDescription(agentConfig.Description),
@@ -377,6 +387,15 @@ func (c *RevisionCompiler) RunPolicyOptions(
 	if revisionKnowledgeEnabled(revision.KnowledgeConfig) {
 		policy.AllowedTools = append(policy.AllowedTools, "knowledge_search")
 	}
+	servers, err := platformtool.ParseMCPServers(revision.AgentConfig)
+	if err != nil {
+		return nil, err
+	}
+	dangerous, err := platformtool.MCPDangerousTools(ctx, c.secrets, input.Scope.TenantID, servers)
+	if err != nil {
+		return nil, err
+	}
+	policy.DangerousTools = append(policy.DangerousTools, dangerous...)
 	for _, name := range policy.AllowedTools {
 		if c.toolCatalog.IsManagedSideEffect(name) {
 			policy.DangerousTools = append(policy.DangerousTools, name)

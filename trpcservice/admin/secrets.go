@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
@@ -76,6 +77,15 @@ func (s *Service) authorizeChannelSecrets(ctx context.Context, binding controlpl
 		}
 		return nil
 	case "telegram":
+		if channels.MediaEnabled(binding) {
+			var ref string
+			if json.Unmarshal(cfg["bot_token_ref"], &ref) != nil {
+				return invalidf("media credential reference required")
+			}
+			if err := s.authorizeSecret(ctx, binding.TenantID, secret.TelegramMedia, ref); err != nil {
+				return err
+			}
+		}
 		fields = map[string]string{"bot_token_ref": secret.TelegramBot, "webhook_secret_ref": secret.TelegramWebhook}
 	case "wecom":
 		fields = map[string]string{"callback_token_ref": secret.WeComCallback, "encoding_aes_key_ref": secret.WeComAES, "app_secret_ref": secret.WeComApp}

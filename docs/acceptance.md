@@ -4,6 +4,8 @@
 
 `0.2.0-rc.3` 已补齐此前核对的六类代码缺口，配置、代码入口和自动/隔离验证见[补齐记录](code-gap-closure.md)。本次不把新代码标记为已部署到日常实例。
 
+`0.2.0-rc.4` 的后续修复与 MCP/附件实现见[后续记录](reliability-followup.md)。其中 Session/Memory 的切换现在同样要求服务器验证证明，分段回复与并发名额有独立所有权记录。只有这里明确列出的限类型附件已实现，不能扩大到完整多媒体。
+
 ## 1. 多租户与节点化
 
 - Tenant/App/Revision/Channel/Backend/Audit/Quota 模型：`controlplane`、migration 001；

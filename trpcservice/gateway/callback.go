@@ -120,6 +120,12 @@ func (g *CallbackGateway) acceptVerifiedMessage(ctx context.Context, binding con
 			return fmt.Errorf("callback rate limit: %w", err)
 		}
 	}
+	if !message.Edited && message.Media != nil && channels.MediaEnabled(binding) {
+		ref := *message.Media
+		ref.BindingVersion = binding.Version
+		_, err := g.intake.Accept(ctx, IntakeRequest{rateChecked: true, BindingKey: binding.CallbackKey, ExternalMessageID: message.ExternalMessageID, UserID: userID, SessionID: sessionID, ChatType: message.ChatType, Text: message.Text, ReplyTarget: message.ReplyTarget, Media: &ref})
+		return err
+	}
 	if feedback := unsupportedMessageReply(message); feedback != "" {
 		if _, err := g.intake.Accept(ctx, IntakeRequest{
 			rateChecked: true,

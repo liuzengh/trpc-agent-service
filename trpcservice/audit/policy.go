@@ -38,7 +38,7 @@ func ParsePolicy(raw json.RawMessage) (Policy, error) {
 	return p, nil
 }
 func securityEvent(event Event) bool {
-	for _, prefix := range []string{"tool_", "approval_", "admin_", "audit_", "channel_"} {
+	for _, prefix := range []string{"tool_", "approval_", "admin_", "audit_", "channel_", "attachment_"} {
 		if strings.HasPrefix(event.Decision, prefix) {
 			return true
 		}

@@ -15,6 +15,8 @@
 
 本轮新增的六类代码补齐及配置说明见[代码缺口补齐记录](code-gap-closure.md)：调用级指标、模型预算与后台用量、Memory 单调水位、租户审计策略、Knowledge 自动迁移、Redis 队列所有权/背压。它们已做自动测试与隔离依赖测试，**没有重启当前业务实例，也没有把历史 IM 联调结论自动转移到新版本**。
 
+2026-09-07 又修复了 Session/Memory 迁移、摘要复制与验证、分段回复、并发名额租约，并实现 Agent MCP 与限类型附件，代码候选为 rc.4/schema 23，见[后续补齐记录](reliability-followup.md)。这些仍只有自动/隔离验证，不标记为已在日常实例启用。
+
 | 能力 | 当前状态 | 已验证范围 | 尚未完成 |
 | --- | --- | --- | --- |
 | tRPC-Agent-Go LLMAgent / Runner / Event | 本地集成 | Mock Model、多轮 Session、Event 消费与关闭 | Graph/Chain/Parallel/Cycle 的平台化注册 |
@@ -31,7 +33,9 @@
 | Telegram | 基础真实联调 + 后续自动测试 | 固定域名、私聊/群聊/Topic、current_time 和审批基础收发真实联调；重复确认新回执、失败回执、媒体/编辑拒绝、模拟 429 由自动测试覆盖 | 后续回执版本真实联调、真实 429、编辑与媒体发送 |
 | 微信公众号 / 微信客服 | 设计 | 数据模型与接入差异说明 | Adapter 代码和真实联调 |
 | Tool 治理与审批 | 自动测试 / 本地集成；只读 Tool 与审批基础真实联调 | 参数绑定、会话隔离、批准/拒绝/重复/过期；权限允许后预留执行；直接回执、Journal 驱动结果与事务回滚测试；新版格式拦截/拒绝回执真实复验 | 新版批准结果正文复验、真实业务 Tool |
-| 通用 MCP 工具平台化 | 设计 | 权限、密钥、超时和审计边界；企业微信专用发现命令已复用 tRPC MCP Client | 通用租户级 ToolSet 配置、生命周期与治理；专用通道发现不等同于通用 MCP 完成 |
+| Agent MCP 工具 | 自动测试（含 Runner 链路） | 部署者端点/凭据、revision 工具子集、分页发现、schema 检查、默认审批、执行 Journal/审计、客户端关闭与输出限额 | 真实业务 MCP 联调；不支持本地 stdio 执行，不提供任意服务自助接入页面 |
+| Telegram 附件导入 | 自动测试 | 默认关闭；队列导入、UTF-8/PNG/JPEG 校验、2 MiB/图片尺寸限制、不可变 Artifact、同会话文本读取与访问审计 | 真实 Bot/对象存储联调；无完整杀毒服务、PDF/Office、图片理解、文件发送；企业微信 MCP 仍隔离媒体 |
+| 迁移/分段回复后续修复 | 自动测试 + 独立 PostgreSQL/Redis | Session staging 切换、Event 身份/内容/顺序和摘要校验、已登记清单证明、写后失效、分段回执/恢复、并发租约及旧 owner 拒绝 | 日常升级、真实故障和容量验证；历史未登记主体需完整迁移清单 |
 | 工具业务操作与对账 | 自动测试 / 本地 PostgreSQL 集成 | 内部 create_work_item、业务键唯一约束、Runner 审批、并发重放、响应/平台写入丢失恢复、Admin 查询/只读对账 | 外部业务 Provider、真实业务幂等契约与历史无事实记录的人工核对 |
 | OpenTelemetry | 真实联调（开发环境）+ 自动测试 | 真实 Telegram→模型→current_time→Session→回复的完整 trace，Tempo 实际读回；共享框架 tracer、审批 span link 与 Memory 组件测试、元数据过滤；现有 metrics/Dashboard/Alert Rule | 真实审批跨请求 link、Alertmanager 与实际通知渠道 |
 | 调用预算与租户审计策略 | 自动测试 + 隔离 PostgreSQL/Redis 集成 | 模型调用预留/结算，Summary/Memory/Embedding 用量；审计分级、私有缓冲、受限保留期和带版本策略更新 | 生产价格配置、账单对账、节点持久卷、真实故障与容量验证 |
@@ -60,7 +64,7 @@ MCP 图片采用隔离、不回复策略，与自建应用/Telegram 的媒体能
 
 - 企业微信当前可以验证和解密回调、规范化文本及媒体 ID，并发送应用文本消息；不声明卡片或文件发送能力。
 - Telegram 当前可以解析文本、图片/文件 ID 和 edited update，并通过 `sendMessage` 发送文本；不声明消息编辑或文件发送能力。
-- 当前 Gateway 对已识别媒体和 Telegram 编辑消息返回固定能力说明，不进入模型/审批。媒体下载、病毒扫描、Artifact 转存和媒体回复是后续工作，不能仅凭 media/file ID 解析视为已经支持。
+- 默认仍对媒体返回固定说明、对编辑消息拒绝执行。rc.4 可显式开启 Telegram 限类型附件导入 Artifact，但导入本身不进入模型/审批；随后读取文本需启用 read_attachment。完整杀毒、多模态分析和媒体回复尚未实现，不能把保存图片当作图片理解。
 
 ## 更新规则
 

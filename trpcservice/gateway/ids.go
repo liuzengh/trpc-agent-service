@@ -3,6 +3,7 @@ package gateway
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 )
 
@@ -29,6 +30,10 @@ func inboundPayloadHash(request InboundRequest) string {
 		// Preserve hashes for existing Agent messages. A control message cannot
 		// be replayed as an Agent task; its first persisted reply is immutable.
 		return stableID("sha256_", hash, "platform-reply")
+	}
+	if request.Media != nil {
+		encoded, _ := json.Marshal(request.Media)
+		return stableID("sha256_", hash, "attachment", string(encoded))
 	}
 	return hash
 }

@@ -34,6 +34,8 @@ func (r Roles) SecretGrants(grants []secret.Grant) []secret.Grant {
 			allowed = r.Sender
 		case secret.Model:
 			allowed = r.Worker || r.Jobs
+		case secret.MCPServer, secret.TelegramMedia:
+			allowed = r.Worker
 		case secret.Session, secret.Memory, secret.Artifact, secret.Knowledge, secret.Embedding:
 			allowed = r.Worker || r.Jobs || r.Admin
 		}

@@ -159,6 +159,7 @@
 - [工具业务幂等与对账](docs/tool-operations.md)
 - [IM 回执与媒体处理规则](docs/im-feedback.md)
 - [当前开发执行清单](docs/execution-plan.md)
+- [rc.4 可靠性修复、Agent MCP 与安全附件](docs/reliability-followup.md)
 - [治理、安全、监控、故障恢复和部署](docs/governance-operations.md)
 - [生产风险清单](docs/risks.md)
 - [代码实施路线和验收映射](docs/implementation-roadmap.md)
