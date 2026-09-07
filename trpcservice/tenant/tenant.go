@@ -59,6 +59,9 @@ type Guard struct {
 	local        map[string]*localQuota
 	usageSeen    map[string]struct{}
 	reservations map[string]reservationState
+	runMembers   map[string]map[string]time.Time
+	runLeases    map[*RunLease]struct{}
+	closed       bool
 }
 
 type localQuota struct {
@@ -82,6 +85,7 @@ func NewGuard(
 	guard := &Guard{
 		repository: repository, prefix: cfg.KeyPrefix + ":quota",
 		local: make(map[string]*localQuota), usageSeen: make(map[string]struct{}),
+		runMembers: map[string]map[string]time.Time{}, runLeases: map[*RunLease]struct{}{},
 	}
 	if cfg.Backend == config.QuotaBackendRedis {
 		options, err := redis.ParseURL(cfg.RedisURL)
@@ -135,58 +139,15 @@ return 1`).Run(ctx, g.redis, []string{key}, policy.RequestsPerMinute).Int()
 	return nil
 }
 
+// AcquireRun preserves the older release-only API for embedded callers. New
+// execution paths must use AcquireRunLease and its cancellation context.
 func (g *Guard) AcquireRun(ctx context.Context, tenantID string) (func(), error) {
-	policy, err := g.policy(ctx, tenantID)
+	l, err := g.AcquireRunLease(ctx, tenantID)
 	if err != nil {
 		return nil, err
 	}
-	if err := g.checkBudget(ctx, tenantID, policy); err != nil {
-		return nil, err
-	}
-	if policy.ConcurrentRuns == 0 {
-		return func() {}, nil
-	}
-	if g.redis != nil {
-		key := g.prefix + ":concurrent:" + tenantID
-		allowed, err := redis.NewScript(`
-local value=redis.call('INCR',KEYS[1])
-redis.call('EXPIRE',KEYS[1],300)
-if value>tonumber(ARGV[1]) then redis.call('DECR',KEYS[1]); return 0 end
-return 1`).Run(ctx, g.redis, []string{key}, policy.ConcurrentRuns).Int()
-		if err != nil {
-			return nil, err
-		}
-		if allowed == 0 {
-			return nil, ErrConcurrencyLimited
-		}
-		return func() {
-			_ = redis.NewScript(`
-local value=tonumber(redis.call('GET',KEYS[1]) or '0')
-if value<=1 then return redis.call('DEL',KEYS[1]) end
-return redis.call('DECR',KEYS[1])`).Run(context.Background(), g.redis, []string{key}).Err()
-		}, nil
-	}
-	g.mu.Lock()
-	entry := g.local[tenantID]
-	if entry == nil {
-		entry = &localQuota{}
-		g.local[tenantID] = entry
-	}
-	if entry.concurrent >= policy.ConcurrentRuns {
-		g.mu.Unlock()
-		return nil, ErrConcurrencyLimited
-	}
-	entry.concurrent++
-	g.mu.Unlock()
-	return func() {
-		g.mu.Lock()
-		if entry.concurrent > 0 {
-			entry.concurrent--
-		}
-		g.mu.Unlock()
-	}, nil
+	return l.Release, nil
 }
-
 func (g *Guard) RecordUsage(
 	ctx context.Context,
 	tenantID string,
@@ -278,7 +239,20 @@ func (g *Guard) Ready(ctx context.Context) error {
 }
 
 func (g *Guard) Close() error {
-	if g == nil || g.redis == nil {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	g.closed = true
+	leases := make([]*RunLease, 0, len(g.runLeases))
+	for lease := range g.runLeases {
+		leases = append(leases, lease)
+	}
+	g.mu.Unlock()
+	for _, lease := range leases {
+		lease.Release()
+	}
+	if g.redis == nil {
 		return nil
 	}
 	return g.redis.Close()

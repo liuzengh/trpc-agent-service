@@ -128,7 +128,7 @@ func Redis(prefix, keyPrefix string) (string, error) {
 			out.WriteString(selector(":quota:usage:*", "+mget +get"))
 			out.WriteString(selector(":channel-poll:coord:session:*", commands))
 		case "worker":
-			out.WriteString(selector(":quota:*", commands))
+			out.WriteString(selector(":quota:*", commands+" +time +zremrangebyscore +zcard +zadd +zscore +zrem"))
 			out.WriteString(selector(":coord:session:*", commands))
 			out.WriteString(selector(":idempotency:message:*", commands))
 			out.WriteString(selector(":stream:*", queueCommands+" +xreadgroup +xautoclaim +xclaim +xack +xdel"))

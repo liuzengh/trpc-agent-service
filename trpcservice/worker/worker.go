@@ -106,7 +106,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	}
 	releaseQuota := func() {}
 	if w.opts.Quota != nil {
-		release, quotaErr := w.opts.Quota.AcquireRun(ctx, task.Scope.TenantID)
+		lease, quotaErr := w.opts.Quota.AcquireRunLease(ctx, task.Scope.TenantID)
 		if quotaErr != nil {
 			failErr := w.journal.FailRun(ctx, task.RequestID, "tenant_quota", quotaErr, w.opts.WorkerID)
 			auditErr := w.recordAudit(
@@ -114,7 +114,8 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 			)
 			return true, w.retryOrAck(ctx, delivery, task, errors.Join(quotaErr, failErr, auditErr))
 		}
-		releaseQuota = release
+		releaseQuota = lease.Release
+		ctx = lease.Context()
 	}
 	defer releaseQuota()
 	result, runErr := w.runtime.ChatWithScope(ctx, agentruntime.ChatInput{

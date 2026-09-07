@@ -109,6 +109,21 @@ func TestRedisACLIntegration(t *testing.T) {
 		if _, err := guard.SettleModel(ctx, r, 20, 5, .005); err != nil {
 			t.Fatal("role cannot settle model budget: ", err)
 		}
+		if role == "worker" {
+			// Exercise real Redis TIME/ZSET permissions with a nonzero limit.
+			data := controlplane.DefaultBootstrapData()
+			data.Tenants[0].QuotaConfig = []byte(`{"concurrent_runs":1}`)
+			leased, err := tenant.NewGuard(ctx, controlplane.NewMemoryRepository(data), config.QuotaConfig{Backend: "redis", RedisURL: url.String(), KeyPrefix: "policy-test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease, err := leased.AcquireRunLease(ctx, "tutorial-tenant")
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease.Release()
+			leased.Close()
+		}
 		guard.Close()
 	}
 	if err := gw.Set(ctx, "policy-test:quota:rate:t:u:m", 1, 0).Err(); err != nil {

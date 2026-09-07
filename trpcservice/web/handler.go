@@ -384,16 +384,18 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	releaseQuota := func() {}
+	runCtx := r.Context()
 	if h.quotaGuard != nil {
-		release, err := h.quotaGuard.AcquireRun(r.Context(), scope.TenantID)
+		lease, err := h.quotaGuard.AcquireRunLease(r.Context(), scope.TenantID)
 		if err != nil {
 			writeJSON(w, http.StatusTooManyRequests, errorResponse{Error: "tenant quota exceeded"})
 			return
 		}
-		releaseQuota = release
+		releaseQuota = lease.Release
+		runCtx = lease.Context()
 	}
 	defer releaseQuota()
-	result, err := h.chatService.ChatWithScope(r.Context(), agentservice.ChatInput{
+	result, err := h.chatService.ChatWithScope(runCtx, agentservice.ChatInput{
 		Scope:     scope,
 		MessageID: request.MessageID,
 		UserID:    request.UserID,
