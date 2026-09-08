@@ -1,8 +1,0 @@
---- docs/project-status.md
-+++ docs/project-status.md
-@@ -91 +91 @@
--| P0-09G-R | P0-09 总审查和关闭 | `partial`；production ObjectStore composition、Artifact metadata persistence/reconciliation、独立 MinIO gate 与 current same-network G-D recovery 通过；真实 Provider 和完整 combined closure 仍未证明 |
-+| P0-09G-R | P0-09 总审查和关闭 | `verified (defined P0 closure boundary)`；production ObjectStore composition、Artifact metadata persistence/reconciliation、独立 MinIO gate、Redis restart failover 与 current same-network G-D recovery 通过；scheduler/lifecycle cleanup 不属于本轮 P0 门禁，ObjectStore/G-D 为并列 boundary，enabled-object 联合故障是后续 evidence；真实 Provider、provider-side dedup、完整业务 Repository、认证和 framework global Wait/Done 仍未证明 |
-@@ -93 +93 @@
--README/ARCHITECTURE 明确 Object Storage 是平台目标能力；本轮已完成 production ObjectStore composition、fail-closed config、runtime/readiness ownership、Artifact metadata repository 和 owned MinIO real gate。独立与 production evidence 均不加入 P0-09F transaction，也不声称跨 PostgreSQL/S3 exactly-once；current owner-scoped same-network G-D ordinary/race 也已 PASS，P0-09G-R/P0-09 仍保持 `partial`。
-+README/ARCHITECTURE 明确 Object Storage 是平台目标能力；本轮已完成 production ObjectStore composition、fail-closed config、runtime/readiness ownership、Artifact metadata repository 和 owned MinIO real gate。独立与 production evidence 均不加入 P0-09F transaction，也不声称跨 PostgreSQL/S3 exactly-once；current owner-scoped same-network G-D ordinary/race 也已 PASS。按本轮 scope decision，P0-09G-R/P0-09 在定义的 durable、assembly、object 和 recovery boundary 内为 `verified`；scheduler/lifecycle cleanup 是 deferred、非 P0 门禁，enabled-object 联合故障是并列 boundary 的后续 evidence。
