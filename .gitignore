@@ -4,8 +4,9 @@
 *.log
 *.swp
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+*.env
 
 bin/
 dist/

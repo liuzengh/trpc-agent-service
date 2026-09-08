@@ -1,53 +1,51 @@
-# 设计文档索引
+# 文档导航
 
-本目录对应根目录 `README.md` 中的架构设计交付物。文档以 tRPC-Agent-Go `v1.11.x` 为基线，版本升级时需要重新验证 Runner、Session、Memory、OpenClaw 和各存储子模块的兼容性。
+第一次接手项目，先读[基本交付说明](delivery.md)，再按[运行手册](operations-runbook.md)操作。不需要按时间顺序翻完所有验证记录。
 
-| 文档 | 内容 |
+## 交付与使用
+
+- [基本交付说明](delivery.md)：交付范围、源码基线、文档清单和验证边界。
+- [运行手册](operations-runbook.md)：安装配置、手动启停、升级与排障。
+- [当前进度](execution-plan.md)：基本交付已完成什么，哪些属于后续增强。
+- [功能状态](feature-status.md)：区分代码实现、自动测试、本地集成和真实联调。
+- [功能配置参考](runtime-reference.md)：从原 README 移出的详细配置与命令。
+- [环境整理说明](workspace-hygiene.md)：本地归档、构建产物、源码打包和数据保护规则。
+
+## 题目要求与设计交付物
+
+| 要求 | 对应文档 |
 | --- | --- |
-| [operations-runbook.md](operations-runbook.md) | 统一的安装、配置、手动启停、版本升级和排障入口 |
-| [validation/release-candidate-2026-09-06.md](validation/release-candidate-2026-09-06.md) | 0.2.0-rc.1 交付范围、集中回归与尚需人工验证项 |
-| [getting-started.md](getting-started.md) | 从 `POST /chat` 开始认识 Message、Runner、Event 和 Session |
-| [security-boundaries.md](security-boundaries.md) | HTTP 默认关闭、调用方授权、租户密钥用途与角色隔离 |
-| [deployment-permissions.md](deployment-permissions.md) | SQL/Redis 分角色权限生成器、隔离验证及网络部署边界 |
-| [monitoring.md](monitoring.md) | 积压、轮询、未知发送、采集失败与告警规则验证 |
-| [validation/recovery-2026-09-06.md](validation/recovery-2026-09-06.md) | Worker 故障接管、真实 PostgreSQL 业务恢复与保证边界 |
-| [tool-operations.md](tool-operations.md) | 业务幂等、内部工作项、工具结果查询与只读对账 |
-| [im-feedback.md](im-feedback.md) | 主动重复审批提示、失败回执、媒体与编辑消息边界 |
-| [wecom-mcp.md](wecom-mcp.md) | 用户当前企业微信 MCP 入口、真实工具发现与后续通道接入边界 |
-| [wecom-mcp-runtime.md](wecom-mcp-runtime.md) | MCP 群消息到 Runner/Sender 的运行链路、检查点、未知发送与启用配置 |
-| [channel-recovery.md](channel-recovery.md) | 单条异常隔离、管理员检查点查询/恢复、显式历史缺口确认 |
-| [execution-plan.md](execution-plan.md) | 当前收尾顺序与已完成项，不扩张原始交付范围 |
-| [architecture.md](architecture.md) | 总体架构、组件职责、节点拓扑、租户隔离和框架复用边界 |
-| [sequence.md](sequence.md) | 企业微信消息进入平台后的完整执行时序，以及取消和故障处理 |
-| [data-model.md](data-model.md) | 控制面、运行面核心表结构和索引设计 |
-| [data-consistency.md](data-consistency.md) | session 并发、event/state/summary 顺序、Memory 可见性、消息幂等和迁移策略 |
-| [backend-adapters.md](backend-adapters.md) | Session、Memory、Knowledge、Artifact 等多后端适配和选型 |
-| [project-docs-mcp.md](project-docs-mcp.md) | 只读文档 MCP 的运行链路、权限与真实验证边界 |
-| [knowledge-embedding-setup.md](knowledge-embedding-setup.md) | 独立 Embedding 配置/预检，以及真实 Knowledge 启用前的准备 |
-| [knowledge-runtime.md](knowledge-runtime.md) | 真实 Embedder、持久入库、Qdrant 检索与运行时安全边界 |
-| [telegram-delivery-diagnostics.md](telegram-delivery-diagnostics.md) | 出站错误分类、HTTP 阶段、隐私与未知发送保护 |
-| [im-channels.md](im-channels.md) | 企业微信、微信公众号和 Telegram 通道接入设计 |
-| [telegram-manual-runbook.md](telegram-manual-runbook.md) | Telegram 固定域名下的手动启动、停止、验证和排障 |
-| [governance-operations.md](governance-operations.md) | Plugin/Guardrail、审计、监控、密钥、故障恢复、容量和部署方案 |
-| [risks.md](risks.md) | 生产风险、触发条件、监控信号和缓解措施 |
-| [implementation-roadmap.md](implementation-roadmap.md) | 代码模块、迭代顺序、测试策略和验收映射 |
-| [deployment.md](deployment.md) | Docker、Kubernetes、可观测栈、灰度、备份与告警 |
-| [capacity.md](capacity.md) | Worker/Token/Redis/SQL 容量公式和压测工具 |
-| [benchmarks/local-mock-2026-09-03.md](benchmarks/local-mock-2026-09-03.md) | 单进程 Mock + PostgreSQL/Redis 完整流水线本地基线 |
-| [acceptance.md](acceptance.md) | README 验收项到代码、测试和命令的最终映射 |
-| [feature-status.md](feature-status.md) | 区分已编码、自动测试、本地集成和真实外部联调 |
-| [validation/real-model-2026-09-03.md](validation/real-model-2026-09-03.md) | 真实模型、Runner 和 Redis Session 开发环境验收记录 |
-| [validation/telegram-2026-09-03.md](validation/telegram-2026-09-03.md) | Telegram Bot、异步链路和真实模型开发环境验收记录 |
+| 原始题目 | [requirements.md](requirements.md) |
+| 总体架构、系统图、框架复用边界 | [architecture.md](architecture.md) |
+| 企业微信完整消息时序、request/trace 传播 | [sequence.md](sequence.md) |
+| 核心实体、关系与表结构 | [data-model.md](data-model.md) |
+| 会话并发、同步顺序、幂等与迁移 | [data-consistency.md](data-consistency.md) |
+| Redis / SQL / 向量库 / 对象存储适配 | [backend-adapters.md](backend-adapters.md) |
+| 至少两种 IM 的接入差异 | [im-channels.md](im-channels.md) |
+| 治理、安全、运维方案 | [governance-operations.md](governance-operations.md) |
+| 生产风险与缓解措施 | [risks.md](risks.md) |
+| 要求到实现和测试的映射 | [acceptance.md](acceptance.md) |
 
-## 推荐阅读顺序
+设计中列出的可选组件不等于当前代码已经全部支持，实际能力以功能状态表为准。Mermaid 图保留在 Markdown 中，可用支持 Mermaid 的阅读器渲染。
 
-第一次接触 Agent 框架时，从上手指南开始，先运行两轮对话。理解 Message、Runner、Event 和 Session 后，再读总体架构和核心时序。准备编码时，从实施路线开始，按其中的里程碑逐步完成。准备上线时，重点复核治理运维和风险清单。
+## 按模块查阅
 
-## 文档约定
+- **学习代码**：[链路演进教程](getting-started.md)、[早期实施路线](implementation-roadmap.md)。教程的前几节刻意描述早期阶段，不是当前功能清单。
+- **Telegram**：[手动运行](telegram-manual-runbook.md)、[工具调用](current-time-tool-walkthrough.md)、[审批](telegram-approval-walkthrough.md)、[追踪](telegram-tracing-walkthrough.md)、[发送诊断](telegram-delivery-diagnostics.md)。
+- **企业微信**：[消息 MCP 接入](wecom-mcp.md)、[MCP 运行链路](wecom-mcp-runtime.md)、[异常恢复](channel-recovery.md)。
+- **工具和数据**：[工具业务幂等](tool-operations.md)、[IM 回执与媒体边界](im-feedback.md)、[文档 MCP](project-docs-mcp.md)、[Embedding 配置](knowledge-embedding-setup.md)、[Knowledge 运行链路](knowledge-runtime.md)。
+- **部署运维**：[部署拓扑](deployment.md)、[权限](deployment-permissions.md)、[安全边界](security-boundaries.md)、[监控](monitoring.md)、[容量](capacity.md)。
 
-- `tenant_id` 是平台租户标识，不接受外部 IM 用户直接传入。
-- `app_id` 表示一个租户下的 Agent 应用，`revision_id` 表示不可变发布版本。
-- `request_id` 是一次 Agent 执行的全局幂等键。
-- `storage_scope` 是平台写入 tRPC-Agent-Go `AppName` 的内部命名空间，格式为 `t/{tenant_id}/a/{app_id}`。
-- `runtime_user_id` 是传给 `runner.Run` 的用户键；它可能是真实用户，也可能是群聊共享模式下的合成主体。
-- Mermaid 图可以在 GitHub、支持 Mermaid 的 Markdown 工具或文档站点中直接渲染。
+## 历史与验证证据
+
+- [验证记录索引](validation/README.md)：优先列出最近的收尾和真实联调证据，失败或部分通过的记录也保留。
+- [原执行清单](history/execution-plan-2026-09-08.md)：保留阶段性进度，不再当作待办。
+- [rc.3 代码补齐](code-gap-closure.md)、[rc.4 可靠性修复](reliability-followup.md)：解释当时的实现变更，版本状态可能已经被后续记录更新。
+- [历史 Mock 性能基线](benchmarks/local-mock-2026-09-03.md)：不是最新版真实模型容量报告。
+
+## 术语约定
+
+`tenant_id` / `app_id` 标识租户和应用；`revision_id` 标识不可变配置。
+`request_id` 用于关联一次逻辑请求及其恢复记录，`trace_id` 用于追踪执行链路。
+`storage_scope` 是平台传给 tRPC-Agent-Go `AppName` 的内部命名空间。
+平台注入并校验这些边界，不能直接相信外部消息中的租户或存储作用域。

@@ -3,6 +3,8 @@
 **/.env*
 **/*.env
 bin
+dist
 data
 coverage.out
+coverage.html
 *.log

@@ -12,7 +12,7 @@ func TestDockerContextExcludesPrivateConfigAndBackups(t *testing.T) {
 		t.Fatal(err)
 	}
 	rules := "\n" + string(data) + "\n"
-	for _, required := range []string{".env*", "**/.env*", "**/*.env", "data", ".git", "bin"} {
+	for _, required := range []string{".env*", "**/.env*", "**/*.env", "data", ".git", "bin", "dist", "coverage.html"} {
 		if !strings.Contains(rules, "\n"+required+"\n") {
 			t.Fatalf("private path exclusion missing: %s", required)
 		}
