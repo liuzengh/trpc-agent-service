@@ -17,7 +17,8 @@ export interface SkillMeta {
 export interface UsageMeta {
   tools?: string[]
   calls?: Record<string, number>
-  skills?: SkillMeta[]
+  /** newer rows carry snapshots; older rows carried a plain skill-id list */
+  skills?: Array<SkillMeta | string>
 }
 
 export interface UsageRow {

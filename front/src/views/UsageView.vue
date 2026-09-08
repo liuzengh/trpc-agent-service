@@ -73,7 +73,10 @@ function detailTags(row: UsageRow): string[] {
     return meta.tools.map((name) => `${name} ×${meta.calls![name] ?? 1}`)
   }
   if (meta.skills) {
-    return meta.skills.map((s) => (s.name ? `${s.name} (${s.code} v${s.version})` : `${s.code} v${s.version}`))
+    return meta.skills.map((s) => {
+      if (typeof s === 'string') return `skill:${s.slice(0, 8)}` // legacy row: bare id
+      return s.name ? `${s.name} (${s.code} v${s.version})` : `${s.code} v${s.version}`
+    })
   }
   return []
 }
