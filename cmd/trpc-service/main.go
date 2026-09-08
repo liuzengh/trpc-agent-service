@@ -35,6 +35,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/reply"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
+	platformskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	platformtelemetry "github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -43,6 +44,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/workspace"
 	"golang.org/x/sync/errgroup"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	agentrunner "trpc.group/trpc-go/trpc-agent-go/runner"
@@ -87,6 +89,24 @@ func run() error {
 	}
 	if roleName == "" {
 		roleName = config.RoleAll
+	}
+	var skillRegistry *platformskill.Registry
+	var sandbox workspace.Executor
+	if roles.Worker || roles.Admin {
+		skillsConfig, configErr := config.LoadSkillsConfigFromEnv()
+		if configErr != nil {
+			return configErr
+		}
+		skillRegistry, err = platformskill.Load(skillsConfig.Root, skillsConfig.GrantsJSON)
+		if err != nil {
+			return fmt.Errorf("load deployment skills: %w", err)
+		}
+		if roles.Worker && skillsConfig.SandboxEnabled {
+			sandbox, err = workspace.NewDocker(context.Background(), skillsConfig.Sandbox)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	docsConfig, err := config.LoadDocsMCPConfigFromEnv(roles)
 	if err != nil {
@@ -349,7 +369,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("build attachments: %w", err)
 	}
-	toolCatalog := platformtool.DefaultCatalog(platformtool.NewWorkItemTool(operations), attachmentService.ReadTool())
+	skillsService := &platformskill.Service{Registry: skillRegistry, Repository: controlPlaneRepository, Journal: toolExecutionJournal, Executor: sandbox}
+	toolCatalog := platformtool.DefaultCatalog(platformtool.NewWorkItemTool(operations), attachmentService.ReadTool(), skillsService.RunTool())
 	revisionCompiler, err := agentservice.NewRevisionCompiler(
 		controlPlaneRepository,
 		selectedModel,
@@ -361,6 +382,7 @@ func run() error {
 		agentservice.WithToolExecutionJournal(toolExecutionJournal),
 		agentservice.WithSecretStore(secretStore),
 		agentservice.WithModelBudget(quotaGuard),
+		agentservice.WithSkills(skillRegistry),
 	)
 	if err != nil {
 		_ = sessionRouter.Close()
@@ -543,6 +565,7 @@ func run() error {
 			return fmt.Errorf("build Admin service: %w", err)
 		}
 		adminService.WithAuditWriter(auditWriter)
+		adminService.WithSkills(skillRegistry)
 		adminService.WithChannelState(wecomMCPState)
 		adminService.WithOutboundParts(inboundJournal)
 		adminService.WithKnowledgeRouter(knowledgeRouter)

@@ -12,6 +12,7 @@ esac
 # Do not accidentally enable an integration suite against inherited live data.
 unset TEST_POSTGRES_URL TEST_REDIS_URL TEST_S3_ENDPOINT TEST_QDRANT_HOST TEST_QDRANT_PORT
 unset TEST_TRACE_OTLP_ENDPOINT TEST_PERMISSIONS_DOCKER TEST_RECOVERY_DOCKER
+unset TEST_SANDBOX_DOCKER TEST_ADMIN_UI_BROWSER
 
 go test -race ./...
 ./lint.sh
@@ -21,6 +22,7 @@ git diff --check
 if [[ "$REGRESSION_ISOLATED" == 1 ]]; then
   TEST_PERMISSIONS_DOCKER=1 go test -race -count=1 ./deploy/permissions -run TestRedisACLIntegration
   TEST_RECOVERY_DOCKER=1 go test -race -count=1 ./trpcservice/recovery
+  TEST_SANDBOX_DOCKER=1 go test -race -count=1 ./trpcservice/workspace ./trpcservice/agent -run 'Test(DockerSandboxIntegration|SkillRunnerDockerIntegration)$'
   ./scripts/e2e-backup-restore.sh
   docker run --rm --pull=never --network none \
     -v "$REGRESSION_ROOT/deploy/compose:/rules:ro" --workdir /rules \

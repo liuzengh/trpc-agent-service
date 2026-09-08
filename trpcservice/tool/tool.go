@@ -65,6 +65,20 @@ func (c *Catalog) Names() []string {
 	return result
 }
 
+// RequiresApproval is controlled by platform tool code, never tenant JSON.
+func (c *Catalog) RequiresApproval(name string) bool {
+	if c.IsManagedSideEffect(name) {
+		return true
+	}
+	if c == nil {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	item, ok := c.tools[name].(interface{ RequiresApproval() bool })
+	return ok && item.RequiresApproval()
+}
+
 type EchoInput struct {
 	Message string `json:"message" jsonschema:"description=Text to echo back"`
 }

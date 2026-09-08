@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent 管理平台</title><link rel="stylesheet" href="./style.css"><script defer src="./app.js"></script></head>
+<body>
+<header><div class="brand"><span class="mark">A</span><div>Agent Console<small>多租户 · tRPC-Agent-Go</small></div></div><div id="identity">未连接</div><button id="logout" hidden>退出</button></header>
+<section id="login"><h1>连接管理平台</h1><p>使用部署者分配的 Admin Token。凭据只保留在本页内存中，刷新后需重新登录。</p><form id="login-form"><label>Admin Token<input id="token" type="password" autocomplete="off" required></label><button type="submit">连接</button></form><p class="muted">仅通过可信 HTTPS 或本机访问。页面不会向模型或第三方发送凭据。</p></section>
+<div id="console" hidden>
+<aside><nav id="navigation"><button data-kind="tenants">租户</button><button data-kind="apps">Agent 应用</button><button data-kind="revisions">版本与发布</button><button data-kind="channels">IM 通道绑定</button><button data-kind="backends">数据后端</button><button data-kind="skills">Skill 目录</button><button data-kind="audit">审计日志</button><button data-kind="executions">工具调用记录</button><button data-kind="operations">业务操作</button></nav><p>配置即权限边界。执行 Skill 需要独立授权和审批，页面不会直接运行脚本。</p></aside>
+<main><div class="toolbar"><label>当前租户<select id="tenant"><option value="">请选择</option></select></label><label><span id="filter-label">应用筛选</span><input id="app-filter" placeholder="可选 app_id"></label><button id="refresh">刷新</button></div>
+<div class="heading"><div><small id="eyebrow">CONTROL PLANE</small><h1 id="title">租户</h1></div><button id="new-resource">新建</button></div>
+<p id="description" class="muted"></p><div id="table-wrap"><table><thead><tr><th>标识</th><th>名称 / 类型</th><th>状态 / 版本</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><p id="empty" hidden>当前范围没有记录。</p></div><button id="more" hidden>加载下一页</button>
+<section id="editor" hidden><div class="heading"><h2 id="editor-title">配置</h2><button id="close-editor" type="button">关闭</button></div><p id="editor-note" class="muted"></p><form id="resource-form"><div id="fields"></div><div id="skill-picker" hidden><h3>已授权 Skill</h3><p class="muted">选择后将固定版本和 checksum 写入 Agent 配置，同时加入工具白名单。执行仍需审批。</p><div id="skill-options"></div></div><div class="actions"><button id="save" type="submit">保存</button><button id="publish" type="button" hidden>发布此版本</button><button id="rollout" type="button" hidden>保存灰度策略</button><button id="tenant-policy" type="button" hidden>保存租户策略</button></div></form><details><summary>查看返回数据</summary><pre id="detail"></pre></details></section>
+</main></div><div id="notice" role="status" aria-live="polite"></div>
+</body></html>

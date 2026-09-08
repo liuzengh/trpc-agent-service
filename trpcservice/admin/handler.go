@@ -37,6 +37,9 @@ func NewHandlerWithPrincipals(service *Service, principals []Principal) (*Handle
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.serveUI(w, r) {
+		return
+	}
 	principal, authorized := authenticate(h.principals, r.Header.Get("Authorization"))
 	if !authorized {
 		w.Header().Set("WWW-Authenticate", "Bearer")
@@ -44,12 +47,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = r.WithContext(contextWithPrincipal(r.Context(), principal))
+	if !sameOrigin(r) {
+		adminJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin admin request rejected"})
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		adminJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
 	switch r.URL.Path {
+	case "/admin/me":
+		adminJSON(w, http.StatusOK, map[string]any{"name": principal.Name, "role": principal.Role, "tenant_ids": principal.TenantIDs})
+	case "/admin/catalog/list":
+		h.handleCatalog(w, r)
+	case "/admin/skills/list":
+		var input struct {
+			TenantID string `json:"tenant_id"`
+		}
+		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionRead) {
+			return
+		}
+		adminJSON(w, http.StatusOK, map[string]any{"items": h.service.skills.List(input.TenantID)})
 	case "/admin/outbound-parts/list", "/admin/outbound-parts/reconcile":
 		h.handleOutboundParts(w, r)
 	case "/admin/channel-rejections/list", "/admin/channel-checkpoints/list", "/admin/channel-checkpoints/recover":

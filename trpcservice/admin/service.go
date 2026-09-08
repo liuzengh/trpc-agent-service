@@ -23,6 +23,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
+	platformskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	platformtenant "github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
@@ -43,6 +44,12 @@ type Service struct {
 	operations    *toolexec.Operations
 	toolJournal   toolexec.Journal
 	channelState  wecommcp.Store
+	skills        *platformskill.Registry
+}
+
+func (s *Service) WithSkills(registry *platformskill.Registry) *Service {
+	s.skills = registry
+	return s
 }
 
 func (s *Service) WithToolOperations(operations *toolexec.Operations, journal toolexec.Journal) *Service {
@@ -423,7 +430,11 @@ func (s *Service) CreateRevision(
 			return controlplane.AgentRevision{}, err
 		}
 	}
-	if _, err := s.tools.Resolve(platformtool.MCPLocalTools(servers, toolPolicy.AllowedTools)); err != nil {
+	refs, err := s.skills.Validate(revision.TenantID, revision.AgentConfig, toolPolicy.AllowedTools)
+	if err != nil {
+		return controlplane.AgentRevision{}, invalidf("skills are invalid or not granted")
+	}
+	if _, err := s.tools.Resolve(platformskill.LocalTools(refs, platformtool.MCPLocalTools(servers, toolPolicy.AllowedTools))); err != nil {
 		return controlplane.AgentRevision{}, invalidf("tool_policy: %v", err)
 	}
 	if err := platformstorage.ValidateRevisionKnowledgeConfig(revision.KnowledgeConfig); err != nil {
@@ -456,6 +467,13 @@ func (s *Service) PublishRevision(
 	if expectedVersion <= 0 {
 		return controlplane.AgentApp{}, invalidf("expected app version must be positive")
 	}
+	revision, err := s.repository.GetRevision(ctx, tenantID, revisionID)
+	if err != nil {
+		return controlplane.AgentApp{}, err
+	}
+	if err := s.validateSkillRevision(revision); err != nil {
+		return controlplane.AgentApp{}, err
+	}
 	app, err := s.repository.PublishRevision(ctx, tenantID, appID, revisionID, expectedVersion)
 	if err != nil {
 		return controlplane.AgentApp{}, err
@@ -467,6 +485,17 @@ func (s *Service) PublishRevision(
 		return controlplane.AgentApp{}, err
 	}
 	return app, nil
+}
+
+func (s *Service) validateSkillRevision(revision controlplane.AgentRevision) error {
+	policy, err := governance.ParseToolPolicy(revision.ToolPolicy)
+	if err != nil {
+		return invalidf("invalid revision tool policy")
+	}
+	if _, err := s.skills.Validate(revision.TenantID, revision.AgentConfig, policy.AllowedTools); err != nil {
+		return invalidf("skill version is unavailable or no longer granted")
+	}
+	return nil
 }
 
 func (s *Service) UpdateRolloutPolicy(
@@ -501,6 +530,9 @@ func (s *Service) UpdateRolloutPolicy(
 		}
 		revision, err := s.repository.GetRevision(ctx, tenantID, config.CanaryRevisionID)
 		if err != nil {
+			return controlplane.AgentApp{}, err
+		}
+		if err := s.validateSkillRevision(revision); err != nil {
 			return controlplane.AgentApp{}, err
 		}
 		if revision.AppID != appID {

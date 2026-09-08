@@ -155,3 +155,31 @@ docker compose --profile observability up -d
 `./clean.sh` 默认预览；`--apply` 仅归档已知构建产物，运行 PID 存在时拒绝。私有快照和临时个人工具不属于交付仓库，数据卷也不能仅因停止或显示 reclaimable 就删除。
 
 源码在本地提交干净后执行 `./build.sh --package`，只导出已提交文件至 `dist` 并生成 SHA-256；不会 push。不要直接压缩整个工作目录，私有 `.env`、`data` 和数据库卷不能交付。
+
+## 8. 管理页面与可执行 Skill
+
+管理页面随 Agent 二进制内嵌，无需 Node/npm，也不需要额外启动脚本。配置 `TRPC_AGENT_ADMIN_ENABLED=true` 和已有的 Admin Token/Principals，在 admin/all 角色启动后访问 `http://127.0.0.1:8080/admin/ui/`，输入 **Admin Token**，不是模型或 IM Key。
+
+该能力从 rc.10 提供，数据库 schema 仍为 23，无新增迁移。先升级相关 Admin/Worker 再发布带 skills 字段的新版本，不要混跑无法识别新字段的旧 Worker；本轮代码开发不自动修改现有 `.env` 或重启实例。
+
+页面支持创建/查询租户和应用、修改租户策略、创建不可变版本、发布/回滚、灰度策略、通道注册/更新、后端注册、Skill 选择和审计查询。基础字段或后端不提供随意覆盖；已有后端变更仍走迁移流程。只读角色只能查询，刷新页面会清除登录凭据。
+
+启用内置示例 Skill（替换为实际授权租户，不覆盖其他 grants）：
+
+```dotenv
+TRPC_AGENT_SKILLS_ROOT=./skills
+TRPC_AGENT_SKILL_GRANTS_JSON='[{"tenant_id":"tutorial-tenant","name":"json-digest","version":"1"}]'
+TRPC_AGENT_SANDBOX_ENABLED=true
+TRPC_AGENT_SANDBOX_IMAGE=alpine:3.22
+TRPC_AGENT_SANDBOX_SOCKET=/var/run/docker.sock
+```
+
+Worker 所在主机需已安装 Docker CLI，并且所指定 daemon 已有该镜像；服务不会自动 pull 或修改 daemon。镜像必须提供 /bin/sh 和 /bin/busybox，启动时解析并固定 image ID。默认容器部署模板不授予 Docker socket 权限；容器化 Worker 启用沙箱前须单独准备可信 Docker CLI、只读 Skill 挂载和专用 daemon 访问，不应把生产主机 root socket 直接共享给所有应用。
+
+在页面选择租户 → 版本与发布 → 创建或复制版本 → 勾选已授权 Skill。页面会写入完整 name/version/checksum，并加入 skill_load、skill_run 工具白名单；原有权限和配置应保留。保存后显式发布。已 pin 的会话不会自动换版本，测试应使用新会话或受控迁移。
+
+json-digest 示例计算输入 JSON 文件字节数和 SHA-256，是真正的脚本执行，不调用模型生成假结果。Agent 先用 skill_load 读取说明，再请求 skill_run；首次返回审批指令，用户批准后执行固定 run.sh，脚本从 /workspace/input.json 读取输入，stdout/stderr 作为有界工具结果返回。不能通过模型的一句“已执行”判断成功，应同时核对执行 Journal。
+
+自定义 Skill 在 root 的 catalog.json 增加注册，提供新的目录和版本；不要原地覆写已发布版本。目录只加载 SKILL.md/run.sh，其他文件不自动挂载。授权、镜像和 root 均为部署者配置，租户只能选择获授权的固定版本，页面不提供未审核脚本上传。
+
+验证：`TRPC_AGENT_VERIFY_ISOLATED=1 ./scripts/regression.sh` 包含真实沙箱和 Skill Runner；浏览器 E2E 的可选依赖与命令见[验收说明](acceptance.md)。所有测试使用合成输入和独立环境，不读取现有会话或发送真实 IM。

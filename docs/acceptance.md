@@ -2,6 +2,8 @@
 
 交付对象是基于 tRPC-Agent-Go 的多租户平台设计、可运行代码、部署模板和自动测试。根目录 README 保留原始题目；本说明集中给出实现映射与验证边界，不包含逐轮开发日志。
 
+管理页面、可执行 Skill 和沙箱均为必做项，现已提供实际实现：页面接通 Admin API，Skill 通过框架加载并固定授权版本，执行在受限 Docker 容器内完成。验证包括真实浏览器操作、Runner/审批/Journal 和独立容器测试，不扩大为生产环境验收。
+
 ## 1. 要求映射
 
 | 题目要求 | 实现与文档 |
@@ -21,7 +23,9 @@
 | 能力 | 已实现与已验证 | 明确限制 |
 | --- | --- | --- |
 | Agent 执行 | LLMAgent、Runner、真实兼容模型、多轮会话 | 未平台化注册 Graph/Chain/Parallel/Cycle |
-| Skill、沙箱与 Web UI | 本版不提供；`web` 仅承载 HTTP API，管理功能通过 Admin API 提供 | 不把目录占位或普通 Tool/MCP 当作 Skill 执行、沙箱或可视化页面 |
+| 管理页面（必做） | 内嵌页面、真实列表/创建、版本发布回滚、租户策略/通道更新、后端注册、Skill 选择和审计查询；浏览器与 RBAC 测试 | 无企业 SSO；既有后端切换仍走迁移 API，不提供任意数据库编辑 |
+| 可执行 Skill（必做） | 框架 SKILL.md 解析/加载、部署注册、租户 grant、name/version/checksum 固定、Agent 调用、强制审批及执行 Journal | 执行注册的 run.sh，输入为 JSON；不支持租户自助上传或未审核在线安装 |
+| 沙箱（必做） | 固定本地镜像 ID、非 root、禁网、只读根、独立 tmpfs、资源/时长/输出限额、取消清理；真实 Docker 测试 | 是共享内核容器，不是 VM；Docker daemon 必须受控，无持久交互终端 |
 | 租户与多节点 | 两租户/两真实 Worker 进程，配置/Session/Memory/Knowledge/工具隔离、故障接管与去重的隔离测试 | 联合测试采用合成模型，不代表真实多供应商压测 |
 | 数据后端 | Session: InMemory/Redis/PostgreSQL；Memory: InMemory/Redis/PostgreSQL；Knowledge: InMemory/Qdrant；Artifact: InMemory/S3-compatible | 不是框架所有后端均已适配；远端云后端未完整联调 |
 | 数据迁移 | 双写、分批回填、服务器验证门禁、切读/回滚与修复任务 | 更换 Embedding 要重建；历史 Session 主体需要完整清单 |
@@ -34,7 +38,7 @@
 | 监控与安全 | OTLP、指标、审计、规则、预算预留结算、精确 Secret grant、分角色权限生成器 | 未接真实告警接收方、SSO/OIDC、Vault/KMS；权限模板须实际部署 |
 | 故障与运维 | Worker 接管、取消、退避、SQL/Redis 恢复、手动生命周期与隔离测试 | 无生产 PITR/主从切换、完整对象/向量灾备或生产容量承诺 |
 
-部署模板和设计中的可选方案不算已验证实现；自动测试、真实模型联调、云环境及生产上线是不同层级。微信公众号/微信客服等额外通道、UI、完整多媒体和节点内并发池不属于本阶段基本交付门槛。
+部署模板和设计中的可选方案不算已验证实现；自动测试、真实模型联调、云环境及生产上线是不同层级。管理页面、Skill、沙箱按上述实际实现和测试验收；微信公众号/微信客服等额外通道、完整多媒体和节点内并发池不作为本阶段前置条件。
 
 ## 3. 可重复验证入口
 
@@ -50,13 +54,15 @@
 TRPC_AGENT_VERIFY_ISOLATED=1 ./scripts/regression.sh
 ```
 
-覆盖隔离 SQL/Redis 权限、恢复套件、两租户/两 Worker 联合测试、合成 SQL/Redis 备份工具链和 Prometheus 规则。测试自行创建并核对所属容器，不复用日常业务数据卷。
+覆盖隔离 SQL/Redis 权限、Admin SQL 列表、恢复套件、两租户/两 Worker 联合测试、Docker 沙箱与 Skill Runner、合成 SQL/Redis 备份工具链和 Prometheus 规则。测试自行创建并核对所属容器，不复用日常业务数据卷。
 
 重点用例在：
 
 - [联合多租户/多 Worker](../trpcservice/recovery/joint_integration_test.go)：同外部身份的作用域隔离、权限拒绝、处理中杀死实际 claim owner、存活 Worker 接管、处理中及完成后的重复投递。
 - [恢复测试目录](../trpcservice/recovery)：故障、迁移、持久化和恢复用例；外部副作用不能仅凭数据库备份推断回滚。
 - [脚本测试](../scripts)：真实临时 Agent 启停、隔离恢复脚本安全约束、构建产物归档及源码包边界。
+- [Skill Runner 测试](../trpcservice/agent/skill_runtime_test.go)、[Docker 隔离测试](../trpcservice/workspace/docker_test.go)：审批前零执行、框架正文装载、受控脚本运行、幂等、禁网/非 root/只读根/超时/输出限制。
+- [真实浏览器测试](../trpcservice/admin/ui_browser_test.go)：租户、应用、版本、绑定、Skill 选择、发布/回滚、审计与只读角色。显式设置 TEST_ADMIN_UI_BROWSER=1、TEST_PLAYWRIGHT_MODULE 为已安装 Playwright 路径、TEST_BROWSER_EXECUTABLE 为已安装 Chromium 路径后运行；不访问真实模型或 IM。
 - 各业务模块的 `*_test.go`：审批、取消、预算、权限、媒体限制、trace 脱敏和数据隔离。
 
 交付基线已通过全仓与完整隔离回归；本地 Go 1.27.1 / golangci-lint 2.13.2 检查为 0 issues。独立源码包已验证解压、编译、Mock 两轮会话和优雅退出。真实 IM 的结论限于上表，不因文档整理或自动回归扩大。
@@ -65,4 +71,4 @@ TRPC_AGENT_VERIFY_ISOLATED=1 ./scripts/regression.sh
 
 正式文档共 11 份（含索引），见 [docs/README.md](README.md)。源码包用 `./build.sh --package` 从 Git HEAD 导出并附 checksum，保留源码、测试、配置模板和部署文件，不包含私有配置、历史记录目录、日志、二进制或运行数据。
 
-基本交付可以用于构建、演示和继续开发；生产上线前还需确认真实分角色账号、网络策略、告警通知、数据驻留/保留、供应商额度、容量和恢复目标。此说明不是生产上线验收报告。
+当前源码包含三个必做模块，可按运行手册配置后使用；默认不启用沙箱，也不会自动注册租户授权。生产上线前还需确认真实分角色账号、网络策略、告警通知、数据驻留/保留、供应商额度、容量和恢复目标。此说明不是生产上线验收报告。

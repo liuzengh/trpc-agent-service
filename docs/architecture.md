@@ -33,6 +33,7 @@ flowchart LR
     end
 
     subgraph Control[控制面]
+        UI[管理页面]
         ADMIN[Admin API]
         CONFIG[(Control DB)]
         SECRET[EnvStore / Secret 引用<br/>KMS 扩展]
@@ -43,6 +44,8 @@ flowchart LR
         INBOX[(Inbound / Outbox)]
         MQ[[Redis Streams 工作队列]]
         WORKER[Agent Worker]
+        SKILLS[Skill 快照与租户授权]
+        SANDBOX[Docker 隔离执行]
         LEASE[Session Coordinator<br/>Lease + Fencing Token]
         RUNNER[runner.Runner]
         POLICY[Plugin / Guardrail<br/>权限、预算、脱敏]
@@ -92,6 +95,10 @@ flowchart LR
     RS --> WECHAT
     RS --> TG
 
+    UI --> ADMIN
+    POLICY --> SKILLS
+    SKILLS --> SANDBOX
+    SANDBOX --> RUNNER
     ADMIN --> CONFIG
     ADMIN --> SECRET
     CONFIG --> DIST
@@ -201,6 +208,7 @@ tRPC-Agent-Go 的 Runner 在构造时接收 Session、Memory 和 Artifact Servic
 | 领域 | 直接复用 tRPC-Agent-Go | 平台新增 |
 | --- | --- | --- |
 | Agent 编排 | LLMAgent；其他编排可扩展 | Agent App 注册、revision 编译和灰度 |
+| Skill | SKILL.md Repository、WithSkills、skill_load | 不可变授权快照、强制审批、容器入口；显式禁止本地执行器自动回退 |
 | 执行 | `runner.Runner`、Event 流、取消、恢复 | Worker 调度、session 租约、事件排空 |
 | Session | InMemory、Redis、PostgreSQL；其他后端可扩展 | Storage Router、幂等 journal、迁移 |
 | Memory | 内置接口、InMemory、Redis/PostgreSQL、Extractor | 租户路由、持久化提取任务和水位 |
@@ -222,7 +230,7 @@ tRPC-Agent-Go 的 Runner 在构造时接收 Session、Memory 和 Artifact Servic
 | Admin API | `admin`、`controlplane` | admin / all |
 | Telemetry Collector | `telemetry`、`metrics`、`audit` 与 `deploy/compose` 配置 | 应用埋点及独立 Collector |
 
-`web` 是 HTTP API 传输层，管理能力由 `admin` 提供，本版没有可视化管理/对话页面。Skill 执行平台和本地/容器沙箱未实现，不以空包占位表示完成；也不能把已授权 Tool/MCP 等同于沙箱隔离。README 的目录示范保持原文，实际交付以上述职责和[验收范围](acceptance.md)为准。
+管理页面内嵌在 `admin/ui`，由启用的 Admin/all 角色提供，真实数据仍走租户授权 API。`skill` 使用 tRPC 的正文加载和渐进注入，执行由平台固定入口 `skill_run` 连接 `workspace` Docker 沙箱；明确关闭框架的宿主机执行器自动回退。每次调用使用独立 tmpfs，不挂载宿主目录、不继承宿主密钥；Local 临时目录仅存 Docker CLI 状态，不作为安全隔离或执行回退。README 原文保持不变，边界见[验收范围](acceptance.md)。
 
 ## 10. 部署形态
 

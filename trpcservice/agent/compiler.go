@@ -18,6 +18,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/modelops"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
+	platformskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/toolexec"
@@ -104,9 +105,14 @@ type RevisionCompiler struct {
 	toolJournal   toolexec.Journal
 	secrets       secret.Store
 	modelBudget   *tenant.Guard
+	skills        *platformskill.Registry
 }
 
 type RevisionCompilerOption func(*RevisionCompiler)
+
+func WithSkills(registry *platformskill.Registry) RevisionCompilerOption {
+	return func(c *RevisionCompiler) { c.skills = registry }
+}
 
 func WithModelBudget(guard *tenant.Guard) RevisionCompilerOption {
 	return func(c *RevisionCompiler) { c.modelBudget = guard }
@@ -253,6 +259,7 @@ func (c *RevisionCompiler) Invalidate(tenantID string, revisionID string) {
 }
 
 type revisionAgentConfig struct {
+	Skills            []platformskill.Ref          `json:"skills,omitempty"`
 	MCPServers        []platformtool.MCPServerSpec `json:"mcp_servers,omitempty"`
 	Name              string                       `json:"name"`
 	Description       string                       `json:"description"`
@@ -315,6 +322,10 @@ func (c *RevisionCompiler) compileRevision(
 	if err != nil {
 		return nil, err
 	}
+	refs, err := c.skills.Validate(scope.TenantID, revision.AgentConfig, policy.AllowedTools)
+	if err != nil {
+		return nil, err
+	}
 	servers, err := platformtool.ParseMCPServers(revision.AgentConfig)
 	if err != nil {
 		return nil, err
@@ -324,7 +335,7 @@ func (c *RevisionCompiler) compileRevision(
 		if c.toolCatalog == nil {
 			return nil, fmt.Errorf("agent revision declares tools but no tool catalog is configured")
 		}
-		tools, err = c.toolCatalog.Resolve(platformtool.MCPLocalTools(servers, policy.AllowedTools))
+		tools, err = c.toolCatalog.Resolve(platformskill.LocalTools(refs, platformtool.MCPLocalTools(servers, policy.AllowedTools)))
 		if err != nil {
 			return nil, err
 		}
@@ -340,6 +351,17 @@ func (c *RevisionCompiler) compileRevision(
 		llmagent.WithInstruction(agentConfig.Instruction),
 		llmagent.WithGenerationConfig(model.GenerationConfig{Stream: stream}),
 		llmagent.WithTools(tools),
+	}
+	if len(refs) > 0 {
+		repo, err := c.skills.RepositoryFor(scope.TenantID, refs)
+		if err != nil {
+			return nil, err
+		}
+		// Explicitly prevent the framework's automatic host executor fallback.
+		agentOptions = append(agentOptions, llmagent.WithSkills(repo),
+			llmagent.WithSkillToolProfile(llmagent.SkillToolProfileKnowledgeOnly),
+			llmagent.WithAllowedSkillTools("skill_load"),
+			llmagent.WithSkillsDirectoryHints(false), llmagent.WithSkillsFilePathHints(false))
 	}
 	modelCallbacks, err := governance.BuildModelCallbacks(revision.GuardrailConfig)
 	if err != nil {
@@ -405,7 +427,7 @@ func (c *RevisionCompiler) RunPolicyOptions(
 	}
 	policy.DangerousTools = append(policy.DangerousTools, dangerous...)
 	for _, name := range policy.AllowedTools {
-		if c.toolCatalog.IsManagedSideEffect(name) {
+		if c.toolCatalog.RequiresApproval(name) {
 			policy.DangerousTools = append(policy.DangerousTools, name)
 		}
 	}

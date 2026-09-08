@@ -140,3 +140,17 @@ PostgreSQL 的 platform_backlog 聚合视图由 Gateway/Admin 读取，只含租
 agent_backlog_snapshot_up=0 表示采集失败，不能导出假的零积压；timestamp 用于识别过期快照。无新消息时接收检查点也应推进。unknown/attempting 计入失败/待核对，不能当发送成功。
 
 Prometheus 规则、测试和 Grafana 配置见 [deploy/compose](../deploy/compose/prometheus-rules.yaml)。阈值是部署初始值，实际通知接收方、静默与 SLO 需另行配置；规则评估成功不代表已经有人收到通知。
+
+## 8. 管理页面与 Skill 沙箱
+
+管理页面位于 `/admin/ui/`，只提供静态登录壳，不带任何租户配置。所有数据与写入继续要求 Admin Bearer/RBAC。Token 仅保留在浏览器内存，不用 Cookie/localStorage；页面使用同源 CSP、文本 DOM 渲染和跨源请求检查。租户列表在服务器按 Principal 过滤，后端也检查 tenant_id，不能靠隐藏按钮当授权。
+
+Skill 由部署者在 skills root 的 catalog.json 注册 name/version/directory；每个目录加载 SKILL.md 与 run.sh。框架负责 Markdown 解析和 skill_load，平台冻结正文与脚本快照，并校验租户 grant 和 Revision 中的 name/version/checksum。部署目录变化不会偷偷改变已编译代码；新内容要发布新引用，旧版本应保留以支持回滚。
+
+skill_run 是固定平台工具，不能由请求指定 shell 命令、宿主路径、镜像或 Docker 参数。即使租户省略 dangerous_tools 也要求审批；执行前再次核对 Tool Journal 的授权状态和参数哈希。未知结果保留原有防重放规则，不直接重跑脚本。
+
+Docker 执行使用本地镜像的不可变 ID，不自动拉取；默认非 root、禁网、只读根、全部 capability 丢弃、no-new-privileges，工作区为独立 16 MiB tmpfs。默认 128 MiB 内存、32 个 PID、0.5 CPU、10 秒脚本时长、64 KiB 合并输出，每节点最多 2 个沙箱执行。超时在容器内执行，Worker 中断后也有退出边界；取消或超限会按随机名称和所有权标签清理本次容器，不做全局 prune。
+
+这不是虚拟机或可证明抵抗所有内核漏洞的隔离。Docker daemon 及镜像由可信部署者管理，生产应使用专用执行节点/受控 rootless daemon，不能将 socket 暴露给租户或挂进沙箱。创建后尚未启动便发生硬崩溃的容器元数据可能需人工核对；不自动删除归属不明资源。[Docker 安全边界](https://docs.docker.com/engine/security/)
+
+当前不支持交互终端、联网安装依赖、宿主机执行或任意文件挂载。脚本结果经 Tool/Session 返回，审计保存调用身份、状态和摘要，不保存脚本正文或完整输出。
