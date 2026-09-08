@@ -145,7 +145,7 @@ func (d *privateDoer) Do(sdkRequest *http.Request) (*http.Response, error) {
 		}
 		return nil, &ProviderError{Kind: kind}
 	}
-	defer response.Body.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(response.Body)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, &ProviderError{Kind: "http", HTTPStatus: response.StatusCode}
 	}

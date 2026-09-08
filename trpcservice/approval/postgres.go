@@ -65,7 +65,7 @@ ORDER BY created_at`, tenantID, requestID)
 	if err != nil {
 		return nil, fmt.Errorf("list pending tool approvals: %w", err)
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	result := make([]Record, 0)
 	for rows.Next() {
 		record, err := scanRecord(rows)
@@ -155,7 +155,7 @@ WHERE tenant_id=$1 AND channel_binding_id=$2 AND user_id=$3 AND session_id=$4
 	if err != nil {
 		return nil, fmt.Errorf("list session approvals: %w", err)
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	result := make([]Record, 0)
 	for rows.Next() {
 		record, err := scanRecord(rows)

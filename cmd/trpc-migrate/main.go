@@ -34,7 +34,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(db)
 	if err := database.Migrate(ctx, db); err != nil {
 		return err
 	}

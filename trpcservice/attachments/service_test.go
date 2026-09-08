@@ -39,7 +39,7 @@ func attachmentFixture(t *testing.T) (*Service, workqueue.AgentTask) {
 		t.Fatal(err)
 	}
 	s.downloader = fakeDownload{data: []byte("untrusted user document")}
-	t.Cleanup(func() { artifacts.Close(); repo.Close(); writer.Close() })
+	t.Cleanup(func() { _ = artifacts.Close(); _ = repo.Close(); _ = writer.Close() })
 	scope, _ := runtimecontext.NewScope("tutorial-tenant", "tutorial-app", "tutorial-revision-1", "telegram", "attachment-binding")
 	return s, workqueue.AgentTask{Scope: scope, RequestID: "attachment-request", MessageID: "message", UserID: "user", SessionID: "session", Media: &runtimecontext.MediaReference{FileID: "file", Name: "../../private", BindingVersion: 1}}
 }

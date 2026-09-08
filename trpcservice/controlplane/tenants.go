@@ -76,7 +76,7 @@ func (r *PostgresRepository) ListTenants(ctx context.Context, after string, limi
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	result := []Tenant{}
 	for rows.Next() {
 		var item Tenant

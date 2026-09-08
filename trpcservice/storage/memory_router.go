@@ -205,14 +205,14 @@ func (r *MemoryRouter) BackfillUser(
 		return MemoryMigrationVerification{}, err
 	}
 	if len(entries) > 100000 {
-		return MemoryMigrationVerification{}, errors.New("Memory migration exceeds scan bound")
+		return MemoryMigrationVerification{}, errors.New("memory migration exceeds scan bound")
 	}
 	targets, err := target.ReadMemories(ctx, key, 100001)
 	if err != nil {
 		return MemoryMigrationVerification{}, err
 	}
 	if len(targets) > 100000 {
-		return MemoryMigrationVerification{}, errors.New("Memory migration exceeds scan bound")
+		return MemoryMigrationVerification{}, errors.New("memory migration exceeds scan bound")
 	}
 	wanted := map[string]bool{}
 	for _, e := range entries {
@@ -326,7 +326,7 @@ func verifyMemoryServices(
 		return MemoryMigrationVerification{}, err
 	}
 	if len(sourceEntries) > 100000 || len(targetEntries) > 100000 {
-		return MemoryMigrationVerification{}, errors.New("Memory verification exceeds scan bound")
+		return MemoryMigrationVerification{}, errors.New("memory verification exceeds scan bound")
 	}
 	targetByID := make(map[string]*memory.Entry, len(targetEntries))
 	for _, entry := range targetEntries {

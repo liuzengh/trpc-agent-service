@@ -49,11 +49,11 @@ func New(
 	opts Options,
 ) (*Sender, error) {
 	if journal == nil || repository == nil || registry == nil {
-		return nil, fmt.Errorf("Reply Sender dependencies are required")
+		return nil, fmt.Errorf("reply Sender dependencies are required")
 	}
 	if opts.WorkerID == "" || opts.BatchSize <= 0 || opts.ClaimLease <= 0 ||
 		opts.PollInterval <= 0 || opts.RetryDelay <= 0 || opts.MaxAttempts <= 0 {
-		return nil, fmt.Errorf("Reply Sender options are invalid")
+		return nil, fmt.Errorf("reply Sender options are invalid")
 	}
 	return &Sender{journal: journal, repository: repository, registry: registry, opts: opts}, nil
 }

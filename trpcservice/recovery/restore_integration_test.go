@@ -37,7 +37,7 @@ func TestIsolatedPostgresContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal("open isolated contract database")
 	}
-	defer db.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(db)
 	for db.PingContext(ctx) != nil {
 		select {
 		case <-time.After(100 * time.Millisecond):

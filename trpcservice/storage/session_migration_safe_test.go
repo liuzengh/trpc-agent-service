@@ -36,7 +36,7 @@ func safeSessionFixture(t *testing.T) (*controlplane.MemoryRepository, *SessionR
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { r.Close(); repo.Close() })
+	t.Cleanup(func() { _ = r.Close(); _ = repo.Close() })
 	b := controlplane.BackendBinding{ID: "target-safe", TenantID: "tutorial-tenant", AppID: "tutorial-app", ResourceType: "session", BackendType: "inmemory", Config: json.RawMessage(`{}`), Version: 1, MigrationState: "migration_target"}
 	if err := repo.CreateBackendBinding(context.Background(), b); err != nil {
 		t.Fatal(err)
@@ -168,8 +168,8 @@ func TestSessionImportStagesWithoutDestroyingTargetAndCoordinatesWrites(t *testi
 	}
 	// Full event verification catches same-count corruption.
 	native, _ := target.nativeKey(ctx, key)
-	corrupt, _ := fault.Service.GetSession(ctx, native)
-	corrupt.Events[0].Response.Choices[0].Message.Content = "corrupted"
+	corrupt, _ := fault.GetSession(ctx, native)
+	corrupt.Events[0].Choices[0].Message.Content = "corrupted"
 	if sameEvents(source, corrupt) {
 		t.Fatal("content corruption not detected")
 	}

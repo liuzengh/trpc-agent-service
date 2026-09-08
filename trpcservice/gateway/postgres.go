@@ -304,7 +304,7 @@ RETURNING q.outbox_id, q.payload`, limit, workerID, postgresInterval(lease))
 	if err != nil {
 		return nil, fmt.Errorf("claim queue outbox: %w", err)
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	result := make([]QueueOutboxItem, 0, limit)
 	for rows.Next() {
 		var item QueueOutboxItem
@@ -414,7 +414,7 @@ WHERE request_id = $1 AND status NOT IN ('completed','dead')`, requestID, worker
 	if status == "dead" {
 		return ErrRunTerminal
 	}
-	return fmt.Errorf("Agent run %q cannot start from status %q", requestID, status)
+	return fmt.Errorf("agent run %q cannot start from status %q", requestID, status)
 }
 
 func (j *PostgresJournal) CompleteRun(
@@ -561,7 +561,7 @@ WHERE o.outbound_id = c.outbound_id
 	if err != nil {
 		return nil, fmt.Errorf("claim outbound messages: %w", err)
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	result := make([]OutboundItem, 0, limit)
 	for rows.Next() {
 		var item OutboundItem

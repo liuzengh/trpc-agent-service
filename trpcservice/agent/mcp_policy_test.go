@@ -18,7 +18,7 @@ func TestRemoteToolsDefaultToApprovalAndCannotUseOtherTenantGrant(t *testing.T) 
 	data.Revisions[0].AgentConfig = json.RawMessage(`{"name":"agent","instruction":"help","mcp_servers":[{"name":"service","credential_ref":"env://MCP_POLICY_TEST","tools":["write"]}]}`)
 	data.Revisions[0].ToolPolicy = json.RawMessage(`{"allowed_tools":["mcp_service_write"]}`)
 	repo := controlplane.NewMemoryRepository(data)
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	t.Setenv("MCP_POLICY_TEST", `{"url":"https://mcp.example.invalid/mcp","allowed_tools":["write"]}`)
 	store, err := secret.NewEnvStore([]secret.Grant{{TenantID: "tutorial-tenant", Purpose: secret.MCPServer, Reference: "env://MCP_POLICY_TEST"}})
 	if err != nil {

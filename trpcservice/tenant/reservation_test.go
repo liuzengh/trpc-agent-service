@@ -24,14 +24,14 @@ func TestReservationsConcurrentAndIdempotent(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer g.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(g)
 			other := g
 			if backend == "redis" {
 				other, err = NewGuard(ctx, repo, cfg)
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer other.Close()
+				defer func(closer interface{ Close() error }) { _ = closer.Close() }(other)
 			}
 			var wg sync.WaitGroup
 			var accepted atomic.Int32
@@ -80,7 +80,7 @@ func TestReservationsConcurrentAndIdempotent(t *testing.T) {
 
 func TestReservationChargesActualOverrunAndRejectsInvalidUsage(t *testing.T) {
 	g, _ := NewGuard(context.Background(), quotaRepository(`{"daily_prompt_tokens":100}`), config.QuotaConfig{Backend: "local"})
-	defer g.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(g)
 	r, err := g.ReserveModel(context.Background(), "tutorial-tenant", 10, 10, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestReservationChargesActualOverrunAndRejectsInvalidUsage(t *testing.T) {
 
 func TestMonetaryBudgetCannotBeBypassedWithUnknownPrice(t *testing.T) {
 	g, _ := NewGuard(context.Background(), quotaRepository(`{"daily_cost_usd":1}`), config.QuotaConfig{Backend: "local"})
-	defer g.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(g)
 	if _, err := g.ReserveModel(context.Background(), "tutorial-tenant", 10, 10, 0); !errors.Is(err, ErrPricingRequired) {
 		t.Fatal("zero-price bypass of monetary quota")
 	}

@@ -16,8 +16,8 @@ import (
 var (
 	ErrMessageConflict = errors.New("external message ID was reused with different payload")
 	ErrJournalClosed   = errors.New("inbound journal is closed")
-	ErrRunTerminal     = errors.New("Agent run has exhausted automatic retries")
-	ErrRunSuperseded   = errors.New("Agent run is owned by another worker")
+	ErrRunTerminal     = errors.New("agent run has exhausted automatic retries")
+	ErrRunSuperseded   = errors.New("agent run is owned by another worker")
 )
 
 // InboundRequest is the normalized message accepted by the durable Gateway.

@@ -271,7 +271,7 @@ func (j *MemoryJournal) MarkRunRunning(
 	defer j.mu.Unlock()
 	run := j.runs[requestID]
 	if run == nil {
-		return fmt.Errorf("Agent run not found")
+		return fmt.Errorf("agent run not found")
 	}
 	if run.status == "completed" {
 		return nil
@@ -293,7 +293,7 @@ func (j *MemoryJournal) CompleteRun(
 	defer j.mu.Unlock()
 	run := j.runs[task.RequestID]
 	if run == nil {
-		return fmt.Errorf("Agent run not found")
+		return fmt.Errorf("agent run not found")
 	}
 	if run.status == "dead" {
 		return ErrRunTerminal
@@ -336,7 +336,7 @@ func (j *MemoryJournal) FailRun(
 	defer j.mu.Unlock()
 	run := j.runs[requestID]
 	if run == nil {
-		return fmt.Errorf("Agent run not found")
+		return fmt.Errorf("agent run not found")
 	}
 	if run.status != "completed" && run.status != "dead" {
 		if len(expectedWorker) > 0 && run.workerID != expectedWorker[0] {
@@ -362,7 +362,7 @@ func (j *MemoryJournal) TerminalFailRun(ctx context.Context, task workqueue.Agen
 	}
 	run := j.runs[task.RequestID]
 	if run == nil {
-		return false, fmt.Errorf("Agent run not found")
+		return false, fmt.Errorf("agent run not found")
 	}
 	if run.status == "completed" {
 		return false, nil

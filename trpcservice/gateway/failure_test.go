@@ -10,7 +10,7 @@ import (
 func TestTerminalFailureDoesNotOverwriteSuccessOrAnotherWorker(t *testing.T) {
 	ctx := context.Background()
 	journal := NewMemoryJournal()
-	defer journal.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 	_, err := journal.Accept(ctx, testInboundRequest(t, "terminal-test", "hello"))
 	if err != nil {
 		t.Fatal(err)

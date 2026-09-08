@@ -36,7 +36,7 @@ func manifests(t *testing.T, fileName string) []manifest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(file)
 	decoder := yaml.NewDecoder(file)
 	var result []manifest
 	for {

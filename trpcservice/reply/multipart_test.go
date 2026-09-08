@@ -40,7 +40,7 @@ func (a *multipartAdapter) Send(ctx context.Context, _ controlplane.ChannelBindi
 func multipartFixture(t *testing.T, j gateway.Journal, a channels.Adapter) (*controlplane.MemoryRepository, *Sender) {
 	t.Helper()
 	repo := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
-	t.Cleanup(func() { repo.Close() })
+	t.Cleanup(func() { _ = repo.Close() })
 	ctx := context.Background()
 	accepted, err := j.Accept(ctx, gateway.InboundRequest{Scope: runtimecontext.TutorialScope(), ExternalMessageID: "multipart", UserID: "user", SessionID: "session", ChatType: "direct", Text: "hi"})
 	if err != nil {
@@ -65,7 +65,7 @@ func multipartFixture(t *testing.T, j gateway.Journal, a channels.Adapter) (*con
 }
 func TestMultipartRetryResumesAtFirstUnsentPart(t *testing.T) {
 	j := gateway.NewMemoryJournal()
-	defer j.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(j)
 	a := &multipartAdapter{fail: true}
 	repo, s := multipartFixture(t, j, a)
 	ctx := context.Background()
@@ -103,7 +103,7 @@ func (j *losePartAck) FinishPart(ctx context.Context, p gateway.OutboundPart, st
 }
 func TestMultipartUnknownStopsWithoutRepeatingExternalSend(t *testing.T) {
 	base := gateway.NewMemoryJournal()
-	defer base.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(base)
 	j := &losePartAck{Journal: base, lose: true}
 	a := &multipartAdapter{}
 	_, s := multipartFixture(t, j, a)
@@ -119,7 +119,7 @@ func TestMultipartUnknownStopsWithoutRepeatingExternalSend(t *testing.T) {
 }
 func TestMultipartHeartbeatProtectsLongDelivery(t *testing.T) {
 	j := gateway.NewMemoryJournal()
-	defer j.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(j)
 	a := &multipartAdapter{delay: 200 * time.Millisecond}
 	_, s := multipartFixture(t, j, a)
 	if n, err := s.ProcessOnce(context.Background()); n != 1 || err != nil {

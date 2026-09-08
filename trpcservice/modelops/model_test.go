@@ -50,7 +50,7 @@ func TestAccountingAllPurposesAndRepeatedStreamUsage(t *testing.T) {
 			data := controlplane.DefaultBootstrapData()
 			data.Tenants[0].QuotaConfig = json.RawMessage(`{"daily_prompt_tokens":1000,"daily_completion_tokens":16}`)
 			g, _ := tenant.NewGuard(context.Background(), controlplane.NewMemoryRepository(data), config.QuotaConfig{Backend: "local"})
-			defer g.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(g)
 			base := &testModel{}
 			m, err := New(base, g, Options{TenantID: "tutorial-tenant", AppID: "tutorial-app", Purpose: purpose, MaxCompletionTokens: 10})
 			if err != nil {
@@ -85,7 +85,7 @@ func TestUnknownOutcomesKeepConservativeDebit(t *testing.T) {
 			data := controlplane.DefaultBootstrapData()
 			data.Tenants[0].QuotaConfig = json.RawMessage(`{"daily_completion_tokens":10}`)
 			g, _ := tenant.NewGuard(context.Background(), controlplane.NewMemoryRepository(data), config.QuotaConfig{Backend: "local"})
-			defer g.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(g)
 			base := &testModel{fail: mode == "fail", noUsage: mode == "missing_usage", wait: mode == "cancel"}
 			m, _ := New(base, g, Options{TenantID: "tutorial-tenant", AppID: "tutorial-app", Purpose: "chat", MaxCompletionTokens: 10, Timeout: 10 * time.Millisecond})
 			responses, err := m.GenerateContent(context.Background(), &model.Request{})

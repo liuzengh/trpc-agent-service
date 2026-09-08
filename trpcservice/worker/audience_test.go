@@ -23,9 +23,9 @@ func TestQueueCarriesVerifiedAudienceToRuntime(t *testing.T) {
 		t.Run(audience, func(t *testing.T) {
 			ctx := context.Background()
 			journal := gateway.NewMemoryJournal()
-			defer journal.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 			queue := workqueue.NewMemoryQueue(2)
-			defer queue.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(queue)
 			if _, err := journal.Accept(ctx, gateway.InboundRequest{Scope: runtimecontext.TutorialScope(), ExternalMessageID: "audience", UserID: "user", SessionID: "session", ChatType: audience, Text: "test"}); err != nil {
 				t.Fatal(err)
 			}

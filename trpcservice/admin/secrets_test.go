@@ -15,7 +15,7 @@ func TestAdminRejectsUnassignedSecretsBeforeSaving(t *testing.T) {
 	ctx := context.Background()
 	data := controlplane.DefaultBootstrapData()
 	repository := controlplane.NewMemoryRepository(data)
-	defer repository.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repository)
 	service, _ := New(repository)
 	store, _ := secret.NewEnvStore([]secret.Grant{
 		{TenantID: "another-tenant", Purpose: secret.Model, Reference: "env://OTHER_KEY"},
@@ -86,7 +86,7 @@ func TestAdminChannelSecretUpdateIsAuthorized(t *testing.T) {
 	data := controlplane.DefaultBootstrapData()
 	binding := controlplane.ChannelBinding{ID: "telegram-binding", TenantID: "tutorial-tenant", AppID: "tutorial-app", AccountID: "bot-account", ChannelType: "telegram", CallbackKey: "bot-callback", SecretRef: "env://BOT_KEY", Config: json.RawMessage(`{"bot_token_ref":"env://BOT_KEY","webhook_secret_ref":"env://WEBHOOK_KEY"}`)}
 	repository := controlplane.NewMemoryRepository(data)
-	defer repository.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repository)
 	service, _ := New(repository)
 	if _, err := service.CreateChannelBinding(ctx, binding); !errors.Is(err, secret.ErrForbidden) {
 		t.Fatalf("default authorize: %v", err)

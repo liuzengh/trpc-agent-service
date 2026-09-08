@@ -27,7 +27,7 @@ func SQLBacklogSource(db *sql.DB) BacklogSource {
 		if err != nil {
 			return nil, errors.New("backlog snapshot unavailable")
 		}
-		defer rows.Close()
+		defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 		items := []BacklogSample{}
 		for rows.Next() {
 			var item BacklogSample

@@ -29,7 +29,7 @@ func TestPostgresTerminalFailureRetainsRedactedCause(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(db)
 	if err := database.Migrate(ctx, db); err != nil {
 		t.Fatal(err)
 	}

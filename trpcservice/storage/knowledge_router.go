@@ -579,7 +579,7 @@ func (r *KnowledgeRouter) build(
 		case "qdrant":
 			if backendConfig.Host == "" || backendConfig.Port <= 0 ||
 				backendConfig.CollectionName == "" {
-				return nil, errors.New("Qdrant host, port and collection_name are required")
+				return nil, errors.New("qdrant host, port and collection_name are required")
 			}
 			options := []vectorqdrant.Option{
 				vectorqdrant.WithHost(backendConfig.Host),

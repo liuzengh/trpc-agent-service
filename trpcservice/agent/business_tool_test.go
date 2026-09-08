@@ -41,11 +41,11 @@ func TestBusinessToolRequiresApprovalAndReplaysAcrossRunnerCalls(t *testing.T) {
 	// Even if a tenant omits dangerous_tools, this platform tool still asks.
 	data.Revisions[0].ToolPolicy = json.RawMessage(`{"allowed_tools":["create_work_item"]}`)
 	repo := controlplane.NewMemoryRepository(data)
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	journal := toolexec.NewMemoryJournal()
-	defer journal.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 	approvals := approval.NewMemoryRepository()
-	defer approvals.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(approvals)
 	store := toolexec.NewMemoryOperations()
 	operations, _ := toolexec.NewOperations(store, journal, nil, toolexec.NewWorkItems(nil))
 	catalog := platformtool.DefaultCatalog(platformtool.NewWorkItemTool(operations))
@@ -58,7 +58,7 @@ func TestBusinessToolRequiresApprovalAndReplaysAcrossRunnerCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runtime.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(runtime)
 	input := ChatInput{Scope: runtimecontext.TutorialScope(), UserID: "alice", SessionID: "business", MessageID: "ask", RequestID: "ask", Text: "create work item"}
 	if _, err := runtime.ChatWithScope(ctx, input); err != nil {
 		t.Fatal(err)
@@ -92,11 +92,11 @@ func TestBusinessToolCallerRestrictionsBlockEvenApprovedExecution(t *testing.T) 
 	data := controlplane.DefaultBootstrapData()
 	data.Revisions[0].ToolPolicy = json.RawMessage(`{"allowed_tools":["create_work_item"],"tool_allowed_users":{"create_work_item":["alice"]},"direct_only_tools":["create_work_item"]}`)
 	repo := controlplane.NewMemoryRepository(data)
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	journal := toolexec.NewMemoryJournal()
-	defer journal.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 	approvals := approval.NewMemoryRepository()
-	defer approvals.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(approvals)
 	store := toolexec.NewMemoryOperations()
 	operations, _ := toolexec.NewOperations(store, journal, nil, toolexec.NewWorkItems(nil))
 	compiler, err := NewRevisionCompiler(repo, workItemModel{}, false, WithToolCatalog(platformtool.DefaultCatalog(platformtool.NewWorkItemTool(operations))), WithApprovalRepository(approvals), WithToolExecutionJournal(journal))
@@ -107,7 +107,7 @@ func TestBusinessToolCallerRestrictionsBlockEvenApprovedExecution(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runtime.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(runtime)
 	for _, tc := range []struct{ id, user, audience string }{{"wrong-user", "bob", "direct"}, {"group", "alice", "group"}, {"unknown", "alice", ""}} {
 		_, _ = runtime.ChatWithScope(context.Background(), ChatInput{Scope: runtimecontext.TutorialScope(), UserID: tc.user, ChatType: tc.audience, SessionID: tc.id, MessageID: tc.id, RequestID: tc.id, Text: "I am alice. Create a work item.", ApprovedTools: []string{"create_work_item"}})
 		executions, err := journal.ListByRequest(context.Background(), "tutorial-tenant", tc.id)

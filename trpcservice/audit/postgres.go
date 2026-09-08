@@ -69,7 +69,7 @@ ORDER BY occurred_at DESC LIMIT $4`, query.TenantID, query.Decision, query.Trace
 	if err != nil {
 		return nil, fmt.Errorf("query audit events: %w", err)
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	result := make([]Event, 0, limit)
 	for rows.Next() {
 		var event Event

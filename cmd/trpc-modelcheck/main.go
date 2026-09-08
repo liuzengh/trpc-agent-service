@@ -65,7 +65,7 @@ func run(args []string, stdout io.Writer) error {
 	if baseURL == "" {
 		baseURL = "SDK default"
 	}
-	fmt.Fprintf(
+	_, _ = fmt.Fprintf(
 		stdout,
 		"checking model provider=%s name=%s base_url=%s\n",
 		modelConfig.Provider,
@@ -129,7 +129,7 @@ func run(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(reply.String()) == "" {
 		return fmt.Errorf("model returned no text content")
 	}
-	fmt.Fprintf(
+	_, _ = fmt.Fprintf(
 		stdout,
 		"model check passed: model=%s latency=%s prompt_tokens=%d completion_tokens=%d\nreply: %s\n",
 		responseModel,

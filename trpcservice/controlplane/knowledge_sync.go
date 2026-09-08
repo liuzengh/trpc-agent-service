@@ -101,7 +101,7 @@ func (r *PostgresRepository) WithKnowledgeSync(ctx context.Context, t, a string,
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(conn)
 	if _, err = conn.ExecContext(ctx, "SELECT pg_advisory_lock(hashtextextended($1,0))", KnowledgeLockName(t, a)); err != nil {
 		return err
 	}

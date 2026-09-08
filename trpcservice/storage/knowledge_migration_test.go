@@ -40,7 +40,7 @@ func migrationFixture(t *testing.T, override ...controlplane.BackendBinding) (*c
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { r.Close(); repo.Close() })
+	t.Cleanup(func() { _ = r.Close(); _ = repo.Close() })
 	ctx := context.Background()
 	scope := runtimecontext.TutorialScope()
 	rev := data.Revisions[0]

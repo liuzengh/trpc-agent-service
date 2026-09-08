@@ -61,15 +61,16 @@ func run(args []string, out io.Writer) error {
 	defer cancel()
 	var report wecommcp.SnapshotReport
 	var err error
-	if *mode == "sessions" {
+	switch *mode {
+	case "sessions":
 		report, err = wecommcp.ReadSessionSnapshot(ctx, os.Getenv("WECOM_MCP_URL"), "data")
-	} else if *mode == "group-messages" {
+	case "group-messages":
 		report, err = wecommcp.ReadUniqueTestGroupMessageSnapshot(ctx, os.Getenv("WECOM_MCP_URL"), *snapshotFile, "data")
-	} else if *mode == "group-reply" {
+	case "group-reply":
 		report, err = wecommcp.SendUniqueTestGroupReply(ctx, os.Getenv("WECOM_MCP_URL"), *snapshotFile, "data")
-	} else if *mode == "group-reply-read" {
+	case "group-reply-read":
 		report, err = wecommcp.ReadUniqueTestGroupReply(ctx, os.Getenv("WECOM_MCP_URL"), *snapshotFile, "data")
-	} else {
+	default:
 		report, err = wecommcp.ReadUniqueTestMessageSnapshot(ctx, os.Getenv("WECOM_MCP_URL"), *snapshotFile, "data")
 	}
 	if err != nil {

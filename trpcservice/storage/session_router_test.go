@@ -114,7 +114,7 @@ func TestSessionRouterMigrationDualWritesEvents(t *testing.T) {
 	}
 	targetSession, err := targetService.GetSession(context.Background(), key)
 	if err != nil || len(targetSession.Events) != 1 ||
-		targetSession.Events[0].Response.Choices[0].Message.Content != "hello" {
+		targetSession.Events[0].Choices[0].Message.Content != "hello" {
 		t.Fatalf("target session=%+v err=%v", targetSession, err)
 	}
 }

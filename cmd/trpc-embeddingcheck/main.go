@@ -63,10 +63,10 @@ func run(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer selected.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(selected)
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	fmt.Fprintf(stdout, "checking embedding provider=openai dimensions=%d requests=1\n", cfg.Dimensions)
+	_, _ = fmt.Fprintf(stdout, "checking embedding provider=openai dimensions=%d requests=1\n", cfg.Dimensions)
 	started := time.Now()
 	vector, _, err := selected.GetEmbeddingWithUsage(ctx, sampleText)
 	if err != nil {
@@ -78,8 +78,8 @@ func run(args []string, stdout io.Writer) error {
 	if err := validateVector(vector, cfg.Dimensions); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "embedding check passed: dimensions=%d latency=%s finite=true nonzero=true\n", len(vector), time.Since(started).Round(time.Millisecond))
-	fmt.Fprintln(stdout, "Connectivity and vector shape verified; no document import or semantic retrieval validation performed.")
+	_, _ = fmt.Fprintf(stdout, "embedding check passed: dimensions=%d latency=%s finite=true nonzero=true\n", len(vector), time.Since(started).Round(time.Millisecond))
+	_, _ = fmt.Fprintln(stdout, "Connectivity and vector shape verified; no document import or semantic retrieval validation performed.")
 	return nil
 }
 

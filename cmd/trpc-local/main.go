@@ -65,7 +65,7 @@ func run(args []string, out io.Writer) (int, error) {
 		if err != nil {
 			return 4, localrun.ErrIdentity
 		}
-		fmt.Fprintf(out, "Agent running: pid=%d\n", process.PID)
+		_, _ = fmt.Fprintf(out, "Agent running: pid=%d\n", process.PID)
 		return 0, nil
 	case "record-pid":
 		if err := manager.RecordStarted(ctx, *pid); err != nil {
@@ -75,12 +75,12 @@ func run(args []string, out io.Writer) (int, error) {
 	case "stop":
 		if err := manager.Stop(ctx); err != nil {
 			if errors.Is(err, localrun.ErrNotRunning) {
-				fmt.Fprintln(out, "Agent is not running")
+				_, _ = fmt.Fprintln(out, "Agent is not running")
 				return 0, nil
 			}
 			return 1, err
 		}
-		fmt.Fprintln(out, "Agent exited; verified PID records removed")
+		_, _ = fmt.Fprintln(out, "Agent exited; verified PID records removed")
 		return 0, nil
 	case "status", "wait-ready":
 	default:
@@ -111,20 +111,20 @@ func run(args []string, out io.Writer) (int, error) {
 			if err != nil {
 				return 1, err
 			}
-			fmt.Fprintln(out, "non-HTTP role running; no readiness endpoint")
+			_, _ = fmt.Fprintln(out, "non-HTTP role running; no readiness endpoint")
 			return 0, nil
 		}
 		for {
 			if _, err := manager.Running(); err != nil {
-				return 1, errors.New("Agent exited or PID identity changed during startup")
+				return 1, errors.New("agent exited or PID identity changed during startup")
 			}
 			if state := httpProbe(ctx, base+"/readyz", nil); state.State == "ok" {
-				fmt.Fprintln(out, "Agent readiness passed")
+				_, _ = fmt.Fprintln(out, "Agent readiness passed")
 				return 0, nil
 			}
 			select {
 			case <-ctx.Done():
-				return 1, errors.New("Agent did not become ready; process retained for diagnosis")
+				return 1, errors.New("agent did not become ready; process retained for diagnosis")
 			case <-time.After(200 * time.Millisecond):
 			}
 		}
@@ -196,7 +196,7 @@ func httpProbe(ctx context.Context, endpoint string, headers map[string]string) 
 	if err != nil {
 		return check{State: "down", Detail: "HTTP request failed; endpoint and error details withheld"}
 	}
-	defer resp.Body.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(resp.Body)
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
 	if resp.StatusCode == 200 {
 		return check{State: "ok", Detail: "HTTP 200"}
@@ -241,7 +241,7 @@ func status(ctx context.Context, root, base string, manager localrun.Manager, ou
 			if err != nil {
 				return check{State: "down", Detail: "invalid connection settings"}
 			}
-			defer db.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(db)
 			db.SetMaxOpenConns(1)
 			probe, cancel := context.WithTimeout(ctx, 3*time.Second)
 			defer cancel()
@@ -267,7 +267,7 @@ func status(ctx context.Context, root, base string, manager localrun.Manager, ou
 			options.MaxRetries = -1
 			options.DialTimeout = 2 * time.Second
 			client := redis.NewClient(options)
-			defer client.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(client)
 			probe, cancel := context.WithTimeout(ctx, 3*time.Second)
 			defer cancel()
 			if client.Ping(probe).Err() != nil {
@@ -347,11 +347,11 @@ func status(ctx context.Context, root, base string, manager localrun.Manager, ou
 	}
 	code := 0
 	for _, result := range results {
-		fmt.Fprintf(out, "%-25s %-8s %s\n", result.Name, result.State, result.Detail)
+		_, _ = fmt.Fprintf(out, "%-25s %-8s %s\n", result.Name, result.State, result.Detail)
 		if result.State == "down" {
 			code = 1
 		}
 	}
-	fmt.Fprintln(out, "Read-only diagnostics: no model generation, IM send, migration or service restart. Local MinIO/Qdrant use Compose loopback ports; this is not a remote-backend audit.")
+	_, _ = fmt.Fprintln(out, "Read-only diagnostics: no model generation, IM send, migration or service restart. Local MinIO/Qdrant use Compose loopback ports; this is not a remote-backend audit.")
 	return code, nil
 }

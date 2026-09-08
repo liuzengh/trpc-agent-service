@@ -77,7 +77,7 @@ func TestManualScriptsInIsolatedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatal("fixture not ready")
 	}
@@ -88,7 +88,7 @@ func TestManualScriptsInIsolatedWorkspace(t *testing.T) {
 		t.Fatal("PID retained after successful stop")
 	}
 	if connection, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
-		connection.Close()
+		_ = connection.Close()
 		t.Fatal("Agent listener survived stop")
 	}
 }

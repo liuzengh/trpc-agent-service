@@ -12,9 +12,9 @@ import (
 
 func TestImmutableArtifactRetriesDoNotCreateNewVersions(t *testing.T) {
 	repo := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	r, _ := NewArtifactRouter(repo, secret.StaticStore{})
-	defer r.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(r)
 	ctx := context.Background()
 	info := artifact.SessionInfo{AppName: "t/tutorial-tenant/a/tutorial-app", UserID: "user", SessionID: "session"}
 	value := &artifact.Artifact{Data: []byte("same"), MimeType: "text/plain"}

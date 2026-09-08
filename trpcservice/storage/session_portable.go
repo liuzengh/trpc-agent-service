@@ -185,7 +185,7 @@ func (p *portableSession) AppendEvent(ctx context.Context, sess *session.Session
 		return err
 	}
 	if physical == nil {
-		return errors.New("Session missing")
+		return errors.New("session missing")
 	}
 	if err := p.Service.AppendEvent(ctx, physical, evt, opts...); err != nil {
 		return err
@@ -207,7 +207,7 @@ func (p *portableSession) CreateSessionSummary(ctx context.Context, sess *sessio
 		return err
 	}
 	if fresh == nil {
-		return errors.New("Session missing")
+		return errors.New("session missing")
 	}
 	if err = hydrateSummaries(fresh); err != nil {
 		return err

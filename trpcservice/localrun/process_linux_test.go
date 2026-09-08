@@ -39,7 +39,7 @@ func fixture(t *testing.T, ignore bool) (Manager, *exec.Cmd) {
 	if err != nil {
 		t.Skip("pidfd unavailable")
 	}
-	unix.Close(fd)
+	_ = unix.Close(fd)
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "data"), 0700); err != nil {
 		t.Fatal(err)

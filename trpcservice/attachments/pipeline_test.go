@@ -21,9 +21,9 @@ func TestAttachmentTravelsDurableQueueAndCompletesWithoutModel(t *testing.T) {
 	s, task := attachmentFixture(t)
 	ctx := context.Background()
 	journal := gateway.NewMemoryJournal()
-	defer journal.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 	queue := workqueue.NewMemoryQueue(4)
-	defer queue.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(queue)
 	_, err := journal.Accept(ctx, gateway.InboundRequest{Scope: task.Scope, ExternalMessageID: task.MessageID, UserID: task.UserID, SessionID: task.SessionID, ChatType: "direct", Text: "uploaded attachment", ReplyTarget: "target", Media: task.Media})
 	if err != nil {
 		t.Fatal(err)

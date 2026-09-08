@@ -78,7 +78,7 @@ func (s *PostgresStore) ListRejections(ctx context.Context, tenant, binding stri
 	if err != nil {
 		return nil, errors.New("cannot read channel rejection metadata")
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	result := []RejectedMessage{}
 	for rows.Next() {
 		var r RejectedMessage

@@ -74,15 +74,15 @@ func TestCompletionFailureReplaysCachedModelResult(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			j := &completionFault{MemoryJournal: gateway.NewMemoryJournal(), fail: true, afterCommit: committed}
-			defer j.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(j)
 			q := workqueue.NewMemoryQueue(4)
-			defer q.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(q)
 			m := &countedModel{Model: agentruntime.NewTutorialModel()}
 			r, err := agentruntime.NewRuntime(m, false)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer r.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(r)
 			task := recoveryTask(t, j.MemoryJournal)
 			if err := q.Publish(ctx, task); err != nil {
 				t.Fatal(err)
@@ -130,7 +130,7 @@ func TestCanceledWorkerLeavesDeliveryForAnotherConsumer(t *testing.T) {
 	}
 	first, second := queue("first"), queue("second")
 	j := gateway.NewMemoryJournal()
-	defer j.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(j)
 	task := recoveryTask(t, j)
 	if err := first.Publish(ctx, task); err != nil {
 		t.Fatal(err)
@@ -159,7 +159,7 @@ func TestCanceledWorkerLeavesDeliveryForAnotherConsumer(t *testing.T) {
 	// be reclaimed by a different consumer after its idle interval.
 	time.Sleep(30 * time.Millisecond)
 	next := agentruntime.NewDemoRuntime()
-	defer next.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(next)
 	if processed, err := newRecoveryWorker(t, second, j, next, "second").ProcessOne(ctx); !processed || err != nil {
 		t.Fatalf("reclaim: processed=%t error=%v", processed, err)
 	}
@@ -192,9 +192,9 @@ func TestWorkerBackendFailureBacksOffAndCancels(t *testing.T) {
 	defer cancel()
 	q := &unavailableQueue{cancel: cancel}
 	j := gateway.NewMemoryJournal()
-	defer j.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(j)
 	r := agentruntime.NewDemoRuntime()
-	defer r.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(r)
 	start := time.Now()
 	err := newRecoveryWorker(t, q, j, r, "worker").Run(ctx)
 	if !errors.Is(err, context.Canceled) || q.calls != 3 || time.Since(start) < 200*time.Millisecond {

@@ -448,7 +448,7 @@ func sessionMessagesAfter(events []event.Event, watermark time.Time) ([]model.Me
 		if item.Timestamp.After(latest) {
 			latest = item.Timestamp
 		}
-		for _, choice := range item.Response.Choices {
+		for _, choice := range item.Choices {
 			if choice.Message.Role != "" &&
 				(choice.Message.Content != "" || len(choice.Message.ToolCalls) > 0) {
 				result = append(result, choice.Message)

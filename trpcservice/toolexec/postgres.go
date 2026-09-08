@@ -105,7 +105,7 @@ WHERE tenant_id=$1 AND request_id=$2 ORDER BY tool_call_id`, tenantID, requestID
 	if err != nil {
 		return nil, fmt.Errorf("read tool outcomes: %w", err)
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	result := make([]Execution, 0)
 	for rows.Next() {
 		var item Execution

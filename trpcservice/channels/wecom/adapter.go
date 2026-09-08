@@ -281,7 +281,7 @@ func (a *Adapter) accessToken(
 		if err != nil {
 			return "", &channels.DeliveryError{Cause: err, Retryable: true}
 		}
-		defer resp.Body.Close()
+		defer func(closer interface{ Close() error }) { _ = closer.Close() }(resp.Body)
 		var payload struct {
 			ErrCode     int    `json:"errcode"`
 			ErrMsg      string `json:"errmsg"`
@@ -329,7 +329,7 @@ func (a *Adapter) sendText(
 	if err != nil {
 		return "", false, &channels.DeliveryError{Cause: fmt.Errorf("WeCom delivery outcome unknown"), Unknown: true}
 	}
-	defer resp.Body.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(resp.Body)
 	var payload struct {
 		ErrCode *int   `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`

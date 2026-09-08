@@ -174,7 +174,7 @@ ORDER BY (app_id IS NOT NULL) DESC, resource_type, binding_id`, tenantID, appID)
 	if err != nil {
 		return nil, fmt.Errorf("list backend bindings: %w", err)
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	result := make([]BackendBinding, 0)
 	for rows.Next() {
 		var binding BackendBinding

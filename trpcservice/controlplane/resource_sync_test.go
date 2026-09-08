@@ -37,7 +37,7 @@ func TestResourceSyncPostgresNestedReadsAndPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	provider := repo.(*PostgresRepository)
 	if err := SeedBootstrap(ctx, provider.SQLDB(), DefaultBootstrapData()); err != nil {
 		t.Fatal(err)

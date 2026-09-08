@@ -28,7 +28,7 @@ func NewHandler(service *Service, token string) (*Handler, error) {
 
 func NewHandlerWithPrincipals(service *Service, principals []Principal) (*Handler, error) {
 	if service == nil {
-		return nil, errors.New("Admin service is required")
+		return nil, errors.New("admin service is required")
 	}
 	if err := ValidatePrincipals(principals); err != nil {
 		return nil, err

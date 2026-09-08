@@ -76,7 +76,7 @@ func (s *spool) append(event Event) error {
 		return errors.New("audit spool write unavailable")
 	}
 	temporary := file.Name()
-	defer os.Remove(temporary)
+	defer func(path string) { _ = os.Remove(path) }(temporary)
 	if _, err = file.Write(data); err == nil {
 		err = file.Sync()
 	}
@@ -102,7 +102,7 @@ func syncDirectory(dir string) error {
 	if err != nil {
 		return errors.New("audit spool directory unavailable")
 	}
-	defer f.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(f)
 	if f.Sync() != nil {
 		return errors.New("audit spool directory flush failed")
 	}
@@ -120,7 +120,7 @@ func (s *spool) read(path string) (Event, error) {
 	if err != nil {
 		return Event{}, err
 	}
-	defer file.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(file)
 	var item spoolEntry
 	decoder := json.NewDecoder(io.LimitReader(file, maxSpoolEvent+1))
 	decoder.DisallowUnknownFields()

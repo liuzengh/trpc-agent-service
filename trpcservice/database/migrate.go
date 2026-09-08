@@ -99,7 +99,7 @@ func appliedMigrations(ctx context.Context, tx *sql.Tx) (map[int64]string, error
 	if err != nil {
 		return nil, fmt.Errorf("list applied migrations: %w", err)
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	result := make(map[int64]string)
 	for rows.Next() {
 		var version int64

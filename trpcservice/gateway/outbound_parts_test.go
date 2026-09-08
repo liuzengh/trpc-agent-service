@@ -16,7 +16,7 @@ import (
 
 func TestMemoryOutboundPartsContract(t *testing.T) {
 	j := NewMemoryJournal()
-	defer j.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(j)
 	testParts(t, j)
 }
 func TestPostgresOutboundPartsContract(t *testing.T) {
@@ -28,7 +28,7 @@ func TestPostgresOutboundPartsContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(db)
 	if err := database.Migrate(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}

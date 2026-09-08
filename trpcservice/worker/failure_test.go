@@ -45,14 +45,14 @@ func TestFailureNoticeIsDurableIdempotentAndStopsModelRetries(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			journal := &failNoticeJournal{MemoryJournal: gateway.NewMemoryJournal(), failOnce: mode != "normal", afterCommit: mode == "commit-response-lost"}
-			defer journal.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 			accepted, err := journal.Accept(ctx, gateway.InboundRequest{Scope: runtimecontext.TutorialScope(), ExternalMessageID: "failure-message", UserID: "alice", SessionID: "demo", ChatType: "direct", Text: "hello"})
 			if err != nil {
 				t.Fatal(err)
 			}
 			task := journal.Tasks()[0]
 			queue := workqueue.NewMemoryQueue(8)
-			defer queue.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(queue)
 			_ = queue.Publish(ctx, task)
 			runtime := &failingRuntime{}
 			worker, err := New(queue, journal, runtime, Options{WorkerID: "failure-worker", MaxAttempts: 2, RetryDelay: time.Millisecond})

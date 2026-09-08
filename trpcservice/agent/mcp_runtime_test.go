@@ -78,12 +78,12 @@ func TestRunnerUsesGovernedMCPToolAndWritesExecutionAudit(t *testing.T) {
 	data.Revisions[0].ToolPolicy = json.RawMessage(`{"allowed_tools":["mcp_test_echo"]}`)
 	data.Revisions[0].Checksum = controlplane.RevisionChecksum(data.Revisions[0])
 	repo := controlplane.NewMemoryRepository(data)
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	credential, _ := json.Marshal(platformtool.MCPCredential{URL: server.URL + "/mcp", AllowedTools: []string{"echo"}, ReadOnlyTools: []string{"echo"}})
 	journal := toolexec.NewMemoryJournal()
-	defer journal.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 	writer := audit.NewMemoryWriter()
-	defer writer.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(writer)
 	selected := mcpCallingModel{}
 	c, err := NewRevisionCompiler(repo, selected, false, WithToolCatalog(platformtool.DefaultCatalog()), WithSecretStore(secret.StaticStore{"mcp": string(credential)}), WithToolExecutionJournal(journal), WithAuditWriter(writer))
 	if err != nil {
@@ -93,7 +93,7 @@ func TestRunnerUsesGovernedMCPToolAndWritesExecutionAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runtime.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(runtime)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	input := ChatInput{Scope: runtimecontext.TutorialScope(), UserID: "user", SessionID: "session", MessageID: "mcp", RequestID: "mcp", Text: "call echo"}

@@ -93,7 +93,7 @@ func (a *Adapter) DownloadMedia(parent context.Context, b controlplane.ChannelBi
 	if err != nil {
 		return nil, errors.New("attachment download unavailable")
 	}
-	defer response.Body.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(response.Body)
 	if response.StatusCode != 200 || response.ContentLength > maxBytes {
 		return nil, errors.New("attachment download rejected")
 	}

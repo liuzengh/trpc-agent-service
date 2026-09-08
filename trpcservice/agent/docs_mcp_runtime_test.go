@@ -65,12 +65,12 @@ func TestRunnerCallsRealDocsMCPProtocolAndRecordsTool(t *testing.T) {
 	data.Revisions[0].ToolPolicy = json.RawMessage(`{"allowed_tools":["mcp_docs_search_project_docs"]}`)
 	data.Revisions[0].Checksum = controlplane.RevisionChecksum(data.Revisions[0])
 	repo := controlplane.NewMemoryRepository(data)
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	raw, _ := json.Marshal(platformtool.MCPCredential{URL: server.URL + "/mcp", BearerToken: token, AllowedTools: []string{docsmcp.ToolName}, ReadOnlyTools: []string{docsmcp.ToolName}})
 	writer := audit.NewMemoryWriter()
-	defer writer.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(writer)
 	journal := toolexec.NewMemoryJournal()
-	defer journal.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 	selected := docsCallingModel{}
 	compiler, err := NewRevisionCompiler(repo, selected, false, WithToolCatalog(platformtool.DefaultCatalog()), WithSecretStore(secret.StaticStore{"docs": string(raw)}), WithAuditWriter(writer), WithToolExecutionJournal(journal))
 	if err != nil {
@@ -80,7 +80,7 @@ func TestRunnerCallsRealDocsMCPProtocolAndRecordsTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runtime.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(runtime)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	result, err := runtime.ChatWithScope(ctx, ChatInput{Scope: runtimecontext.TutorialScope(), ChatType: "direct", UserID: "test-user", SessionID: "test-session", RequestID: "docs-request", MessageID: "docs-message", Text: "Search docs"})

@@ -15,7 +15,7 @@ import (
 
 func TestKnowledgeSyncMemoryContract(t *testing.T) {
 	repo := NewMemoryRepository(DefaultBootstrapData())
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	testKnowledgeSync(t, repo, repo, "tutorial-tenant", "tutorial-app")
 }
 func TestKnowledgeSyncPostgresContract(t *testing.T) {
@@ -27,12 +27,12 @@ func TestKnowledgeSyncPostgresContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(r)
 	other, err := New(context.Background(), config.ControlPlaneConfig{Backend: "postgres", PostgresURL: dsn, MaxOpenConns: 10, MaxIdleConns: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer other.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(other)
 	id := fmt.Sprintf("knowledge-%x", time.Now().UnixNano())
 	now := time.Now().UTC()
 	mutable := r.(MutableRepository)

@@ -12,7 +12,7 @@ import (
 
 func TestTenantPoliciesVersionedAndValidated(t *testing.T) {
 	repo := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	writer := audit.NewMemoryWriter()
 	s := &Service{repository: repo, audit: writer}
 	ctx := context.Background()

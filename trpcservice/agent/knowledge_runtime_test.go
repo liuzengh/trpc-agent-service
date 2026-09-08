@@ -55,19 +55,19 @@ func TestRunnerKnowledgeToolUsesRemoteEmbeddingAndJournal(t *testing.T) {
 	data.Revisions[0].KnowledgeConfig, _ = json.Marshal(map[string]any{"enabled": true, "embedding": map[string]any{"provider": "openai", "model": "test-model", "base_url": server.URL + "/v1", "dimensions": 3, "secret_ref": "test://embedding"}})
 	data.Revisions[0].Checksum = controlplane.RevisionChecksum(data.Revisions[0])
 	repo := controlplane.NewMemoryRepository(data)
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	secrets := secret.StaticStore{"test://embedding": "test-embedding-key"}
 	router, _ := storage.NewKnowledgeRouter(repo, secrets)
-	defer router.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(router)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, err := router.UpsertDocument(ctx, runtimecontext.TutorialScope(), data.Revisions[0], storage.KnowledgeDocument{ID: "synthetic-borrowing", Content: "The test document may be borrowed for seventeen days."}); err != nil {
 		t.Fatal(err)
 	}
 	writer := audit.NewMemoryWriter()
-	defer writer.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(writer)
 	journal := toolexec.NewMemoryJournal()
-	defer journal.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 	selected := knowledgeCallingModel{}
 	compiler, err := NewRevisionCompiler(repo, selected, false, WithToolCatalog(platformtool.DefaultCatalog()), WithSecretStore(secrets), WithKnowledgeProvider(router), WithAuditWriter(writer), WithToolExecutionJournal(journal))
 	if err != nil {
@@ -77,7 +77,7 @@ func TestRunnerKnowledgeToolUsesRemoteEmbeddingAndJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runtime.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(runtime)
 	result, err := runtime.ChatWithScope(ctx, ChatInput{Scope: runtimecontext.TutorialScope(), ChatType: "direct", UserID: "synthetic-user", SessionID: "knowledge-test", RequestID: "knowledge-request", MessageID: "knowledge-message", Text: "Consult the knowledge base"})
 	if err != nil || !strings.Contains(result.Reply, "seventeen days") || !strings.Contains(result.Reply, "synthetic-borrowing") {
 		t.Fatal("Runner did not return scoped Knowledge evidence", err)

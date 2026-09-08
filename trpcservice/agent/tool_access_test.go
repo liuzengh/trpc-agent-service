@@ -15,7 +15,7 @@ func TestCompilerAppliesVerifiedUserAndAudienceToToolAccess(t *testing.T) {
 	data := controlplane.DefaultBootstrapData()
 	data.Revisions[0].ToolPolicy = json.RawMessage(`{"allowed_tools":["dangerous_demo"],"dangerous_tools":["dangerous_demo"],"tool_allowed_users":{"dangerous_demo":["alice"]},"direct_only_tools":["dangerous_demo"]}`)
 	repo := controlplane.NewMemoryRepository(data)
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	compiler, err := NewRevisionCompiler(repo, NewTutorialModel(), false)
 	if err != nil {
 		t.Fatal(err)

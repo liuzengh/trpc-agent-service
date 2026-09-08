@@ -43,11 +43,11 @@ func LoadAdminConfigFromEnv() (AdminConfig, error) {
 		})
 	}
 	if config.Enabled && len(config.Principals) == 0 {
-		return AdminConfig{}, fmt.Errorf("Admin requires TRPC_AGENT_ADMIN_TOKEN or TRPC_AGENT_ADMIN_PRINCIPALS_JSON")
+		return AdminConfig{}, fmt.Errorf("admin requires TRPC_AGENT_ADMIN_TOKEN or TRPC_AGENT_ADMIN_PRINCIPALS_JSON")
 	}
 	for _, principal := range config.Principals {
 		if strings.TrimSpace(principal.Name) == "" || len(principal.Token) < 24 {
-			return AdminConfig{}, fmt.Errorf("Admin principal name and token are invalid")
+			return AdminConfig{}, fmt.Errorf("admin principal name and token are invalid")
 		}
 	}
 	return config, nil

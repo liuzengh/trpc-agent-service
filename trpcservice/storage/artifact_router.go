@@ -199,7 +199,7 @@ func (r *ArtifactRouter) withDistributedLock(
 	if err != nil {
 		return fmt.Errorf("acquire artifact lock connection: %w", err)
 	}
-	defer conn.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(conn)
 	var ignored any
 	if err := conn.QueryRowContext(
 		ctx, `SELECT pg_advisory_lock(hashtextextended($1, 0))`, key,

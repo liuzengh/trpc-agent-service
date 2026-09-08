@@ -126,7 +126,7 @@ func (r *SessionRouter) BackfillSession(ctx context.Context, tenantID, migration
 			return SessionMigrationVerification{}, err
 		}
 		if m.State != controlplane.MigrationBackfill && m.State != controlplane.MigrationVerify && m.State != controlplane.MigrationCutover {
-			return SessionMigrationVerification{}, errors.New("Session migration is not in a copy/verify state")
+			return SessionMigrationVerification{}, errors.New("session migration is not in a copy/verify state")
 		}
 		key := session.Key{AppName: app, UserID: item.UserID, SessionID: item.SessionID}
 		exists, err := sessionExists(ctx, source, key)

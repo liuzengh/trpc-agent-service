@@ -16,8 +16,8 @@ func TestRunLeasesRenewAndOldReleaseCannotFreeNewOwner(t *testing.T) {
 	repo := quotaRepository(`{"concurrent_runs":1}`)
 	a, _ := NewGuard(context.Background(), repo, cfg)
 	b, _ := NewGuard(context.Background(), repo, cfg)
-	defer a.Close()
-	defer b.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(a)
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(b)
 	ctx, cancel := context.WithCancel(context.Background())
 	old, err := a.acquireRunLease(ctx, "tutorial-tenant", 150*time.Millisecond)
 	if err != nil {
@@ -47,7 +47,7 @@ func TestRunLeasesRenewAndOldReleaseCannotFreeNewOwner(t *testing.T) {
 func TestRunLeaseLossCancelsExecution(t *testing.T) {
 	s := miniredis.RunT(t)
 	g, _ := NewGuard(context.Background(), quotaRepository(`{"concurrent_runs":1}`), config.QuotaConfig{Backend: "redis", RedisURL: "redis://" + s.Addr()})
-	defer g.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(g)
 	l, err := g.acquireRunLease(context.Background(), "tutorial-tenant", 90*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)

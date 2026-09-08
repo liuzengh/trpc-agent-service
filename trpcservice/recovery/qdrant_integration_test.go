@@ -46,7 +46,7 @@ func TestIsolatedKnowledgeMigration(t *testing.T) {
 	for {
 		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			break
 		}
 		select {

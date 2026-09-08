@@ -55,7 +55,7 @@ func (r *PostgresRepository) WithResourceSync(ctx context.Context, t, a, kind st
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(conn)
 	key := ResourceLockName(t, a, kind)
 	if _, err = conn.ExecContext(ctx, "SELECT pg_advisory_lock(hashtextextended($1,0))", key); err != nil {
 		return err

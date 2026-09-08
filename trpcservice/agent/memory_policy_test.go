@@ -16,7 +16,7 @@ func TestCompilerMemoryPermissionUsesTrustedChatAudience(t *testing.T) {
 	data.Revisions[0].MemoryConfig = json.RawMessage(`{"direct_only":true}`)
 	data.Revisions[0].ToolPolicy = json.RawMessage(`{"allowed_tools":["memory_add","memory_load","echo"]}`)
 	repo := controlplane.NewMemoryRepository(data)
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	compiler, err := NewRevisionCompiler(repo, NewTutorialModel(), false)
 	if err != nil {
 		t.Fatal(err)

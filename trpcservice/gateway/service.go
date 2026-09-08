@@ -60,10 +60,10 @@ func NewIntake(
 	opts ...IntakeOption,
 ) (*Intake, error) {
 	if resolver == nil {
-		return nil, fmt.Errorf("Gateway route resolver is required")
+		return nil, fmt.Errorf("gateway route resolver is required")
 	}
 	if journal == nil {
-		return nil, fmt.Errorf("Gateway inbound journal is required")
+		return nil, fmt.Errorf("gateway inbound journal is required")
 	}
 	intake := &Intake{resolver: resolver, journal: journal}
 	for _, opt := range opts {

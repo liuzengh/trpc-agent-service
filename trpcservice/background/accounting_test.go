@@ -58,22 +58,22 @@ func TestBackgroundJobsResolveRevisionModelAndChargeUsage(t *testing.T) {
 			data.Revisions[0].Checksum = controlplane.RevisionChecksum(data.Revisions[0])
 			data.Tenants[0].QuotaConfig = json.RawMessage(`{"daily_completion_tokens":8}`)
 			control := controlplane.NewMemoryRepository(data)
-			defer control.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(control)
 			g, _ := tenant.NewGuard(context.Background(), control, config.QuotaConfig{Backend: "local"})
-			defer g.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(g)
 			base := &accountedBackgroundModel{purpose: purpose}
 			compiler, err := agentmodel.NewRevisionCompiler(control, base, false, agentmodel.WithModelBudget(g))
 			if err != nil {
 				t.Fatal(err)
 			}
 			jobs := NewMemoryRepository()
-			defer jobs.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(jobs)
 			sessions := inmemory.NewSessionService(inmemory.WithSummarizer(NewJobSummarizer()))
-			defer sessions.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(sessions)
 			memories, _ := platformstorage.NewMemoryRouter(control, secret.StaticStore{})
-			defer memories.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(memories)
 			kb, _ := platformstorage.NewKnowledgeRouter(control, secret.StaticStore{})
-			defer kb.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(kb)
 			key := session.Key{AppName: runtimecontext.TutorialScope().StorageScope, UserID: "synthetic-user", SessionID: purpose}
 			ctx := context.Background()
 			sess, err := sessions.CreateSession(ctx, key, nil)

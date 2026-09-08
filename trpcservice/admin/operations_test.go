@@ -14,9 +14,9 @@ import (
 
 func TestToolOperationAdminRBACAndNoOutcomeOverride(t *testing.T) {
 	repo := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	journal := toolexec.NewMemoryJournal()
-	defer journal.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 	store := toolexec.NewMemoryOperations()
 	op, _, err := store.Reserve(context.Background(), toolexec.Operation{ID: "op-test", TenantID: "tutorial-tenant", AppID: "tutorial-app", UserID: "alice", ToolName: toolexec.WorkItemTool, BusinessKeyHash: "key-hash", InputHash: "input-hash"})
 	if err != nil {

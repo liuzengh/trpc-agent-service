@@ -73,9 +73,10 @@ func TestModelProbeOnlyMissingListingIsUnknown(t *testing.T) {
 		result := modelProbe(context.Background(), server.URL+"/v1", "secret-canary")
 		server.Close()
 		want := "down"
-		if code == 200 {
+		switch code {
+		case 200:
 			want = "ok"
-		} else if code == 404 || code == 405 {
+		case 404, 405:
 			want = "unknown"
 		}
 		if result.State != want {

@@ -55,7 +55,7 @@ func (s *PostgresOperations) List(ctx context.Context, tenantID, status, after s
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	result := []Operation{}
 	for rows.Next() {
 		op, err := scanOperation(rows)

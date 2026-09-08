@@ -17,7 +17,7 @@ func TestRevisionCompilerCannotReadUnassignedEnvironment(t *testing.T) {
 		data := controlplane.DefaultBootstrapData()
 		data.Revisions[0].ModelConfig = json.RawMessage(`{"source":"revision","provider":"openai","name":"example","base_url":"https://untrusted.example/v1",` + keyField + `}`)
 		repository := controlplane.NewMemoryRepository(data)
-		defer repository.Close()
+		defer func(closer interface{ Close() error }) { _ = closer.Close() }(repository)
 		for _, grant := range []secret.Grant{
 			{TenantID: "another-tenant", Purpose: secret.Model, Reference: "env://OTHER_TENANT_KEY"},
 			{TenantID: "tutorial-tenant", Purpose: secret.Memory, Reference: "env://OTHER_TENANT_KEY"},

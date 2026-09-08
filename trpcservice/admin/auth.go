@@ -66,7 +66,7 @@ func ValidatePrincipals(principals []Principal) error {
 	names := make(map[string]struct{}, len(principals))
 	for _, principal := range principals {
 		if strings.TrimSpace(principal.Name) == "" || len(principal.Token) < 24 {
-			return errors.New("Admin principal name and strong token are required")
+			return errors.New("admin principal name and strong token are required")
 		}
 		switch principal.Role {
 		case RoleSuperAdmin:
@@ -78,7 +78,7 @@ func ValidatePrincipals(principals []Principal) error {
 			return errors.New("unknown Admin principal role")
 		}
 		if _, exists := names[principal.Name]; exists {
-			return errors.New("Admin principal name is duplicated")
+			return errors.New("admin principal name is duplicated")
 		}
 		names[principal.Name] = struct{}{}
 	}

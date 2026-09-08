@@ -92,7 +92,7 @@ func (s *PostgresStore) ListCheckpoints(ctx context.Context, tenant, binding str
 	if err != nil {
 		return nil, errors.New("cannot list channel checkpoints")
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	out := []CheckpointView{}
 	for rows.Next() {
 		var c CheckpointView

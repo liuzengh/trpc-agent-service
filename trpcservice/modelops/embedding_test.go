@@ -26,7 +26,7 @@ func TestEmbeddingCallsAreReservedAndSettled(t *testing.T) {
 	data := controlplane.DefaultBootstrapData()
 	data.Tenants[0].QuotaConfig = json.RawMessage(`{"daily_prompt_tokens":44}`)
 	g, _ := tenant.NewGuard(context.Background(), controlplane.NewMemoryRepository(data), config.QuotaConfig{Backend: "local"})
-	defer g.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(g)
 	base := &embeddingFake{}
 	e, err := NewEmbedding(base, g, "tutorial-tenant", "tutorial-app", 1)
 	if err != nil {

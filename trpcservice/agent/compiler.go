@@ -205,7 +205,7 @@ func (c *RevisionCompiler) Compile(
 		return nil, fmt.Errorf("load Agent revision: %w", err)
 	}
 	if revision.AppID != scope.AppID || revision.TenantID != scope.TenantID {
-		return nil, fmt.Errorf("Agent revision scope mismatch")
+		return nil, fmt.Errorf("agent revision scope mismatch")
 	}
 	cacheKey := scope.TenantID + "\x00" + revision.ID + "\x00" + revision.Checksum
 	c.mu.RLock()
@@ -295,13 +295,13 @@ func (c *RevisionCompiler) compileRevision(
 	agentConfig.Description = strings.TrimSpace(agentConfig.Description)
 	agentConfig.Instruction = strings.TrimSpace(agentConfig.Instruction)
 	if agentConfig.Name == "" || agentConfig.Instruction == "" {
-		return nil, fmt.Errorf("Agent revision requires name and instruction")
+		return nil, fmt.Errorf("agent revision requires name and instruction")
 	}
 	if agentConfig.PreloadMemory < 0 {
-		return nil, fmt.Errorf("Agent revision preload_memory must not be negative")
+		return nil, fmt.Errorf("agent revision preload_memory must not be negative")
 	}
 	if agentConfig.SummaryEveryTurns < 0 {
-		return nil, fmt.Errorf("Agent revision summary_every_turns must not be negative")
+		return nil, fmt.Errorf("agent revision summary_every_turns must not be negative")
 	}
 	selectedModel, err := c.ModelForRevision(ctx, revision, "chat")
 	if err != nil {
@@ -322,7 +322,7 @@ func (c *RevisionCompiler) compileRevision(
 	var tools []agenttool.Tool
 	if len(policy.AllowedTools) > 0 {
 		if c.toolCatalog == nil {
-			return nil, fmt.Errorf("Agent revision declares tools but no tool catalog is configured")
+			return nil, fmt.Errorf("agent revision declares tools but no tool catalog is configured")
 		}
 		tools, err = c.toolCatalog.Resolve(platformtool.MCPLocalTools(servers, policy.AllowedTools))
 		if err != nil {

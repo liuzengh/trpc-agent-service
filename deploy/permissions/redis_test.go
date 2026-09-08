@@ -122,9 +122,9 @@ func TestRedisACLIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 			lease.Release()
-			leased.Close()
+			_ = leased.Close()
 		}
-		guard.Close()
+		_ = guard.Close()
 	}
 	if err := gw.Set(ctx, "policy-test:quota:rate:t:u:m", 1, 0).Err(); err != nil {
 		t.Fatal(err)

@@ -46,7 +46,7 @@ func (j *PostgresJournal) ListParts(ctx context.Context, t, id string) ([]Outbou
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(rows)
 	out := []OutboundPart{}
 	for rows.Next() {
 		p := OutboundPart{TenantID: t, OutboundID: id}

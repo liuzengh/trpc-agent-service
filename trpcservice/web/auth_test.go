@@ -80,7 +80,7 @@ func TestHTTPAPIAuthorizesBeforeExecutionOrPersistence(t *testing.T) {
 				}
 				resolver := fakeRouteResolver{scope: scope}
 				journal := gateway.NewMemoryJournal()
-				defer journal.Close()
+				defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 				intake, err := gateway.NewIntake(resolver, journal)
 				if err != nil {
 					t.Fatal(err)

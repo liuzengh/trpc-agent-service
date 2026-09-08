@@ -162,7 +162,7 @@ func NewRuntimeWithCompilerServices(
 		return nil, errors.New("model is required")
 	}
 	if compiler == nil {
-		return nil, errors.New("Agent compiler is required")
+		return nil, errors.New("agent compiler is required")
 	}
 	return newRuntimeWithCompiler(
 		newTutorialAgent(selectedModel, stream),
@@ -192,7 +192,7 @@ func newRuntimeWithCompiler(
 		return nil, errors.New("idempotency store is required")
 	}
 	if compiler == nil {
-		return nil, errors.New("Agent compiler is required")
+		return nil, errors.New("agent compiler is required")
 	}
 	if defaultAgent == nil {
 		return nil, errors.New("default Agent is required")
@@ -283,7 +283,7 @@ func (r *Runtime) ChatWithScope(
 		return ChatResult{}, errors.New("idempotency store is not initialized")
 	}
 	if r.compiler == nil {
-		return ChatResult{}, errors.New("Agent compiler is not initialized")
+		return ChatResult{}, errors.New("agent compiler is not initialized")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -548,22 +548,22 @@ func collectChatResult(
 		if evt.Response == nil {
 			continue
 		}
-		if evt.Response.Error != nil {
+		if evt.Error != nil {
 			runErr = fmt.Errorf(
 				"agent run failed (%s): %s",
-				evt.Response.Error.Type,
-				evt.Response.Error.Message,
+				evt.Error.Type,
+				evt.Error.Message,
 			)
 			continue
 		}
-		if evt.Response.Usage != nil {
+		if evt.Usage != nil {
 			usageKey := evt.InvocationID + "\x00" + evt.Response.ID
 			if usageKey == "\x00" {
 				usageKey = evt.ID
 			}
-			usageByResponse[usageKey] = *evt.Response.Usage
+			usageByResponse[usageKey] = *evt.Usage
 		}
-		for _, choice := range evt.Response.Choices {
+		for _, choice := range evt.Choices {
 			if choice.Delta.Content != "" {
 				partial.WriteString(choice.Delta.Content)
 			}

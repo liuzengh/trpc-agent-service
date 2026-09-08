@@ -43,7 +43,7 @@ type Adapter struct {
 
 func New(secrets secret.Store, client *http.Client) (*Adapter, error) {
 	if secrets == nil {
-		return nil, fmt.Errorf("Telegram secret store is required")
+		return nil, fmt.Errorf("telegram secret store is required")
 	}
 	custom := client != nil
 	if client == nil {
@@ -334,9 +334,9 @@ func (a *Adapter) Send(
 	request.Header.Set("Content-Type", "application/json")
 	response, err := a.client.Do(request)
 	if err != nil {
-		return channels.DeliveryReceipt{}, &channels.DeliveryError{Cause: errors.New("Telegram delivery outcome unknown"), Unknown: true, Diagnostics: observation.Failure(err)}
+		return channels.DeliveryReceipt{}, &channels.DeliveryError{Cause: errors.New("telegram delivery outcome unknown"), Unknown: true, Diagnostics: observation.Failure(err)}
 	}
-	defer response.Body.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(response.Body)
 	var result struct {
 		OK          bool   `json:"ok"`
 		Description string `json:"description"`
@@ -355,12 +355,12 @@ func (a *Adapter) Send(
 		}
 		diagnostic.Phase, diagnostic.HTTPStatus = "response_body", response.StatusCode
 		return channels.DeliveryReceipt{}, &channels.DeliveryError{
-			Cause: errors.New("Telegram delivery response unreadable"), Unknown: true,
+			Cause: errors.New("telegram delivery response unreadable"), Unknown: true,
 			Diagnostics: diagnostic,
 		}
 	}
 	if (!result.OK && result.ErrorCode == 0) || (result.OK && result.Result.MessageID <= 0) {
-		return channels.DeliveryReceipt{}, &channels.DeliveryError{Cause: errors.New("Telegram delivery response incomplete"), Unknown: true,
+		return channels.DeliveryReceipt{}, &channels.DeliveryError{Cause: errors.New("telegram delivery response incomplete"), Unknown: true,
 			Diagnostics: &channels.DeliveryDiagnostics{Kind: "invalid_response", Phase: "response_body", HTTPStatus: response.StatusCode}}
 	}
 	if !result.OK {
@@ -368,7 +368,7 @@ func (a *Adapter) Send(
 		return channels.DeliveryReceipt{}, &channels.DeliveryError{
 			// Provider descriptions may echo credentials or user content. Keep
 			// only the numeric code; never wrap the original HTTP error either.
-			Cause:       fmt.Errorf("Telegram send failed: code=%d", result.ErrorCode),
+			Cause:       fmt.Errorf("telegram send failed: code=%d", result.ErrorCode),
 			Retryable:   retryable,
 			RetryAfter:  time.Duration(result.Parameters.RetryAfter) * time.Second,
 			Diagnostics: &channels.DeliveryDiagnostics{Kind: "provider_rejected", Phase: "provider_response", HTTPStatus: response.StatusCode},
@@ -382,7 +382,7 @@ func (a *Adapter) Send(
 
 func parseBinding(binding controlplane.ChannelBinding) (bindingConfig, error) {
 	if binding.ChannelType != "telegram" || binding.Status != controlplane.StatusActive {
-		return bindingConfig{}, fmt.Errorf("Telegram binding is unavailable")
+		return bindingConfig{}, fmt.Errorf("telegram binding is unavailable")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(binding.Config))
 	decoder.DisallowUnknownFields()
@@ -391,21 +391,21 @@ func parseBinding(binding controlplane.ChannelBinding) (bindingConfig, error) {
 		return bindingConfig{}, fmt.Errorf("decode Telegram binding config: %w", err)
 	}
 	if cfg.BotTokenRef == "" || cfg.WebhookSecretRef == "" {
-		return bindingConfig{}, fmt.Errorf("Telegram binding config is incomplete")
+		return bindingConfig{}, fmt.Errorf("telegram binding config is incomplete")
 	}
 	cfg.BotUsername = strings.TrimPrefix(strings.TrimSpace(cfg.BotUsername), "@")
 	if cfg.RequireMention && (cfg.BotUserID <= 0 || cfg.BotUsername == "") {
 		return bindingConfig{}, fmt.Errorf(
-			"Telegram mention filtering requires bot_user_id and bot_username",
+			"telegram mention filtering requires bot_user_id and bot_username",
 		)
 	}
 	seenChatIDs := make(map[int64]struct{}, len(cfg.AllowedChatIDs))
 	for _, chatID := range cfg.AllowedChatIDs {
 		if chatID == 0 {
-			return bindingConfig{}, fmt.Errorf("Telegram allowed_chat_ids contains zero")
+			return bindingConfig{}, fmt.Errorf("telegram allowed_chat_ids contains zero")
 		}
 		if _, exists := seenChatIDs[chatID]; exists {
-			return bindingConfig{}, fmt.Errorf("Telegram allowed_chat_ids contains duplicates")
+			return bindingConfig{}, fmt.Errorf("telegram allowed_chat_ids contains duplicates")
 		}
 		seenChatIDs[chatID] = struct{}{}
 	}

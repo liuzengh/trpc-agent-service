@@ -50,7 +50,7 @@ func TestFrameworkModelAndToolMetricsWithPrivateIDsRemoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := runner.NewRunner("t/tenant/a/app", llmagent.New("metrics-agent", llmagent.WithModel(&metricToolModel{}), llmagent.WithTools(tools)))
-	defer r.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(r)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	events, err := r.Run(ctx, "secret-user", "secret-session", model.NewUserMessage("secret-prompt"))

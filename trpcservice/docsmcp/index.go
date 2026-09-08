@@ -54,7 +54,7 @@ func LoadIndex(repoPath string) (*Index, error) {
 	if err != nil {
 		return nil, errors.New("documentation root unavailable")
 	}
-	defer root.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(root)
 	info, err := root.Lstat("docs")
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("documentation directory must be a real directory")
@@ -63,7 +63,7 @@ func LoadIndex(repoPath string) (*Index, error) {
 	if err != nil {
 		return nil, errors.New("documentation directory unavailable")
 	}
-	defer docs.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(docs)
 	index := &Index{}
 	digest := sha256.New()
 	total := 0

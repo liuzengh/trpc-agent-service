@@ -26,7 +26,7 @@ func TestPostgresAuditPolicyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal("open test DB")
 	}
-	defer root.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(root)
 	schema := fmt.Sprintf("audit_test_%x", time.Now().UnixNano())
 	if _, err := root.ExecContext(ctx, "CREATE SCHEMA "+schema); err != nil {
 		t.Fatal("create isolated audit schema")
@@ -49,7 +49,7 @@ func TestPostgresAuditPolicyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal("open scoped DB")
 	}
-	defer db.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(db)
 	if err := database.Migrate(ctx, db); err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestPostgresAuditPolicyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(conn)
 	if _, err := conn.ExecContext(ctx, "CREATE TEMP TABLE audit_log (LIKE "+schema+".audit_log INCLUDING ALL)"); err != nil {
 		t.Fatal(err)
 	}

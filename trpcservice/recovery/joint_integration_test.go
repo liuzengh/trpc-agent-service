@@ -46,7 +46,7 @@ func TestIsolatedTwoTenantTwoWorkerWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(db)
 	jointEventually(t, ctx, func() bool { return db.PingContext(ctx) == nil })
 	if err := database.Migrate(ctx, db); err != nil {
 		t.Fatal(err)
@@ -186,9 +186,9 @@ func TestIsolatedTwoTenantTwoWorkerWorkflow(t *testing.T) {
 	}
 	repo, _ := controlplane.NewPostgresRepository(db)
 	mem, _ := storage.NewMemoryRouter(repo, store)
-	defer mem.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(mem)
 	kb, _ := storage.NewKnowledgeRouter(repo, store)
-	defer kb.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(kb)
 	for i, id := range []string{"a", "b"} {
 		scope, _ := runtimecontext.NewScope("joint-"+id, "joint-app-"+id, "joint-rev-"+id, "http", "joint-binding-"+id)
 		if err := mem.AddMemory(ctx, memory.UserKey{AppName: scope.StorageScope, UserID: "alice"}, "ONLY_"+strings.ToUpper(id)+"_MEMORY", nil); err != nil {
@@ -231,7 +231,7 @@ func TestIsolatedTwoTenantTwoWorkerWorkflow(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		defer resp.Body.Close()
+		defer func(closer interface{ Close() error }) { _ = closer.Close() }(resp.Body)
 		return resp.StatusCode == 200
 	})
 	post := func(actor, binding, msg, text string) (string, bool, int) {
@@ -243,7 +243,7 @@ func TestIsolatedTwoTenantTwoWorkerWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func(closer interface{ Close() error }) { _ = closer.Close() }(resp.Body)
 		var result struct {
 			RequestID string `json:"request_id"`
 			Duplicate bool   `json:"duplicate"`

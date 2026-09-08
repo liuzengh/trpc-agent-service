@@ -152,7 +152,7 @@ func (q *RedisQueue) Receive(ctx context.Context) (Delivery, error) {
 func (q *RedisQueue) delivery(parent context.Context, message redis.XMessage) (Delivery, error) {
 	raw, ok := message.Values["task"]
 	if !ok {
-		return nil, fmt.Errorf("Redis Stream message %s has no task field", message.ID)
+		return nil, fmt.Errorf("redis Stream message %s has no task field", message.ID)
 	}
 	var payload string
 	switch value := raw.(type) {
@@ -161,7 +161,7 @@ func (q *RedisQueue) delivery(parent context.Context, message redis.XMessage) (D
 	case []byte:
 		payload = string(value)
 	default:
-		return nil, fmt.Errorf("Redis Stream task field has type %T", raw)
+		return nil, fmt.Errorf("redis Stream task field has type %T", raw)
 	}
 	var task AgentTask
 	if err := json.Unmarshal([]byte(payload), &task); err != nil {
@@ -170,7 +170,7 @@ func (q *RedisQueue) delivery(parent context.Context, message redis.XMessage) (D
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.closed {
-		return nil, errors.New("Redis work queue is closed")
+		return nil, errors.New("redis work queue is closed")
 	}
 	if _, exists := q.active[message.ID]; exists {
 		return nil, ErrNoMessage
@@ -185,7 +185,7 @@ func (q *RedisQueue) delivery(parent context.Context, message redis.XMessage) (D
 
 func (q *RedisQueue) Ready(ctx context.Context) error {
 	if q == nil || q.client == nil {
-		return fmt.Errorf("Redis work queue is closed")
+		return fmt.Errorf("redis work queue is closed")
 	}
 	if err := q.client.Ping(ctx).Err(); err != nil {
 		return fmt.Errorf("ping queue Redis: %w", err)
@@ -224,8 +224,8 @@ func (d *redisDelivery) Task() AgentTask          { return d.task }
 func (d *redisDelivery) Context() context.Context { return d.ctx }
 func (d *redisDelivery) Close()                   { d.cancel(context.Canceled); <-d.done }
 
-var ErrQueueFull = errors.New("Agent queue capacity reached; retain task in durable outbox")
-var ErrDeliveryOwnership = errors.New("Agent queue delivery ownership lost")
+var ErrQueueFull = errors.New("agent queue capacity reached; retain task in durable outbox")
+var ErrDeliveryOwnership = errors.New("agent queue delivery ownership lost")
 
 func (d *redisDelivery) renew() {
 	defer d.queue.workers.Done()

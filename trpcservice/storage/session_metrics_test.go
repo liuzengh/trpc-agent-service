@@ -27,7 +27,7 @@ func TestSessionBackendLatencyAndFailureMetrics(t *testing.T) {
 	defer func() { _ = provider.Shutdown(context.Background()); otel.SetMeterProvider(old) }()
 	base := inmemory.NewSessionService()
 	svc := observeSession(base, "inmemory")
-	defer svc.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(svc)
 	key := session.Key{AppName: "t/tenant/a/app", UserID: "secret-user", SessionID: "secret-session"}
 	if _, err := observeSession(failingMetricSession{base}, "inmemory").GetSession(context.Background(), key); err == nil {
 		t.Fatal("expected missing-session error")

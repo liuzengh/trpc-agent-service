@@ -51,7 +51,7 @@ func TestRemoteUsesRealEndpointAndDropsImplicitHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(client)
 	id, _ := trace.TraceIDFromHex("00112233445566778899aabbccddeeff")
 	sid, _ := trace.SpanIDFromHex("0011223344556677")
 	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{TraceID: id, SpanID: sid, TraceFlags: trace.FlagsSampled}))
@@ -97,7 +97,7 @@ func TestRemoteRejectsUnsafeResultsBeforeFrameworkLogging(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer client.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(client)
 			core, logs := observer.New(zap.DebugLevel)
 			previous := agentlog.ContextDefault
 			agentlog.ContextDefault = zap.New(core).Sugar()
@@ -124,7 +124,7 @@ func TestRemoteRedirectAndCancellationDoNotRetry(t *testing.T) {
 	}))
 	defer server.Close()
 	client, _ := NewRemote(Config{Model: "test", BaseURL: server.URL, APIKey: "key", Dimensions: 3})
-	defer client.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(client)
 	if _, err := client.GetEmbedding(context.Background(), "test"); err == nil || redirected.Load() != 0 {
 		t.Fatal("redirect followed")
 	}
@@ -141,7 +141,7 @@ func TestRemoteConcurrentCallsAndClose(t *testing.T) {
 	}))
 	defer server.Close()
 	client, _ := NewRemote(Config{Model: "test", BaseURL: server.URL, APIKey: "key", Dimensions: 3})
-	defer client.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(client)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var wg sync.WaitGroup

@@ -117,9 +117,9 @@ func applyBinding(ctx context.Context, address, token string, binding controlpla
 	}
 	ip := net.ParseIP(u.Hostname())
 	if u.Scheme != "http" || ip == nil || !ip.IsLoopback() || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-		return errors.New("Admin address must be a loopback HTTP origin")
+		return errors.New("admin address must be a loopback HTTP origin")
 	}
-	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("Admin redirects disabled") }}
+	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("admin redirects disabled") }}
 	call := func(path string, body any) (int, []byte, error) {
 		raw, _ := json.Marshal(body)
 		request, err := http.NewRequestWithContext(ctx, "POST", address+path, bytes.NewReader(raw))
@@ -130,7 +130,7 @@ func applyBinding(ctx context.Context, address, token string, binding controlpla
 		request.Header.Set("Authorization", "Bearer "+token)
 		response, err := client.Do(request)
 		if err != nil {
-			return 0, nil, errors.New("Admin request failed (details omitted)")
+			return 0, nil, errors.New("admin request failed (details omitted)")
 		}
 		defer func() { _ = response.Body.Close() }()
 		data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
@@ -159,7 +159,7 @@ func applyBinding(ctx context.Context, address, token string, binding controlpla
 		return errors.New("binding already exists with different configuration; not overwritten")
 	}
 	if status != 404 {
-		return fmt.Errorf("Admin preflight rejected: HTTP %d", status)
+		return fmt.Errorf("admin preflight rejected: HTTP %d", status)
 	}
 	status, data, err = call("/admin/channel-bindings", binding)
 	if err != nil {

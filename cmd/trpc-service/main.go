@@ -155,7 +155,7 @@ func run() error {
 	}
 	quotaConfig := backends.Quota
 	if roleName == config.RoleAdmin && !adminConfig.Enabled {
-		return fmt.Errorf("Admin role requires TRPC_AGENT_ADMIN_ENABLED=true")
+		return fmt.Errorf("admin role requires TRPC_AGENT_ADMIN_ENABLED=true")
 	}
 	telemetryConfig, err := config.LoadTelemetryConfigFromEnv()
 	if err != nil {

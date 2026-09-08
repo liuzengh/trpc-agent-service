@@ -68,11 +68,11 @@ func TestPersistentMemoryRunnerPostgresIntegration(t *testing.T) {
 		}
 	}
 	repo := controlplane.NewMemoryRepository(data)
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	journal := toolexec.NewMemoryJournal()
-	defer journal.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 	writer := audit.NewMemoryWriter()
-	defer writer.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(writer)
 	selected := memoryCallingModel{}
 	build := func() (*Runtime, *storage.MemoryRouter) {
 		memories, err := storage.NewMemoryRouter(repo, secret.StaticStore{"secret://test-memory": dsn})
@@ -102,8 +102,8 @@ func TestPersistentMemoryRunnerPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	second, secondMemory := build()
-	defer second.Close()
-	defer secondMemory.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(second)
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(secondMemory)
 	input.SessionID = "fresh-session-after-restart"
 	input.MessageID = "load"
 	input.RequestID = "load"

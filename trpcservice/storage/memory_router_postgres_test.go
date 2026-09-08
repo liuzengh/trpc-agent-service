@@ -51,12 +51,12 @@ func TestMemoryRouterPostgresIntegration(t *testing.T) {
 	// in-process cache; same text/topics must remain idempotent.
 	data.BackendBindings[0].Config = json.RawMessage(`{"table_name":"memory_router_integration","skip_db_init":true}`)
 	reopenedRepo := controlplane.NewMemoryRepository(data)
-	defer reopenedRepo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(reopenedRepo)
 	reopened, err := NewMemoryRouter(reopenedRepo, secret.StaticStore{"secret://postgres": dsn})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(reopened)
 	entries, err = reopened.ReadMemories(context.Background(), key, 10)
 	if err != nil || len(entries) != 1 || entries[0].Memory.Memory != "postgres memory" {
 		t.Fatal("memory missing after reopen", err)

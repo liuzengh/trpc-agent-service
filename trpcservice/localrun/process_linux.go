@@ -138,13 +138,13 @@ func atomicFile(path string, data []byte) error {
 		return err
 	}
 	name := file.Name()
-	defer os.Remove(name)
+	defer func(path string) { _ = os.Remove(path) }(name)
 	if _, err := file.Write(data); err != nil {
-		file.Close()
+		_ = file.Close()
 		return err
 	}
 	if err := file.Sync(); err != nil {
-		file.Close()
+		_ = file.Close()
 		return err
 	}
 	if err := file.Close(); err != nil {
@@ -163,7 +163,7 @@ func (m Manager) Stop(ctx context.Context) error {
 	if err != nil {
 		return errors.New("cannot pin process identity; no signal sent")
 	}
-	defer unix.Close(fd)
+	defer func(fd int) { _ = unix.Close(fd) }(fd)
 	now, err := m.Running()
 	if err != nil || now != before {
 		return ErrIdentity

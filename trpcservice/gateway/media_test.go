@@ -30,11 +30,11 @@ func TestCallbackRateLimitIncludesControlMessagesWithoutDoubleCounting(t *testin
 			data := controlplane.DefaultBootstrapData()
 			data.Tenants[0].QuotaConfig = json.RawMessage(`{"requests_per_minute":1}`)
 			repo := controlplane.NewMemoryRepository(data)
-			defer repo.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 			guard, _ := tenant.NewGuard(ctx, repo, config.QuotaConfig{Backend: config.QuotaBackendLocal})
-			defer guard.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(guard)
 			journal := NewMemoryJournal()
-			defer journal.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 			resolver, _ := routing.NewControlPlaneResolver(repo)
 			intake, _ := NewIntake(resolver, journal, WithQuotaGuard(guard))
 			kind := "text"
@@ -70,9 +70,9 @@ func TestMediaAndEditsDoNotReachApprovalOrAgent(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			ctx := context.Background()
 			repo := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
-			defer repo.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 			journal := NewMemoryJournal()
-			defer journal.Close()
+			defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 			resolver, _ := routing.NewControlPlaneResolver(repo)
 			intake, _ := NewIntake(resolver, journal)
 			registry, _ := channels.NewRegistry(mediaAdapter{kind: kind, edited: kind == "text"})
@@ -102,9 +102,9 @@ func TestEnabledAttachmentIsQueuedWithoutParsingCaptionAsApproval(t *testing.T) 
 	binding.Version = 3
 	data.ChannelBindings[0] = binding
 	repo := controlplane.NewMemoryRepository(data)
-	defer repo.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	journal := NewMemoryJournal()
-	defer journal.Close()
+	defer func(closer interface{ Close() error }) { _ = closer.Close() }(journal)
 	resolver, _ := routing.NewControlPlaneResolver(repo)
 	intake, _ := NewIntake(resolver, journal)
 	approvals := &approvalDecisionTestHandler{}
