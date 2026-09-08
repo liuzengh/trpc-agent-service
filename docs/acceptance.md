@@ -82,12 +82,14 @@ docker compose --profile observability config -q
 
 ```bash
 docker build -t trpc-agent-service:local .
-./scripts/e2e-multiprocess.sh
 ./scripts/e2e-observability.sh
 ./scripts/e2e-telegram-tracing.sh
 ./scripts/benchmark-local.sh
-./scripts/e2e-backup-restore.sh
 ```
+
+最新 `./scripts/e2e-multiprocess.sh` 已替换为完全隔离的联合测试入口：两个租户、两个真实 Worker 进程、独立 PostgreSQL/Redis/Qdrant，使用合成 HTTP 模型/Embedding，验证 Session/Memory/Knowledge 作用域、工具拒绝、处理中 SIGKILL 接管及回调去重。不加载 `.env`，不使用日常 DSN、数据卷、真实模型或 IM。
+
+`./scripts/e2e-backup-restore.sh` 同样只创建独立测试容器与合成数据，已包含在隔离回归中；它验证备份工具链，不操作日常数据，也不替代真实业务恢复演练。
 
 依赖型集成测试通过环境变量显式启用：
 

@@ -4,7 +4,7 @@
 
 ## 1. 第一次安装和配置
 
-需要 Go（以 `go.mod` 为准，当前声明 1.24；Docker 构建使用 1.25）、Docker Compose 和 curl。使用本机 workbuddy2api 时还需要已配置好的 `uv` 和 converter；使用 Telegram Webhook 时需要公网 HTTPS 入口。企业微信消息 MCP 是主动拉取，不需要公网回调。
+需要 Go（以 `go.mod` 为准，当前声明 1.24；Docker 构建使用 1.25）、Docker Compose 和 curl。手动 Agent 启停脚本需要 Linux、flock 和支持 pidfd 的内核；其他平台可直接管理 `go run`/二进制进程。使用本机 workbuddy2api 还需要已配置好的 `uv` 和 converter；Telegram Webhook 需要公网 HTTPS 入口，企业微信消息 MCP 主动拉取不需要公网回调。
 
 在仓库根目录运行，已有 `.env` 不要覆盖：
 
@@ -40,18 +40,18 @@ chmod 600 .env
 
 保持这个前台终端运行。默认目录是 `~/workbuddy2api`；参数是原来的 `--desensitize --log converter.log --api-key 0`。`WORKBUDDY2API_DIR` 是启动脚本自己的环境变量，不从项目 `.env` 加载。Key `0` 仅用于本机测试，不应对公网开放转换服务。
 
-终端 B，本机日常实例已配置 PostgreSQL、Redis 和 MinIO 附件后端：
+终端 B，本机日常实例已配置 PostgreSQL、Redis、MinIO 和 Qdrant：
 
 ```bash
-docker compose up -d postgres redis minio
-# 已启用 Qdrant Knowledge 的实例另需：
-# docker compose up -d qdrant
+docker compose up -d postgres redis minio qdrant
 ./check-model.sh
 ./start-real.sh
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-模型检查会真实调用一次模型，但不启用 Bot。`start-real.sh` 会等待已运行的 Compose PostgreSQL/Redis/MinIO 健康，**不会替你创建依赖**。尚未选择 MinIO 后端的其他开发环境可以省略它。已在运行时不会覆盖进程；二进制存在时也不会重新编译源码。MinIO 专用账号配置保存在私有 `.env`，IAM 和对象数据保存在原 MinIO 数据卷；正常重启不需要重新初始化账号或后端绑定。
+模型检查会真实调用一次模型，但不启用 Bot。`start-real.sh` 检查已有 Compose PostgreSQL/Redis/MinIO/Qdrant 的运行或健康状态，**不会替你创建依赖**；未配置对应后端的开发环境可省略它们。随后核对 Agent PID 身份、记录启动时间/boot ID，并等待 HTTP 角色的 `/readyz`，避免仅凭进程存在就报告启动成功。非 HTTP 角色只确认进程，依赖可用性另查。主程序存在时不重新编译它，运维辅助程序会重新构建。
+
+重复启动不会覆盖正在运行的 Agent。日志采用追加方式，历史日志保留；PID 与元数据文件在 `data`，不要复制到另一台机器当作运行状态。MinIO/Qdrant 数据和密钥保持原配置，不必因正常重启重新初始化。
 
 需要 trace/metrics，再按需启动监控组件：
 
@@ -71,12 +71,28 @@ cloudflared tunnel --config /home/shiyu/.cloudflared/config.yml run trpc-agent-t
 
 正常使用只需要从已授权的 Telegram/企业微信群发送消息，不必再重复配置 Binding、重新设置 Webhook或开启 HTTP 调试入口。
 
+### 一次查看当前状态
+
+```bash
+./status.sh
+```
+
+它读取配置并检查 Agent PID/readyz、PostgreSQL ping、Redis PING、模型 `/models`、本地 MinIO/Qdrant，以及 Compose 运行状态，不启动服务、不调用模型生成或发送 IM。模型列表能访问不等于聊天一定成功；若供应商以 404/405 表示不支持 `/models`，显示 unknown，另用 `check-model.sh`。连接失败、鉴权失败或其他非成功响应显示 down，不因缺少生成测试而忽略故障。MinIO/Qdrant 探针针对本仓库 Compose 的 loopback 端口，不代替远程后端审计。
+
+要同时检查公网入口，在私有 `.env` 设置已有的域名，不带回调路径或凭据：
+
+```dotenv
+TRPC_AGENT_PUBLIC_BASE_URL=https://your-existing-domain.example
+```
+
+`ok` 表示相应探针成功，`down` 表示已配置项失败，`unknown` 表示该检查无法确认。存在 down 时返回非零退出码；unknown 不会被误写成健康。公网 healthz 正常只说明入口可达，不能证明 Telegram API 出站正常。
+
 ## 3. 修改代码或 `.env` 后怎样升级
 
 改文件不会热更新已有进程。先确认没有正在等待的模型/危险工具操作；不要在真实群测试中运行其他实验脚本抢消费同一条队列。
 
 1. 保存私有 `.env`、当前二进制及数据库备份，备份权限设为仅本人可读。旧备份保留，不在公共日志输出内容。
-2. 用 `./stop.sh` 发起 Agent 的优雅退出。当前脚本只发信号，不等待全部退出；确认旧进程确实停止后再继续。模型转换服务和 Tunnel 可保持运行。
+2. 用 `./stop.sh` 优雅退出 Agent。脚本核对工作区可执行文件、cwd、已记录的启动时间/boot ID，再通过 pidfd 对同一个进程发 SIGTERM，最多等待 20 秒；超时不强杀、不删除 PID 记录。旧格式 PID 文件也须匹配 exe/cwd，不能指向任意进程。模型和 Tunnel 不由这个脚本停止。
 3. 执行 `./build.sh` 编译新二进制。
 4. PostgreSQL 升级使用 `./bin/trpc-migrate`；它从仓库根目录 `.env` 和进程环境加载配置。确认 `TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=false`。分角色部署必须用独立迁移凭据，不能给 runtime 提升 DDL 权限。
 5. 执行 `./start-real.sh`，再检查 `/readyz`；确认没有反复启动失败，再发一条新的测试消息。

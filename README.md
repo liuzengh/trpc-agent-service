@@ -164,6 +164,7 @@
 - [知识库 Embedding 配置与检查](docs/knowledge-embedding-setup.md)
 - [真实 Knowledge 的入库与检索链路](docs/knowledge-runtime.md)
 - [Telegram 发送失败诊断](docs/telegram-delivery-diagnostics.md)
+- [交付收尾与隔离联合验证](docs/validation/delivery-closeout-2026-09-08.md)
 - [治理、安全、监控、故障恢复和部署](docs/governance-operations.md)
 - [生产风险清单](docs/risks.md)
 - [代码实施路线和验收映射](docs/implementation-roadmap.md)
@@ -386,6 +387,14 @@ Admin 支持多 Principal RBAC；Gateway/Worker 支持 Local/Redis 租户限流�
 灰度 Revision、Model Guardrail Callbacks、Tool Execution Journal、Storage/Reply trace 和媒体安全边界见 [最终链路加固](docs/getting-started.md#33-最终链路加固)。完整本地多进程验收执行 `./scripts/e2e-multiprocess.sh`。
 
 逐条验收映射见 [最终验收文档](docs/acceptance.md)。
+
+只读查看 Agent、依赖和已配置公网入口的状态：
+
+```bash
+./status.sh
+```
+
+脚本不会启动服务、调用模型生成或发送 IM。完整手动启停说明见[运行手册](docs/operations-runbook.md)。
 
 停止服务：
 

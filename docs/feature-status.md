@@ -17,6 +17,8 @@
 
 当前本地程序为 rc.9、控制面 schema 23。文本附件/MinIO、PostgreSQL 长期记忆、只读文档 MCP、真实 Embedding + Qdrant，以及本地工作项的申请/批准/重复确认均有对应的真实开发环境记录，分别见[附件](validation/artifact-minio-2026-09-07.md)、[记忆](validation/memory-postgres-2026-09-07.md)、[MCP](validation/project-docs-mcp-2026-09-08.md)、[Knowledge](validation/knowledge-qdrant-2026-09-08.md)和[工作项](validation/workitem-approval-2026-09-08.md)。后端迁移与分段回复等修复见[补齐记录](reliability-followup.md)，发送故障分类见[诊断说明](telegram-delivery-diagnostics.md)。下表保留每项具体的验证层级，不将单身份/单节点的成功扩大为生产多租户验收。
 
+最新隔离联合测试已通过：两个租户、两个实际 Worker 进程，共享 Redis Session、PostgreSQL Memory 和 Qdrant Knowledge，覆盖租户凭据/工具权限隔离、处理中进程故障接管与重复消息去重。模型及 Embedding 是本地合成 HTTP 服务，不代表多供应商真实联调或容量验收。手动启停和只读状态检查也已补齐，完整隔离回归通过，见[收尾记录](validation/delivery-closeout-2026-09-08.md)。
+
 | 能力 | 当前状态 | 已验证范围 | 尚未完成 |
 | --- | --- | --- | --- |
 | tRPC-Agent-Go LLMAgent / Runner / Event | 基础真实联调 + 自动测试 | 真实 IM/模型/工具执行、多轮 Session；Event 消费与关闭自动测试 | Graph/Chain/Parallel/Cycle 的平台化注册 |
@@ -45,6 +47,7 @@
 | MCP 异常隔离/恢复 | 自动测试 + 本地 PostgreSQL 集成；图片隔离与去重真实联调 | 检查点 CAS、禁用/版本检查、恢复审计原子性；图片不阻塞文字；rc.2 新图片持久隔离经完整重叠读取仍只产生一条隔离/审计，不调用 Agent 或发送回复 | 其他媒体类型/真实分页；不支持媒体分析或下载；同人同秒同类型附件可能合并 |
 | 积压与异常告警 | 自动测试 + 本地 SQL/规则验证与启用 | 聚合积压、unknown/attempting、检查点停滞、快照失败/过期、多节点去重聚合；候选实例快照 up=1，13 条规则加载健康 | 生产部署、阈值/SLO、实际通知渠道 |
 | Docker Compose | 本地集成 | 依赖启动、镜像构建、非 root 运行 | 长时间稳定性验证 |
+| 本地手动运维 | 自动测试 + 独立进程测试 + 本地探针 | 启停互斥、PID 身份校验/pidfd 停止、就绪等待、只读依赖状态；不配置开机自启 | 当前进程管理脚本限 Linux；远端租户后端需另行检查 |
 | Kubernetes | 配置 | Deployment、HPA、PDB、NetworkPolicy YAML 校验 | 测试或生产集群部署 |
 | 容量与故障恢复 | 自动测试 + 本地隔离集成 | Worker 取消接管、完成确认丢失、故障退避；PostgreSQL 暂停/业务 schema 恢复与发送事实保护，Redis RDB 工具链；历史 1000 请求 Mock 基线 | 真实模型/多 Worker 压测、PITR/主从切换、MinIO/Qdrant 恢复和完整故障矩阵 |
 
