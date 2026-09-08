@@ -18,11 +18,13 @@ import (
 )
 
 type ToolPolicy struct {
-	AllowedTools   []string `json:"allowed_tools"`
-	DangerousTools []string `json:"dangerous_tools"`
-	DeniedUsers    []string `json:"denied_users"`
-	MaxToolCalls   int      `json:"max_tool_calls"`
-	MaxRunDuration string   `json:"max_run_duration"`
+	AllowedTools     []string            `json:"allowed_tools"`
+	DangerousTools   []string            `json:"dangerous_tools"`
+	DeniedUsers      []string            `json:"denied_users"`
+	ToolAllowedUsers map[string][]string `json:"tool_allowed_users,omitempty"`
+	DirectOnlyTools  []string            `json:"direct_only_tools,omitempty"`
+	MaxToolCalls     int                 `json:"max_tool_calls"`
+	MaxRunDuration   string              `json:"max_run_duration"`
 }
 
 // ToolDecision is the security-relevant result of one tool permission check.
@@ -56,6 +58,9 @@ func ParseToolPolicy(raw json.RawMessage) (ToolPolicy, error) {
 	if policy.MaxToolCalls < 0 {
 		return ToolPolicy{}, fmt.Errorf("max_tool_calls must not be negative")
 	}
+	if err := validateToolAccess(policy); err != nil {
+		return ToolPolicy{}, err
+	}
 	if policy.MaxRunDuration != "" {
 		duration, err := time.ParseDuration(policy.MaxRunDuration)
 		if err != nil || duration <= 0 {
@@ -81,6 +86,14 @@ func RunOptionsWithApprovals(
 	approvedCalls []ApprovedToolCall,
 	recorders ...DecisionRecorder,
 ) []agentcore.RunOption {
+	// Legacy callers have no verified audience. Audience-restricted tools
+	// therefore fail closed unless RunOptionsForCaller is used explicitly.
+	return RunOptionsForCaller(policy, Caller{UserID: userID}, approvedTools, approvedCalls, recorders...)
+}
+
+func RunOptionsForCaller(policy ToolPolicy, caller Caller, approvedTools []string, approvedCalls []ApprovedToolCall, recorders ...DecisionRecorder) []agentcore.RunOption {
+	policy.AllowedTools = scopeToolAccess(policy, caller)
+	userID := caller.UserID
 	allowed := stringSet(policy.AllowedTools)
 	dangerous := stringSet(policy.DangerousTools)
 	deniedUsers := stringSet(policy.DeniedUsers)

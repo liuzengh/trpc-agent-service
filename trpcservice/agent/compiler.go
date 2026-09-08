@@ -281,6 +281,9 @@ func (c *RevisionCompiler) compileRevision(
 	scope runtimecontext.Scope,
 	revision controlplane.AgentRevision,
 ) (agentcore.Agent, error) {
+	if err := governance.ValidateMemoryPolicy(revision.AgentConfig, revision.MemoryConfig); err != nil {
+		return nil, err
+	}
 	if revision.AgentType != "llm" {
 		return nil, fmt.Errorf("unsupported Agent type %q", revision.AgentType)
 	}
@@ -384,6 +387,11 @@ func (c *RevisionCompiler) RunPolicyOptions(
 	if err != nil {
 		return nil, err
 	}
+	memoryPolicy, err := governance.ParseMemoryPolicy(revision.MemoryConfig)
+	if err != nil {
+		return nil, err
+	}
+	policy.AllowedTools = governance.ScopeMemoryTools(policy.AllowedTools, memoryPolicy, input.ChatType)
 	if revisionKnowledgeEnabled(revision.KnowledgeConfig) {
 		policy.AllowedTools = append(policy.AllowedTools, "knowledge_search")
 	}
@@ -461,9 +469,9 @@ func (c *RevisionCompiler) RunPolicyOptions(
 			ToolName: decision.ToolName, ArgumentsHash: decision.ArgumentsHash,
 		}, c.toolCatalog.IsManagedSideEffect(decision.ToolName))
 	}
-	return governance.RunOptionsWithApprovals(
+	return governance.RunOptionsForCaller(
 		policy,
-		input.UserID,
+		governance.Caller{UserID: input.UserID, ChatType: input.ChatType},
 		input.ApprovedTools,
 		input.ApprovedToolCalls,
 		recorder,

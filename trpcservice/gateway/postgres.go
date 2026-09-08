@@ -196,6 +196,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,'pending')`, stableID("out_", requestID),
 			RevisionID: pinnedRevisionID, TurnSeq: turnSeq}, nil
 	}
 	task := workqueue.AgentTask{
+		ChatType:          request.ChatType,
 		Media:             request.Media,
 		InboundID:         inboundID,
 		RequestID:         requestID,

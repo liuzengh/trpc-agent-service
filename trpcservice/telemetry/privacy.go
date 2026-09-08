@@ -59,7 +59,7 @@ func safeAttribute(key string) bool {
 	case "tenant.id", "agent.app.id", "agent.revision.id", "channel.type", "channel.binding.id",
 		"gen_ai.request.id", "messaging.message.id", "approval.id", "approval.decision", "approval.origin_request_id",
 		"http.request.method", "http.route", "http.response.status_code",
-		"storage.backend", "storage.resource", "storage.operation", "db.system", "error.type",
+		"storage.backend", "storage.resource", "storage.operation", "db.system", "error.type", "delivery.error.kind", "delivery.phase",
 		"gen_ai.system", "gen_ai.operation.name", "gen_ai.provider.name",
 		"gen_ai.request.model", "gen_ai.response.model", "gen_ai.request.is_stream",
 		"gen_ai.request.max_tokens", "gen_ai.request.temperature", "gen_ai.request.top_p",

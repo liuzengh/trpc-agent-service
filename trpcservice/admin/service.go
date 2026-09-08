@@ -407,6 +407,9 @@ func (s *Service) CreateRevision(
 	if err := s.authorizeRevisionSecrets(ctx, revision); err != nil {
 		return controlplane.AgentRevision{}, err
 	}
+	if err := governance.ValidateMemoryPolicy(revision.AgentConfig, revision.MemoryConfig); err != nil {
+		return controlplane.AgentRevision{}, invalidf("memory_config: %v", err)
+	}
 	toolPolicy, err := governance.ParseToolPolicy(revision.ToolPolicy)
 	if err != nil {
 		return controlplane.AgentRevision{}, invalidf("tool_policy: %v", err)

@@ -56,6 +56,7 @@ wait_for_compose_service() {
 if command -v docker >/dev/null 2>&1; then
   wait_for_compose_service postgres
   wait_for_compose_service redis
+  wait_for_compose_service minio
 fi
 
 nohup env \

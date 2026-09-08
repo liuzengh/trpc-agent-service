@@ -44,6 +44,11 @@ services:
       - "127.0.0.1:9001:9001"
     volumes:
       - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
   minio-init:
     image: minio/mc:RELEASE.2025-07-21T05-28-08Z
     depends_on:
@@ -56,6 +61,8 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.15.4
+    environment:
+      QDRANT__SERVICE__API_KEY: ${TRPC_AGENT_QDRANT_API_KEY:-}
     ports:
       - "127.0.0.1:6333:6333"
       - "127.0.0.1:6334:6334"

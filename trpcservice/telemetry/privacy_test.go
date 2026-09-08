@@ -97,3 +97,21 @@ func TestFrameworkAndHTTPUseOneProviderWithoutCallbackKey(t *testing.T) {
 		t.Fatal("framework trace is disconnected from HTTP")
 	}
 }
+
+func TestDeliveryMetadataSurvivesPrivacyBoundaryWithoutNetworkDetails(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(metadataExporter{exporter}))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	_, span := provider.Tracer("test").Start(context.Background(), "reply.send")
+	span.SetAttributes(attribute.String("delivery.error.kind", "timeout"), attribute.String("delivery.phase", "wait_response"), attribute.String("error.type", "channel_delivery_unknown"), attribute.String("server.address", "private-host-canary"), attribute.String("url.full", "private-url-canary"), attribute.String("delivery.error.message", "private-error-canary"))
+	span.SetStatus(codes.Error, "")
+	span.End()
+	spans := exporter.GetSpans()
+	if len(spans) != 1 || len(spans[0].Attributes) != 3 || spans[0].Status.Code != codes.Error {
+		t.Fatal("delivery metadata not preserved")
+	}
+	raw, _ := json.Marshal(spans)
+	if strings.Contains(string(raw), "canary") {
+		t.Fatal("network details escaped privacy boundary")
+	}
+}

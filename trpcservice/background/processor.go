@@ -10,6 +10,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"go.opentelemetry.io/otel"
@@ -339,19 +340,14 @@ func (p *Processor) processSummary(
 	return p.sessions.CreateSessionSummary(ctx, sess, "", true)
 }
 
-type memoryBackgroundConfig struct {
-	AutoExtract bool `json:"auto_extract"`
-	EveryTurns  int  `json:"every_turns"`
-}
-
 func (p *Processor) processMemory(
 	ctx context.Context,
 	revision controlplane.AgentRevision,
 	payload SessionJobPayload,
 	progressKey WatermarkKey,
 ) error {
-	var config memoryBackgroundConfig
-	if err := json.Unmarshal(revision.MemoryConfig, &config); err != nil {
+	config, err := governance.ParseMemoryPolicy(revision.MemoryConfig)
+	if err != nil {
 		return err
 	}
 	if !config.AutoExtract || config.EveryTurns <= 0 ||

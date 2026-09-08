@@ -52,6 +52,7 @@ type ChatResult struct {
 // ChatInput is the trusted, transport-neutral input for one Agent turn.
 type ChatInput struct {
 	Scope             runtimecontext.Scope
+	ChatType          string // trusted normalized ingress audience; empty is unknown
 	MessageID         string
 	UserID            string
 	SessionID         string
@@ -239,6 +240,7 @@ func (r *Runtime) Chat(
 	text string,
 ) (ChatResult, error) {
 	return r.ChatWithScope(ctx, ChatInput{
+		ChatType:  "direct",
 		Scope:     runtimecontext.TutorialScope(),
 		MessageID: uuid.NewString(),
 		UserID:    userID,
@@ -257,6 +259,7 @@ func (r *Runtime) ChatWithMessageID(
 	text string,
 ) (ChatResult, error) {
 	return r.ChatWithScope(ctx, ChatInput{
+		ChatType:  "direct",
 		Scope:     runtimecontext.TutorialScope(),
 		MessageID: messageID,
 		UserID:    userID,

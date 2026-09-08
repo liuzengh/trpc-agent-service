@@ -516,6 +516,7 @@ func (r *MemoryRouter) cachedService(
 }
 
 type memoryBackendConfig struct {
+	SkipDBInit  bool   `json:"skip_db_init"`
 	URL         string `json:"url"`
 	KeyPrefix   string `json:"key_prefix"`
 	DSN         string `json:"dsn"`
@@ -560,7 +561,10 @@ func (r *MemoryRouter) build(
 		if err != nil {
 			return nil, err
 		}
-		options := []memorypostgres.ServiceOpt{memorypostgres.WithPostgresClientDSN(dsn)}
+		options := []memorypostgres.ServiceOpt{
+			memorypostgres.WithPostgresClientDSN(dsn),
+			memorypostgres.WithSkipDBInit(cfg.SkipDBInit),
+		}
 		if cfg.TableName != "" {
 			options = append(options, memorypostgres.WithTableName(cfg.TableName))
 		}

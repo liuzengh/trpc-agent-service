@@ -30,7 +30,9 @@ func (j *PostgresJournal) TerminalFailRun(ctx context.Context, task workqueue.Ag
 	if status == "running" && result.WorkerID != "" && owner != result.WorkerID {
 		return false, ErrRunSuperseded
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE agent_run SET status='dead',error_type='retry_exhausted',error_message=NULL,
+	// FailRun has already redacted and bounded the last cause. Preserve it for
+	// authorized diagnostics instead of discarding the only failure evidence.
+	if _, err := tx.ExecContext(ctx, `UPDATE agent_run SET status='dead',error_type='retry_exhausted',
 completed_at=COALESCE(completed_at,now()),trace_id=COALESCE(NULLIF($2,''),trace_id) WHERE request_id=$1`, task.RequestID, result.TraceID); err != nil {
 		return false, err
 	}

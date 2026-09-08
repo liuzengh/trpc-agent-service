@@ -3,6 +3,7 @@ package modelops
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"time"
 
@@ -31,6 +32,12 @@ func NewEmbedding(base embedder.Embedder, guard *tenant.Guard, tenantID, appID s
 	return &Embedding{base: base, guard: guard, tenantID: tenantID, appID: appID, price: price, operation: metrics.NewOperation("model"), usage: recorder}, nil
 }
 func (e *Embedding) GetDimensions() int { return e.base.GetDimensions() }
+func (e *Embedding) Close() error {
+	if closer, ok := e.base.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
 func (e *Embedding) GetEmbedding(ctx context.Context, text string) ([]float64, error) {
 	v, _, err := e.GetEmbeddingWithUsage(ctx, text)
 	return v, err

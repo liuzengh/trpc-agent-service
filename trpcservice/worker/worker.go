@@ -21,6 +21,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 )
 
@@ -133,6 +134,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		result.AgentName = "platform-attachment"
 	} else {
 		result, runErr = w.runtime.ChatWithScope(ctx, agentruntime.ChatInput{
+			ChatType:          task.ChatType,
 			Scope:             task.Scope,
 			MessageID:         task.MessageID,
 			UserID:            task.UserID,
@@ -145,9 +147,17 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		})
 	}
 	if runErr != nil {
+		failureType := "agent_execution"
+		if task.Media != nil {
+			failureType = "attachment_import"
+		}
+		// Export only a stable category, never arbitrary provider errors, file
+		// content or credential-bearing URLs in trace status descriptions.
+		span.SetAttributes(attribute.String("error.type", failureType))
+		span.SetStatus(codes.Error, failureType)
 		w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "failed", time.Since(started))
-		failErr := w.journal.FailRun(ctx, task.RequestID, "agent_execution", runErr, w.opts.WorkerID)
-		auditErr := w.recordAudit(ctx, task, gateway.RunResult{}, "run_failed", "agent_execution", started)
+		failErr := w.journal.FailRun(ctx, task.RequestID, failureType, runErr, w.opts.WorkerID)
+		auditErr := w.recordAudit(ctx, task, gateway.RunResult{}, "run_failed", failureType, started)
 		return true, w.retryOrAck(ctx, delivery, task, errors.Join(runErr, failErr, auditErr))
 	}
 	if task.ApprovalID != "" {

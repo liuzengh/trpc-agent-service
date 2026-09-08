@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"trpc.group/trpc-go/trpc-agent-go/artifact"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -23,6 +25,11 @@ func TestArtifactDistributedLockPostgresIntegration(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	router := &ArtifactRouter{lockDB: db}
+	// Use the actual composite key. A plain fixture string hid PostgreSQL's
+	// rejection of the NUL delimiters in real user/session/artifact keys.
+	key := router.artifactLockKey(artifact.SessionInfo{
+		AppName: "t/test-tenant/a/test-app", UserID: "test-user", SessionID: "test-session",
+	}, "att_test")
 	var active atomic.Int64
 	var maximum atomic.Int64
 	var group sync.WaitGroup
@@ -30,7 +37,7 @@ func TestArtifactDistributedLockPostgresIntegration(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			if err := router.withDistributedLock(context.Background(), "same-artifact", func() error {
+			if err := router.withDistributedLock(context.Background(), key, func() error {
 				current := active.Add(1)
 				for {
 					previous := maximum.Load()

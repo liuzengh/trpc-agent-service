@@ -396,6 +396,7 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseQuota()
 	result, err := h.chatService.ChatWithScope(runCtx, agentservice.ChatInput{
+		ChatType:  "direct", // authenticated synchronous HTTP chat is not an IM group
 		Scope:     scope,
 		MessageID: request.MessageID,
 		UserID:    request.UserID,

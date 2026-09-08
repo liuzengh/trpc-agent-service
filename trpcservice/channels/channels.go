@@ -86,14 +86,19 @@ type DeliveryError struct {
 	Retryable  bool
 	RetryAfter time.Duration
 	// Unknown means the provider may have delivered; do not blindly resend.
-	Unknown bool
+	Unknown     bool
+	Diagnostics *DeliveryDiagnostics
 }
 
 func (e *DeliveryError) Error() string {
 	if e == nil || e.Cause == nil {
 		return "channel delivery failed"
 	}
-	return e.Cause.Error()
+	if e.Diagnostics == nil {
+		return e.Cause.Error()
+	}
+	d := e.Diagnostics.Safe()
+	return fmt.Sprintf("%s [kind=%s phase=%s http_status=%d]", e.Cause.Error(), d.Kind, d.Phase, d.HTTPStatus)
 }
 
 func (e *DeliveryError) Unwrap() error {

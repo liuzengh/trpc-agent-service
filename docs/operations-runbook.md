@@ -40,16 +40,18 @@ chmod 600 .env
 
 保持这个前台终端运行。默认目录是 `~/workbuddy2api`；参数是原来的 `--desensitize --log converter.log --api-key 0`。`WORKBUDDY2API_DIR` 是启动脚本自己的环境变量，不从项目 `.env` 加载。Key `0` 仅用于本机测试，不应对公网开放转换服务。
 
-终端 B，已经配置好日常 PostgreSQL/Redis 后端时：
+终端 B，本机日常实例已配置 PostgreSQL、Redis 和 MinIO 附件后端：
 
 ```bash
-docker compose up -d postgres redis
+docker compose up -d postgres redis minio
+# 已启用 Qdrant Knowledge 的实例另需：
+# docker compose up -d qdrant
 ./check-model.sh
 ./start-real.sh
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-模型检查会真实调用一次模型，但不启用 Bot。`start-real.sh` 会等待已经存在的 Compose PostgreSQL/Redis 健康，**不会替你创建依赖**。已在运行时不会覆盖进程；二进制存在时也不会重新编译源码。
+模型检查会真实调用一次模型，但不启用 Bot。`start-real.sh` 会等待已运行的 Compose PostgreSQL/Redis/MinIO 健康，**不会替你创建依赖**。尚未选择 MinIO 后端的其他开发环境可以省略它。已在运行时不会覆盖进程；二进制存在时也不会重新编译源码。MinIO 专用账号配置保存在私有 `.env`，IAM 和对象数据保存在原 MinIO 数据卷；正常重启不需要重新初始化账号或后端绑定。
 
 需要 trace/metrics，再按需启动监控组件：
 
@@ -79,9 +81,19 @@ cloudflared tunnel --config /home/shiyu/.cloudflared/config.yml run trpc-agent-t
 4. PostgreSQL 升级使用 `./bin/trpc-migrate`；它从仓库根目录 `.env` 和进程环境加载配置。确认 `TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=false`。分角色部署必须用独立迁移凭据，不能给 runtime 提升 DDL 权限。
 5. 执行 `./start-real.sh`，再检查 `/readyz`；确认没有反复启动失败，再发一条新的测试消息。
 
-本轮代码包含 migration **015、016**，分别是异常隔离/检查点恢复和积压聚合视图。迁移只新增表、列和视图，不删除既有会话与发送事实。不要修改已应用 migration 的内容，也不要为回滚二进制反向删除新表。检查点锁键空间也已分离，分角色部署应有序停旧接收器再启新接收器。
+当前代码 `0.2.0-rc.9` 对应 schema **23**，rc.5–rc.9 没有新增平台 migration；从此前 schema 16 升级需应用 **017–023**，迁移器会依据已应用记录跳过旧版本。新增内容包括审计函数、迁移协调元数据和回复分段记录。不要修改已应用 migration 的内容，也不要为回滚二进制反向删除新表。分角色部署须同步核对 SQL/Redis 权限；升级前排空或人工核对旧版未完成的发送记录，并停止旧 Worker/Jobs/Sender，不能混跑新旧并发配额和发送协议。
 
-上述是升级流程，不代表编写文档时已经升级日常实例。真实生产 SQL/Redis 账号、网络策略和告警通知接收方都需要部署者核对，见[部署权限](deployment-permissions.md)和[监控](monitoring.md)。
+本机已在 2026-09-07 经用户授权完成 rc.4 升级，具体备份、配置变化及尚待真实消息验证的项目见[本地升级记录](validation/local-rc4-upgrade-2026-09-07.md)。这不等于生产上线；生产 SQL/Redis 账号、网络策略和告警通知接收方仍需部署者核对，见[部署权限](deployment-permissions.md)和[监控](monitoring.md)。
+
+后续已部署 rc.5，并配置 PostgreSQL 长期记忆，见[Memory 启用记录](validation/memory-postgres-2026-09-07.md)。Memory 表由运维账号预建，运行时使用受限凭据和 `skip_db_init=true`。rc.5 增加可信会话类型传递及私聊记忆工具限制；不要用不识别该策略的旧 Worker 执行新 revision。
+
+rc.6 增加[可选的只读项目文档 MCP](project-docs-mcp.md)，schema 仍为 23。本机启用和真实 IM 验证状态见[记录](validation/project-docs-mcp-2026-09-08.md)。启用后它随 Agent 在 loopback 独立端口启动和关闭，无需新增终端；MCP 密钥和服务开关都保存在 `.env`。文档索引为启动快照，修改白名单文档后需要重启刷新。
+
+rc.7 补齐 [Telegram 出站诊断](telegram-delivery-diagnostics.md)。新增的是错误分类和 HTTP 阶段，不是自动恢复承诺；收到消息、模型执行完成、回复送达必须分别核对。`dead + unknown` 不会因为重启而重发，也不能靠扩大重试次数解决。
+
+rc.8 将 Embedding 预检与正式 Knowledge 接到同一个安全包装层，新增本地 Qdrant API Key 配置。启用真实 Knowledge 后必须保留 Qdrant 数据卷、密钥、1024 维绑定和对应 revision；不要只启动聊天模型就假定知识检索可用，见[运行链路](knowledge-runtime.md)。
+
+rc.9 增加每工具的用户白名单及仅私聊限制，用于[本地工作项审批](validation/workitem-approval-2026-09-08.md)。先升级 Worker 再发布新权限字段；配置回滚不得自动撤销已提交的业务写入，待批及不确定操作仍须按原请求核对。
 
 ## 4. 测试结束如何停止
 
@@ -92,7 +104,7 @@ cloudflared tunnel --config /home/shiyu/.cloudflared/config.yml run trpc-agent-t
 确认 Agent 已退出后，在 Tunnel 与 workbuddy2api 的前台终端分别按 Ctrl+C。如果没有其他程序使用这些依赖，再执行：
 
 ```bash
-docker compose stop postgres redis
+docker compose stop postgres redis minio
 docker compose --profile observability stop otel-collector prometheus tempo grafana
 ```
 

@@ -2,9 +2,11 @@
 
 本文映射的是题目要求、代码和可重复测试，不等同于所有外部系统已经完成生产联调。企业微信、Telegram、Kubernetes、云 Secret Manager 等能力的实际验证层级见[功能实现与验证状态](feature-status.md)。
 
-`0.2.0-rc.3` 已补齐此前核对的六类代码缺口，配置、代码入口和自动/隔离验证见[补齐记录](code-gap-closure.md)。本次不把新代码标记为已部署到日常实例。
+`0.2.0-rc.3` 阶段补齐此前核对的六类代码缺口，配置、代码入口和当时的自动/隔离验证见[补齐记录](code-gap-closure.md)。历史记录中的“未部署”描述属于当时阶段；后续启用以具体版本记录为准。
 
 `0.2.0-rc.4` 的后续修复与 MCP/附件实现见[后续记录](reliability-followup.md)。其中 Session/Memory 的切换现在同样要求服务器验证证明，分段回复与并发名额有独立所有权记录。只有这里明确列出的限类型附件已实现，不能扩大到完整多媒体。
+
+截至 rc.9，本地已分别完成 MinIO 文本附件持久化、PostgreSQL 长期记忆、只读文档 MCP、真实文本 Embedding + Qdrant，以及本地工作项审批/单次写入/重复批准的 Telegram 链路，见[当前状态](feature-status.md)、[知识库](validation/knowledge-qdrant-2026-09-08.md)和[工作项记录](validation/workitem-approval-2026-09-08.md)。这些是明确限定的开发环境证据，不自动扩大到所有后端、媒体类型、租户或生产集群。
 
 ## 1. 多租户与节点化
 
@@ -100,7 +102,7 @@ TEST_QDRANT_HOST=127.0.0.1 TEST_QDRANT_PORT=6334 go test ./trpcservice/storage -
 
 只读工具的真实模型预检和已通过的 Telegram 工具验收步骤见[工具调用上手说明](current-time-tool-walkthrough.md)，实际证据见[2026-09-06 验证记录](validation/current-time-2026-09-06.md)。
 
-审批测试、真实模型预检、合法命令基础收发及新版格式拦截/拒绝回执复验见[审批验证记录](validation/approval-2026-09-06.md)。步骤见[审批上手说明](telegram-approval-walkthrough.md)，新版批准结果正文仍待真实 Telegram 复验。
+审批测试、真实模型预检、合法命令基础收发及格式拦截/拒绝回执见[历史记录](validation/approval-2026-09-06.md)。rc.9 本地工作项的批准结果、重复确认回执与跨审批 trace link 已真实核对，见[工作项记录](validation/workitem-approval-2026-09-08.md)；不继承为其他外部业务接口的通过结论。
 
 ## 7. tRPC-Agent-Go 复用边界
 

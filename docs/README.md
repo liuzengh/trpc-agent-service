@@ -22,6 +22,10 @@
 | [data-model.md](data-model.md) | 控制面、运行面核心表结构和索引设计 |
 | [data-consistency.md](data-consistency.md) | session 并发、event/state/summary 顺序、Memory 可见性、消息幂等和迁移策略 |
 | [backend-adapters.md](backend-adapters.md) | Session、Memory、Knowledge、Artifact 等多后端适配和选型 |
+| [project-docs-mcp.md](project-docs-mcp.md) | 只读文档 MCP 的运行链路、权限与真实验证边界 |
+| [knowledge-embedding-setup.md](knowledge-embedding-setup.md) | 独立 Embedding 配置/预检，以及真实 Knowledge 启用前的准备 |
+| [knowledge-runtime.md](knowledge-runtime.md) | 真实 Embedder、持久入库、Qdrant 检索与运行时安全边界 |
+| [telegram-delivery-diagnostics.md](telegram-delivery-diagnostics.md) | 出站错误分类、HTTP 阶段、隐私与未知发送保护 |
 | [im-channels.md](im-channels.md) | 企业微信、微信公众号和 Telegram 通道接入设计 |
 | [telegram-manual-runbook.md](telegram-manual-runbook.md) | Telegram 固定域名下的手动启动、停止、验证和排障 |
 | [governance-operations.md](governance-operations.md) | Plugin/Guardrail、审计、监控、密钥、故障恢复、容量和部署方案 |

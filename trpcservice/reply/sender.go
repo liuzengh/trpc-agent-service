@@ -19,6 +19,8 @@ import (
 	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Options struct {
@@ -226,6 +228,19 @@ func (s *Sender) fail(
 	if unknown {
 		status, decision, errorType = "unknown", "reply_delivery_unknown", "channel_delivery_unknown"
 	}
+	span := trace.SpanFromContext(ctx)
+	span.SetStatus(codes.Error, "")
+	span.SetAttributes(attribute.String("error.type", errorType))
+	details := map[string]any{"outbound_id": item.ID, "terminal": terminal}
+	if deliveryErr != nil && deliveryErr.Diagnostics != nil {
+		d := deliveryErr.Diagnostics.Safe()
+		details["delivery_error_kind"], details["delivery_phase"] = d.Kind, d.Phase
+		details["delivery_http_status"] = d.HTTPStatus
+		span.SetAttributes(attribute.String("delivery.error.kind", d.Kind), attribute.String("delivery.phase", d.Phase))
+		if d.HTTPStatus != 0 {
+			span.SetAttributes(attribute.Int("http.response.status_code", d.HTTPStatus))
+		}
+	}
 	s.opts.Metrics.RecordDelivery(ctx, item.TenantID, channelType, status, time.Since(started))
 	var auditErr error
 	if s.opts.Audit != nil {
@@ -238,10 +253,7 @@ func (s *Sender) fail(
 			Decision:         decision,
 			Latency:          time.Since(started),
 			ErrorType:        errorType,
-			Details: map[string]any{
-				"outbound_id": item.ID,
-				"terminal":    terminal,
-			},
+			Details:          details,
 		})
 	}
 	return errors.Join(cause, markErr, auditErr)

@@ -16,7 +16,18 @@
 
 工具参数是 `business_key` 和 `title`。前者必须是用户提供的稳定业务编号，不能为绕过冲突不断生成新编号。相同租户/App/用户/工具/业务编号、相同内容复用原结果；同一个编号更换内容则拒绝。跨用户、App 或租户有不同的业务空间。新业务编号代表新业务，平台不能自动判断两段自然语言是否是同一请求。
 
-只有 Revision 白名单声明该工具才会提供给模型，且平台强制要求审批，即使租户忘记写 `dangerous_tools`。当前已发布的 Telegram App/Revision 没有自动改变，不会突然获得这个工具。
+只有 Revision 白名单声明该工具才会提供给模型，且平台强制要求审批，即使租户忘记写 `dangerous_tools`。rc.9 可额外用 `tool_allowed_users` 限制精确测试身份、用 `direct_only_tools` 限制私聊；已有批准不能绕过这两层限制。本机启用及待用户确认的验证范围见[记录](validation/workitem-approval-2026-09-08.md)，不代表所有用户或其他既有会话都获得了写权限。
+
+权限配置的增量示例（不是实际用户标识）：
+
+```json
+{
+  "tool_allowed_users": {"create_work_item": ["mapped-runtime-user-id"]},
+  "direct_only_tools": ["create_work_item"]
+}
+```
+
+白名单填写的是平台映射后的 runtime_user_id，不是模型声称的用户名或原始 Telegram 昵称。缺少可信受众时 direct-only 工具拒绝执行；旧配置不声明这些字段时保持原行为。生产使用前须确保所有 Worker 已升级。
 
 ## 不确定结果如何恢复
 
@@ -51,7 +62,7 @@
 
 ## 部署与验证边界
 
-新增 migration `012_business_operations.sql`；旧迁移未修改。启动使用自动迁移时会应用新表，否则先执行独立迁移命令。开发过程中未对日常数据库应用迁移、修改 Bot Binding 或重启日常服务。
+该能力最初增加 migration `012_business_operations.sql`，旧迁移未修改。历史开发阶段没有修改日常实例；目前本机已升级 schema 23，并完成受限测试用户的真实工作项链路，见上方 rc.9 记录。新环境仍须先运行独立迁移命令。
 
 自动测试覆盖真实 Runner 审批前不执行、审批后工作项创建、不同请求 ID 重放、16 个并发调用、输入冲突、租户/用户隔离、响应丢失、平台写失败后重建服务与对账、非幂等后端禁止盲重试、Admin RBAC 和日志不包含业务正文。Memory 与 PostgreSQL 运行同一业务契约。
 

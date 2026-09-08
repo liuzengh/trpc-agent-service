@@ -45,4 +45,32 @@ func TestArtifactRouterS3Integration(t *testing.T) {
 	if err != nil || string(loaded.Data) != "s3-compatible" {
 		t.Fatalf("artifact=%+v err=%v", loaded, err)
 	}
+	// A new router must recover bytes from the object store rather than from
+	// an in-process cache. Reusing the immutable artifact must not add versions.
+	if err := router.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewArtifactRouter(repository, secret.StaticStore{
+		"secret://s3": `{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	loaded, err = reopened.LoadArtifact(context.Background(), info, "integration.txt", nil)
+	if err != nil || loaded == nil || string(loaded.Data) != "s3-compatible" {
+		t.Fatalf("reopened artifact missing: %v", err)
+	}
+	if _, err := reopened.SaveArtifactOnce(context.Background(), info, "integration.txt", loaded); err != nil {
+		t.Fatal(err)
+	}
+	versions, err := reopened.ListVersions(context.Background(), info, "integration.txt")
+	if err != nil || len(versions) != 1 || versions[0] != 0 {
+		t.Fatalf("immutable reopen versions=%v err=%v", versions, err)
+	}
+	otherSession := info
+	otherSession.SessionID = "another-session"
+	if value, err := reopened.LoadArtifact(context.Background(), otherSession, "integration.txt", nil); err == nil && value != nil {
+		t.Fatal("different session read the original artifact")
+	}
 }

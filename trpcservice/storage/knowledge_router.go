@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	remoteembedding "github.com/liuzengh/trpc-agent-service/trpcservice/embedding"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/modelops"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
@@ -19,7 +21,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/document"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/embedder"
-	openaiembedder "trpc.group/trpc-go/trpc-agent-go/knowledge/embedder/openai"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore"
 	vectorinmemory "trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/inmemory"
 	vectorqdrant "trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/qdrant"
@@ -278,11 +279,20 @@ func (r *KnowledgeRouter) Close() error {
 	}
 	r.closed = true
 	stores := make([]vectorstore.VectorStore, 0, len(r.stores))
+	var embedders []io.Closer
+	for _, handle := range r.handles {
+		if closer, ok := handle.embedder.(io.Closer); ok {
+			embedders = append(embedders, closer)
+		}
+	}
 	for _, store := range r.stores {
 		stores = append(stores, store)
 	}
 	r.mu.Unlock()
 	var closeErr error
+	for _, closer := range embedders {
+		closeErr = errors.Join(closeErr, closer.Close())
+	}
 	for _, store := range stores {
 		closeErr = errors.Join(closeErr, store.Close())
 	}
@@ -332,8 +342,8 @@ func parseRevisionKnowledgeConfig(raw json.RawMessage) (revisionKnowledgeConfig,
 	if config.Embedding.PromptCostPerMillion < 0 || config.Embedding.PromptCostPerMillion > 1_000_000 {
 		return revisionKnowledgeConfig{}, errors.New("invalid embedding token price")
 	}
-	if config.Embedding.Dimensions <= 0 {
-		return revisionKnowledgeConfig{}, errors.New("knowledge embedding dimensions must be positive")
+	if config.Embedding.Dimensions <= 0 || config.Embedding.Dimensions > 65536 {
+		return revisionKnowledgeConfig{}, errors.New("knowledge embedding dimensions must be between 1 and 65536")
 	}
 	if config.Embedding.Provider != "hash" && config.Embedding.Provider != "openai" {
 		return revisionKnowledgeConfig{}, fmt.Errorf(
@@ -342,6 +352,15 @@ func parseRevisionKnowledgeConfig(raw json.RawMessage) (revisionKnowledgeConfig,
 	}
 	if config.Embedding.Provider == "openai" && config.Embedding.Model == "" {
 		return revisionKnowledgeConfig{}, errors.New("OpenAI knowledge embedding model is required")
+	}
+	if config.Embedding.Provider == "openai" {
+		baseURL := config.Embedding.BaseURL
+		if baseURL == "" {
+			baseURL = remoteembedding.DefaultBaseURL
+		}
+		if err := (remoteembedding.Config{Model: config.Embedding.Model, BaseURL: baseURL, APIKey: "validation-only", Dimensions: config.Embedding.Dimensions}).Validate(); err != nil {
+			return revisionKnowledgeConfig{}, err
+		}
 	}
 	if config.ChunkSize <= 0 {
 		config.ChunkSize = 800
@@ -487,6 +506,9 @@ func (r *KnowledgeRouter) cachedHandle(
 		if r.closed {
 			r.mu.Unlock()
 			_ = built.store.Close()
+			if closer, ok := built.embedder.(io.Closer); ok {
+				_ = closer.Close()
+			}
 			return nil, errors.New("knowledge router is closed")
 		}
 		r.handles[cacheKey] = built
@@ -519,11 +541,21 @@ func (r *KnowledgeRouter) build(
 	if err != nil {
 		return nil, err
 	}
+	// Until cached in a handle, failures must not orphan an HTTP transport.
+	owned := false
+	defer func() {
+		if !owned {
+			if closer, ok := selectedEmbedder.(io.Closer); ok {
+				_ = closer.Close()
+			}
+		}
+	}()
 	if r.budget != nil {
-		selectedEmbedder, err = modelops.NewEmbedding(selectedEmbedder, r.budget, scope.TenantID, scope.AppID, revisionConfig.Embedding.PromptCostPerMillion)
+		wrapped, err := modelops.NewEmbedding(selectedEmbedder, r.budget, scope.TenantID, scope.AppID, revisionConfig.Embedding.PromptCostPerMillion)
 		if err != nil {
 			return nil, err
 		}
+		selectedEmbedder = wrapped
 	}
 	// Physical storage is independent of prompt/chunking/retrieval settings.
 	// New revision views may change those settings without losing existing data.
@@ -589,6 +621,7 @@ func (r *KnowledgeRouter) build(
 		tenantID: scope.TenantID, appID: scope.AppID,
 		maxResults: revisionConfig.MaxResults, minScore: revisionConfig.MinScore,
 	}
+	owned = true
 	return &knowledgeHandle{
 		knowledge: scoped, store: store, embedder: selectedEmbedder, config: revisionConfig,
 	}, nil
@@ -606,21 +639,15 @@ func (r *KnowledgeRouter) buildEmbedder(
 		if config.SecretRef == "" {
 			return nil, errors.New("OpenAI embedding requires an explicit tenant credential reference")
 		}
-		options := []openaiembedder.Option{
-			openaiembedder.WithModel(config.Model),
-			openaiembedder.WithDimensions(config.Dimensions),
+		apiKey, err := r.secrets.Resolve(ctx, tenantID, secret.Embedding, config.SecretRef)
+		if err != nil {
+			return nil, err
 		}
-		if config.BaseURL != "" {
-			options = append(options, openaiembedder.WithBaseURL(config.BaseURL))
+		baseURL := config.BaseURL
+		if baseURL == "" {
+			baseURL = remoteembedding.DefaultBaseURL
 		}
-		if config.SecretRef != "" {
-			apiKey, err := r.secrets.Resolve(ctx, tenantID, secret.Embedding, config.SecretRef)
-			if err != nil {
-				return nil, err
-			}
-			options = append(options, openaiembedder.WithAPIKey(apiKey))
-		}
-		return openaiembedder.New(options...), nil
+		return remoteembedding.NewRemote(remoteembedding.Config{Model: config.Model, BaseURL: baseURL, APIKey: apiKey, Dimensions: config.Dimensions})
 	default:
 		return nil, fmt.Errorf("unsupported knowledge embedding provider %q", config.Provider)
 	}

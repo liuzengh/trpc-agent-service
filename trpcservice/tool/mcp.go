@@ -19,6 +19,7 @@ import (
 	platformlog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
+	"go.opentelemetry.io/otel/propagation"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	coretool "trpc.group/trpc-go/trpc-agent-go/tool"
 	mcp "trpc.group/trpc-go/trpc-mcp-go"
@@ -202,10 +203,19 @@ func (t *remoteMCPTool) Call(ctx context.Context, args []byte) (any, error) {
 	if err != nil || len(raw) > 65536 {
 		return nil, errors.New("MCP result exceeds safe output bound")
 	}
-	clean := scrubMCP(string(raw), cfg)
 	var out any
-	if json.Unmarshal([]byte(clean), &out) != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&out) != nil {
 		return nil, errors.New("invalid MCP result")
+	}
+	out, err = scrubMCPValue(out, cfg, 0)
+	if err != nil {
+		return nil, err
+	}
+	clean, err := json.Marshal(out)
+	if err != nil || len(clean) > 65536 {
+		return nil, errors.New("sanitized MCP result exceeds safe output bound")
 	}
 	return out, nil
 }
@@ -338,6 +348,69 @@ func scrubMCP(value string, cfg MCPCredential) string {
 	return platformlog.Redact(value)
 }
 
+// Scrub decoded values, not serialized JSON: regex replacement across escaped
+// quotes/newlines can consume delimiters and corrupt a valid MCP result. Text
+// blocks can themselves contain JSON, so preserve that inner structure too.
+func scrubMCPValue(value any, cfg MCPCredential, depth int) (any, error) {
+	if depth > 64 {
+		return nil, errors.New("MCP result nesting exceeds safe bound")
+	}
+	switch typed := value.(type) {
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[' || trimmed[0] == '"') && json.Valid([]byte(trimmed)) {
+			var nested any
+			d := json.NewDecoder(strings.NewReader(trimmed))
+			d.UseNumber()
+			if err := d.Decode(&nested); err != nil {
+				return nil, errors.New("invalid nested MCP JSON")
+			}
+			clean, err := scrubMCPValue(nested, cfg, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			raw, err := json.Marshal(clean)
+			if err != nil {
+				return nil, errors.New("cannot encode sanitized MCP text")
+			}
+			return string(raw), nil
+		}
+		return scrubMCP(typed, cfg), nil
+	case []any:
+		out := make([]any, len(typed))
+		for n, item := range typed {
+			clean, err := scrubMCPValue(item, cfg, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[n] = clean
+		}
+		return out, nil
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			cleanKey := scrubMCP(key, cfg)
+			if _, exists := out[cleanKey]; exists {
+				return nil, errors.New("MCP field names collide after redaction")
+			}
+			lower := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
+			switch lower {
+			case "authorization", "password", "secret", "token", "apikey", "accesstoken", "refreshtoken", "bearertoken", "clientsecret", "secretaccesskey", "credentials", "dsn":
+				out[cleanKey] = "[REDACTED]"
+				continue
+			}
+			clean, err := scrubMCPValue(item, cfg, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[cleanKey] = clean
+		}
+		return out, nil
+	default:
+		return value, nil
+	}
+}
+
 type mcpHTTP struct {
 	cfg         MCPCredential
 	client      *http.Client
@@ -379,6 +452,10 @@ func (h *mcpHTTP) Handle(ctx context.Context, _ *http.Client, req *http.Request)
 		req.Body = io.NopCloser(bytes.NewReader(b))
 	}
 	request := req.Clone(ctx)
+	request.Header.Del("baggage")
+	// Continue the Tool span over the real HTTP MCP hop. Propagation includes
+	// trace context only, not credentials or tool arguments.
+	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(request.Header))
 	if h.cfg.BearerToken != "" {
 		request.Header.Set("Authorization", "Bearer "+h.cfg.BearerToken)
 	}

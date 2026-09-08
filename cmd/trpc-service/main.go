@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,6 +27,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/docsmcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	platformlog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
@@ -85,6 +87,10 @@ func run() error {
 	}
 	if roleName == "" {
 		roleName = config.RoleAll
+	}
+	docsConfig, err := config.LoadDocsMCPConfigFromEnv(roles)
+	if err != nil {
+		return err
 	}
 	auditConfig, err := config.LoadAuditConfigFromEnv()
 	if err != nil {
@@ -684,6 +690,26 @@ func run() error {
 		}
 		defer unregister()
 	}
+	var docsServer *http.Server
+	var docsListener net.Listener
+	var docsHandler *docsmcp.Handler
+	if docsConfig.Enabled {
+		index, err := docsmcp.LoadIndex(docsConfig.Root)
+		if err != nil {
+			return fmt.Errorf("build docs MCP index: %w", err)
+		}
+		docsHandler, err = docsmcp.NewHandler(index, docsConfig.Token)
+		if err != nil {
+			return err
+		}
+		docsListener, err = net.Listen("tcp", docsConfig.Addr)
+		if err != nil {
+			return fmt.Errorf("listen on docs MCP address: %w", err)
+		}
+		defer func() { _ = docsListener.Close() }()
+		docsServer = &http.Server{Handler: docsHandler, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+		fmt.Printf("read-only project docs MCP listening on %s (loopback, authenticated)\n", docsConfig.Addr)
+	}
 	handlerOptions := []web.Option{
 		web.WithRouteResolver(routeResolver),
 		web.WithQuotaGuard(quotaGuard),
@@ -700,6 +726,9 @@ func run() error {
 		web.WithReadinessCheck("quota", quotaGuard.Ready),
 		web.WithReadinessCheck("tool-execution", toolExecutionJournal.Ready),
 		web.WithReadinessCheck("tool-operations", operations.Ready),
+	}
+	if docsHandler != nil {
+		handlerOptions = append(handlerOptions, web.WithReadinessCheck("docs-mcp", docsHandler.Ready))
 	}
 	if roles.Gateway {
 		handlerOptions = append(handlerOptions,
@@ -737,6 +766,16 @@ func run() error {
 	defer stop()
 
 	group, groupCtx := errgroup.WithContext(ctx)
+	if docsServer != nil {
+		docsServer.BaseContext = func(net.Listener) context.Context { return groupCtx }
+		group.Go(func() error {
+			err := docsServer.Serve(docsListener)
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		})
+	}
 	if maintenance, ok := auditWriter.(*audit.PolicyWriter); ok {
 		group.Go(func() error { return ignoreCancellation(maintenance.RunMaintenance(groupCtx, roles.Jobs)) })
 	}
@@ -767,18 +806,23 @@ func run() error {
 
 	<-groupCtx.Done()
 
+	var shutdownErr error
+	servers := []*http.Server{docsServer}
 	if serverEnabled {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown HTTP server: %w", err)
+		servers = append(servers, server)
+	}
+	for _, current := range servers {
+		if current == nil {
+			continue
 		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := current.Shutdown(shutdownCtx); err != nil {
+			_ = current.Close()
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("shutdown HTTP server: %w", err))
+		}
+		cancel()
 	}
-
-	if err := group.Wait(); err != nil {
-		return err
-	}
-	return nil
+	return errors.Join(shutdownErr, group.Wait())
 }
 
 func ignoreCancellation(err error) error {

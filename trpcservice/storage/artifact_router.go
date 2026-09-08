@@ -2,8 +2,10 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -187,6 +189,12 @@ func (r *ArtifactRouter) withDistributedLock(
 	key string,
 	operation func() error,
 ) (err error) {
+	// Composite artifact identities contain NUL separators. PostgreSQL TEXT
+	// cannot represent those bytes. Hash in Go before crossing the SQL text
+	// boundary, for both lock and unlock; raw identities also stay out of SQL
+	// parameter diagnostics. Keep the same digest across every writer.
+	digest := sha256.Sum256([]byte(key))
+	key = "artifact-lock:v1:" + hex.EncodeToString(digest[:])
 	conn, err := r.lockDB.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire artifact lock connection: %w", err)

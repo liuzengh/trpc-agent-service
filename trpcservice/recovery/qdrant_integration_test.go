@@ -59,7 +59,7 @@ func TestIsolatedKnowledgeMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.CommandContext(ctx, "go", "test", "-race", "-count=1", "./trpcservice/storage", "-run", "TestKnowledgeMigrationQdrantIntegration")
+	cmd := exec.CommandContext(ctx, "go", "test", "-race", "-count=1", "./trpcservice/storage", "-run", "TestKnowledge(MigrationQdrantIntegration|RouterRemoteQdrantIntegration)")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "TEST_QDRANT_HOST="+host, "TEST_QDRANT_PORT="+port, "TEST_POSTGRES_URL=", "TEST_REDIS_URL=", "TEST_S3_ENDPOINT=")
 	out, err := cmd.CombinedOutput()

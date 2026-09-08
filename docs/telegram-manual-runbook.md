@@ -31,11 +31,11 @@ cd /home/shiyu/trpc-agent-service
 
 ```bash
 cd /home/shiyu/trpc-agent-service
-docker compose up -d postgres redis
+docker compose up -d postgres redis minio
 ./start-real.sh
 ```
 
-`start-real.sh` 会等待当前 Compose 中的 PostgreSQL 和 Redis 进入 healthy，再启动 Agent。电脑重启后 Redis 可能需要先加载 RDB/AOF；如果跳过健康等待，Agent 会因 `LOADING Redis is loading the dataset in memory` 按 fail-fast 退出，随后 Tunnel 日志会出现 `dial tcp 127.0.0.1:8080: connect: connection refused`。
+本机在 2026-09-07 已将附件切换到 MinIO，见[持久化启用记录](validation/artifact-minio-2026-09-07.md)；仍用内存附件的其他开发环境可以省略 `minio`。`start-real.sh` 会等待当前 Compose 中的 PostgreSQL、Redis 和 MinIO 进入 healthy，再启动 Agent。电脑重启后 Redis 可能需要先加载 RDB/AOF；如果跳过健康等待，Agent 会因 `LOADING Redis is loading the dataset in memory` 按 fail-fast 退出，随后 Tunnel 日志会出现 `dial tcp 127.0.0.1:8080: connect: connection refused`。
 
 检查本地服务：
 

@@ -329,11 +329,12 @@ func (a *Adapter) Send(
 	}
 	body, _ := json.Marshal(payload)
 	endpoint := apiBase(cfg) + "/bot" + url.PathEscape(botToken) + "/sendMessage"
+	ctx, observation := channels.TraceHTTPDelivery(ctx)
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	response, err := a.client.Do(request)
 	if err != nil {
-		return channels.DeliveryReceipt{}, &channels.DeliveryError{Cause: errors.New("Telegram delivery outcome unknown"), Unknown: true}
+		return channels.DeliveryReceipt{}, &channels.DeliveryError{Cause: errors.New("Telegram delivery outcome unknown"), Unknown: true, Diagnostics: observation.Failure(err)}
 	}
 	defer response.Body.Close()
 	var result struct {
@@ -348,19 +349,29 @@ func (a *Adapter) Send(
 		} `json:"parameters"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
+		diagnostic := observation.Failure(err)
+		if diagnostic.Kind == "transport" {
+			diagnostic.Kind = "invalid_response"
+		}
+		diagnostic.Phase, diagnostic.HTTPStatus = "response_body", response.StatusCode
 		return channels.DeliveryReceipt{}, &channels.DeliveryError{
 			Cause: errors.New("Telegram delivery response unreadable"), Unknown: true,
+			Diagnostics: diagnostic,
 		}
 	}
 	if (!result.OK && result.ErrorCode == 0) || (result.OK && result.Result.MessageID <= 0) {
-		return channels.DeliveryReceipt{}, &channels.DeliveryError{Cause: errors.New("Telegram delivery response incomplete"), Unknown: true}
+		return channels.DeliveryReceipt{}, &channels.DeliveryError{Cause: errors.New("Telegram delivery response incomplete"), Unknown: true,
+			Diagnostics: &channels.DeliveryDiagnostics{Kind: "invalid_response", Phase: "response_body", HTTPStatus: response.StatusCode}}
 	}
 	if !result.OK {
 		retryable := response.StatusCode >= 500 || result.ErrorCode == 429
 		return channels.DeliveryReceipt{}, &channels.DeliveryError{
-			Cause:      fmt.Errorf("Telegram send failed: code=%d message=%s", result.ErrorCode, result.Description),
-			Retryable:  retryable,
-			RetryAfter: time.Duration(result.Parameters.RetryAfter) * time.Second,
+			// Provider descriptions may echo credentials or user content. Keep
+			// only the numeric code; never wrap the original HTTP error either.
+			Cause:       fmt.Errorf("Telegram send failed: code=%d", result.ErrorCode),
+			Retryable:   retryable,
+			RetryAfter:  time.Duration(result.Parameters.RetryAfter) * time.Second,
+			Diagnostics: &channels.DeliveryDiagnostics{Kind: "provider_rejected", Phase: "provider_response", HTTPStatus: response.StatusCode},
 		}
 	}
 	return channels.DeliveryReceipt{
