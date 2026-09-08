@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -258,5 +257,5 @@ func TestP204BoundedSoak(t *testing.T) {
 		t.Fatalf("hook completions incomplete: completions=%d outbox=%d accepted=%d", completionCount.Load(), outboxCount.Load(), accepted)
 	}
 	_ = heapHighWater
-	t.Logf(fmt.Sprintf("soak evidence ops=%d accepted=%d high_water_goroutines=%d heap_high_water_bytes=%d", totalOps, accepted, goroutineHighWater, heapHighWater))
+	t.Logf("soak evidence ops=%d accepted=%d high_water_goroutines=%d heap_high_water_bytes=%d", totalOps, accepted, goroutineHighWater, heapHighWater)
 }

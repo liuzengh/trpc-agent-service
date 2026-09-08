@@ -1,0 +1,118 @@
+# POST-P2 WS-3/WS-4: VM2 HA node — PostgreSQL streaming STANDBY (promoted
+# manually on primary failure; automatic failover NOT PROVEN with 2 nodes),
+# Redis replica of the VM1 master (data redundancy; the apps point at the
+# current master via the operator-maintained app-pg-host file), and a second
+# stateless app instance serving from the shared PostgreSQL authority.
+name: p2prod
+x-app-env: &app-env
+  DATABASE_SCHEMA: public
+  HTTP_ADDR: 0.0.0.0:8080
+  DEFAULT_TENANT: p2-prod
+  DEFAULT_AGENT_APP_ID: p2-prod-agent
+  MODEL_PROVIDER: runner
+  MODEL_BASE_URL: http://127.0.0.1:9
+  MODEL_NAME: p2-prod-model
+  MODEL_API_KEY: p2-prod-placeholder-not-a-secret
+  MODEL_CONFIG_VERSION: "1"
+  ASYNC_OWNER_ID: p2-prod-owner
+  BOOTSTRAP_OBJECT_BACKEND: none
+  BOOTSTRAP_TENANT_ID: p2-prod
+  BOOTSTRAP_TENANT_NAME: p2-prod
+  BOOTSTRAP_AGENT_APP_ID: p2-prod-agent
+  BOOTSTRAP_AGENT_NAME: p2-prod-agent
+  BOOTSTRAP_AGENT_VERSION: "1"
+  BOOTSTRAP_LARK_ENABLED: "false"
+  BOOTSTRAP_TELEGRAM_ENABLED: "false"
+  BOOTSTRAP_LARK_BINDING_ID: prod-lark
+  BOOTSTRAP_TELEGRAM_BINDING_ID: prod-tg
+  BOOTSTRAP_LARK_EXTERNAL_APP_ID: prod-lark-ext
+  BOOTSTRAP_TELEGRAM_EXTERNAL_APP_ID: prod-tg-ext
+  BOOTSTRAP_LARK_APP_ID: prod-lark-app
+  BOOTSTRAP_LARK_APP_SECRET_REF: "env://P2PROD_LARK_SECRET"
+  BOOTSTRAP_TELEGRAM_BOT_TOKEN_REF: "env://P2PROD_TG_TOKEN"
+  BOOTSTRAP_TELEGRAM_WEBHOOK_SECRET_REF: "env://P2PROD_TG_HOOK"
+  BOOTSTRAP_LARK_VERIFY_TOKEN_REF: "env://P2PROD_LARK_VERIFY"
+  BOOTSTRAP_LARK_ENCRYPT_KEY_REF: "env://P2PROD_LARK_ENCRYPT"
+  BOOTSTRAP_LARK_RECEIVER_ID_TYPE: open_id
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  TELEMETRY_MODE: ""
+  TELEMETRY_INSECURE_LOCAL: ""
+  RATE_LIMIT_WINDOW: 1m
+  RATE_LIMIT_TENANT_LIMIT: "600"
+  RATE_LIMIT_BINDING_LIMIT: "300"
+  RATE_LIMIT_CHAT_LIMIT: "120"
+  INGRESS_MAX_INFLIGHT: "64"
+  INGRESS_MAX_INFLIGHT_PER_TENANT: "32"
+  INGRESS_MAX_INFLIGHT_PER_BINDING: "16"
+  WORKER_CONCURRENCY: "4"
+  DISPATCHER_CONCURRENCY: "1"
+  DISPATCHER_CLAIM_BATCH_SIZE: "100"
+services:
+  vm2-pg:
+    image: postgres:16-alpine
+    container_name: p2prod-vm2-pg
+    restart: unless-stopped
+    secrets:
+      - pg_repl_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+  redis:
+    image: redis:7.4-alpine
+    container_name: p2prod-redis
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - redisdata:/data
+      - /opt/p2prod/redis.conf:/usr/local/etc/redis/redis.conf:ro
+  otel:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    container_name: p2prod-otel
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - /opt/p2prod/otel-config.yaml:/etc/otelcol/config.yaml:ro
+  app:
+    image: app:release
+    container_name: p2prod-app
+    restart: unless-stopped
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        PGHOST="$(cat /opt/p2prod/app-pg-host)"
+        export DATABASE_URL="postgres://postgres:$(cat /run/secrets/pg_postgres_password)@$${PGHOST}:5432/trpc_agent?sslmode=disable"
+        export DATABASE_RUNTIME_URL="postgres://trpc_runtime:$(cat /run/secrets/pg_runtime_password)@$${PGHOST}:5432/trpc_agent?sslmode=disable"
+        export RATE_LIMIT_REDIS_URL="redis://:$(cat /run/secrets/redis_password)@192.168.1.6:6379/0"
+        exec su-exec app /usr/local/bin/trpc-service
+    secrets:
+      - pg_postgres_password
+      - pg_runtime_password
+      - redis_password
+    environment: *app-env
+    ports:
+      - "192.168.1.8:8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+secrets:
+  pg_postgres_password:
+    file: /opt/p2prod/secrets/pg_postgres_password
+  pg_repl_password:
+    file: /opt/p2prod/secrets/pg_repl_password
+  pg_runtime_password:
+    file: /opt/p2prod/secrets/pg_runtime_password
+  redis_password:
+    file: /opt/p2prod/secrets/redis_password
+volumes:
+  pgdata:
+    name: p2prod-pgdata
+  redisdata:
+    name: p2prod-redisdata

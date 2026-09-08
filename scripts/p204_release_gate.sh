@@ -24,8 +24,8 @@ git diff --check -- cmd trpcservice scripts docs/implementation-plan.md docs/pro
 echo "ok"
 
 echo "[2/6] dependency baseline"
-EXPECTED_MOD="${P204_EXPECTED_GO_MOD:-50ace4330977e4cc0f57f55965bcaf8a61390d01f8b6c47e1c5d3c49c4d7d5ed}"
-EXPECTED_SUM="${P204_EXPECTED_GO_SUM:-23cba731c8cc436c8cab0f6e4df247e793e573b2fb3a32206c5e7918157b43f1}"
+EXPECTED_MOD="${P204_EXPECTED_GO_MOD:-8587b80a9698876d1f090125e041a9465ddf57b9d0a51ce6fda99d97d6c72f9d}"
+EXPECTED_SUM="${P204_EXPECTED_GO_SUM:-223dfac9171b3c1d36fdd99f1c27baec7eae8eb314ca4f6017071c3cc9458073}"
 ACTUAL_MOD="$(sha256sum go.mod | cut -d' ' -f1)"
 ACTUAL_SUM="$(sha256sum go.sum | cut -d' ' -f1)"
 if [ "$ACTUAL_MOD" != "$EXPECTED_MOD" ] || [ "$ACTUAL_SUM" != "$EXPECTED_SUM" ]; then

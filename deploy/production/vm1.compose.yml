@@ -1,0 +1,150 @@
+# POST-P2 WS-3A: VM1 production-shaped stack (single active node, HA-ready).
+# PG runs as the repmgr PRIMARY ready for a VM2 standby to join later; Redis
+# is an expendable rate-limit budget store (authority stays in PostgreSQL);
+# telemetry export stays no-export until TLS/IAM are provisioned (P1-07
+# contract). All credentials flow through Docker secret files (0600), never
+# through environment literals.
+name: p2prod
+x-app-env: &app-env
+  DATABASE_SCHEMA: public
+  HTTP_ADDR: 0.0.0.0:8080
+  DEFAULT_TENANT: p2-prod
+  DEFAULT_AGENT_APP_ID: p2-prod-agent
+  MODEL_PROVIDER: runner
+  MODEL_BASE_URL: http://127.0.0.1:9
+  MODEL_NAME: p2-prod-model
+  MODEL_API_KEY: p2-prod-placeholder-not-a-secret
+  MODEL_CONFIG_VERSION: "1"
+  ASYNC_OWNER_ID: p2-prod-owner
+  BOOTSTRAP_OBJECT_BACKEND: none
+  BOOTSTRAP_TENANT_ID: p2-prod
+  BOOTSTRAP_TENANT_NAME: p2-prod
+  BOOTSTRAP_AGENT_APP_ID: p2-prod-agent
+  BOOTSTRAP_AGENT_NAME: p2-prod-agent
+  BOOTSTRAP_AGENT_VERSION: "1"
+  BOOTSTRAP_LARK_ENABLED: "false"
+  BOOTSTRAP_TELEGRAM_ENABLED: "false"
+  BOOTSTRAP_LARK_BINDING_ID: prod-lark
+  BOOTSTRAP_TELEGRAM_BINDING_ID: prod-tg
+  BOOTSTRAP_LARK_EXTERNAL_APP_ID: prod-lark-ext
+  BOOTSTRAP_TELEGRAM_EXTERNAL_APP_ID: prod-tg-ext
+  BOOTSTRAP_LARK_APP_ID: prod-lark-app
+  BOOTSTRAP_LARK_APP_SECRET_REF: "env://P2PROD_LARK_SECRET"
+  BOOTSTRAP_TELEGRAM_BOT_TOKEN_REF: "env://P2PROD_TG_TOKEN"
+  BOOTSTRAP_TELEGRAM_WEBHOOK_SECRET_REF: "env://P2PROD_TG_HOOK"
+  BOOTSTRAP_LARK_VERIFY_TOKEN_REF: "env://P2PROD_LARK_VERIFY"
+  BOOTSTRAP_LARK_ENCRYPT_KEY_REF: "env://P2PROD_LARK_ENCRYPT"
+  BOOTSTRAP_LARK_RECEIVER_ID_TYPE: open_id
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  TELEMETRY_MODE: ""
+  TELEMETRY_INSECURE_LOCAL: ""
+  RATE_LIMIT_WINDOW: 1m
+  RATE_LIMIT_TENANT_LIMIT: "600"
+  RATE_LIMIT_BINDING_LIMIT: "300"
+  RATE_LIMIT_CHAT_LIMIT: "120"
+  INGRESS_MAX_INFLIGHT: "64"
+  INGRESS_MAX_INFLIGHT_PER_TENANT: "32"
+  INGRESS_MAX_INFLIGHT_PER_BINDING: "16"
+  WORKER_CONCURRENCY: "4"
+  DISPATCHER_CONCURRENCY: "1"
+  DISPATCHER_CLAIM_BATCH_SIZE: "100"
+services:
+  vm1-pg:
+    image: postgres:16-alpine
+    container_name: p2prod-vm1-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_postgres_password
+      POSTGRES_DB: trpc_agent
+    secrets:
+      - pg_postgres_password
+      - pg_repl_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - /opt/p2prod/pg-init:/docker-entrypoint-initdb.d:ro
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trpc_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    ports:
+      - "0.0.0.0:5432:5432"
+  redis:
+    image: redis:7.4-alpine
+    container_name: p2prod-redis
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    secrets:
+      - redis_password
+    volumes:
+      - redisdata:/data
+      - /opt/p2prod/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $(cat /run/secrets/redis_password) ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+  otel:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    container_name: p2prod-otel
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - /opt/p2prod/otel-config.yaml:/etc/otelcol/config.yaml:ro
+  app:
+    image: app:release
+    container_name: p2prod-app
+    restart: unless-stopped
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        PGHOST="$(cat /opt/p2prod/app-pg-host)"
+        export DATABASE_URL="postgres://postgres:$(cat /run/secrets/pg_postgres_password)@$${PGHOST}:5432/trpc_agent?sslmode=disable"
+        export DATABASE_RUNTIME_URL="postgres://trpc_runtime:$(cat /run/secrets/pg_runtime_password)@$${PGHOST}:5432/trpc_agent?sslmode=disable"
+        export RATE_LIMIT_REDIS_URL="redis://:$(cat /run/secrets/redis_password)@redis:6379/0"
+        exec su-exec app /usr/local/bin/trpc-service
+    secrets:
+      - pg_postgres_password
+      - pg_runtime_password
+      - redis_password
+    volumes:
+      - /opt/p2prod/app-pg-host:/opt/p2prod/app-pg-host:ro
+    environment: *app-env
+    depends_on:
+      vm1-pg:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "192.168.1.6:8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+secrets:
+  pg_postgres_password:
+    file: /opt/p2prod/secrets/pg_postgres_password
+  pg_repl_password:
+    file: /opt/p2prod/secrets/pg_repl_password
+  pg_runtime_password:
+    file: /opt/p2prod/secrets/pg_runtime_password
+  redis_password:
+    file: /opt/p2prod/secrets/redis_password
+volumes:
+  pgdata:
+    name: p2prod-pgdata
+  redisdata:
+    name: p2prod-redisdata
