@@ -1,115 +1,67 @@
-# 最终验收映射
+# 交付范围与验收
 
-本文映射的是题目要求、代码和可重复测试，不等同于所有外部系统已经完成生产联调。企业微信、Telegram、Kubernetes、云 Secret Manager 等能力的实际验证层级见[功能实现与验证状态](feature-status.md)。
+交付对象是基于 tRPC-Agent-Go 的多租户平台设计、可运行代码、部署模板和自动测试。根目录 README 保留原始题目；本说明集中给出实现映射与验证边界，不包含逐轮开发日志。
 
-`0.2.0-rc.3` 阶段补齐此前核对的六类代码缺口，配置、代码入口和当时的自动/隔离验证见[补齐记录](code-gap-closure.md)。历史记录中的“未部署”描述属于当时阶段；后续启用以具体版本记录为准。
+## 1. 要求映射
 
-`0.2.0-rc.4` 的后续修复与 MCP/附件实现见[后续记录](reliability-followup.md)。其中 Session/Memory 的切换现在同样要求服务器验证证明，分段回复与并发名额有独立所有权记录。只有这里明确列出的限类型附件已实现，不能扩大到完整多媒体。
+| 题目要求 | 实现与文档 |
+| --- | --- |
+| 租户模型、配置、发布与路由 | `controlplane`、`routing`、`agent/compiler.go`；[架构](architecture.md)、[数据模型](data-model.md) |
+| 多 Worker、无 sticky、Session 一致性 | `worker`、`coordination`、`workqueue`、`storage`；[同步协议](data-consistency.md) |
+| Session/Memory/Summary/Artifact/Knowledge/Audit | 租户路由与持久任务；[后端方案](backend-adapters.md) |
+| 至少两类 IM，包含微信/企业微信 | Telegram、企业微信自建应用 Adapter 与消息 MCP；[通道](im-channels.md) |
+| 完整消息链路和 request_id/trace_id | Runner、Tool Journal、OTel、Reply Sender；[核心时序](sequence.md) |
+| 工具权限、审批、预算、审计与密钥 | `governance`、`approval`、`toolexec`、`modelops`、`audit`、`secret`；[治理](governance-operations.md) |
+| 故障、取消、恢复、灰度与部署 | Context/事件通道消费、claim/重试、Revision、Compose/Kubernetes；[运行手册](operations-runbook.md) |
+| 至少 8 项风险和缓解措施 | [20 项风险](risks.md) |
+| 代码与框架复用界限 | 本仓库源码；[架构中的复用说明](architecture.md) |
 
-截至 rc.9，本地已分别完成 MinIO 文本附件持久化、PostgreSQL 长期记忆、只读文档 MCP、真实文本 Embedding + Qdrant，以及本地工作项审批/单次写入/重复批准的 Telegram 链路，见[当前状态](feature-status.md)、[知识库](validation/knowledge-qdrant-2026-09-08.md)和[工作项记录](validation/workitem-approval-2026-09-08.md)。这些是明确限定的开发环境证据，不自动扩大到所有后端、媒体类型、租户或生产集群。
+## 2. 实现和验证层级
 
-## 1. 多租户与节点化
+| 能力 | 已实现与已验证 | 明确限制 |
+| --- | --- | --- |
+| Agent 执行 | LLMAgent、Runner、真实兼容模型、多轮会话 | 未平台化注册 Graph/Chain/Parallel/Cycle |
+| 租户与多节点 | 两租户/两真实 Worker 进程，配置/Session/Memory/Knowledge/工具隔离、故障接管与去重的隔离测试 | 联合测试采用合成模型，不代表真实多供应商压测 |
+| 数据后端 | Session: InMemory/Redis/PostgreSQL；Memory: InMemory/Redis/PostgreSQL；Knowledge: InMemory/Qdrant；Artifact: InMemory/S3-compatible | 不是框架所有后端均已适配；远端云后端未完整联调 |
+| 数据迁移 | 双写、分批回填、服务器验证门禁、切读/回滚与修复任务 | 更换 Embedding 要重建；历史 Session 主体需要完整清单 |
+| Telegram | 私聊/群/Topic、真实模型回复；工具、审批、文本附件、记忆、文档 MCP 和知识检索的开发环境联调 | 真实 429、多账号高负载、媒体发送/编辑未验收 |
+| 企业微信消息 MCP | 已授权群文本接收 → Runner/模型 → 机器人回复，开发环境真实链路与 trace 已验证 | 指纹去重不是源消息 ID；分页、延迟、多群和媒体能力仍有限 |
+| 企业微信自建应用回调 | URL 验证、签名、AES、Token 和应用文本发送的模拟协议测试 | 不能继承消息 MCP 的真实联调结论 |
+| 工具与审批 | 单用户/会话绑定、白名单、参数校验；本地工作项审批前无写入、批准后一次写入、重复批准不重做 | 本地工作项不是外部企业工单系统 |
+| Agent MCP | 受授权的 Streamable HTTP 工具；只读项目文档工具已真实联调 | 不支持任意 MCP 自助接入、stdio 或外部企业系统的通用接入保证 |
+| 附件/记忆/知识库 | 文本附件存 MinIO、PostgreSQL 长期记忆、真实 Embedding+本地 Qdrant，含重启读取 | 文件保存不等于图片理解；无完整杀毒/PDF/Office；语义质量和灾备需另验 |
+| 监控与安全 | OTLP、指标、审计、规则、预算预留结算、精确 Secret grant、分角色权限生成器 | 未接真实告警接收方、SSO/OIDC、Vault/KMS；权限模板须实际部署 |
+| 故障与运维 | Worker 接管、取消、退避、SQL/Redis 恢复、手动生命周期与隔离测试 | 无生产 PITR/主从切换、完整对象/向量灾备或生产容量承诺 |
 
-- Tenant/App/Revision/Channel/Backend/Audit/Quota 模型：`controlplane`、migration 001；
-- Gateway/Relay/Worker/Sender/Jobs/Admin 六角色：`config/role.go`、Kubernetes manifests；
-- Binding 反查 tenant/app，Storage Scope 强校验：`routing`、`runtimecontext`；
-- Session Router + Redis Coordinator + Redis Idempotency 支持无 sticky、多 Worker；
-- Revision stable/canary、稳定哈希与 conversation pin；
-- Admin Principal RBAC、SecretRef、日志/Audit 脱敏。
+部署模板和设计中的可选方案不算已验证实现；自动测试、真实模型联调、云环境及生产上线是不同层级。微信公众号/微信客服等额外通道、UI、完整多媒体和节点内并发池不属于本阶段基本交付门槛。
 
-## 2. 数据同步与多后端
-
-- Session：startup/InMemory/Redis/PostgreSQL；
-- Memory：InMemory/Redis/PostgreSQL；
-- Knowledge：InMemory/Qdrant，Hash/OpenAI Embedder；
-- Artifact：InMemory/S3-compatible/MinIO；
-- PostgreSQL 保存控制面、Inbox/Run/Outbox、Approval、Tool Journal、Background Job、Migration、Audit；
-- Session Coordinator + fencing token、外部 message ID 幂等、Transactional Outbox、Redis Streams pending reclaim；
-- Summary/Memory/Knowledge durable job、水位、重试/dead；
-- Backend Migration 双写、回填、verify、cutover、rollback、repair backlog。
-
-## 3. IM 接入
-
-- 企业微信 Adapter：SHA1 验签、时间窗、AES-CBC/PKCS7、CorpID、Token cache、应用文本消息、429/Token 刷新；当前由模拟协议测试覆盖，真实企业账号联调待完成；
-- Telegram Adapter：Webhook Secret、private/group/topic Session、sendMessage、Retry-After、群白名单、mention/command/reply 识别和其他 Bot 过滤；真实 Bot 已完成基础联调，群策略用户反馈复验通过；429 调度与重试终态由模拟 API + MemoryJournal 测试覆盖，真实限流待验证；
-- 用户/群/线程经 binding-scoped hash 生成隔离身份；
-- 文本、图片和文件 ID 可规范化；当前出站仅支持文本，默认不自动下载媒体；
-- 重复 callback 由 `(channel_binding_id, external_message_id)` 唯一约束处理；
-- Reply Sender 长度切分、重试、provider receipt；
-- 危险 Tool 使用原 IM 会话文本批准/拒绝。
-
-另有 **`wecom_mcp`**：复用 tRPC MCP Client，主动读取已授权群文本并以机器人身份发送；基础真实模型自动回复、数据库状态与完整 trace 已核对。指纹去重、单条异常隔离、页级失败保留进度、版本化恢复和 unknown 不重发均有自动测试。它不是上面的企业微信自建应用回调，不能混写验证状态；细节见[运行链路](wecom-mcp-runtime.md)。
-
-## 4. 治理、监控和安全
-
-- tRPC-Agent-Go ToolFilter、PermissionPolicy、MaxRunDuration；
-- Model Callbacks Guardrail：输入阻断、输出正则脱敏；
-- Tool Approval 精确绑定 tool + arguments hash；
-- Tool Execution Journal 阻断盲目重放；
-- Local/Redis rate、concurrency、daily token/cost quota；
-- OTLP traces/metrics，HTTP → Queue → Worker → Storage → Reply traceparent；
-- tenant-scoped Audit Query 和必需审计字段；
-- Secret 不写日志、trace、配置仓库。
-
-新增分角色 SQL/Redis 权限生成器与隔离正反向测试、按角色初始化依赖、收窄网络模板、SQL 聚合积压指标和离线 Prometheus 规则测试。真实账号/集群应用和实际通知接收方仍待配置。
-
-## 5. 故障恢复与运维
-
-- SIGINT/SIGTERM root Context + errgroup；
-- Runner Event channel 始终消费到关闭；
-- Worker 队列/Job/Outbox lease 到期后可 reclaim；**MCP 外部发送尝试没有到期自动重发机制**，unknown/attempting 必须核对；
-- Redis/PostgreSQL 不可用时 readiness 退出，不创建空 Session；
-- 模型/Tool/IM 错误分类、退避、dead 状态和人工 retry；
-- Revision 乐观锁发布、canary、回滚；
-- Docker Compose、非 root Docker 镜像、migration command；
-- Kubernetes HPA/PDB/NetworkPolicy/resources；
-- load generator、容量公式、fault drill。
-
-本轮还通过了 Worker 取消接管、完成确认丢失、不可用队列退避和独立 PostgreSQL 全部平台 schema/合成业务数据恢复测试。恢复点之后的外部副作用不能凭旧备份恢复安全性推断，详见[恢复证据](validation/recovery-2026-09-06.md)。
-
-## 6. 自动与真实验收命令
+## 3. 可重复验证入口
 
 ```bash
-# 默认不加载 .env、不启用继承来的集成环境、不重启服务。
 ./scripts/regression.sh
-# 可选：只增加独立测试容器和离线告警规则，要求镜像已缓存。
+```
+
+默认清除继承的集成测试地址，不加载日常 `.env`、不调用真实 IM/模型、不重启服务。执行全仓 race、go vet、可用的 golangci-lint、构建和文档链接检查。
+
+独立后端与恢复验证要求 Docker 及已缓存的测试镜像：
+
+```bash
 TRPC_AGENT_VERIFY_ISOLATED=1 ./scripts/regression.sh
-./build.sh
-docker compose --profile observability config -q
 ```
 
-以下命令属于**另外的实验环境/真实联调操作**，不要整段粘贴到日常聊天环境运行。部分历史脚本会加载 `.env`、启动 Compose 或迁移目标库；测试 Redis prefix 不等于隔离了 SQL/IM 通道。需要独立工作目录、测试配置和数据后端，外部读发必须有明确授权：
+覆盖隔离 SQL/Redis 权限、恢复套件、两租户/两 Worker 联合测试、合成 SQL/Redis 备份工具链和 Prometheus 规则。测试自行创建并核对所属容器，不复用日常业务数据卷。
 
-```bash
-docker build -t trpc-agent-service:local .
-./scripts/e2e-observability.sh
-./scripts/e2e-telegram-tracing.sh
-./scripts/benchmark-local.sh
-```
+重点用例在：
 
-最新 `./scripts/e2e-multiprocess.sh` 已替换为完全隔离的联合测试入口：两个租户、两个真实 Worker 进程、独立 PostgreSQL/Redis/Qdrant，使用合成 HTTP 模型/Embedding，验证 Session/Memory/Knowledge 作用域、工具拒绝、处理中 SIGKILL 接管及回调去重。不加载 `.env`，不使用日常 DSN、数据卷、真实模型或 IM。
+- [联合多租户/多 Worker](../trpcservice/recovery/joint_integration_test.go)：同外部身份的作用域隔离、权限拒绝、处理中杀死实际 claim owner、存活 Worker 接管、处理中及完成后的重复投递。
+- [恢复测试目录](../trpcservice/recovery)：故障、迁移、持久化和恢复用例；外部副作用不能仅凭数据库备份推断回滚。
+- [脚本测试](../scripts)：真实临时 Agent 启停、隔离恢复脚本安全约束、构建产物归档及源码包边界。
+- 各业务模块的 `*_test.go`：审批、取消、预算、权限、媒体限制、trace 脱敏和数据隔离。
 
-`./scripts/e2e-backup-restore.sh` 同样只创建独立测试容器与合成数据，已包含在隔离回归中；它验证备份工具链，不操作日常数据，也不替代真实业务恢复演练。
+交付基线已通过全仓与完整隔离回归；本地 Go 1.27.1 / golangci-lint 2.13.2 检查为 0 issues。独立源码包已验证解压、编译、Mock 两轮会话和优雅退出。真实 IM 的结论限于上表，不因文档整理或自动回归扩大。
 
-依赖型集成测试通过环境变量显式启用：
+## 4. 交付文件与上线边界
 
-```bash
-TEST_POSTGRES_URL='postgres://...' go test ./trpcservice/storage ./trpcservice/controlplane ./trpcservice/background ./trpcservice/toolexec
-TEST_POSTGRES_URL='postgres://...' go test ./trpcservice/approval -run TestPostgresDecisionContractIntegration
-TEST_S3_ENDPOINT=http://127.0.0.1:9000 go test ./trpcservice/storage -run S3Integration
-TEST_QDRANT_HOST=127.0.0.1 TEST_QDRANT_PORT=6334 go test ./trpcservice/storage -run QdrantIntegration
-```
+正式文档共 11 份（含索引），见 [docs/README.md](README.md)。源码包用 `./build.sh --package` 从 Git HEAD 导出并附 checksum，保留源码、测试、配置模板和部署文件，不包含私有配置、历史记录目录、日志、二进制或运行数据。
 
-这些 DSN/端点只指向受控测试实例；并非所有旧集成测试都会自己创建隔离 schema。近期收尾测试结果见[候选版本记录](validation/release-candidate-2026-09-06.md)，不要把被跳过的外部集成计为通过。
-
-只读工具的真实模型预检和已通过的 Telegram 工具验收步骤见[工具调用上手说明](current-time-tool-walkthrough.md)，实际证据见[2026-09-06 验证记录](validation/current-time-2026-09-06.md)。
-
-审批测试、真实模型预检、合法命令基础收发及格式拦截/拒绝回执见[历史记录](validation/approval-2026-09-06.md)。rc.9 本地工作项的批准结果、重复确认回执与跨审批 trace link 已真实核对，见[工作项记录](validation/workitem-approval-2026-09-08.md)；不继承为其他外部业务接口的通过结论。
-
-## 7. tRPC-Agent-Go 复用边界
-
-完整追踪的本地组件预检、真实模型 HTTP 和已通过的真实 Telegram trace 证据见[追踪验证记录](validation/tracing-2026-09-06.md)，查看新请求的方法见[追踪上手说明](telegram-tracing-walkthrough.md)。
-
-直接复用：LLMAgent、Runner/Event、Session Redis/PostgreSQL、Memory Redis/PostgreSQL、Memory Tools/Extractor、Knowledge/VectorStore/Qdrant、Artifact/S3、Model/Tool Callbacks、PermissionPolicy、OpenTelemetry。
-
-平台新增：Tenant/App/Revision/Binding、Storage Router、Channel Adapter、Inbox/Outbox、Redis Streams Worker、Session Coordinator、Approval、Tool Journal、Background Job、Backend Migration、RBAC/Quota/Audit、部署与运维工具。
+基本交付可以用于构建、演示和继续开发；生产上线前还需确认真实分角色账号、网络策略、告警通知、数据驻留/保留、供应商额度、容量和恢复目标。此说明不是生产上线验收报告。

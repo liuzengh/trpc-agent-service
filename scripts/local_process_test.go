@@ -93,8 +93,8 @@ func TestManualScriptsInIsolatedWorkspace(t *testing.T) {
 	}
 }
 
-func TestMultiProcessWrapperIsIsolated(t *testing.T) {
-	raw, err := os.ReadFile("e2e-multiprocess.sh")
+func TestUnifiedRegressionIncludesIsolatedWorkers(t *testing.T) {
+	raw, err := os.ReadFile("regression.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestMultiProcessWrapperIsIsolated(t *testing.T) {
 			t.Fatal("unsafe legacy workflow remains")
 		}
 	}
-	if !strings.Contains(script, "TestIsolatedTwoTenantTwoWorkerWorkflow") {
-		t.Fatal("joint suite not wired")
+	if !strings.Contains(script, "TEST_RECOVERY_DOCKER=1") || !strings.Contains(script, "./trpcservice/recovery") {
+		t.Fatal("isolated recovery and joint Worker suite not wired")
 	}
 }

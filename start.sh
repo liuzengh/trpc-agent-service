@@ -14,5 +14,6 @@ if [[ ! -x "$ROOT/bin/trpc-service" ]]; then
 fi
 
 ENV_FILE="${TRPC_AGENT_ENV_FILE:-$ROOT/.env}"
+local_agent_wait_dependencies
 nohup "$ROOT/bin/trpc-service" -env-file "$ENV_FILE" >>"$ROOT/data/trpc-service.log" 2>&1 9>&- &
 local_agent_register "$!" "$ENV_FILE"

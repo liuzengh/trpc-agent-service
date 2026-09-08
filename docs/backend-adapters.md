@@ -106,7 +106,7 @@ Memory 与 Session 的生命周期不同。Session 记录完整对话，Memory �
 
 适合事实型 Memory、软删除、版本管理、合规查询和数据导出。框架 MySQL/PostgreSQL 实现通过稳定 memory ID 和 upsert 提供幂等写入。若需要语义检索，可以将 SQL 作为真相源，异步同步到 pgvector 或独立向量库。
 
-当前 PostgreSQL 包装器支持 `schema`、`table_name` 和 `skip_db_init`。先用迁移/运维身份初始化表，再配置 `skip_db_init=true` 和仅有表 DML 权限的 SecretRef，避免运行时要求建表权限。rc.5 的本地启用及真实测试边界见[记忆记录](validation/memory-postgres-2026-09-07.md)。
+当前 PostgreSQL 包装器支持 `schema`、`table_name` 和 `skip_db_init`。先用迁移/运维身份初始化表，再配置 `skip_db_init=true` 和仅有表 DML 权限的 SecretRef，避免运行时要求建表权限。验证层级见[验收说明](acceptance.md)。
 
 Memory 用户键不包含 Session ID。若不希望私聊事实被带入群聊，可设置 revision `memory_config.direct_only=true`，并保持 `preload_memory=0`、`auto_extract=false`；框架工具按可信请求受众过滤，群聊和未知受众无法调用 `memory_*`。该模式仅在用户明确操作时保存/读取，不等于自动长期记忆提取。
 
@@ -137,7 +137,11 @@ summarizer model and revision
 
 ## 5. Knowledge 和向量库
 
-Knowledge 包含两部分：原始文档真相和检索索引。原始文件放对象存储，文档元数据、版本和处理状态放 SQL，chunk 与 embedding 放向量库。
+Knowledge 包含原始文档与检索索引。生产建议原始文件放对象存储，元数据/处理状态放 SQL，chunk 与 embedding 放向量库。当前持久化 Job 管理入库/删除，Router 强制注入 tenant/app 过滤；它不等于任意文档格式都能自动解析。
+
+真实 Embedding 与聊天模型分开配置，部署者先用 `bin/trpc-embeddingcheck -env-file .env` 验证连通性、维度、有限数值和非零向量，再发布引用该模型及后端的 Revision。预检只发一条合成文本，不导入文档，不证明语义质量；模型名称、API 地址、Key 和维度不能从聊天配置猜测。
+
+运行时必须明确 `purpose=embedding` 的 Key 引用和 `purpose=knowledge` 的向量库凭据；不回退到 SDK 默认 Key。维度与目标 collection 必须一致，变更模型/维度需重建索引。远端请求禁止不受控重定向，限制响应大小，不导出原始供应商错误体或向量内容到 trace。
 
 ### Qdrant
 
@@ -170,23 +174,15 @@ mandatory metadata:
 
 ## 6. Artifact 和对象存储
 
-Artifact 适合放图片、语音、文件、代码产物和报表。对象 key 统一为：
+Artifact 用于文件和产物。建议的逻辑命名空间如下；当前物理对象布局由所复用的框架后端实现，不承诺与示例字符串完全相同：
 
 ```text
 env/{tenant_id}/{app_id}/{runtime_user_id}/{session_id}/{artifact_id}/{version}
 ```
 
-SQL `artifact_metadata` 分配版本并保存 checksum。上传流程为：
+当前复用 tRPC-Agent-Go Artifact Service，以 Storage Scope 隔离文件，通过 PostgreSQL advisory lock 保护跨节点的同名版本分配，操作记录保护重试。部署者必须提供 bucket-scoped 凭据和显式 Backend Binding，不使用 MinIO root 或隐式 SDK 身份。
 
-1. 在 SQL 事务中取得下一个版本，状态置为 `uploading`；
-2. 上传临时 object key；
-3. 校验大小和 checksum，执行病毒扫描；
-4. 原子更新 metadata 为 `ready`；
-5. 失败对象由清理任务回收。
-
-tRPC-Agent-Go 的 S3 Artifact Service 会通过列举已有版本计算新版本，并明确不保证同名并发写安全。生产 Router 应使用 SQL 版本分配器，或要求每次保存使用唯一 artifact ID。
-
-下载 URL 使用短期签名，不能把永久公网 URL 写入模型上下文。上传和下载都限制文件大小、MIME 类型、压缩比和访问域名，防止恶意文件及 SSRF。
+生产可进一步增加独立元数据分配器、临时对象校验、病毒扫描和过期对象回收，但这些流程不应当作当前已实现的完整附件平台。已实现的 Telegram 限类型导入会检查大小、MIME、图片尺寸和路径，并按原会话授权读取；当前没有完整杀毒、Office/PDF 解析和媒体发送。
 
 ## 7. Audit Log
 

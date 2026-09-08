@@ -210,7 +210,7 @@ func modelProbe(ctx context.Context, baseURL, apiKey string) check {
 		result.Detail = "model listing reachable; generation not tested"
 	} else if result.Detail == "HTTP 404" || result.Detail == "HTTP 405" {
 		result.State = "unknown"
-		result.Detail += "; listing unavailable, use check-model.sh"
+		result.Detail += "; listing unavailable, use bin/trpc-modelcheck"
 	}
 	return result
 }

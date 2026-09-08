@@ -12,7 +12,7 @@
 
 以下 DDL 是最小逻辑模型，省略了组织成员、RBAC、计费明细和知识文档分片等扩展表。
 
-当前仓库的可执行 schema 由 `trpcservice/database/migrations/001..009` 管理，实际包含：
+当前仓库的可执行 schema 由 [001–023 migrations](../trpcservice/database/migrations) 管理，核心包括：
 
 ```text
 tenant / agent_app / agent_revision

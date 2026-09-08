@@ -73,17 +73,24 @@ func TestRoleHTTPBoundaryIntegration(t *testing.T) {
 					if err != nil {
 						t.Errorf("test process stopped: %v; %s", err, logs.String())
 					}
-				case <-time.After(5 * time.Second):
+				// The service allows HTTP shutdown up to 10s; leave room for
+				// the race runtime to exit as well, rather than killing early.
+				case <-time.After(15 * time.Second):
 					_ = cmd.Process.Kill()
 					<-finished
 					t.Error("test process did not shut down")
 				}
 			})
-			client := &http.Client{Timeout: time.Second}
+			transport := http.DefaultTransport.(*http.Transport).Clone()
+			// Registered after the process cleanup: LIFO closes this test's
+			// pooled connections before the server is asked to shut down.
+			t.Cleanup(transport.CloseIdleConnections)
+			client := &http.Client{Timeout: time.Second, Transport: transport}
 			ready := false
 			for range 100 {
 				res, err := client.Get("http://" + addr + "/readyz")
 				if err == nil {
+					_, _ = io.Copy(io.Discard, res.Body)
 					_ = res.Body.Close()
 					if res.StatusCode == 200 {
 						ready = true

@@ -1,154 +1,107 @@
 # 核心消息时序
 
-本文是原始生产方案时序，包含计划中的队列分区、卡片和自建应用回调；不是当前每条真实请求的逐步代码记录。当前实际队列为 Redis Streams 消费组，不保证按 conversation 分区；同 Session 依靠 Coordinator 协调。已真实接入的企业微信群采用主动消息 MCP，实际接收/发送顺序见[运行链路](wecom-mcp-runtime.md)，没有加密 callback。当前 Sender 只发文本，不能把图中的卡片渲染视为已实现。
+以已实现的企业微信群消息 MCP 为例。Telegram 和企业微信自建应用在接收/发送协议上不同，进入 Gateway 后复用同一链路，见[通道接入](im-channels.md)。
 
-## 1. 企业微信消息完整链路
+## 1. 企业微信 → Agent → Tool / 存储 → 回复
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant U as 企业微信用户
-    participant C as WeCom Adapter
+    participant IM as 企业微信消息服务
+    participant C as Channel Adapter / Poller
     participant G as Agent Gateway
-    participant DB as Control DB / Inbox
-    participant Q as Message Queue
+    participant DB as PostgreSQL / Inbox / Journal
+    participant Q as Relay / Redis Streams
     participant W as Agent Worker
     participant L as Session Coordinator
-    participant S as Session Service
-    participant R as Runner
+    participant R as Runner / LLMAgent
+    participant S as Session 后端
     participant M as Model
-    participant P as Plugin / Guardrail
+    participant P as Guardrail / Permission
     participant T as Tool / MCP
-    participant A as Approval / Tool Journal
-    participant J as Summary / Memory Queue
-    participant O as Reply Outbox
+    participant MEM as Memory 后端
     participant D as Reply Sender
 
-    U->>C: 加密 callback
-    C->>C: 验签、解密、校验 CorpID/AgentID
-    C->>G: InboundEnvelope + trace context
-    G->>G: 解析 binding、身份映射、生成 session_id/request_id
-    G->>DB: 事务写 inbound_message + outbox
-    Note over G,DB: UNIQUE(binding_id, external_message_id)
-    DB-->>G: committed
-    G-->>C: accepted
-    C-->>U: 快速 ACK
-
-    DB->>Q: Outbox Relay 发布任务
-    Q->>W: 按 conversation_key 分区投递
-    W->>L: Acquire lease
-    L-->>W: fencing_token
-    W->>DB: CAS agent_run=PENDING→RUNNING
-    W->>S: GetSession
-    S-->>W: session/events/state/summary
-    W->>R: Run(request_id, runtime_user_id, session_id)
-    R->>S: Append 用户 Event
-    Note over R,S: 用户输入先于模型调用持久化
+    U->>IM: 发送群消息
+    C->>IM: 读取已授权群的完整分页窗口
+    IM-->>C: 源消息
+    C->>C: 群/成员/@校验、指纹去重、身份映射
+    C->>G: 可信 Inbound + trace context
+    G->>DB: 原子保存 Inbox / Run / Queue Outbox
+    DB-->>G: 已提交的 request_id
+    G-->>C: 接收完成
+    C->>DB: seen / 检查点版本更新
+    Q->>DB: Claim Queue Outbox
+    Q->>W: 发布并投递任务 / traceparent
+    W->>L: 获取会话租约与 fencing token
+    W->>DB: Claim Run / 校验所有权
+    W->>R: Run(ctx, user, session, Message)
+    R->>S: 读取历史并持久化用户 Event
+    R->>P: 输入/预算检查
+    P-->>R: 允许（拒绝时终止，不调用模型）
     R->>M: GenerateContent
-    M-->>R: 流式文本或 tool_call
+    M-->>R: tool_call
 
-    alt 模型请求工具
-        R->>P: BeforeTool / PermissionPolicy
-        alt deny
-            P-->>R: denied result
-        else ask
-            P-->>R: approval_required
-            R->>A: tool_approval(arguments_hash)
-            R-->>W: 审批事件
-            W->>O: 写确认文本/卡片任务
-        else allow
-            P-->>R: allow
-            R->>A: tool_execution=running
-            R->>T: 执行工具，携带业务幂等键
-            T-->>R: 工具结果
-            R->>A: succeeded/failed + result_hash
-            R->>S: Append tool result + StateDelta
-            R->>M: 继续生成最终答案
+    alt 工具允许执行
+        R->>P: ToolFilter / PermissionPolicy / 用户权限
+        P-->>R: allow
+        R->>DB: Tool Journal 授权执行记录
+        R->>T: 执行受控工具
+        opt 工具写入长期记忆
+            T->>MEM: 按 tenant/app/user 提交 Memory
+            MEM-->>T: 已提交
         end
+        T-->>R: 工具结果
+        R->>DB: 工具结果/业务操作状态
+        R->>S: 工具结果 Event / StateDelta
+        R->>M: 基于工具结果继续回答
+        M-->>R: 最终文本
+    else 需要审批
+        R->>P: 权限检查
+        P-->>R: ask
+        R->>DB: 保存绑定用户/会话/参数的 Approval
+        Note over R,T: 此分支不执行危险工具
+    else 拒绝
+        R->>P: 权限检查
+        P-->>R: deny
     end
 
-    M-->>R: 最终回答
-    R->>S: Append assistant Event + StateDelta
-    R-->>W: Event stream closed
-    W->>DB: 事务写 agent_run=COMPLETED + outbound
-    W->>J: durable summary job
-    W->>J: durable memory job
-    W->>L: Release lease
-
-    O->>D: Claim outbound + 恢复 traceparent
-    D->>D: 长度切分、卡片渲染、限流
-    D->>U: 企业微信发送 API
-    U-->>D: 发送结果
-    D->>DB: 更新 delivery 状态和重试次数
+    R->>S: 完整 Agent Event / StateDelta
+    R-->>W: Event channel 关闭
+    W->>DB: 完成 Run / 创建 Outbound
+    W->>DB: 持久化 Summary / 自动 Memory 等后台任务
+    W->>L: 释放租约
+    W->>Q: 核对队列所有权后 ACK
+    D->>DB: Claim Outbound / 创建发送尝试
+    D->>IM: message_aibot_send（文本或审批提示）
+    IM-->>D: 发送结果
+    D->>DB: 保存 sent / unknown / rejected 事实
+    IM-->>U: 用户看到回复
 ```
 
-## 2. trace_id 和 request_id
+图中的 Memory 写入是已授权 memory 工具分支；未启用该工具时不会每轮自动写长期记忆。自动提取、Summary 和知识入库由独立 Jobs 执行，不应把“任务已提交”当作“后端已更新”。
 
-外部 IM 通常不会携带可复用的 W3C trace context，因此 Channel Adapter 在收到 callback 时创建根 span。`trace_id` 贯穿可观测链路，`request_id` 负责业务幂等，两者不能互相替代。
+审批后用户在原会话发送严格批准/拒绝命令，Gateway 校验绑定、身份、参数与有效期，生成幂等 continuation；模型文字本身不能代替平台审批。副作用工具已有未知结果时不得盲目重跑。
 
-建议在 context、消息头和任务 payload 中传播以下字段：
+## 2. 其他入站方式
 
-```text
-trace_id
-request_id
-tenant_id
-app_id
-revision_id
-channel_binding_id
-session_id
-runtime_user_id
-actor_user_id
-fencing_token
-```
+Telegram Webhook 验证 Secret，企业微信自建应用 callback 验签并解密，随后规范化到同一 Inbound。回调必须先持久化，再快速 ACK，不能阻塞等待 Runner。托管消息 MCP 为主动读取，没有加密 callback 或对用户消息的 HTTP ACK。
 
-Worker 调用 Runner 时使用 `agent.WithRequestID`。Tool、Session、Memory、Knowledge、Artifact Router 都从 context 创建子 span；Worker 把当前 `traceparent` 写入 outbound payload，Reply Sender 恢复父上下文后再调用 IM API。跨 Agent Queue 和 Background Job 同样持久化 traceparent。
+HTTP 调试入口先执行 Bearer 与租户/Binding/用户授权，不允许冒充 IM Binding。其 202 响应表示可靠接收，不代表模型执行或 IM 投递完成。
 
-## 3. 事件消费与流式回复
+## 3. request_id 与 trace_id
 
-Runner 返回的 Event channel 必须由一个 goroutine 持续读取到关闭。IM 平台的发送速度不能反向阻塞 Runner，因此 Worker 内部需要一个小型聚合器：
+request_id 标识逻辑请求及其恢复/去重；trace_id 关联观测链路，两者不能互换。外部 IM 没有可信 W3C context 时由入口创建根 span，Queue Outbox、AgentTask、Outbound 保存传播信息。
 
-- partial text 合并为较大的 delta；
-- tool call、tool result、error 和最终事件单独保留；
-- 对不支持流式的通道只保留最终回复；
-- 对支持编辑消息的通道按最小更新时间间隔推送预览；
-- 传输断开时取消 run context，但继续排空 Event channel。
+Runner、模型、Tool/MCP、Session/Memory/Knowledge、Sender 都继承或关联该 context；审批继续执行可通过 span link 关联原请求。重试与异步处理不能依赖上游 HTTP 请求仍存活。
 
-推荐结构如下：
+span 只记录必要类型、耗时、状态和关联 ID，不记录完整输入/输出、用户原文、密钥、数据库 DSN 或 MCP URL。对外 MCP 不传播 baggage。
 
-```go
-events, err := r.Run(runCtx, userID, sessionID, msg, opts...)
-if err != nil {
-    return err
-}
+## 4. 取消、故障和并发
 
-for evt := range events {
-    accumulator.Consume(evt)
-    publisher.TryPublish(evt) // 有界、可合并，不能阻塞事件消费
-}
-```
+服务根 Context 随 SIGINT/SIGTERM 取消，各角色循环可取消等待并由 errgroup 回收。Runner 的 Event channel 持续消费到关闭，错误事件不应导致消费者直接退出而让发送方永久阻塞。
 
-客户端断开或 IM 发送失败后，`publisher` 可以停止发送，但 Event 消费 goroutine 仍要运行。取消后超过 drain timeout 仍未关闭时记录错误指标，并由 Worker 生命周期管理器等待或强制回收。
+会话租约和队列所有权丢失会取消执行；旧 Worker 即使恢复也不能提交新 owner 的结果。相同会话的执行由 Coordinator 保护，不依赖 Redis Streams 按会话分区。不同 Worker 可并行处理不同会话。
 
-## 4. callback 数据库不可用
-
-如果 Gateway 无法把 inbound message 和 outbox 可靠提交，就不能向 IM 返回成功。应返回协议允许的失败状态，让上游重试。为了降低数据库抖动造成的回调风暴，可以设置短超时、连接池隔离和入口限流，但不能用内存队列替代持久化确认。
-
-如果写入成功但 ACK 丢失，上游会重投相同消息。唯一索引返回已有记录，Gateway 再次返回成功，不创建第二个 Agent run。
-
-## 5. Worker 故障恢复
-
-Worker 取得租约后定期续租。节点崩溃时租约过期，队列任务会被重新投递。新 Worker 先查询 `agent_run` 和 Session Event：
-
-- run 已完成：复用已保存的 outbound reply；
-- 已有 terminal Event，但 run 状态未提交：重建结果并补写状态；
-- 仅有用户 Event：根据 Agent 类型决定安全重跑或 `WithResume(true)`；
-- 已产生副作用工具调用：先查询 tool execution journal，禁止盲目重放；
-- 没有任何 Event：重新执行。
-
-旧 Worker 恢复后即使仍持有本地结果，也会因 fencing token 落后而无法提交状态和回复。
-
-## 6. 用户取消
-
-取消请求通过 `request_id` 路由到当前 Worker。若 Runner 实现 `ManagedRunner`，调用 `Cancel(request_id)`；同时把 `agent_run.cancel_requested_at` 持久化，避免取消 RPC 丢失。Worker 收到 context cancellation 后继续排空 Event channel，再根据租户策略决定是否保存已经产生的 assistant partial text。
-
-取消不等于回滚工具副作用。已经提交的外部操作进入补偿或人工对账流程，审计日志记录 `decision=cancel_after_side_effect`。
+数据库失败不创建空 Session 降级；任务保留在持久化链路退避恢复。模型/工具超时必须区别是否可能已发生副作用。IM 发送结果 unknown 时停止自动重发，查询业务事实或供应商证据后处理，不把超时误当作回滚。

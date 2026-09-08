@@ -19,10 +19,7 @@
 
 Redis、MySQL 和 PostgreSQL Session 适配器可以保证单次 `AppendEvent` 内部原子，但两个 Runner 仍可能交错执行。例如 A、B 两条用户消息几乎同时到达，两个 Worker 都先读取旧 Session，再分别调用模型。即使数据库最终按顺序写入，B 的模型上下文也没有包含 A 的回答。
 
-平台采用两层串行化：
-
-- 消息队列以 `conversation_key` 分区，正常情况下同一会话由一个消费者顺序处理；
-- Session Coordinator 提供跨节点租约和 fencing token，处理 rebalance、重投和网络分区。
+当前 Redis Streams 消费组不保证按 conversation 分区；同一会话整轮串行化依赖 Session Coordinator 的跨节点租约和 fencing token。队列分区是可选的调度优化，不能代替此正确性约束。重投和网络分区时仍可能短暂出现旧消费者，关键提交必须核对所有权。
 
 Redis 租约示例：
 
@@ -157,7 +154,7 @@ planned → dual_write → backfill → verify → cutover → completed
 
 ## 9. 本地向量库到远端向量库
 
-代码现状：已实现同 embedding/维度的历史 chunk/vector 自动回填、持久化游标、写意图修复和服务器校验门禁，见[当前迁移实现及边界](code-gap-closure.md#3-knowledge-回填与校验)。下面的原始文档重建和业务 top-k 影子评估用于更换 Embedder 或生产质量验证，不能与已实现的后端复制混为一谈。
+当前已实现同 embedding/维度的历史 chunk/vector 自动回填、持久化游标、写意图修复和服务器校验门禁。原始文档重建和业务 top-k 影子评估用于更换 Embedder 或生产质量验证，不能与后端复制混为一谈。
 
 向量迁移以原始文档和 chunk 元数据为真相，不把旧库向量结果当成唯一来源。新旧库必须使用相同 embedding 模型和维度；如果 embedding 模型也变化，需要重新计算向量，不能直接复制。
 
@@ -186,3 +183,14 @@ planned → dual_write → backfill → verify → cutover → completed
 | Knowledge 索引 | 最终一致 | 用 revision 和索引状态控制可见性 |
 | Artifact 二进制 | 写后可读 | 元数据和对象需要对账 |
 | Audit 分析索引 | 最终一致 | 原始审计记录先可靠落库 |
+
+## 11. 已实现迁移与队列的约束
+
+- 自动 Memory 以 SQL `background_watermark` 为真相，原子单调推进；旧 Session 水位仅首次导入，自动路径只允许 canonical-ID 幂等 add，不开放自动 update/delete/clear。
+- Session 迁移保留 Event 身份、内容、顺序、State 和 Summary；staging 切读依赖服务器生成且当前仍有效的验证证明。历史未登记主体需提供完整清单，不能凭客户端 `passed:true` 跳过核验。
+- Knowledge Upsert/Delete 先写 `knowledge_sync` 意图并提升 app epoch；同 app 锁协调双写、回填和切换。失败意图保留修复，后续写入使旧证明失效，绕过平台直接修改 collection 不受此协议保护。
+- Knowledge 回填每作业最多 50 chunks，以 ID 游标续作，先持久化续作任务再 ACK；逐项比较内容、metadata、维度和数值，并做检索探针。当前每 tenant/app 上限 100000 chunks，超过显式失败；更换 Embedding 必须从原文重建。
+- 使用 `/admin/backend-migrations/backfill-knowledge`、`verify-knowledge`、`knowledge-status` 查询和推进，要求租户权限与 operation_id。切换时在服务器锁内检查证明/epoch，持续编辑可能反复使验证失效，向量检索仍是最终一致。
+- Redis Stream 只允许一个平台 consumer group，消费者身份带独立后缀；长任务保活 pending，ACK/Retry 核对实际所有权。只删除已确认记录或安全前缀，容量满时拒绝 Publish，原任务留在 SQL Outbox，不裁剪未读或 pending 任务。
+
+迁移与恢复不得通过清空幂等、预算、发送尝试或审计状态来完成。数据库事实恢复不代表外部工具或 IM 副作用已经回滚。

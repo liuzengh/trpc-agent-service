@@ -6,6 +6,8 @@
 
 本方案以 tRPC-Agent-Go `v1.11.x` 为运行内核。框架负责 Agent 编排、Runner 事件流、Session、Memory、Artifact、Knowledge、Tool/MCP、Plugin/Guardrail 和 OpenTelemetry 埋点。平台层负责租户注册、配置发布、消息路由、分布式并发控制、后端选择、持久化任务、IM 账号绑定、审计与运维。
 
+图中标注“扩展”的后端、渠道和密钥服务是生产方案选项，不表示本版已接入。实际复用范围见第 9 节，验证层级见[验收说明](acceptance.md)。
+
 设计遵循四条约束：
 
 1. Worker 不保存会话真相。配置可以缓存，Session、Memory 和任务状态必须落在共享后端。
@@ -19,7 +21,7 @@
 flowchart LR
     subgraph External[外部系统]
         WECOM[企业微信]
-        WECHAT[微信公众号 / 微信客服]
+        WECHAT[微信公众号 / 微信客服<br/>扩展]
         TG[Telegram]
         TOOLAPI[企业工具 / MCP]
     end
@@ -33,13 +35,13 @@ flowchart LR
     subgraph Control[控制面]
         ADMIN[Admin API]
         CONFIG[(Control DB)]
-        SECRET[KMS / Secret Manager]
-        DIST[Config Distributor]
+        SECRET[EnvStore / Secret 引用<br/>KMS 扩展]
+        DIST[Revision 读取与缓存<br/>主动分发可扩展]
     end
 
     subgraph Runtime[运行面]
         INBOX[(Inbound / Outbox)]
-        MQ[[按 conversation_key 分区的队列]]
+        MQ[[Redis Streams 工作队列]]
         WORKER[Agent Worker]
         LEASE[Session Coordinator<br/>Lease + Fencing Token]
         RUNNER[runner.Runner]
@@ -52,10 +54,10 @@ flowchart LR
     subgraph Data[数据面]
         ROUTER[Storage Router]
         REDIS[(Redis)]
-        SQL[(PostgreSQL / MySQL)]
-        VECTOR[(Qdrant / Milvus)]
+        SQL[(PostgreSQL<br/>MySQL 可扩展)]
+        VECTOR[(Qdrant<br/>Milvus 可扩展)]
         OBJECT[(S3 / MinIO)]
-        MEMORY[External Memory Service]
+        MEMORY[External Memory Service<br/>扩展]
     end
 
     subgraph Observe[可观测性]
@@ -141,13 +143,13 @@ Reply Sender 与 Agent Worker 分离。Worker 只写标准化回复到 outbound 
 
 ## 5. 运行面与 Runner
 
-消息队列按 `conversation_key` 分区。推荐键为：
+会话协调以 `conversation_key` 定位，逻辑字段为：
 
 ```text
 tenant_id | app_id | runtime_user_id | session_id
 ```
 
-分区可以让同一会话的消息按顺序到达，但在消费者 rebalance、超时重投和网络分区时仍可能短暂出现双消费者。因此 Worker 在调用 Runner 前必须取得 Session Coordinator 发放的租约和单调递增 fencing token。后续更新 `agent_run`、conversation 水位和 outbound message 时都要检查 token，旧 Worker 即使恢复连接也不能覆盖新 Worker 的结果。
+当前 Redis Streams 消费组不保证按会话分区，正确性依赖 Coordinator。在重投和网络分区时可能短暂出现双消费者，因此 Worker 调用 Runner 前必须取得会话租约和单调递增 fencing token；关键提交核对所有权，旧 Worker 恢复后不能覆盖新 Worker 的结果。分区可作为未来降低争用的优化，不能替代这些检查。
 
 平台可以使用一个共享 Runner，并在请求级注入 Agent、模型和治理策略：
 
@@ -195,21 +197,21 @@ tRPC-Agent-Go 的 Runner 在构造时接收 Session、Memory 和 Artifact Servic
 
 配置隔离通过 Control DB 的 `tenant_id` 外键、不可变 revision 和服务端授权实现。数据隔离通过 Storage Router 强制命名空间实现。工具隔离不能只依赖工具列表：`WithToolFilter` 控制模型可见性，`WithToolPermissionPolicy` 和 Tool 自身的 `PermissionChecker` 才是执行边界。
 
-密钥只保存 Secret Manager 引用。Worker 在调用模型、MCP 或 IM API 前按需取回短期凭据，使用后不写入 Session、Memory、日志或 trace。日志记录规范化 ID 和参数摘要；需要留存原始内容时，写入独立加密审计仓库，并受更严格的访问控制和保留期约束。
+控制面只保存密钥引用；当前 EnvStore 按租户/用途精确授权，相关角色按需解析，不写入 Session、Memory、日志或 trace。短期凭据、Workload Identity 与 KMS 是生产扩展目标。日志记录规范化 ID 和参数摘要，原始内容留存须单独配置加密、访问控制与保留期。
 
 ## 9. 可复用能力和平台新增能力
 
 | 领域 | 直接复用 tRPC-Agent-Go | 平台新增 |
 | --- | --- | --- |
-| Agent 编排 | LLMAgent、GraphAgent、Chain、Parallel、Cycle | Agent App 注册、revision 编译和灰度 |
+| Agent 编排 | LLMAgent；其他编排可扩展 | Agent App 注册、revision 编译和灰度 |
 | 执行 | `runner.Runner`、Event 流、取消、恢复 | Worker 调度、session 租约、事件排空 |
-| Session | inmemory、Redis、MySQL、PostgreSQL、SQLite、MongoDB 等 | Storage Router、幂等 journal、迁移 |
-| Memory | 内置接口、Redis/SQL、Mem0、Extractor | 租户路由、持久化提取任务和水位 |
+| Session | InMemory、Redis、PostgreSQL；其他后端可扩展 | Storage Router、幂等 journal、迁移 |
+| Memory | 内置接口、InMemory、Redis/PostgreSQL、Extractor | 租户路由、持久化提取任务和水位 |
 | Knowledge | Source、Chunking、Embedder、Retriever、VectorStore | 知识库控制面、强制租户过滤和迁移 |
-| Artifact | InMemory、COS、S3 等 | 版本分配、配额、病毒扫描和生命周期 |
+| Artifact | InMemory、S3-compatible | 版本锁与受控附件导入；完整扫描/生命周期待扩展 |
 | Tool/MCP | Function Tool、MCP Tool、运行时过滤 | 工具目录、租户授权、密钥注入和审批 |
 | 治理 | Plugin、Guardrail、Callbacks | 策略中心、预算、审计和 IM 身份校验 |
-| 协议 | OpenAI、AG-UI、A2A、OpenClaw 模型 | 统一 Gateway、企业微信/微信 Channel |
+| 协议 | OpenAI-compatible 模型、MCP；server/*/OpenClaw 可扩展 | 统一 Gateway、Telegram/企业微信 Channel |
 | 可观测性 | OpenTelemetry spans/metrics | 租户成本、审计索引、告警和 SLO |
 
 ## 10. 部署形态

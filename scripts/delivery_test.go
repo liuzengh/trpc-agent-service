@@ -65,7 +65,7 @@ func writeDeliveryFixture(t *testing.T, root, path, content string) {
 }
 
 func TestSourcePackageOnlyCommittedPublicFiles(t *testing.T) {
-	root := deliveryFixture(t, "package-source.sh")
+	root := deliveryFixture(t, "build.sh")
 	writeDeliveryFixture(t, root, ".gitignore", ".env\ndata/*\n!data/README.md\nbin/\ndist/\n")
 	writeDeliveryFixture(t, root, ".env", "PRIVATE_CANARY")
 	writeDeliveryFixture(t, root, "data/private.dump", "PRIVATE_CANARY")
@@ -73,7 +73,7 @@ func TestSourcePackageOnlyCommittedPublicFiles(t *testing.T) {
 	writeDeliveryFixture(t, root, ".env.example", "PROVIDER=mock")
 	deliveryCommand(t, root, "git", "add", ".")
 	deliveryCommand(t, root, "git", "commit", "-qm", "fixture")
-	deliveryCommand(t, root, "bash", "package-source.sh")
+	deliveryCommand(t, root, "bash", "build.sh", "--package")
 	archives, _ := filepath.Glob(filepath.Join(root, "dist", "*.tar.gz"))
 	if len(archives) != 1 {
 		t.Fatal("missing source package")
@@ -111,17 +111,17 @@ func TestSourcePackageOnlyCommittedPublicFiles(t *testing.T) {
 		t.Fatal("wrong archive members")
 	}
 	deliveryCommand(t, filepath.Join(root, "dist"), "sha256sum", "-c", filepath.Base(archives[0])+".sha256")
-	deliveryMustFail(t, root, "package-source.sh") // no overwrite
+	deliveryMustFail(t, root, "build.sh --package") // no overwrite
 	writeDeliveryFixture(t, root, "new-source.go", "package example")
-	deliveryMustFail(t, root, "package-source.sh") // no silent omission of untracked source
+	deliveryMustFail(t, root, "build.sh --package") // no silent omission of untracked source
 	deliveryCommand(t, root, "git", "add", "new-source.go")
-	deliveryMustFail(t, root, "package-source.sh") // no omission of staged source
+	deliveryMustFail(t, root, "build.sh --package") // no omission of staged source
 }
 
 func TestSourcePackageRejectsTrackedPrivateFileAndSymlink(t *testing.T) {
 	for _, mode := range []string{"private", "symlink"} {
 		t.Run(mode, func(t *testing.T) {
-			root := deliveryFixture(t, "package-source.sh")
+			root := deliveryFixture(t, "build.sh")
 			if mode == "private" {
 				writeDeliveryFixture(t, root, ".env", "PRIVATE_CANARY")
 			} else {
@@ -131,7 +131,7 @@ func TestSourcePackageRejectsTrackedPrivateFileAndSymlink(t *testing.T) {
 			}
 			deliveryCommand(t, root, "git", "add", ".")
 			deliveryCommand(t, root, "git", "commit", "-qm", "fixture")
-			deliveryMustFail(t, root, "package-source.sh")
+			deliveryMustFail(t, root, "build.sh --package")
 		})
 	}
 }

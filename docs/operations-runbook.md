@@ -1,12 +1,10 @@
-# 本地运行与升级手册
+# 安装、部署与运行手册
 
-这份文档是日常操作入口。按手动测试方式运行，不设置开机自启；模型服务、Agent、数据依赖和公网 Tunnel 是不同的进程。学习内部链路看[上手指南](getting-started.md)，核对完成范围看[功能状态](feature-status.md)。
+所有命令在仓库根目录执行。已有配置和数据库的环境不要重新 bootstrap，也不要复制模板覆盖 `.env`。
 
-## 1. 第一次安装和配置
+## 1. 环境与配置
 
-需要 Go（以 `go.mod` 为准，当前声明 1.24；Docker 构建使用 1.25）、Docker Compose 和 curl。手动 Agent 启停脚本需要 Linux、flock 和支持 pidfd 的内核；其他平台可直接管理 `go run`/二进制进程。使用本机 workbuddy2api 还需要已配置好的 `uv` 和 converter；Telegram Webhook 需要公网 HTTPS 入口，企业微信消息 MCP 主动拉取不需要公网回调。
-
-在仓库根目录运行，已有 `.env` 不要覆盖：
+Go 版本以 [go.mod](../go.mod) 为准。手动启停需要 Linux、flock 和支持 pidfd 的内核；其他系统可直接以前台二进制或容器运行。持久化/多进程部署还需要 Docker Compose 或自行准备 PostgreSQL、Redis，以及按需使用的 MinIO/Qdrant。
 
 ```bash
 test -f .env || cp .env.example .env
@@ -14,130 +12,146 @@ chmod 600 .env
 ./build.sh
 ```
 
-`.env.example` 默认是内存后端 + Mock，HTTP/Admin 和 MCP 轮询默认关闭。真正的日常 IM 配置包含以下几组，不是只填模型三项就能完成接入：
+模板使用 Mock Model 和 InMemory，不需要模型密钥或数据库；HTTP 聊天、Admin、外部 IM 默认关闭。进程环境变量优先于 dotenv 文件，配置在启动时读取。指定其他文件可用 `TRPC_AGENT_ENV_FILE=/path/dev.env ./start.sh`；脚本不把 dotenv 当 shell 代码执行。
 
-| 配置组 | 保存位置与作用 |
-| --- | --- |
-| 模型 | `.env` 的 provider/name/key/base URL；本地转换服务使用已验证的模型 ID |
-| PostgreSQL | 控制面、Inbox/Run/Outbox、审批、审计、接收与发送事实；连接信息只在 `.env`/Secret |
-| Redis | Session、Coordinator、Idempotency、Queue、Quota 的后端开关和 URL/prefix |
-| IM 凭据与授权 | `.env` 保存 Token/完整 MCP URL；`TRPC_AGENT_SECRET_GRANTS_JSON` 精确授权租户和用途 |
-| Channel Binding | 保存在 PostgreSQL，含租户/App、账号、群/成员白名单、SecretRef；不把 Token 填进 Binding |
-| 接收开关 | Telegram 用已登记的 Webhook；企业微信另需 `TRPC_AGENT_WECOM_MCP_TARGETS_JSON` |
-| 本地运维 | HTTP/Admin 默认关闭；按需启用、鉴权；OTel 指向本地 Collector |
-
-仅在全新的开发数据库上，设置 PostgreSQL 控制面、`TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=true` 后执行一次 `./bin/trpc-migrate` 创建教学租户；随后改回 `false`，不要覆盖已经发布的教学配置。新通道按 [Telegram 手册](telegram-manual-runbook.md)或[企业微信 MCP 配置](wecom-mcp-runtime.md)绑定。生产不使用教学账号或自动 bootstrap。
-
-一般配置优先级是命令行参数 > 已导出的环境变量 > `.env` > 默认值。`start-real.sh` / `check-model.sh` 会清掉旧的模型环境变量并强制 OpenAI-compatible 模式，让模型配置取自选定的 env 文件；**其他变量仍遵循环境优先**。不需要为正常启动 `source .env`。
-
-## 2. 每次启动
-
-终端 A，模型来自本机 workbuddy2api 时：
-
-```bash
-./start-workbuddy2api.sh
-```
-
-保持这个前台终端运行。默认目录是 `~/workbuddy2api`；参数是原来的 `--desensitize --log converter.log --api-key 0`。`WORKBUDDY2API_DIR` 是启动脚本自己的环境变量，不从项目 `.env` 加载。Key `0` 仅用于本机测试，不应对公网开放转换服务。
-
-终端 B，本机日常实例已配置 PostgreSQL、Redis、MinIO 和 Qdrant：
-
-```bash
-docker compose up -d postgres redis minio qdrant
-./check-model.sh
-./start-real.sh
-curl -fsS http://127.0.0.1:8080/readyz
-```
-
-模型检查会真实调用一次模型，但不启用 Bot。`start-real.sh` 检查已有 Compose PostgreSQL/Redis/MinIO/Qdrant 的运行或健康状态，**不会替你创建依赖**；未配置对应后端的开发环境可省略它们。随后核对 Agent PID 身份、记录启动时间/boot ID，并等待 HTTP 角色的 `/readyz`，避免仅凭进程存在就报告启动成功。非 HTTP 角色只确认进程，依赖可用性另查。主程序存在时不重新编译它，运维辅助程序会重新构建。
-
-重复启动不会覆盖正在运行的 Agent。日志采用追加方式，历史日志保留；PID 与元数据文件在 `data`，不要复制到另一台机器当作运行状态。MinIO/Qdrant 数据和密钥保持原配置，不必因正常重启重新初始化。
-
-需要 trace/metrics，再按需启动监控组件：
-
-```bash
-docker compose --profile observability up -d otel-collector prometheus tempo grafana
-```
-
-修改过 Compose 端口/网络配置后，`up` 可能重建相关容器。不要在聊天或业务操作进行中更新共享依赖；数据卷需保留。`/healthz` 仅表明进程存活，`/readyz` 才检查本角色所需依赖；两者都不能证明模型或 IM 平台此刻可用。
-
-终端 C，仅 Telegram 需要，使用你已经保存的 Named Tunnel 配置：
-
-```bash
-cloudflared tunnel --config /home/shiyu/.cloudflared/config.yml run trpc-agent-telegram
-```
-
-这个路径和名称属于本机示例，其他机器换成自己的配置。企业微信 MCP 无需启动这个 Tunnel，也不用把 MCP URL 填成回调地址。
-
-正常使用只需要从已授权的 Telegram/企业微信群发送消息，不必再重复配置 Binding、重新设置 Webhook或开启 HTTP 调试入口。
-
-### 一次查看当前状态
-
-```bash
-./status.sh
-```
-
-它读取配置并检查 Agent PID/readyz、PostgreSQL ping、Redis PING、模型 `/models`、本地 MinIO/Qdrant，以及 Compose 运行状态，不启动服务、不调用模型生成或发送 IM。模型列表能访问不等于聊天一定成功；若供应商以 404/405 表示不支持 `/models`，显示 unknown，另用 `check-model.sh`。连接失败、鉴权失败或其他非成功响应显示 down，不因缺少生成测试而忽略故障。MinIO/Qdrant 探针针对本仓库 Compose 的 loopback 端口，不代替远程后端审计。
-
-要同时检查公网入口，在私有 `.env` 设置已有的域名，不带回调路径或凭据：
+真实模型在 `.env` 配置：
 
 ```dotenv
-TRPC_AGENT_PUBLIC_BASE_URL=https://your-existing-domain.example
+TRPC_AGENT_MODEL_PROVIDER=openai
+TRPC_AGENT_MODEL_NAME="部署者选择的模型 ID"
+OPENAI_API_KEY="服务端密钥"
+OPENAI_BASE_URL="https://provider.example/v1"
+TRPC_AGENT_MODEL_STREAM=false
 ```
 
-`ok` 表示相应探针成功，`down` 表示已配置项失败，`unknown` 表示该检查无法确认。存在 down 时返回非零退出码；unknown 不会被误写成健康。公网 healthz 正常只说明入口可达，不能证明 Telegram API 出站正常。
+兼容服务须支持 OpenAI Chat Completions；本机模型转换服务由部署者单独启动。不要把简单本地测试 Key 的模型接口暴露到公网。聊天模型与 Embedding 分别配置、分别授权，不能混用。
 
-## 3. 修改代码或 `.env` 后怎样升级
+启用持久化平台时设置：
 
-改文件不会热更新已有进程。先确认没有正在等待的模型/危险工具操作；不要在真实群测试中运行其他实验脚本抢消费同一条队列。
+```dotenv
+TRPC_AGENT_CONTROL_PLANE_BACKEND=postgres
+TRPC_AGENT_SESSION_BACKEND=redis
+TRPC_AGENT_COORDINATOR_BACKEND=redis
+TRPC_AGENT_IDEMPOTENCY_BACKEND=redis
+TRPC_AGENT_QUEUE_BACKEND=redis
+TRPC_AGENT_QUOTA_BACKEND=redis
+TRPC_AGENT_POSTGRES_AUTO_MIGRATE=false
+TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=false
+```
 
-1. 保存私有 `.env`、当前二进制及数据库备份，备份权限设为仅本人可读。旧备份保留，不在公共日志输出内容。
-2. 用 `./stop.sh` 优雅退出 Agent。脚本核对工作区可执行文件、cwd、已记录的启动时间/boot ID，再通过 pidfd 对同一个进程发 SIGTERM，最多等待 20 秒；超时不强杀、不删除 PID 记录。旧格式 PID 文件也须匹配 exe/cwd，不能指向任意进程。模型和 Tunnel 不由这个脚本停止。
-3. 执行 `./build.sh` 编译新二进制。
-4. PostgreSQL 升级使用 `./bin/trpc-migrate`；它从仓库根目录 `.env` 和进程环境加载配置。确认 `TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=false`。分角色部署必须用独立迁移凭据，不能给 runtime 提升 DDL 权限。
-5. 执行 `./start-real.sh`，再检查 `/readyz`；确认没有反复启动失败，再发一条新的测试消息。
+同时提供 `TRPC_AGENT_POSTGRES_URL` 和 `REDIS_URL`。首次空环境由迁移身份执行 `./bin/trpc-migrate`；若需要示例租户，可只在首次初始化时显式启用 tutorial bootstrap，随后关闭。应用账号不应获得 DDL 权限。Backend Binding 与 Secret grant 见[后端方案](backend-adapters.md)和[治理说明](governance-operations.md)。
 
-当前代码 `0.2.0-rc.9` 对应 schema **23**，rc.5–rc.9 没有新增平台 migration；从此前 schema 16 升级需应用 **017–023**，迁移器会依据已应用记录跳过旧版本。新增内容包括审计函数、迁移协调元数据和回复分段记录。不要修改已应用 migration 的内容，也不要为回滚二进制反向删除新表。分角色部署须同步核对 SQL/Redis 权限；升级前排空或人工核对旧版未完成的发送记录，并停止旧 Worker/Jobs/Sender，不能混跑新旧并发配额和发送协议。
+## 2. 手动启动、状态和停止
 
-本机已在 2026-09-07 经用户授权完成 rc.4 升级，具体备份、配置变化及尚待真实消息验证的项目见[本地升级记录](validation/local-rc4-upgrade-2026-09-07.md)。这不等于生产上线；生产 SQL/Redis 账号、网络策略和告警通知接收方仍需部署者核对，见[部署权限](deployment-permissions.md)和[监控](monitoring.md)。
+Mock 和真实模型统一使用同一个入口，模型由配置决定：
 
-后续已部署 rc.5，并配置 PostgreSQL 长期记忆，见[Memory 启用记录](validation/memory-postgres-2026-09-07.md)。Memory 表由运维账号预建，运行时使用受限凭据和 `skip_db_init=true`。rc.5 增加可信会话类型传递及私聊记忆工具限制；不要用不识别该策略的旧 Worker 执行新 revision。
+```bash
+# 仅对选择了这些后端的环境执行；不需要的依赖可省略。
+docker compose up -d postgres redis minio qdrant
+./start.sh
+curl -fsS http://127.0.0.1:8080/readyz
+./bin/trpc-local status
+```
 
-rc.6 增加[可选的只读项目文档 MCP](project-docs-mcp.md)，schema 仍为 23。本机启用和真实 IM 验证状态见[记录](validation/project-docs-mcp-2026-09-08.md)。启用后它随 Agent 在 loopback 独立端口启动和关闭，无需新增终端；MCP 密钥和服务开关都保存在 `.env`。文档索引为启动快照，修改白名单文档后需要重启刷新。
+启动前检查已有 Compose 依赖状态；成功启动须通过 PID 身份核对和 HTTP 就绪检查。不会自动创建依赖、启动模型、注册 IM 或配置开机自启。主程序已存在时不会自动重编译；改代码先正常停止，再构建启动。
 
-rc.7 补齐 [Telegram 出站诊断](telegram-delivery-diagnostics.md)。新增的是错误分类和 HTTP 阶段，不是自动恢复承诺；收到消息、模型执行完成、回复送达必须分别核对。`dead + unknown` 不会因为重启而重发，也不能靠扩大重试次数解决。
+`trpc-local status` 只读检查 PID、readyz、配置的数据库/Redis、模型列表和本地对象/向量服务。模型列表成功不等于生成成功；不支持列表的 404/405 为 unknown，连接/鉴权失败为 down。可在 `.env` 配置不含凭据的 `TRPC_AGENT_PUBLIC_BASE_URL` 检查公网 healthz，但这不能证明 IM 出站可达。
 
-rc.8 将 Embedding 预检与正式 Knowledge 接到同一个安全包装层，新增本地 Qdrant API Key 配置。启用真实 Knowledge 后必须保留 Qdrant 数据卷、密钥、1024 维绑定和对应 revision；不要只启动聊天模型就假定知识检索可用，见[运行链路](knowledge-runtime.md)。
+需要单独诊断时直接使用已构建的命令，无额外 shell 包装：
 
-rc.9 增加每工具的用户白名单及仅私聊限制，用于[本地工作项审批](validation/workitem-approval-2026-09-08.md)。先升级 Worker 再发布新权限字段；配置回滚不得自动撤销已提交的业务写入，待批及不确定操作仍须按原请求核对。
+| 命令 | 行为 |
+| --- | --- |
+| `./bin/trpc-modelcheck -env-file .env` | 一次真实模型生成，会消耗模型额度 |
+| `./bin/trpc-embeddingcheck -env-file .env` | 一次合成文本 Embedding 请求，不导入知识库 |
+| `./bin/trpc-wecomcheck -env-file .env` | MCP initialize/tools-list，不读取业务消息或发送 |
+| `./bin/trpc-local status -env-file .env` | 只读依赖探针，不调用生成 |
 
-## 4. 测试结束如何停止
+检查器同样遵循“进程环境优先”；若终端遗留了旧配置，先清除对应环境变量。不要在命令行或日志中传真实密钥。
+
+停止：
 
 ```bash
 ./stop.sh
 ```
 
-确认 Agent 已退出后，在 Tunnel 与 workbuddy2api 的前台终端分别按 Ctrl+C。如果没有其他程序使用这些依赖，再执行：
+脚本共享生命周期锁，核对工作区 exe/cwd、PID 启动时间与 boot ID，通过 pidfd 对同一进程发送 SIGTERM，最多等待 20 秒；身份不符或超时不强杀、不删除证据。仅停止 Agent，模型、Tunnel 和数据库由部署者单独管理。
+
+## 3. HTTP、Admin 和 IM
+
+HTTP 调试入口默认关闭；启用时必须配置强随机 Token 和精确的租户/Binding/用户授权，见[访问控制](governance-operations.md#1-访问控制)。`/chat` 返回完整 JSON；`/inbound` 在 Inbox/Run/Outbox 原子提交后返回 202，异步结果由 Sender 处理。
+
+使用已初始化的 tutorial HTTP Binding，可在受控终端单独注入对应 HTTP Token 后调用：
 
 ```bash
-docker compose stop postgres redis minio
-docker compose --profile observability stop otel-collector prometheus tempo grafana
+curl -fsS http://127.0.0.1:8080/chat \
+  -H "Authorization: Bearer $TRPC_AGENT_HTTP_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"binding_key":"tutorial-http","message_id":"client-001","user_id":"alice","session_id":"demo","message":"你好"}'
 ```
 
-不删除 `.env`、Tunnel 凭据或数据卷，不执行 `down -v`。停止模型或数据库不会自动停止 Agent；错误恢复测试之外，应先停 Agent 再停依赖。
+新消息使用新的 message_id，重试原消息复用原 ID；保持 user_id/session_id 延续会话。不要把模型或 IM Token 当成 HTTP Token，也不要为了 curl 把整份私有配置公开到日志。
 
-## 5. 常见问题
+Admin 仅在 `TRPC_AGENT_ADMIN_ENABLED=true` 时注册，使用独立 Bearer Principal。所有管理调用为 POST，常用资源如下：
 
-| 现象 | 先检查什么 |
-| --- | --- |
-| 6379 connection refused / Redis LOADING | Redis 是否启动并 healthy；不要只重新填写模型 Key |
-| 模型检查通过，Agent 启动失败 | PostgreSQL/Redis、迁移权限、端口占用和角色配置；模型检查不覆盖这些 |
-| cloudflared 8080 connection refused | 本地 Agent 是否启动；这不是域名 DNS 配置成功就能解决的 |
-| 已改 `.env` 但行为没变 | 旧进程未重启、已有环境变量覆盖、选错 env 文件或运行的是旧二进制 |
-| HTTP 401/403/404 | 调试入口默认关闭；核对调用方 Token、Binding/租户/用户授权和进程角色 |
-| Telegram 群不回复 | Privacy Mode 的投递规则、Bot 是否在群、Binding 白名单、@/command/reply 条件 |
-| 企业微信 MCP 不回复 | 目标列表、群/人类白名单、精确 @ 前缀、Binding 状态、检查点和隔离记录 |
-| unknown/attempting 发送状态 | 先核对发送证据；超时不代表没发出，禁止直接删记录或盲目重发 |
-| 没看到告警通知 | 当前只有指标/规则，尚未配置真实通知接收方 |
+- `/admin/tenants`、`/admin/apps`、`/admin/revisions`：创建租户、应用和不可变版本。
+- `/admin/revisions/publish`、`/admin/apps/rollout`：带 expected_version 的发布和灰度。
+- `/admin/channel-bindings`、`/admin/backend-bindings`：绑定渠道与数据后端。
+- `/admin/tenants/policies`：带版本更新审计和配额策略。
+- `/admin/tool-operations/get`、`/admin/tool-operations/reconcile`：查询或仅依据后端事实对账。
 
-日志在 `data/trpc-service.log`；分享排障信息时只给错误类型、request_id/trace_id 和相关时间，不粘贴完整 `.env`、MCP URL、Bot Token、数据库 URL 或原始聊天内容。更多恢复入口见[通道恢复](channel-recovery.md)。
+请求结构以 [Admin Handler](../trpcservice/admin/handler.go)及对应类型为准，鉴权后仍按 tenant_id 检查权限。生产只从内网或身份代理访问 Admin。IM 接入步骤见[通道文档](im-channels.md)，公网入口只转发 Gateway，不公开管理、数据库或模型服务。
+
+## 4. 容器与多节点
+
+```bash
+docker build -t trpc-agent-service:local .
+```
+
+镜像为非 root 运行，排除私有配置、数据、`bin`、`dist` 和日志。最小部署是一个 all 进程加共享 PostgreSQL/Redis；按需使用对象、向量和观测后端。
+
+生产将同一程序按 `gateway / relay / worker / sender / jobs / admin` 分别启动。多个 Worker 共享 Session、协调器、队列与控制面，不需要负载均衡 sticky session；单个异步 Worker 当前一次处理一个任务。
+
+Kubernetes 模板位于 [deploy/kubernetes](../deploy/kubernetes/platform.yaml)。顺序是：准备分角色 Secret 与依赖 → 应用命名空间/网络策略 → 独立 migration Job → 六角色 Deployment/Service → Ingress。镜像地址、账号、namespace/Pod 标签与真实外连范围必须由部署者核对；模板验证不等于已在集群生效。
+
+启用观测依赖：
+
+```bash
+docker compose --profile observability up -d
+```
+
+配置 `TRPC_AGENT_OTEL_ENABLED=true`、OTLP endpoint、service name 和采样率。Collector、Tempo、Prometheus、Grafana 的配置位于 `deploy/compose`；实际告警通知渠道另行设置。
+
+## 5. 升级与回滚
+
+1. 备份配置、当前二进制和数据库，先核对未完成工具及 unknown/attempting 发送事实。
+2. 停止旧 Worker/Jobs/Sender，不能混跑不兼容的队列、权限或分段发送协议。
+3. 构建，使用迁移身份应用缺失 migrations；当前控制面 schema 为 23，不能修改已应用 SQL 文件。
+4. 核对新增表/函数/Redis 命令权限，再启动候选实例，检查就绪和受控请求。
+5. Agent 行为通过不可变 Revision、stable/canary 和 conversation pin 灰度；切回稳定 revision 不会自动迁移已 pin 的会话。
+6. 数据迁移按[迁移协议](data-consistency.md)执行。回滚配置不会撤销已提交的工作项或已发送消息，不得恢复旧备份后盲目重放。
+
+## 6. 容量与恢复
+
+所需活跃并发约为“峰值 turn/s × 平均执行秒数”。当前每 Worker 的异步执行并发为 1，节点数量还需考虑模型供应商配额、SQL 连接池和故障余量；不能用同步 `/chat` 的并发推断异步队列容量。
+
+`trpc-loadgen` 测量 `/inbound` ACK 吞吐和分位延迟；完整容量还要测队列排空时间、最终完成/送达数、token、成本、SQL/Redis QPS、GC、取消时延和失败率。真实模型压测必须先设预算与供应商限额，不使用生产 IM 群压测。
+
+- PostgreSQL：全量备份加 WAL/PITR，恢复到独立实例后核对业务与发送事实。
+- Redis：持久化、复制和恢复演练，禁止清空预算/幂等/租约键以“解决”错误。
+- S3/MinIO：版本化、权限、对象 checksum 与独立恢复；重启可读不等同于灾备成功。
+- Qdrant：snapshot 备份与恢复校验，更换 Embedding 模型/维度需重建向量。
+
+`./scripts/e2e-backup-restore.sh` 只演练独立合成 SQL/Redis 数据的恢复工具链，不恢复日常业务库。完整验证入口见[验收说明](acceptance.md)。
+
+## 7. 排障、清理与打包
+
+日志位于 `data/trpc-service.log`。只分享错误类别、时间和 request_id/trace_id；不要粘贴完整日志、原始会话、MCP URL 或 dotenv。
+
+- 无回复：依次检查模型、Agent readiness、公网入口、Inbox/Run/Outbound 状态，不能把“模型完成”当作“发送成功”。
+- 队列持续错误：检查依赖、所有权和退避，不清队列强行恢复。
+- unknown/attempting：先核对供应商或工具业务事实，不自动重发，也不直接手改成成功。
+- MCP 接收卡住：用 Admin 的 channel-rejections/checkpoints 查询和带版本 recover 接口；不能清空 seen 记录跳过历史缺口。
+
+`./clean.sh` 默认预览；`--apply` 仅归档已知构建产物，运行 PID 存在时拒绝。私有快照和临时个人工具不属于交付仓库，数据卷也不能仅因停止或显示 reclaimable 就删除。
+
+源码在本地提交干净后执行 `./build.sh --package`，只导出已提交文件至 `dist` 并生成 SHA-256；不会 push。不要直接压缩整个工作目录，私有 `.env`、`data` 和数据库卷不能交付。
