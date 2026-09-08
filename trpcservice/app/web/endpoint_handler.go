@@ -38,7 +38,11 @@ func (a *EndpointAPI) create(w http.ResponseWriter, r *http.Request) {
 		ep.Scope = llm.ScopeTenant
 	}
 	if err := a.reg.Create(r.Context(), ep); err != nil {
-		writeError(w, http.StatusConflict, err)
+		if errors.Is(err, llm.ErrEndpointExists) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, a.persisted(r, ep))

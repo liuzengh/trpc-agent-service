@@ -22,3 +22,19 @@ func TestHandlerReturnsOK(t *testing.T) {
 		t.Errorf("body = %q, want %q", got, `{"status":"ok"}`)
 	}
 }
+
+func TestHandlerReportsDegraded(t *testing.T) {
+	SetDegraded("mysql unavailable")
+	t.Cleanup(ClearDegraded)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if got := rec.Body.String(); got != `{"reason":"mysql unavailable","status":"degraded"}` {
+		t.Errorf("body = %q, want degraded reason", got)
+	}
+}

@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -47,6 +48,18 @@ func TestRegistryUnknownEndpoint(t *testing.T) {
 	r := NewRegistry(nil)
 	if _, err := r.Resolve(context.Background(), "nope"); err == nil {
 		t.Error("unknown endpoint should return an error")
+	}
+}
+
+func TestCreateDuplicateReturnsErrEndpointExists(t *testing.T) {
+	r := NewRegistry(nil)
+	ctx := context.Background()
+	if err := r.Create(ctx, Endpoint{ID: "dup", Name: "x", ModelName: "m"}); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	err := r.Create(ctx, Endpoint{ID: "dup", Name: "y", ModelName: "m2"})
+	if !errors.Is(err, ErrEndpointExists) {
+		t.Fatalf("duplicate create error = %v, want ErrEndpointExists", err)
 	}
 }
 

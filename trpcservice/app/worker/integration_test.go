@@ -24,7 +24,6 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/knowledge"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/llm"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tenant"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/bus"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/agentstore"
@@ -149,7 +148,7 @@ func TestWorkerHandleDirect(t *testing.T) {
 		storage.SessionConfig{Backend: storage.BackendInMemory},
 		storage.MemoryConfig{Backend: storage.BackendInMemory},
 	)
-	w := New(rb, agents, tools, nil, outbox, router, nil, nil, nil, nil, nil)
+	w := New(rb, agents, NewToolResolver(tools, nil, nil), outbox, router, nil, nil, nil, nil)
 
 	_ = reg.Create(ctx, llm.Endpoint{
 		ID: "e-direct", Scope: llm.ScopeTenant, TenantID: "t-direct", Name: "main",
@@ -227,7 +226,7 @@ func TestWorkerFullChain(t *testing.T) {
 		func(_ context.Context, _ *knowledge.KnowledgeBase) (embedder.Embedder, error) {
 			return &bagEmbedder{dim: 64}, nil
 		})
-	w := New(rb, agents, tools, nil, outbox, router, kbs, nil, nil, nil, nil)
+	w := New(rb, agents, NewToolResolver(tools, nil, kbs), outbox, router, nil, nil, nil, nil)
 
 	// Seed one endpoint + one KB + one published agent mounting the KB.
 	if err := reg.Create(ctx, llm.Endpoint{
@@ -378,7 +377,7 @@ func TestWorkerApprovalFullCycle(t *testing.T) {
 	memReg := llm.NewRegistry(func(_ context.Context, _ llm.Endpoint) (model.Model, error) {
 		return nil, nil
 	})
-	w := New(rb, agent.NewManager(memReg), tool.NewRegistry(), nil, outbox, nil, nil, nil, nil, nil, nil)
+	w := New(rb, agent.NewManager(memReg), nil, outbox, nil, nil, nil, nil, nil)
 
 	// Serialize the session as the worker would before running a turn.
 	lockTok := "lock-approve"
@@ -480,7 +479,7 @@ func TestWorkerApprovalDenyByReply(t *testing.T) {
 	memReg := llm.NewRegistry(func(_ context.Context, _ llm.Endpoint) (model.Model, error) {
 		return nil, nil
 	})
-	w := New(rb, agent.NewManager(memReg), tool.NewRegistry(), nil, outbox, nil, nil, nil, nil, nil, nil)
+	w := New(rb, agent.NewManager(memReg), nil, outbox, nil, nil, nil, nil, nil)
 
 	userMsg := model.NewUserMessage("deploy")
 	in := &bus.Message{
@@ -569,7 +568,7 @@ func TestWorkerLedgerWritesTurn(t *testing.T) {
 		storage.MemoryConfig{Backend: storage.BackendInMemory},
 	)
 	ledger := ledgerstore.NewMySQLLedger(db)
-	w := New(rb, agents, tool.NewRegistry(), nil, outbox, router, nil, nil, nil, nil, ledger)
+	w := New(rb, agents, nil, outbox, router, nil, nil, nil, ledger)
 
 	userMsg := model.NewUserMessage("hello ledger")
 	in := &bus.Message{

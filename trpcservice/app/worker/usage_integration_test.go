@@ -43,7 +43,7 @@ func TestUsageDimensionsSurviveUUIDMessageID(t *testing.T) {
 
 	entries := buildUsageEntries(m, "a-1", 150,
 		map[string]int{"echo": 2, "execute_code": 1}, // tool x2 + sandbox x1
-		[]string{"sk-1"}, 0) // skill injected
+		[]skillUsageRef{{SkillID: "sk-1", Code: "triage", Name: "Triage", Version: 1}}, 0) // skill injected
 
 	// Two deliveries must be idempotent (INSERT IGNORE on record_id).
 	for i := 0; i < 2; i++ {

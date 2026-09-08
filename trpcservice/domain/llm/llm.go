@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/genai"
@@ -28,15 +29,26 @@ import (
 // Overridable via SetHTTPTimeout for operators that need a longer budget.
 const DefaultHTTPTimeout = 120 * time.Second
 
-// httpTimeout is the effective model HTTP timeout (mutable for tests/ops).
-var httpTimeout = DefaultHTTPTimeout
+// httpTimeoutNanos is the effective model HTTP timeout in nanoseconds. It is
+// atomic so SetHTTPTimeout (startup) and the provider factories (model-build
+// path) can touch it without a data race.
+var httpTimeoutNanos atomic.Int64
+
+func init() {
+	httpTimeoutNanos.Store(int64(DefaultHTTPTimeout))
+}
 
 // SetHTTPTimeout overrides the model HTTP timeout used by all provider
 // factories. Call before building models (startup) for a consistent budget.
 func SetHTTPTimeout(d time.Duration) {
 	if d > 0 {
-		httpTimeout = d
+		httpTimeoutNanos.Store(int64(d))
 	}
+}
+
+// modelHTTPTimeout returns the current model HTTP timeout as a duration.
+func modelHTTPTimeout() time.Duration {
+	return time.Duration(httpTimeoutNanos.Load())
 }
 
 // Scope values for an endpoint.
@@ -47,6 +59,11 @@ const (
 
 // ErrEndpointNotFound is returned when an endpoint does not exist.
 var ErrEndpointNotFound = errors.New("llm: endpoint not found")
+
+// ErrEndpointExists is returned when creating an endpoint whose id already
+// exists. It is distinct from ErrEndpointNotFound so callers can map a
+// duplicate-create to a conflict rather than a not-found.
+var ErrEndpointExists = errors.New("llm: endpoint already exists")
 
 // Provider identifiers supported out of the box.
 const (
@@ -115,25 +132,34 @@ func NormalizeProvider(p string) string {
 }
 
 // factories maps a canonical provider id to its ModelFactory. It is mutable so
-// operators can register additional providers at startup.
-var factories = map[string]ModelFactory{
-	ProviderOpenAICompat: openAIFactory,
-	ProviderAnthropic:    anthropicFactory,
-	ProviderGemini:       geminiFactory,
-}
+// operators can register additional providers at startup; factoriesMu guards
+// it because RegisterFactory (startup) and DefaultFactory (model-build path)
+// may run concurrently.
+var (
+	factoriesMu sync.RWMutex
+	factories   = map[string]ModelFactory{
+		ProviderOpenAICompat: openAIFactory,
+		ProviderAnthropic:    anthropicFactory,
+		ProviderGemini:       geminiFactory,
+	}
+)
 
 // RegisterFactory registers or overrides a factory for a provider id.
 func RegisterFactory(provider string, f ModelFactory) {
 	if f == nil {
 		return
 	}
+	factoriesMu.Lock()
 	factories[NormalizeProvider(provider)] = f
+	factoriesMu.Unlock()
 }
 
 // DefaultFactory dispatches on the endpoint provider to the matching factory.
 func DefaultFactory(ctx context.Context, ep Endpoint) (model.Model, error) {
 	p := NormalizeProvider(ep.Provider)
+	factoriesMu.RLock()
 	f, ok := factories[p]
+	factoriesMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("llm: unsupported provider %q", ep.Provider)
 	}
@@ -144,7 +170,7 @@ func openAIFactory(_ context.Context, ep Endpoint) (model.Model, error) {
 	return openai.New(ep.ModelName,
 		openai.WithBaseURL(ep.BaseURL),
 		openai.WithAPIKey(ep.APIKey),
-		openai.WithHTTPClientOptions(openai.WithHTTPClientTimeout(httpTimeout)),
+		openai.WithHTTPClientOptions(openai.WithHTTPClientTimeout(modelHTTPTimeout())),
 	), nil
 }
 
@@ -152,7 +178,7 @@ func anthropicFactory(_ context.Context, ep Endpoint) (model.Model, error) {
 	return anthropic.New(ep.ModelName,
 		anthropic.WithBaseURL(ep.BaseURL),
 		anthropic.WithAPIKey(ep.APIKey),
-		anthropic.WithHTTPClientOptions(anthropic.WithHTTPClientTimeout(httpTimeout)),
+		anthropic.WithHTTPClientOptions(anthropic.WithHTTPClientTimeout(modelHTTPTimeout())),
 	), nil
 }
 
@@ -160,7 +186,7 @@ func geminiFactory(ctx context.Context, ep Endpoint) (model.Model, error) {
 	cfg := &genai.ClientConfig{
 		APIKey:     ep.APIKey,
 		Backend:    genai.BackendGeminiAPI,
-		HTTPClient: &http.Client{Timeout: httpTimeout},
+		HTTPClient: &http.Client{Timeout: modelHTTPTimeout()},
 	}
 	if ep.BaseURL != "" {
 		cfg.HTTPOptions = genai.HTTPOptions{BaseURL: ep.BaseURL}
@@ -405,7 +431,7 @@ func (s *memStore) Create(_ context.Context, ep Endpoint) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.eps[ep.ID]; ok {
-		return ErrEndpointNotFound // caller maps to conflict
+		return ErrEndpointExists
 	}
 	s.eps[ep.ID] = ep
 	return nil

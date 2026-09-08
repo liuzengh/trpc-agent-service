@@ -41,8 +41,8 @@ func TestSkillInstructionSplicesPublishedSkills(t *testing.T) {
 	if !strings.Contains(got, "===== End Skill: triage =====") {
 		t.Errorf("missing end marker in %q", got)
 	}
-	if len(injected) != 1 || injected[0] != s.SkillID {
-		t.Errorf("injected skill ids = %v, want [%s]", injected, s.SkillID)
+	if len(injected) != 1 || injected[0].SkillID != s.SkillID || injected[0].Code != s.Code {
+		t.Errorf("injected skill snapshot = %+v, want [{SkillID:%s Code:%s}]", injected, s.SkillID, s.Code)
 	}
 }
 

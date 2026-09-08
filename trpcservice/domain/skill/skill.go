@@ -24,12 +24,12 @@ import (
 
 // Sentinel errors.
 var (
-	ErrSkillNotFound    = errors.New("skill: not found")
-	ErrVersionNotFound  = errors.New("skill: version not found")
-	ErrSkillCodeExists  = errors.New("skill: code already exists")
-	ErrVersionExists    = errors.New("skill: version already exists")
-	ErrVersionNotDraft  = errors.New("skill: version is not in draft state")
-	ErrInvalidSkill     = errors.New("skill: missing required field")
+	ErrSkillNotFound   = errors.New("skill: not found")
+	ErrVersionNotFound = errors.New("skill: version not found")
+	ErrSkillCodeExists = errors.New("skill: code already exists")
+	ErrVersionExists   = errors.New("skill: version already exists")
+	ErrVersionNotDraft = errors.New("skill: version is not in draft state")
+	ErrInvalidSkill    = errors.New("skill: missing required field")
 )
 
 // Lifecycle states.
@@ -48,30 +48,30 @@ const (
 // Skill is the stable identity of a reusable capability: code, scope,
 // name and the current_version pointer that the runtime resolves.
 type Skill struct {
-	SkillID        string     `json:"skill_id"`
-	Scope          string     `json:"scope"`
-	OwnerTenantID  *string    `json:"owner_tenant_id,omitempty"` // nil when scope=global
-	Code           string     `json:"code"`
-	Name           string     `json:"name"`
-	Description    string     `json:"description,omitempty"`
-	CurrentVersion int        `json:"current_version"`
-	Status         string     `json:"status"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	SkillID        string    `json:"skill_id"`
+	Scope          string    `json:"scope"`
+	OwnerTenantID  *string   `json:"owner_tenant_id,omitempty"` // nil when scope=global
+	Code           string    `json:"code"`
+	Name           string    `json:"name"`
+	Description    string    `json:"description,omitempty"`
+	CurrentVersion int       `json:"current_version"`
+	Status         string    `json:"status"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // SkillVersion is one immutable snapshot of a skill's SKILL.md body and
 // execution config. Versions are append-only.
 type SkillVersion struct {
-	SkillID         string    `json:"skill_id"`
-	Version         int       `json:"version"`
-	ContentMD       string    `json:"content_md"`
-	Checksum        string    `json:"checksum"`
-	PromptTemplate  string    `json:"prompt_template,omitempty"`
-	ExecutorType    string    `json:"executor_type"`
-	TimeoutSeconds  int       `json:"timeout_seconds"`
-	Status          string    `json:"status"`
-	PublishedAt     time.Time `json:"published_at"`
+	SkillID        string    `json:"skill_id"`
+	Version        int       `json:"version"`
+	ContentMD      string    `json:"content_md"`
+	Checksum       string    `json:"checksum"`
+	PromptTemplate string    `json:"prompt_template,omitempty"`
+	ExecutorType   string    `json:"executor_type"`
+	TimeoutSeconds int       `json:"timeout_seconds"`
+	Status         string    `json:"status"`
+	PublishedAt    time.Time `json:"published_at"`
 }
 
 // AgentSkill is the (agent, skill) binding with a locked version and sort
@@ -280,8 +280,9 @@ func checksum(s string) string {
 // store contract
 // =============================================================================
 
-// Store is the persistence contract behind Manager: the four-level skill
-// model plus M:N agent bindings. The in-memory store keeps the service
+// Store is the persistence contract behind Manager: the three-level skill
+// model (Skill / SkillVersion / AgentSkill binding) plus the version
+// lifecycle and M:N agent bindings. The in-memory store keeps the service
 // runnable without MySQL; MySQL and other backend stores are implemented in
 // the infra/storage package against this interface.
 type Store interface {
@@ -306,11 +307,11 @@ type Store interface {
 // =============================================================================
 
 type memStore struct {
-	mu             sync.Mutex
-	skills         map[string]*Skill
-	byCode         map[string]string // code -> skill_id
-	versions       map[string]map[int]*SkillVersion
-	agentBindings  map[string][]*AgentSkill
+	mu            sync.RWMutex
+	skills        map[string]*Skill
+	byCode        map[string]string // code -> skill_id
+	versions      map[string]map[int]*SkillVersion
+	agentBindings map[string][]*AgentSkill
 }
 
 func newMemStore() *memStore {
@@ -382,8 +383,8 @@ func (s *memStore) Delete(_ context.Context, id string) error {
 }
 
 func (s *memStore) Get(_ context.Context, id string) (*Skill, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	cur, ok := s.skills[id]
 	if !ok {
 		return nil, ErrSkillNotFound
@@ -393,8 +394,8 @@ func (s *memStore) Get(_ context.Context, id string) (*Skill, error) {
 }
 
 func (s *memStore) List(_ context.Context, tenantID string) ([]*Skill, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	out := make([]*Skill, 0, len(s.skills))
 	for _, sk := range s.skills {
 		if sk.Scope == ScopeGlobal {
@@ -464,8 +465,8 @@ func (s *memStore) PublishVersion(_ context.Context, skillID string, version int
 }
 
 func (s *memStore) GetVersion(_ context.Context, skillID string, version int) (*SkillVersion, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	versions, ok := s.versions[skillID]
 	if !ok {
 		return nil, ErrVersionNotFound
@@ -479,8 +480,8 @@ func (s *memStore) GetVersion(_ context.Context, skillID string, version int) (*
 }
 
 func (s *memStore) ListVersions(_ context.Context, skillID string) ([]*SkillVersion, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	versions, ok := s.versions[skillID]
 	if !ok {
 		return nil, nil
@@ -533,8 +534,8 @@ func (s *memStore) UnbindAgentSkill(_ context.Context, agentID, skillID string) 
 }
 
 func (s *memStore) ListAgentSkills(_ context.Context, agentID string) ([]*AgentSkill, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	bindings := s.agentBindings[agentID]
 	out := make([]*AgentSkill, 0, len(bindings))
 	for _, b := range bindings {

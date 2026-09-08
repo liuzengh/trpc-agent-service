@@ -89,7 +89,12 @@ func main() {
 	if cfg.MySQL.DSN != "" {
 		db, err = storage.OpenMySQL(cfg.MySQL.DSN)
 		if err != nil {
-			logger.Error("mysql open failed, falling back to memory", "err", err)
+			// A configured-but-unreachable MySQL is a degraded state, not a
+			// silent fallback: persistence, audit and the worker all stay off.
+			// Make it loud (error log + /healthz 503) so a transient outage at
+			// startup is visible instead of running in-memory unnoticed.
+			logger.Error("mysql unavailable, running degraded (no persistence/audit/worker)", "err", err)
+			health.SetDegraded("mysql unavailable")
 		}
 	}
 	var reg *llm.Registry
@@ -180,103 +185,9 @@ func main() {
 		web.NewUsageAPI(auditRec).Register(mux)
 	}
 
-	// Worker + outbox dispatcher: run when the role includes worker and both
-	// Redis and MySQL are configured (the bus needs Redis, the outbox MySQL).
-	if isWorkerRole(cfg.Role) && db != nil && cfg.Redis.URL != "" {
-		rb, err := bus.NewRedisFromURL(cfg.Redis.URL)
-		if err != nil {
-			logger.Error("redis bus unavailable, worker disabled", "err", err)
-		} else {
-			outbox := bus.NewOutbox(db)
-			router := storage.NewRouter(tenantMgr,
-				storage.SessionConfig{Backend: storage.BackendRedis, RedisURL: cfg.Redis.URL},
-				storage.MemoryConfig{Backend: storage.BackendRedis, RedisURL: cfg.Redis.URL},
-			)
-			// Artifact persistence on MinIO when configured; without it the
-			// runner just does not persist artifacts.
-			var artSvc artifact.Service
-			if cfg.MinIO.Endpoint != "" {
-				bucket := cfg.MinIO.Bucket
-				if bucket == "" {
-					bucket = "artifacts"
-				}
-				svc, err := storage.NewMinioArtifactService(context.Background(),
-					cfg.MinIO.Endpoint, cfg.MinIO.AccessKey, cfg.MinIO.SecretKey, bucket, cfg.MinIO.UseSSL)
-				if err != nil {
-					logger.Error("minio unavailable, artifact persistence disabled", "err", err)
-				} else {
-					artSvc = svc
-					logger.Info("artifact persistence enabled", "endpoint", cfg.MinIO.Endpoint, "bucket", bucket)
-				}
-			}
-			// Data-domain assembly point: session/memory via the Router,
-			// knowledge/artifact/audit as their single production backends.
-			// Summary has no standalone domain (lives in the session backend).
-			dss := storage.NewDataStores(router, kbMgr, artSvc, auditor)
-			// Admin chat rides the same worker pipeline: POST /chat publishes
-			// inbound, replies come back over outbound and are SSE-forwarded.
-			web.NewChatAPI(rb).Register(mux)
-			// Business conversation ledger writes every turn (USER+ASSISTANT)
-			// for the session-history API; it shares the worker's MySQL.
-			ledger := ledgerstore.NewMySQLLedger(db)
-			web.NewChatHistoryAPI(ledger).Register(mux)
-			w := worker.New(rb, agentMgr, toolReg, builtinToolSource, outbox, dss.Router, dss.Knowledge, skillMgr, dss.Auditor, dss.Artifacts, ledger)
-			// Tenant governance: per-tenant quota + audit_policy come from the
-			// tenants table (configured in the tenant UI); budgets apply only
-			// when a tenant sets quota.token_quota > 0. The token meter reads
-			// usage_records when the audit recorder is wired; without it no
-			// budget is ever enforced.
-			var usageFn func(ctx context.Context, tenantID string) (int64, error)
-			if auditRec != nil {
-				usageFn = func(ctx context.Context, tenantID string) (int64, error) {
-					sums, err := auditRec.UsageSummary(ctx, audit.UsageQuery{TenantID: tenantID, Dimension: audit.UsageDimensionToken})
-					if err != nil {
-						return 0, err
-					}
-					var total int64
-					for _, s := range sums {
-						total += int64(s.Total)
-					}
-					return total, nil
-				}
-			}
-			w.SetGovernance(tenantMgr, usageFn)
-			go func() {
-				if err := w.Run(runCtx); err != nil {
-					logger.Error("worker stopped", "err", err)
-				}
-			}()
-			go func() {
-				if err := outbox.Run(runCtx, rb, time.Second); err != nil {
-					logger.Error("outbox dispatcher stopped", "err", err)
-				}
-			}()
-			// IM gateway: binding-driven connection manager. Reload connects
-			// each bound account at startup; ChannelAPI reconciles live
-			// adapters on every binding create/delete.
-			imMgr := channels.NewManager(rb, bindStore, secretStore, buildAdapter)
-			if cfg.RateLimit.Enable && cfg.Redis.URL != "" {
-				// Inbound rate limiting shares the bus's Redis so the limit
-				// holds across gateway nodes; a limiter error fails open.
-				if rcli, err := bus.NewRedisFromURL(cfg.Redis.URL); err != nil {
-					logger.Error("rate limiter unavailable, inbound limiting disabled", "err", err)
-				} else {
-					imMgr.SetRateLimiter(channels.NewRedisRateLimiter(rcli.Client(), cfg.RateLimit.PerMinute, time.Minute))
-					logger.Info("IM inbound rate limiting enabled", "per_minute", cfg.RateLimit.PerMinute)
-				}
-			}
-			channelAPI.SetManager(imMgr)
-			if err := imMgr.Reload(context.Background()); err != nil {
-				logger.Error("IM gateway reload failed", "err", err)
-			}
-			go func() {
-				if err := imMgr.Run(runCtx); err != nil {
-					logger.Error("IM gateway stopped", "err", err)
-				}
-			}()
-			logger.Info("worker started", "group", worker.Group)
-		}
-	}
+	// Worker + outbox dispatcher + IM gateway: started when the role includes
+	// worker and both Redis and MySQL are configured.
+	startRuntime(runCtx, cfg, db, tenantMgr, agentMgr, toolReg, kbMgr, skillMgr, auditor, auditRec, secretStore, bindStore, mux, channelAPI, logger)
 
 	logger.Info("starting server", "addr", cfg.Server.HTTPAddr, "role", cfg.Role)
 	srv := &http.Server{Addr: cfg.Server.HTTPAddr, Handler: web.CORS(mux)}
@@ -297,6 +208,121 @@ func main() {
 			logger.Warn("http server drain", "err", err)
 		}
 	}
+}
+
+// startRuntime wires and starts the worker, outbox dispatcher and IM gateway
+// when the role includes worker and both Redis and MySQL are configured (the
+// bus needs Redis, the outbox MySQL). Extracted from main so the composition
+// root stays a thin assembly over the wiring below.
+func startRuntime(runCtx context.Context, cfg *config.Config, db *sql.DB,
+	tenantMgr *tenant.Manager, agentMgr *agent.Manager, toolReg *tool.Registry,
+	kbMgr *knowledge.Manager, skillMgr *skill.Manager, auditor audit.Recorder,
+	auditRec *audit.MySQLRecorder, secretStore secret.Store,
+	bindStore channels.BindingStore, mux *http.ServeMux,
+	channelAPI *web.ChannelAPI, logger *slog.Logger,
+) {
+	if !isWorkerRole(cfg.Role) || db == nil || cfg.Redis.URL == "" {
+		return
+	}
+	rb, err := bus.NewRedisFromURL(cfg.Redis.URL)
+	if err != nil {
+		logger.Error("redis bus unavailable, worker disabled", "err", err)
+		return
+	}
+
+	outbox := bus.NewOutbox(db)
+	router := storage.NewRouter(tenantMgr,
+		storage.SessionConfig{Backend: storage.BackendRedis, RedisURL: cfg.Redis.URL},
+		storage.MemoryConfig{Backend: storage.BackendRedis, RedisURL: cfg.Redis.URL},
+	)
+
+	// Artifact persistence on MinIO when configured; without it the runner
+	// just does not persist artifacts.
+	var artSvc artifact.Service
+	if cfg.MinIO.Endpoint != "" {
+		bucket := cfg.MinIO.Bucket
+		if bucket == "" {
+			bucket = "artifacts"
+		}
+		svc, err := storage.NewMinioArtifactService(context.Background(),
+			cfg.MinIO.Endpoint, cfg.MinIO.AccessKey, cfg.MinIO.SecretKey, bucket, cfg.MinIO.UseSSL)
+		if err != nil {
+			logger.Error("minio unavailable, artifact persistence disabled", "err", err)
+		} else {
+			artSvc = svc
+			logger.Info("artifact persistence enabled", "endpoint", cfg.MinIO.Endpoint, "bucket", bucket)
+		}
+	}
+
+	// Data-domain assembly point: session/memory via the Router,
+	// knowledge/artifact/audit as their single production backends.
+	// Summary has no standalone domain (lives in the session backend).
+	dss := storage.NewDataStores(router, kbMgr, artSvc, auditor)
+
+	// Admin chat rides the same worker pipeline: POST /chat publishes inbound,
+	// replies come back over outbound and are SSE-forwarded.
+	web.NewChatAPI(rb).Register(mux)
+	// Business conversation ledger writes every turn (USER+ASSISTANT) for the
+	// session-history API; it shares the worker's MySQL.
+	ledger := ledgerstore.NewMySQLLedger(db)
+	web.NewChatHistoryAPI(ledger).Register(mux)
+
+	w := worker.New(rb, agentMgr, worker.NewToolResolver(toolReg, builtinToolSource, dss.Knowledge), outbox, dss.Router, skillMgr, dss.Auditor, dss.Artifacts, ledger)
+	// Tenant governance: per-tenant quota + audit_policy come from the tenants
+	// table (configured in the tenant UI); budgets apply only when a tenant
+	// sets quota.token_quota > 0. The token meter reads usage_records when the
+	// audit recorder is wired; without it no budget is ever enforced.
+	var usageFn func(ctx context.Context, tenantID string) (int64, error)
+	if auditRec != nil {
+		usageFn = func(ctx context.Context, tenantID string) (int64, error) {
+			sums, err := auditRec.UsageSummary(ctx, audit.UsageQuery{TenantID: tenantID, Dimension: audit.UsageDimensionToken})
+			if err != nil {
+				return 0, err
+			}
+			var total int64
+			for _, s := range sums {
+				total += int64(s.Total)
+			}
+			return total, nil
+		}
+	}
+	w.SetGovernance(tenantMgr, usageFn)
+
+	go func() {
+		if err := w.Run(runCtx); err != nil {
+			logger.Error("worker stopped", "err", err)
+		}
+	}()
+	go func() {
+		if err := outbox.Run(runCtx, rb, time.Second); err != nil {
+			logger.Error("outbox dispatcher stopped", "err", err)
+		}
+	}()
+
+	// IM gateway: binding-driven connection manager. Reload connects each bound
+	// account at startup; ChannelAPI reconciles live adapters on every binding
+	// create/delete.
+	imMgr := channels.NewManager(rb, bindStore, secretStore, buildAdapter)
+	if cfg.RateLimit.Enable && cfg.Redis.URL != "" {
+		// Inbound rate limiting shares the bus's Redis so the limit holds
+		// across gateway nodes; a limiter error fails open.
+		if rcli, err := bus.NewRedisFromURL(cfg.Redis.URL); err != nil {
+			logger.Error("rate limiter unavailable, inbound limiting disabled", "err", err)
+		} else {
+			imMgr.SetRateLimiter(channels.NewRedisRateLimiter(rcli.Client(), cfg.RateLimit.PerMinute, time.Minute))
+			logger.Info("IM inbound rate limiting enabled", "per_minute", cfg.RateLimit.PerMinute)
+		}
+	}
+	channelAPI.SetManager(imMgr)
+	if err := imMgr.Reload(context.Background()); err != nil {
+		logger.Error("IM gateway reload failed", "err", err)
+	}
+	go func() {
+		if err := imMgr.Run(runCtx); err != nil {
+			logger.Error("IM gateway stopped", "err", err)
+		}
+	}()
+	logger.Info("worker started", "group", worker.Group)
 }
 
 // setupTelemetry wires OpenTelemetry trace + metrics when an OTLP endpoint is
@@ -353,51 +379,48 @@ func vectorStoreFactory(cfg *config.Config) knowledge.VectorStoreFactory {
 	return knowledgestore.MilvusVectorStoreFactory(cfg.Milvus.Address, cfg.Milvus.Username, cfg.Milvus.Password)
 }
 
+// builtinTool couples a built-in tool's registry definition with its runtime
+// factory, so both the registration loop and the tool-source lookup read one
+// table — adding a built-in tool no longer touches an if-chain.
+type builtinTool struct {
+	def     tool.Definition
+	factory func() fwtool.Tool
+}
+
+// builtinTools is the platform's built-in tool catalog. Builtin tools are
+// global (no scope), so every tenant sees them. Code execution is inherently
+// dangerous: risk_level=high makes every code-exec call require human approval
+// (approval rail 2), independent of per-agent config.
+var builtinTools = []builtinTool{
+	{
+		def:     tool.Definition{ID: "echo", Name: "echo", Description: "Returns the input text unchanged.", RiskLevel: tool.RiskLow},
+		factory: tool.EchoTool,
+	},
+	{
+		def:     tool.Definition{ID: "get-current-time", Name: "get_current_time", Description: "Returns the current date and time.", RiskLevel: tool.RiskLow},
+		factory: tool.CurrentTimeTool,
+	},
+	{
+		def:     tool.Definition{ID: "code-exec", Name: "execute_code", Description: "Execute Python or Bash code in an isolated container and return the output. High risk: human approval required before each run.", RiskLevel: tool.RiskHigh},
+		factory: func() fwtool.Tool { return fwtoolcodeexec.NewTool(dockerExec) },
+	},
+}
+
 // builtinToolSource resolves built-in tool ids to their implementations.
 func builtinToolSource(id string) (fwtool.Tool, bool) {
-	if id == "echo" {
-		return tool.EchoTool(), true
-	}
-	if id == "get-current-time" {
-		return tool.CurrentTimeTool(), true
-	}
-	if id == "code-exec" {
-		return fwtoolcodeexec.NewTool(dockerExec), true
+	for _, bt := range builtinTools {
+		if bt.def.ID == id {
+			return bt.factory(), true
+		}
 	}
 	return nil, false
 }
 
-// registerBuiltinTools registers the platform's built-in tools. Builtin
-// tools are global: they carry no scope, so every tenant sees them.
+// registerBuiltinTools registers the platform's built-in tools.
 func registerBuiltinTools(reg *tool.Registry) {
-	err := reg.Register(context.Background(), tool.Definition{
-		ID:          "echo",
-		Name:        "echo",
-		Description: "Returns the input text unchanged.",
-		RiskLevel:   tool.RiskLow,
-	})
-	if err != nil {
-		slog.Error("register builtin tool failed", "err", err)
-	}
-	err = reg.Register(context.Background(), tool.Definition{
-		ID:          "get-current-time",
-		Name:        "get_current_time",
-		Description: "Returns the current date and time.",
-		RiskLevel:   tool.RiskLow,
-	})
-	if err != nil {
-		slog.Error("register builtin tool failed", "err", err)
-	}
-	// Code execution is inherently dangerous: risk_level=high makes every
-	// code-exec call require human approval (approval rail 2), independent
-	// of per-agent config.
-	err = reg.Register(context.Background(), tool.Definition{
-		ID:          "code-exec",
-		Name:        "execute_code",
-		Description: "Execute Python or Bash code in an isolated container and return the output. High risk: human approval required before each run.",
-		RiskLevel:   tool.RiskHigh,
-	})
-	if err != nil {
-		slog.Error("register builtin tool failed", "err", err)
+	for _, bt := range builtinTools {
+		if err := reg.Register(context.Background(), bt.def); err != nil {
+			slog.Error("register builtin tool failed", "tool", bt.def.ID, "err", err)
+		}
 	}
 }

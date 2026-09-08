@@ -38,11 +38,24 @@ func usageRecordID(msgID, dim string) string {
 	return hex.EncodeToString(sum[:16]) // 32 hex chars: always fits the column
 }
 
+// skillUsageRef is the human-readable snapshot of one injected skill stored in
+// the "skill" usage dimension's meta. It is a snapshot on purpose: a skill may
+// be unpublished or renamed later, and the usage history must stay readable.
+type skillUsageRef struct {
+	SkillID string `json:"skill_id"`
+	Code    string `json:"code"`
+	Name    string `json:"name"`
+	Version int    `json:"version"`
+}
+
 // buildUsageEntries aggregates a finished turn into metered usage entries.
 // token is recorded only when > 0; every other dimension is recorded only
 // when its amount is positive. meta carries human-readable context for the
-// usage/audit views.
-func buildUsageEntries(m *bus.Message, agentID string, tokens int64, toolCalls map[string]int, skillIDs []string, artifactSaves int32) []audit.UsageEntry {
+// usage/audit views: the tool dimension records the distinct tool names plus
+// per-tool call counts; the skill dimension records skill snapshots (id, code,
+// name, version) so the front-end can show exactly which skills ran.
+func buildUsageEntries(m *bus.Message, agentID string, tokens int64, toolCalls map[string]int, skills []skillUsageRef, artifactSaves int32) []audit.UsageEntry {
+
 	if m == nil {
 		return nil
 	}
@@ -81,8 +94,8 @@ func buildUsageEntries(m *bus.Message, agentID string, tokens int64, toolCalls m
 	if artifactSaves > 0 {
 		appendDim(audit.UsageDimensionArtifact, float64(artifactSaves), nil)
 	}
-	if len(skillIDs) > 0 {
-		appendDim(audit.UsageDimensionSkill, float64(len(skillIDs)), map[string]any{"skills": skillIDs})
+	if len(skills) > 0 {
+		appendDim(audit.UsageDimensionSkill, float64(len(skills)), map[string]any{"skills": skills})
 	}
 	return out
 }

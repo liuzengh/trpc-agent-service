@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getUsage, type UsageResponse, type UsageSummary } from '../api/usage'
+import { getUsage, type UsageResponse, type UsageRow, type UsageSummary } from '../api/usage'
 import { listTenants, type Tenant } from '../api/tenant'
 import { listAgents, type Agent } from '../api/agent'
 import { formatBeijingTime } from '../utils/time'
@@ -64,6 +64,19 @@ function fmt(n: number) {
 function formatAt(s: string) {
   return formatBeijingTime(s)
 }
+
+/** Renders the meta of a usage row as human-readable detail chips. */
+function detailTags(row: UsageRow): string[] {
+  const meta = row.meta
+  if (!meta) return []
+  if (meta.tools && meta.calls) {
+    return meta.tools.map((name) => `${name} ×${meta.calls![name] ?? 1}`)
+  }
+  if (meta.skills) {
+    return meta.skills.map((s) => (s.name ? `${s.name} (${s.code} v${s.version})` : `${s.code} v${s.version}`))
+  }
+  return []
+}
 </script>
 
 <template>
@@ -101,6 +114,16 @@ function formatAt(s: string) {
       </el-table-column>
       <el-table-column prop="amount" label="用量" width="140">
         <template #default="{ row }">{{ fmt(row.amount) }}</template>
+      </el-table-column>
+      <el-table-column label="明细" min-width="240">
+        <template #default="{ row }">
+          <template v-if="detailTags(row).length">
+            <el-tag v-for="tag in detailTags(row)" :key="tag" size="small" style="margin: 2px 6px 2px 0">
+              {{ tag }}
+            </el-tag>
+          </template>
+          <span v-else class="muted">—</span>
+        </template>
       </el-table-column>
       <el-table-column prop="tenant_id" label="租户" width="160" />
       <el-table-column prop="agent_id" label="Agent" width="200" show-overflow-tooltip />

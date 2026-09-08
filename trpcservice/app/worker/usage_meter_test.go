@@ -17,7 +17,8 @@ func TestBuildUsageEntriesAllDimensions(t *testing.T) {
 	m := msgWithID("m1")
 	entries := buildUsageEntries(m, "a1", 0,
 		map[string]int{"get_current_time": 2, codeExecToolName: 1},
-		[]string{"sk1", "sk2"},
+		[]skillUsageRef{{SkillID: "sk1", Code: "triage", Name: "Triage", Version: 1},
+			{SkillID: "sk2", Code: "writer", Name: "Writer", Version: 2}},
 		1,
 	)
 	got := map[string]float64{}
@@ -59,7 +60,7 @@ func TestBuildUsageEntriesTokenOnly(t *testing.T) {
 func TestBuildUsageEntriesMetaCarriesNames(t *testing.T) {
 	m := msgWithID("m3")
 	entries := buildUsageEntries(m, "a1", 10,
-		map[string]int{"echo": 1}, []string{"sk9"}, 0)
+		map[string]int{"echo": 1}, []skillUsageRef{{SkillID: "sk9", Code: "triage", Name: "Triage", Version: 1}}, 0)
 	var toolEntry, skillEntry *audit.UsageEntry
 	for i := range entries {
 		switch entries[i].Dimension {
@@ -75,8 +76,9 @@ func TestBuildUsageEntriesMetaCarriesNames(t *testing.T) {
 	if toolEntry.Meta["tools"] == nil || toolEntry.Meta["calls"] == nil {
 		t.Error("tool entry should carry tools/calls meta")
 	}
-	if skillEntry.Meta["skills"] == nil {
-		t.Error("skill entry should carry skills meta")
+	refs, ok := skillEntry.Meta["skills"].([]skillUsageRef)
+	if !ok || len(refs) != 1 || refs[0].Code != "triage" || refs[0].Name != "Triage" || refs[0].Version != 1 {
+		t.Errorf("skill meta should carry skill snapshots (code/name/version), got %#v", skillEntry.Meta["skills"])
 	}
 }
 

@@ -117,7 +117,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 			}
 			// im.reply span shares the trace id carried from the originating
 			// im.callback, so Jaeger shows one end-to-end trace.
-			replyCtx, replySpan := tracer.Start(spanContextFor(m.TraceID), "im.reply",
+			replyCtx, replySpan := tracer.Start(metrics.TraceContextFromID(context.Background(), m.TraceID), "im.reply",
 				trace.WithAttributes(
 					attribute.String("channel", m.Channel),
 					attribute.String("session_id", m.SessionID),
@@ -233,22 +233,4 @@ func (g *Gateway) resolveAgent(ctx context.Context, channel string, opt Attach) 
 		}
 	}
 	return opt.AgentID
-}
-
-// spanContextFor returns a context carrying the given trace id, so a span
-// started on it shares the trace with the originating im.callback span.
-func spanContextFor(traceID string) context.Context {
-	ctx := context.Background()
-	if traceID == "" {
-		return ctx
-	}
-	tid, err := trace.TraceIDFromHex(traceID)
-	if err != nil {
-		return ctx
-	}
-	sc := trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID:    tid,
-		TraceFlags: trace.FlagsSampled,
-	})
-	return trace.ContextWithSpanContext(ctx, sc)
 }

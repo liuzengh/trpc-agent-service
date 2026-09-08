@@ -18,9 +18,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/chat"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/knowledge"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/skill"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/bus"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/metrics"
@@ -40,23 +38,6 @@ import (
 // tracer names the platform's worker spans.
 var tracer = otel.Tracer("trpc-agent-service/worker")
 
-// withTraceID attaches the given trace id to ctx, so spans started on it join
-// the trace the IM gateway stamped on the message.
-func withTraceID(ctx context.Context, traceID string) context.Context {
-	if traceID == "" {
-		return ctx
-	}
-	tid, err := trace.TraceIDFromHex(traceID)
-	if err != nil {
-		return ctx
-	}
-	sc := trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID:    tid,
-		TraceFlags: trace.FlagsSampled,
-	})
-	return trace.ContextWithSpanContext(ctx, sc)
-}
-
 // Consumer group on stream:inbound shared by all worker nodes.
 const Group = "workers"
 
@@ -66,30 +47,50 @@ const Group = "workers"
 // user indefinitely. Default is generous enough for a deep reasoning model.
 const runTimeout = 300 * time.Second
 
-// StateBus is the bus plus the cross-node session state the worker relies on;
-// bus.RedisBus satisfies it.
-type StateBus interface {
-	bus.Bus
-	// Idempotent atomically claims msgKey (SetNX): true = first claim, false =
-	// already processed. ClearIdem releases the claim so a failed attempt can
-	// be retried on redelivery.
+// Idempotency is the cross-node dedup contract: Idempotent atomically claims
+// msgKey (SetNX) — true = first claim, false = already processed. ClearIdem
+// releases the claim so a failed attempt can be retried on redelivery.
+type Idempotency interface {
 	Idempotent(ctx context.Context, msgKey string) (bool, error)
 	ClearIdem(ctx context.Context, msgKey string) error
-	SeenIdem(ctx context.Context, msgKey string) (bool, error)
-	MarkIdem(ctx context.Context, msgKey string) error
+}
+
+// SessionRouter binds sessions to agents so stateless workers resolve the
+// right agent for any session.
+type SessionRouter interface {
 	Route(ctx context.Context, tenantID, sessionID string) (string, error)
 	SetRoute(ctx context.Context, tenantID, sessionID, agentID string) error
+}
+
+// SessionLocker serializes handling of one session across nodes.
+type SessionLocker interface {
 	LockSession(ctx context.Context, tenantID, sessionID, token string) (bool, error)
 	UnlockSession(ctx context.Context, tenantID, sessionID, token string) error
 	// RefreshLock extends the session lock TTL when token still owns it; a
 	// long approval wait must not let the lock expire under the worker.
 	RefreshLock(ctx context.Context, tenantID, sessionID, token string) (bool, error)
-	// Approval state: at most one pending human approval per session.
+}
+
+// ApprovalState is the cross-node approval state: at most one pending human
+// approval per session.
+type ApprovalState interface {
 	SetPendingApproval(ctx context.Context, tenantID, sessionID, payload string, ttl time.Duration) error
 	PendingApproval(ctx context.Context, tenantID, sessionID string) (string, error)
 	ClearPendingApproval(ctx context.Context, tenantID, sessionID string) error
 	ResolveApproval(ctx context.Context, tenantID, sessionID, decision string) error
 	ApprovalResult(ctx context.Context, tenantID, sessionID string) (string, error)
+}
+
+// StateBus is the full cross-node state the worker relies on. It composes the
+// message bus with the four narrower contracts (idempotency, routing,
+// locking, approval) so one implementation (bus.RedisBus) satisfies it, while
+// callers can still depend on only the slice they use.
+type StateBus interface {
+	bus.Bus
+	Idempotency
+	SessionRouter
+	SessionLocker
+	ApprovalState
 }
 
 // ToolSource resolves a registered tool id to its runtime implementation.
@@ -99,25 +100,23 @@ type ToolSource func(id string) (fwtool.Tool, bool)
 type Worker struct {
 	bus       StateBus
 	agents    *agent.Manager
-	tools     *tool.Registry
-	toolSrc   ToolSource
+	toolRes   *toolResolver // optional: static tools + KB search tools
 	outbox    *bus.Outbox
-	sessions  *storage.Router    // optional: per-tenant session backend
-	knowledge *knowledge.Manager // optional: KB search tools
-	skills    *skill.Manager     // optional: mounted skills -> instruction splice
-	auditor   audit.Recorder     // optional: audit log
-	artifacts artifact.Service   // optional: code-execution artifacts (MinIO)
-	ledger    chat.Ledger        // optional: business conversation ledger
+	sessions  *storage.Router  // optional: per-tenant session backend
+	skills    *skill.Manager   // optional: mounted skills -> instruction splice
+	auditor   audit.Recorder   // optional: audit log
+	artifacts artifact.Service // optional: code-execution artifacts (MinIO)
+	ledger    chat.Ledger      // optional: business conversation ledger
 
 	tenants TenantSource                                              // optional: tenant governance config source
 	usage   func(ctx context.Context, tenantID string) (int64, error) // optional: token meter for budget checks
 }
 
-// New assembles a worker. sessions, kbs, skills, auditor, artifacts and
-// ledger may be nil (no multi-turn persistence / no knowledge bases / no
-// skills / no audit / no artifact persistence / no chat ledger).
-func New(b StateBus, agents *agent.Manager, tools *tool.Registry, toolSrc ToolSource, outbox *bus.Outbox, sessions *storage.Router, kbs *knowledge.Manager, skills *skill.Manager, auditor audit.Recorder, artifacts artifact.Service, ledger chat.Ledger) *Worker {
-	return &Worker{bus: b, agents: agents, tools: tools, toolSrc: toolSrc, outbox: outbox, sessions: sessions, knowledge: kbs, skills: skills, auditor: auditor, artifacts: artifacts, ledger: ledger}
+// New assembles a worker. toolRes, sessions, skills, auditor, artifacts and
+// ledger may be nil (no tools / no multi-turn persistence / no skills / no
+// audit / no artifact persistence / no chat ledger).
+func New(b StateBus, agents *agent.Manager, toolRes *toolResolver, outbox *bus.Outbox, sessions *storage.Router, skills *skill.Manager, auditor audit.Recorder, artifacts artifact.Service, ledger chat.Ledger) *Worker {
+	return &Worker{bus: b, agents: agents, toolRes: toolRes, outbox: outbox, sessions: sessions, skills: skills, auditor: auditor, artifacts: artifacts, ledger: ledger}
 }
 
 // SetGovernance wires the per-tenant governance source and the token meter
@@ -316,7 +315,7 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 	// Share the trace id the IM gateway stamped on the message, so the
 	// agent.run span (and its Runner/Tool/Session children) join the same
 	// trace as im.callback / im.reply in Jaeger.
-	ctx = withTraceID(ctx, m.TraceID)
+	ctx = metrics.TraceContextFromID(ctx, m.TraceID)
 	ctx, span := tracer.Start(ctx, "agent.run",
 		trace.WithAttributes(
 			attribute.String("tenant_id", m.TenantID),
@@ -346,24 +345,74 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 		return nil, nil, 0, fmt.Errorf("worker: tenant %s token budget exceeded", m.TenantID)
 	}
 
-	tools, approvalToolNames := w.toolsFromProfile(ctx, agentID, profile, policy)
-	tools = append(tools, w.resolveKnowledgeTools(ctx, agentID)...)
-	// usedSkillIDs reports which mounted skills were actually injected this
-	// turn (loaded with content); the usage meter counts only those as "used".
-	instruction, usedSkillIDs := w.skillInstruction(ctx, profile)
+	var tools []fwtool.Tool
+	var approvalToolNames map[string]bool
+	if w.toolRes != nil {
+		tools, approvalToolNames = w.toolRes.fromProfile(ctx, agentID, profile, policy)
+		tools = append(tools, w.toolRes.knowledgeTools(ctx, profile)...)
+	}
+	// usedSkills lists which mounted skills were actually injected this turn
+	// (loaded with content); the usage meter counts only those as "used".
+	instruction, usedSkills := w.skillInstruction(ctx, profile)
 	ag, err := w.agents.BuildFromProfile(ctx, agentID, profile, tools, instruction)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 
-	// A human approval plugin pauses tool calls that the profile marked for
-	// approval (plus the tenant's force-approval union, resolved inside
-	// toolsFromProfile). Built per turn because the tool-name set follows the
-	// profile and tenant policy.
-	plugin := w.approvalPlugin(ctx, m, approvalToolNames, lockToken)
+	// Assemble the per-turn runner configuration (approval plugin, model timer,
+	// redaction, artifact meter, session backend).
+	opts, timer, artMeter := w.buildRunnerOptions(ctx, m, policy, approvalToolNames, lockToken)
 
+	r := runner.NewRunner(m.TenantID, ag, opts...)
+	defer func() { _ = r.Close() }()
+
+	// Bound the whole turn so a hung model/tool cannot stall the worker (the
+	// IM user waits on this). The per-model HTTP timeout already caps a single
+	// request; this is the end-to-end budget for a multi-call turn.
+	runCtx, cancel := context.WithTimeout(ctx, runTimeout)
+	defer cancel()
+
+	events, err := r.Run(runCtx, m.UserID, m.SessionID, *m.Content)
+	// Record model latency even when the run failed: model calls did happen
+	// and a timeout spike is exactly what the metric should surface.
+	if md := timer.Duration(); md > 0 {
+		metrics.ModelCallDuration(ctx, m.TenantID, agentID, md)
+	}
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("worker: run agent %q: %w", agentID, err)
+	}
+	text, tokens, toolNames, toolDur, toolCalls, err := finalTextWithUsage(events)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	w.recordTurnUsage(ctx, m, agentID, tokens, toolDur, toolCalls, usedSkills, artMeter)
+	if text == "" {
+		return nil, nil, 0, nil
+	}
+	reply := model.NewAssistantMessage(text)
+
+	return &bus.Message{
+		ID:        uuid.NewString(),
+		TraceID:   m.TraceID,
+		TenantID:  m.TenantID,
+		AgentID:   agentID,
+		SessionID: m.SessionID,
+		Channel:   m.Channel,
+		UserID:    m.UserID,
+		Content:   &reply,
+		ReplyTo:   m.ID,
+	}, toolNames, tokens, nil
+}
+
+// buildRunnerOptions assembles the per-turn runner configuration: the human
+// approval plugin (built per turn because the tool-name set follows the
+// profile and tenant policy), the model-latency timer, sensitive-data
+// redaction, the artifact-save meter, and the shared session backend. It
+// returns the options plus the timer and artifact meter the caller uses to
+// record model latency and artifact-save counts after the run.
+func (w *Worker) buildRunnerOptions(ctx context.Context, m *bus.Message, policy *tenantPolicy, approvalNames map[string]bool, lockToken string) ([]runner.Option, *modelTimer, *artifactUsage) {
 	var opts []runner.Option
-	if plugin != nil {
+	if plugin := w.approvalPlugin(ctx, m, approvalNames, lockToken); plugin != nil {
 		opts = append(opts, runner.WithPlugins(plugin))
 	}
 	// The model timer brackets every model call of this turn so the platform
@@ -395,29 +444,15 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 			opts = append(opts, runner.WithSessionService(s.Service()))
 		}
 	}
+	return opts, timer, artMeter
+}
 
-	r := runner.NewRunner(m.TenantID, ag, opts...)
-	defer func() { _ = r.Close() }()
-
-	// Bound the whole turn so a hung model/tool cannot stall the worker (the
-	// IM user waits on this). The per-model HTTP timeout already caps a single
-	// request; this is the end-to-end budget for a multi-call turn.
-	runCtx, cancel := context.WithTimeout(ctx, runTimeout)
-	defer cancel()
-
-	events, err := r.Run(runCtx, m.UserID, m.SessionID, *m.Content)
-	// Record model latency even when the run failed: model calls did happen
-	// and a timeout spike is exactly what the metric should surface.
-	if md := timer.Duration(); md > 0 {
-		metrics.ModelCallDuration(ctx, m.TenantID, agentID, md)
-	}
-	if err != nil {
-		return nil, nil, 0, fmt.Errorf("worker: run agent %q: %w", agentID, err)
-	}
-	text, tokens, toolNames, toolDur, toolCalls, err := finalTextWithUsage(events)
-	if err != nil {
-		return nil, nil, 0, err
-	}
+// recordTurnUsage records the finished turn's consumption: the
+// token/cost/tool-latency metrics plus the idempotent usage_records entries
+// (token + tool + sandbox + artifact + skill). Only positive dimensions are
+// written, each keyed on m.ID + ":" + dimension so a redelivered turn never
+// double-counts.
+func (w *Worker) recordTurnUsage(ctx context.Context, m *bus.Message, agentID string, tokens int64, toolDur time.Duration, toolCalls map[string]int, usedSkills []skillUsageRef, artMeter *artifactUsage) {
 	metrics.TokenUsage(ctx, m.TenantID, tokens)
 	// Per-tenant cost: the platform meters cost in tokens (no price table),
 	// so the counter value equals this turn's token consumption.
@@ -425,113 +460,11 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 	if toolDur > 0 {
 		metrics.ToolCallDuration(ctx, m.TenantID, agentID, toolDur)
 	}
-	// Usage metering: token + tool + sandbox(code-exec) + artifact(saves) +
-	// skill(injected SKILL.md count). Only positive dimensions are written,
-	// each idempotent on m.ID + ":" + dimension.
 	var artSaves int32
 	if artMeter != nil {
 		artSaves = artMeter.count()
 	}
-	w.recordUsage(ctx, m, agentID, buildUsageEntries(m, agentID, tokens, toolCalls, usedSkillIDs, artSaves))
-	if text == "" {
-		return nil, nil, 0, nil
-	}
-	reply := model.NewAssistantMessage(text)
-
-	return &bus.Message{
-		ID:        uuid.NewString(),
-		TraceID:   m.TraceID,
-		TenantID:  m.TenantID,
-		AgentID:   agentID,
-		SessionID: m.SessionID,
-		Channel:   m.Channel,
-		UserID:    m.UserID,
-		Content:   &reply,
-		ReplyTo:   m.ID,
-	}, toolNames, tokens, nil
-}
-
-// toolsFromProfile returns the tool implementations the agent may use (the
-// profile's tool ids intersected with the RBAC grants and the tenant's tool
-// whitelist) plus the set of tool names whose calls need human approval.
-// Approval is triggered by any of the three rails: the tool is listed in
-// profile.ApprovalToolIDs, in the tenant's force-approval set, or its
-// definition is risk_level=high.
-func (w *Worker) toolsFromProfile(ctx context.Context, agentID string, profile agent.RuntimeProfile, policy *tenantPolicy) ([]fwtool.Tool, map[string]bool) {
-	if len(profile.ToolIDs) == 0 || w.toolSrc == nil || w.tools == nil {
-		return nil, nil
-	}
-	if policy == nil {
-		policy = defaultTenantPolicy()
-	}
-	manuallyApproved := make(map[string]bool, len(profile.ApprovalToolIDs))
-	for _, id := range profile.ApprovalToolIDs {
-		manuallyApproved[id] = true
-	}
-	var out []fwtool.Tool
-	approvalNames := make(map[string]bool)
-	for _, id := range profile.ToolIDs {
-		allowed, err := w.tools.IsAllowed(ctx, agentID, id)
-		if err != nil {
-			slog.Warn("worker: RBAC check failed, skipping tool", "agent", agentID, "tool", id, "err", err)
-			continue
-		}
-		if !allowed {
-			continue
-		}
-		// Tenant whitelist (static tools only): knowledge_search tools are
-		// appended by resolveKnowledgeTools and never restricted here.
-		if !policy.toolAllowed(id) {
-			continue
-		}
-		// Resolve the tool definition (risk level) BEFORE mounting: a missing
-		// definition drops the tool rather than mounting it without its
-		// approval gate. A high-risk / force-approved tool that mounted
-		// without its approval entry would otherwise execute ungoverned.
-		def, err := w.tools.Get(ctx, id)
-		if err != nil {
-			slog.Warn("worker: tool definition unavailable, skipping tool", "agent", agentID, "tool", id, "err", err)
-			continue
-		}
-		t, ok := w.toolSrc(id)
-		if !ok {
-			continue
-		}
-		out = append(out, t)
-		_, forced := policy.ForceApproval[id]
-		if manuallyApproved[id] || forced || def.RiskLevel == tool.RiskHigh {
-			approvalNames[def.Name] = true
-		}
-	}
-	return out, approvalNames
-}
-
-// resolveKnowledgeTools returns one search tool per KB mounted on the agent's
-// profile. The first tool keeps the framework's default name; extra KBs get
-// numbered names so the LLM can address them separately.
-func (w *Worker) resolveKnowledgeTools(ctx context.Context, agentID string) []fwtool.Tool {
-	if w.knowledge == nil {
-		return nil
-	}
-	profile, err := w.agents.Resolve(ctx, agentID)
-	if err != nil || len(profile.KnowledgeIDs) == 0 {
-		return nil
-	}
-	var out []fwtool.Tool
-	for i, kbID := range profile.KnowledgeIDs {
-		name := "knowledge_search"
-		if i > 0 {
-			name = fmt.Sprintf("knowledge_search_%d", i+1)
-		}
-		t, err := w.knowledge.SearchTool(ctx, kbID, name)
-		if err != nil {
-			// A missing KB must not take down the whole agent run.
-			slog.Warn("worker: knowledge tool unavailable", "kb", kbID, "err", err)
-			continue
-		}
-		out = append(out, t)
-	}
-	return out
+	w.recordUsage(ctx, m, agentID, buildUsageEntries(m, agentID, tokens, toolCalls, usedSkills, artSaves))
 }
 
 // skillInstruction splices the text of the skills mounted on the agent's
@@ -541,7 +474,7 @@ func (w *Worker) resolveKnowledgeTools(ctx context.Context, agentID string) []fw
 // the ids of the skills actually injected (loaded, published and non-empty),
 // which the usage meter reports as the turn's skill dimension — a skill is
 // "used" when its SKILL.md shapes the turn, not merely mounted.
-func (w *Worker) skillInstruction(ctx context.Context, profile agent.RuntimeProfile) (string, []string) {
+func (w *Worker) skillInstruction(ctx context.Context, profile agent.RuntimeProfile) (string, []skillUsageRef) {
 	if w.skills == nil || len(profile.SkillIDs) == 0 {
 		return "", nil
 	}
@@ -551,7 +484,7 @@ func (w *Worker) skillInstruction(ctx context.Context, profile agent.RuntimeProf
 		return "", nil
 	}
 	var b strings.Builder
-	injected := make([]string, 0, len(loaded))
+	injected := make([]skillUsageRef, 0, len(loaded))
 	for _, s := range loaded {
 		text := s.ContentMD
 		if text == "" {
@@ -562,7 +495,7 @@ func (w *Worker) skillInstruction(ctx context.Context, profile agent.RuntimeProf
 		}
 		fmt.Fprintf(&b, "\n===== Skill: %s (v%d) =====\n%s\n===== End Skill: %s =====\n",
 			s.Code, s.Version, text, s.Code)
-		injected = append(injected, s.SkillID)
+		injected = append(injected, skillUsageRef{SkillID: s.SkillID, Code: s.Code, Name: s.Name, Version: s.Version})
 	}
 	return b.String(), injected
 }

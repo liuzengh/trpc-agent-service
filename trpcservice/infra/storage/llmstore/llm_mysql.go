@@ -55,7 +55,7 @@ func (s *mysqlStore) Create(ctx context.Context, ep llm.Endpoint) error {
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ep.ID, ep.Scope, sqlutil.Null(ep.TenantID), ep.Name, llm.NormalizeProvider(ep.Provider), normalizeType(ep.Type), ep.BaseURL, ep.ModelName, ep.APIKeyRef)
 	if sqlutil.IsDuplicate(err) {
-		return fmt.Errorf("llm: endpoint %q already exists", ep.ID)
+		return fmt.Errorf("%w: %q", llm.ErrEndpointExists, ep.ID)
 	}
 	return err
 }

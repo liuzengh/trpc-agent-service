@@ -9,8 +9,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"sync"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/channels"
 )
@@ -169,85 +167,31 @@ func normalizeMsgType(t string) string {
 // ----------------------------------------------------------------- adapter --
 
 // Adapter implements channels.Adapter for Feishu on top of a Conn. The Conn
-// owns connection establishment and verification; Adapter normalizes and dedups
-// inbound events.
+// owns connection establishment and verification; the adapter only decodes and
+// normalizes inbound events. The shared pump, dedup and send plumbing lives in
+// channels.BaseAdapter.
 type Adapter struct {
 	tenantID  string
 	botOpenID string
-	conn      channels.Conn
-	inbound   chan *channels.InboundMessage
-
-	mu   sync.Mutex
-	seen map[string]struct{}
+	*channels.BaseAdapter
 }
 
 // New returns a Feishu adapter bound to the given tenant and bot open_id.
 func New(tenantID, botOpenID string, conn channels.Conn) *Adapter {
-	return &Adapter{
-		tenantID:  tenantID,
-		botOpenID: botOpenID,
-		conn:      conn,
-		inbound:   make(chan *channels.InboundMessage, 64),
-		seen:      make(map[string]struct{}),
-	}
+	return &Adapter{tenantID: tenantID, botOpenID: botOpenID, BaseAdapter: channels.NewBaseAdapter(Name, conn)}
 }
-
-// Name returns the stable channel identifier.
-func (a *Adapter) Name() string { return Name }
-
-// Inbound returns the channel of normalized inbound messages.
-func (a *Adapter) Inbound() <-chan *channels.InboundMessage { return a.inbound }
 
 // Start consumes raw events from the Conn until ctx is done.
 func (a *Adapter) Start(ctx context.Context) error {
-	for {
-		raw, err := a.conn.Recv(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil // graceful shutdown
-			}
-			return err
-		}
+	return a.BaseAdapter.Run(ctx, func(raw []byte) (*channels.InboundMessage, bool) {
 		var ev Event
 		if err := json.Unmarshal(raw, &ev); err != nil || ev.Header.EventID == "" {
-			continue // skip malformed or undeduplicatable events
-		}
-		if a.isDup(ev.Header.EventID) {
-			continue
+			return nil, false // skip malformed or undeduplicatable events
 		}
 		in := ToInbound(a.tenantID, &ev, a.botOpenID)
 		if in == nil {
-			continue // filtered: group message without @bot
+			return nil, false // filtered: group message without @bot
 		}
-		select {
-		case a.inbound <- in:
-		case <-ctx.Done():
-			return nil
-		}
-	}
-}
-
-// Send delivers a normalized outbound message back to the platform.
-func (a *Adapter) Send(ctx context.Context, msg *channels.OutboundMessage) error {
-	if msg == nil || msg.Inbound == nil {
-		return fmt.Errorf("feishu: outbound requires inbound context")
-	}
-	return a.conn.Send(ctx, msg.Inbound.ChatID, msg.Inbound.ChatType, msg.Text())
-}
-
-// Stop closes the underlying connection.
-func (a *Adapter) Stop(_ context.Context) error {
-	return a.conn.Close()
-}
-
-// isDup records and reports whether an event id was already seen.
-// ponytail: in-memory set; swap for Redis idem:{msg_key} in phase 6.
-func (a *Adapter) isDup(id string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if _, ok := a.seen[id]; ok {
-		return true
-	}
-	a.seen[id] = struct{}{}
-	return false
+		return in, true
+	})
 }
