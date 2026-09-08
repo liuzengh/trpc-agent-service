@@ -21,6 +21,7 @@
 | 能力 | 已实现与已验证 | 明确限制 |
 | --- | --- | --- |
 | Agent 执行 | LLMAgent、Runner、真实兼容模型、多轮会话 | 未平台化注册 Graph/Chain/Parallel/Cycle |
+| Skill、沙箱与 Web UI | 本版不提供；`web` 仅承载 HTTP API，管理功能通过 Admin API 提供 | 不把目录占位或普通 Tool/MCP 当作 Skill 执行、沙箱或可视化页面 |
 | 租户与多节点 | 两租户/两真实 Worker 进程，配置/Session/Memory/Knowledge/工具隔离、故障接管与去重的隔离测试 | 联合测试采用合成模型，不代表真实多供应商压测 |
 | 数据后端 | Session: InMemory/Redis/PostgreSQL；Memory: InMemory/Redis/PostgreSQL；Knowledge: InMemory/Qdrant；Artifact: InMemory/S3-compatible | 不是框架所有后端均已适配；远端云后端未完整联调 |
 | 数据迁移 | 双写、分批回填、服务器验证门禁、切读/回滚与修复任务 | 更换 Embedding 要重建；历史 Session 主体需要完整清单 |

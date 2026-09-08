@@ -52,7 +52,7 @@ func (r *TenantSessionRouter) AppendEvent(
 }
 ```
 
-连接池以 `backend_binding_id + version` 为键。Secret 轮换或连接参数变化时创建新版本，旧实例等到活跃请求归零后再关闭。所有 Router 方法记录 backend type、operation、latency 和 error type，但不把 DSN、bucket credential 等写入 span。
+Router 按后端 Binding 和配置摘要缓存服务，不同资源的具体缓存键由实现决定。当前没有通用的按引用计数热淘汰，旧服务由 Router 关闭时回收；Secret 或连接配置更新需配合受控重启。后端操作记录类型、耗时和安全错误分类，DSN、bucket credential 等不写入 span。
 
 ## 2. Session 后端
 

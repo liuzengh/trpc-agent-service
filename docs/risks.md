@@ -8,7 +8,7 @@
 
 | 编号 | 风险 | 等级 | 触发场景 | 监控信号 | 缓解措施 |
 | --- | --- | --- | --- | --- | --- |
-| R01 | 同一 Session 被两个 Worker 同时执行 | P1 | 队列 rebalance、租约续期失败、网络分区 | lease conflict、同 conversation 活跃 run 大于 1 | 队列分区、Redis 租约、fencing token、提交 CAS |
+| R01 | 同一 Session 被两个 Worker 同时执行 | P1 | 队列 rebalance、租约续期失败、网络分区 | lease conflict、同 conversation 活跃 run 大于 1 | Redis 租约、fencing token、提交 CAS；队列分区仅作可选优化 |
 | R02 | IM 重投导致重复模型调用和重复回复 | P1 | ACK 丢失、上游超时重试 | inbound unique conflict、重复 request | 外部消息唯一索引、稳定 request_id、复用 agent_run/outbound |
 | R03 | 副作用 Tool 重复执行 | P0 | Worker 在 Tool 成功后崩溃，恢复时盲目重跑 | 同 idempotency key 多次调用、uncertain tool execution | tool journal、业务幂等键、先查询后重试、补偿与对账 |
 | R04 | 自动 Summary 或 Memory 任务丢失 | P1 | 使用进程内 channel，Pod 在消费前退出 | summary/memory lag 长期增长、水位不推进 | durable queue、outbox、任务重试和死信 |

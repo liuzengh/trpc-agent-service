@@ -98,8 +98,8 @@ flowchart LR
     DIST -. revision / invalidation .-> GW
     DIST -. revision / invalidation .-> WORKER
     DIST -. binding .-> CA
-    SECRET -. temporary credentials .-> CA
-    SECRET -. temporary credentials .-> WORKER
+    SECRET -. purpose-scoped credentials .-> CA
+    SECRET -. purpose-scoped credentials .-> WORKER
 
     CA --> OTEL
     GW --> OTEL
@@ -128,7 +128,7 @@ flowchart LR
 
 ## 4. 接入层
 
-Channel Adapter 只处理协议差异。它验证签名、解密消息、下载受控媒体、规范化用户和群聊标识，再生成统一的 `InboundEnvelope`。回调 URL 使用不可猜测的 `channel_binding_id`，由平台反查租户和 Agent App，URL 中不暴露租户名称。
+Channel Adapter 处理协议验证和消息规范化：Telegram 验证 Webhook Secret，企业微信自建应用验签/解密，托管消息 MCP 使用授权的主动读取。回调路径使用 `callback_key`，平台反查对应 Binding 和租户，不能将 URL 当作授权凭证。Adapter 产出统一的 `InboundEnvelope`；可选 Telegram 附件由独立的受控导入流程保存 Artifact，不是各通道均可任意下载媒体。
 
 Agent Gateway 执行以下工作：
 
@@ -139,7 +139,7 @@ Agent Gateway 执行以下工作：
 5. 提交成功后向 IM 平台返回 ACK；
 6. 由 outbox relay 将任务投递到消息队列。
 
-Reply Sender 与 Agent Worker 分离。Worker 只写标准化回复到 outbound outbox，Sender 负责长度切分、卡片渲染、频率限制、媒体上传、发送重试和失败对账。这样即使 IM API 暂时不可用，也不会占住 Agent Worker。
+Reply Sender 与 Agent Worker 分离。Worker 写标准化回复到 outbound outbox，Sender 负责完整文本的长度切分、限流退避、受控重试和分段发送事实记录。当前没有卡片渲染、媒体上传/发送或消息编辑；这几项是可选扩展。发送结果 unknown 时不盲目重发，必须核对外部事实。IM API 暂时不可用不会持续占住 Agent Worker。
 
 ## 5. 运行面与 Runner
 
@@ -178,20 +178,17 @@ events, err := sharedRunner.Run(
 
 tRPC-Agent-Go 的 Runner 在构造时接收 Session、Memory 和 Artifact Service。为了支持租户选择不同后端，平台提供组合路由器，实现相同接口并根据 `AppName` 或 `SessionInfo.AppName` 选择真实服务。
 
-路由过程必须包含两次校验：先解析内部 `storage_scope`，再核对 context 中的 `tenant_id` 和 `app_id`。两者不一致时直接拒绝，不能继续访问后端。连接池按 backend binding 复用，配置变更创建新实例，旧实例在所有引用释放后关闭。
+路由过程必须包含两次校验：先解析内部 `storage_scope`，再核对 context 中的 `tenant_id` 和 `app_id`。两者不一致时直接拒绝，不能继续访问后端。后端服务按 Binding/配置摘要复用；当前旧服务随 Router 关闭，不承诺引用计数式热淘汰。密钥或连接配置更新应配合受控重启，不能把缓存重建机制当作在线密钥轮换。
 
 共享后端采用逻辑隔离：Redis key prefix、SQL `tenant_id/app_id` 条件、向量 metadata filter、对象存储 prefix。高安全租户可以选择独立数据库、schema、Redis 集群、bucket 或 vector collection。向量库还要使用包装器强制注入租户过滤条件，并给文档 ID 加命名空间，不能依赖调用方传入 `KnowledgeFilter`。
 
 ## 7. 会话路由与 sticky session
 
-平台不要求负载均衡层 sticky session。消息队列分区、共享 Session 后端和 Session Coordinator 已经提供正确性；Gateway 和 Worker 可以任意扩缩容。可以使用一致性哈希提高 Agent、配置和连接缓存命中率，但哈希结果失效时，其他节点仍能从共享后端继续执行。
+平台在共享 Session、协调器、队列和控制面的部署下不要求负载均衡 sticky session，正确性不依赖消息队列按会话分区。Gateway 和 Worker 可以水平扩展；同一会话由 Coordinator 串行协调，其他 Worker 可读取共享历史。InMemory 配置只适用于单进程，不具备这种跨节点保证。
 
-单聊默认使用真实用户作为 `runtime_user_id`。群聊提供两种模式：
+当前 `channels.RuntimeIdentity` 将 Binding 和上游用户映射为不透明的 `runtime_user_id`；单聊 session_id 由 Binding、会话类型、用户和线程生成，群聊则由 Binding、会话类型、群和线程生成。
 
-- `PER_USER_IN_CHAT`：同一群内每个用户有独立上下文，`runtime_user_id` 是用户，`session_id` 包含群和话题；
-- `SHARED_CHAT`：全群共享上下文，`runtime_user_id` 是合成群主体，真实发送者放入 runtime state 和审计字段。
-
-这是因为框架的 Session 主键实际由 `AppName + UserID + SessionID` 组成，仅让群成员使用相同 `session_id` 并不会自动共享会话。共享模式下默认关闭个人自动 Memory，避免把某个成员的信息写入群主体记忆。
+框架完整 Session Key 为 `AppName + UserID + SessionID`，所以同群成员即使 session_id 相同，仍有各自的会话历史；Telegram Topic 进一步区分线程，跨 Binding/租户继续隔离。当前没有 `SHARED_CHAT` 全群共享模式的配置与实现；若扩展，必须同时调整用户主体以及个人 Memory、工具和审计边界，不能只让成员共用 session_id。
 
 ## 8. 租户隔离
 
@@ -214,9 +211,22 @@ tRPC-Agent-Go 的 Runner 在构造时接收 Session、Memory 和 Artifact Servic
 | 协议 | OpenAI-compatible 模型、MCP；server/*/OpenClaw 可扩展 | 统一 Gateway、Telegram/企业微信 Channel |
 | 可观测性 | OpenTelemetry spans/metrics | 租户成本、审计索引、告警和 SLO |
 
+平台组件在仓库中的实际对应关系如下，代码模块不必各自成为独立进程：
+
+| 要求组件 | 实际代码/配置 | 运行位置 |
+| --- | --- | --- |
+| Agent Gateway | `gateway`、`routing`、`controlplane` | gateway / all |
+| Agent Worker | `worker`、`agent` | worker / all |
+| Channel Adapter | `channels`、受控附件导入 `attachments` | Gateway 接入、Worker 导入、Sender 回复 |
+| Storage Adapter | `storage`、`embedding` 及框架后端 | 按角色和功能初始化 |
+| Admin API | `admin`、`controlplane` | admin / all |
+| Telemetry Collector | `telemetry`、`metrics`、`audit` 与 `deploy/compose` 配置 | 应用埋点及独立 Collector |
+
+`web` 是 HTTP API 传输层，管理能力由 `admin` 提供，本版没有可视化管理/对话页面。Skill 执行平台和本地/容器沙箱未实现，不以空包占位表示完成；也不能把已授权 Tool/MCP 等同于沙箱隔离。README 的目录示范保持原文，实际交付以上述职责和[验收范围](acceptance.md)为准。
+
 ## 10. 部署形态
 
-最小部署使用一个服务进程承载 Admin API、Gateway、Channel、Worker 和 Job Worker，外接 PostgreSQL、Redis、MinIO、Qdrant 与 OpenTelemetry Collector。它适合本地开发和功能验收，但不用于高可用生产。
+最小离线演示使用 all 进程、Mock Model 和 InMemory。持久化平台使用 all 进程加 PostgreSQL/Redis；MinIO、Qdrant 和 Collector 按启用的附件、知识库、观测功能选用，不是每次启动的必需依赖。以上均不等于高可用生产部署。
 
 生产部署清单将 Gateway、Admin、Relay、Worker、Reply Sender 和 Jobs 分别扩缩容；企业微信/Telegram 协议代码当前随 Gateway/Sender 运行。Worker 可继续按普通对话、长工具、代码执行等负载分池。HPA 初始使用 CPU，生产应接入队列 lag、active run、模型并发和投递延迟。PostgreSQL、Redis、对象存储和向量库采用托管或高可用形态，并定期做恢复演练。
 

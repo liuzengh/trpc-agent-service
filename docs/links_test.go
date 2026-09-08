@@ -43,3 +43,23 @@ func TestLocalDocumentLinks(t *testing.T) {
 		}
 	}
 }
+
+// Keep the supplied implementation requirement when restoring README versions.
+func TestReadmeRequirementBoundary(t *testing.T) {
+	raw, err := os.ReadFile("../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(raw)
+	if strings.Contains(content, "不要求实现完整系统") {
+		t.Fatal("README restored an older, relaxed implementation requirement")
+	}
+	for _, required := range []string{
+		"一份基于该设计的 GitHub 实现代码",
+		"实现时不必严格按这个结构组织代码",
+	} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("README lost the supplied requirement: %s", required)
+		}
+	}
+}
