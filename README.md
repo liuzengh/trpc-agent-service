@@ -98,12 +98,14 @@
 | --- | --- | --- |
 | Agent 编排 | `agent/llmagent`、`agent/graph`、Chain / Parallel / Cycle | 租户级 Agent 注册、发布与路由 |
 | 执行入口 | `runner.Runner`（流式 Event、context 取消） | 多租户 Worker 调度、无状态水平扩展 |
-| Session / Memory / Artifact / Knowledge | `session`、`memory`、`artifact`、`knowledge` 及多后端实现 | 租户级后端选择、数据隔离与迁移 |
+| Session / Memory / Artifact / Knowledge | 根模块接口，以及独立发布的 `session/redis v1.11.0`、`memory/redis v1.11.0`、`storage/redis v1.11.0` 等后端子模块；Redis 方案已由 Phase 1.5 B 路径验证 | 租户级后端选择、`RedisBackend` 延迟初始化、命名空间、生命周期与迁移 |
 | Tool / MCP / Skill | `tool`、MCP Tool、`skill` | 租户工具白名单与密钥注入 |
 | 治理 | Plugin / Guardrail / Callbacks | 租户策略下发、预算与审批 |
 | 服务化 | `server/openai`、`server/agui`、`server/a2a`、`server/trpcagent` | 统一 Gateway、Admin API |
 | IM 接入 | OpenClaw Gateway + Channel | 微信 / 企业微信等通道与租户绑定 |
 | 可观测性 | OpenTelemetry tracing / metrics | 租户维度审计、成本与合规 |
+
+当前实现已完成 Phase 2 多租户内核：只读 JSON Catalog 和 `PresetRepository` 管理 Tenant、AgentApp、ChannelBinding、ConfigVersion 与 StorageProfile；服务端通过可信 Binding 派生租户和活动配置，`BackendProvider` 按租户选择官方 InMemory/Redis Session/Memory，`RunnerRegistry` 按 `tenant_id + agent_app_id + config_version` 缓存 Runner。原 Demo HTTP 与环境变量入口保持兼容，Redis 不可用时不回退其他后端。详见 [`docs/stage2-multi-tenant.md`](docs/stage2-multi-tenant.md)。Phase 1.5 的官方 Redis 选择与 SQL Spike 证据仍见 [`docs/stage1.5-storage-spike.md`](docs/stage1.5-storage-spike.md)。
 
 ## 代码目录
 
@@ -147,8 +149,140 @@ cd trpc-agent-service
 ./start.sh
 ```
 
+服务默认只监听 `127.0.0.1:8080`。需要显式对外开放或修改端口时使用 `./start.sh -addr :8081`；脚本会将参数传给 `trpc-service serve`。
+
+Phase 2 也可以通过 `PLATFORM_CONFIG_FILE` 加载只读多租户目录。示例文件为 `configs/phase2.example.json`；先按实际环境修改模型 endpoint，并通过环境变量提供引用的凭据：
+
+```bash
+export IDENTITY_SECRET='replace-with-at-least-32-random-bytes'
+export PLATFORM_CONFIG_FILE='configs/phase2.example.json'
+export PHASE2_MODEL_KEY='replace-with-model-key'
+export PHASE2_REDIS_URL='redis://localhost:6379/0'
+./start.sh
+```
+
+目录文件只允许 `env:<ENV_NAME>` 凭据引用，不得写入模型 Key 或 Redis URL 明文。未设置 `PLATFORM_CONFIG_FILE` 时继续使用原有单租户环境变量契约。
+
+### Phase 3 可靠消息
+
+Phase 3 将 Demo 请求接入 Redis Streams、Inbox 去重、任务租约和有限重试。`serve` 仍是一条命令启动，但内部会运行一个 Gateway 和一个单并发 Worker，并且不会绕过可靠消息链路：
+
+```bash
+export IDENTITY_SECRET='replace-with-at-least-32-random-bytes'
+export PLATFORM_CONFIG_FILE='configs/phase3.example.json'
+export PHASE3_MODEL_KEY='replace-with-model-key'
+export PHASE3_MESSAGING_REDIS_URL='redis://localhost:6379/0'
+export PHASE3_TENANT_REDIS_URL='redis://localhost:6379/0'
+./start.sh
+```
+
+也可以分别启动两个角色：
+
+```bash
+./bin/trpc-service gateway -addr :8080
+./bin/trpc-service worker -health-addr :8081
+```
+
+Gateway 只需要目录、`IDENTITY_SECRET` 和 Messaging Redis 凭据；Worker 还需要模型及租户存储凭据。两者必须使用相同的 `IDENTITY_SECRET`。Messaging Redis 可以和租户 Redis 使用同一实例，但使用独立客户端与 `<key_prefix>:reliable-v1` 命名空间。
+
+`POST /api/v1/demo/messages` 的成功响应保持不变。Gateway 默认同步等待 75 秒；如果任务仍在重试，会返回 `504 task_pending`，任务不会取消。客户端应使用完全相同的 `message_id` 和消息内容重试，以等待或读取 Inbox 中的缓存结果。幂等窗口由 `inbox_retention` 控制，默认 24 小时；窗口过期后相同消息 ID 会被视为新消息。
+
+Phase 3 的默认 `session_fencing=legacy` 保持单 Worker 契约。Worker 崩溃或退出后，新 Worker 会在租约过期后恢复 Pending 任务。Phase 3 的实现与验收见 [`docs/stage3-reliable-messaging.md`](docs/stage3-reliable-messaging.md)。
+
+### Phase 4 双 Worker 与 Strong Session Fencing
+
+Phase 4 增加显式 `session_fencing=strong`。两个独立 Worker 可以共享 Consumer Group：同一 Session 按 Redis `session_seq` 严格串行，不同 Session 可以并行；task lease 和 Session lock 都失效后，其他 Worker 才能接管原 Pending。旧 Worker 的迟到 Session commit、Retry、Fail、Recover 和 release 都会被 fencing 拒绝。
+
+使用 Strong 示例：
+
+```bash
+export IDENTITY_SECRET='replace-with-at-least-32-random-bytes'
+export PLATFORM_CONFIG_FILE='configs/phase4.example.json'
+export PHASE4_MODEL_KEY='replace-with-model-key'
+export PHASE4_REDIS_URL='redis://localhost:6379/0'
+
+./bin/trpc-service gateway -addr :8080 -consumer gateway-a
+./bin/trpc-service worker -health-addr :8081 -consumer worker-a
+./bin/trpc-service worker -health-addr :8082 -consumer worker-b
+```
+
+Strong 模式有以下硬约束：
+
+- Messaging 与所有活动 Session StorageProfile 必须使用同一 Redis URL、logical DB 和 primary `run_id`；
+- Redis 必须是可验证的 standalone primary；InMemory、Redis Cluster、跨 Redis、不可验证代理和 fallback 都会被拒绝；
+- Session 数据使用 `<key_prefix>:reliable-v1:fenced-v1`，不读取或迁移旧 namespace；
+- `max_turn_events` 和 `max_turn_bytes` 默认分别为 512 与 2 MiB，超限只产生一次 `session_turn_too_large` 终态；
+- task heartbeat 只续 task lease/Pending，Session heartbeat 只续 Session lock。
+
+完整 key schema、状态转换、恢复规则、测试矩阵和真实 Redis 7.4.11 验收见 [`docs/stage4-two-workers-session-lock.md`](docs/stage4-two-workers-session-lock.md)。Strong fencing 保护 Session/Inbox/Reply，不承诺模型、Tool、Memory 或外部系统副作用 exactly-once。
+
+### Phase 5 Telegram、企业微信智能机器人与 Web UI
+
+Phase 5 把 Telegram 长轮询、企业微信智能机器人 API 长连接和本地 Web UI 接入同一可靠链路。Telegram 使用 `github.com/go-telegram/bot v1.25.0`，由项目自行控制 `getUpdates` offset；企业微信使用官方 WebSocket 协议薄客户端，不再使用自建应用 callback、验签或消息解密。企微字段级 Spike 见 [`docs/stage5-wecom-spike.md`](docs/stage5-wecom-spike.md)。
+
+示例配置为 `configs/phase5.example.json`。所有真实值仍只通过环境变量注入：
+
+```bash
+export IDENTITY_SECRET='replace-with-at-least-32-random-bytes'
+export PLATFORM_CONFIG_FILE='configs/phase5.example.json'
+export PHASE5_REDIS_URL='redis://localhost:6379/0'
+export PHASE5_MODEL_KEY='replace-with-model-key'
+export PHASE5_TELEGRAM_TOKEN='replace-with-telegram-token'
+export PHASE5_WECOM_BOT_ID='replace-with-wecom-bot-id'
+export PHASE5_WECOM_BOT_SECRET='replace-with-wecom-bot-secret'
+
+./bin/trpc-service gateway -consumer gateway-a
+./bin/trpc-service worker -health-addr :8081 -consumer worker-a
+./bin/trpc-service worker -health-addr :8082 -consumer worker-b
+```
+
+Worker 不读取任何 IM 凭据。引用格式错误会拒绝启动；引用值缺失、认证失败或连接断开时进程保持存活，但 Gateway/serve 的 `/readyz` 返回 503。一个 Telegram/企微 Bot 首版只允许一个 Gateway 连接。
+
+Web UI 位于 `http://127.0.0.1:8080/`，使用预置 demo binding，不接受浏览器提交的 tenant/Agent/配置版本。异步接口为：
+
+```text
+POST /api/v1/web/messages
+GET  /api/v1/web/messages/{message_id}?binding_id=<demo-binding>
+```
+
+页面每 1500ms 轮询 `submitted/processing/succeeded/failed`。原同步 `POST /api/v1/demo/messages` 保持兼容。IM 首版只发一次性文本；Agent 失败向 IM 返回统一文案，Web 查询保留完整错误码。
+
+出站状态保存在 `<prefix>:reliable-v1:outbound:<task_id>`。发送成功或达到默认 5 次上限后，Lua 才原子更新终态并确认 Reply Stream；Gateway 重启会恢复 Pending 和 attempts。外部发送成功、Redis 确认前崩溃仍可能重复，因此只承诺至少一次。完整实现和验收矩阵见 [`docs/stage5-telegram-wecom-webui.md`](docs/stage5-telegram-wecom-webui.md)。
+
+### Phase 5.5 Redis / PostgreSQL / MySQL 多后端持久化
+
+Phase 5.5 允许每个 Tenant/Agent App 选择 Redis、PostgreSQL 或 MySQL Session/Memory；Redis 始终承担 Streams、Inbox、lease、Session lock、重试和接管。SQL Turn 成功提交后才会写成功结果和 Reply，SQL 故障不会回退 Redis，也不会重新调用模型。
+
+三租户示例为 `configs/phase5.5.example.json`：
+
+```bash
+export IDENTITY_SECRET='replace-with-at-least-32-random-bytes'
+export PLATFORM_CONFIG_FILE='configs/phase5.5.example.json'
+export PHASE55_MODEL_KEY='replace-with-model-key'
+export PHASE55_REDIS_URL='redis://localhost:6379/0'
+export PHASE55_POSTGRES_DSN='postgres://user:password@localhost:5432/app?sslmode=require'
+export PHASE55_MYSQL_DSN='user:password@tcp(localhost:3306)/app?parseTime=true&charset=utf8mb4&loc=UTC'
+
+./bin/trpc-service gateway -addr :8080 -consumer gateway-a
+./bin/trpc-service worker -health-addr :8081 -consumer worker-a
+./bin/trpc-service worker -health-addr :8082 -consumer worker-b
+```
+
+配置文件只保存 `env:` 引用。PostgreSQL schema 必须预先存在；`skip_db_init=false` 创建并验证表，`true` 只验证现有表。每个 Agent App 首次执行时在 Messaging Redis 锁定脱敏后端指纹，后续禁止改变 backend/database/schema/prefix，但允许密码和 TLS 配置轮换。
+
+PostgreSQL `session/postgres v1.11.0` 的跨时区 Summary 缺陷仍存在，因此 PostgreSQL Summary 在本阶段强制禁用。SQL Memory 固定无限容量、无 Extractor、无 Memory Tool。完整状态机、SQL 事务、错误码、schema/版本契约和升级门槛见 [`docs/stage5.5-sql-persistence.md`](docs/stage5.5-sql-persistence.md)。
+
 停止服务：
 
 ```bash
 ./stop.sh
 ```
+
+### Phase 7 deployment delivery
+
+Phase 7 adds reproducible `full`, `light`, `obs`, and `ha` Compose modes,
+offline Model/Telegram mocks, SQL init/readiness commands, OTLP telemetry, and
+an automated fault matrix. Run `scripts/phase7/up.ps1 -Mode full`; the first
+run creates `compose/.env` and stops until required values are reviewed. See
+`docs/stage7-compose.md`, `docs/stage7-observability.md`, and
+`docs/stage7-final-design.md` for the runbook and design boundaries.

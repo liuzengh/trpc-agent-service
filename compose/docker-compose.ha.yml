@@ -1,0 +1,17 @@
+services:
+  gateway-standby:
+    image: trpc-phase7:local
+    profiles: [ha]
+    environment:
+      IDENTITY_SECRET: ${IDENTITY_SECRET}
+      PHASE7_MODEL_KEY: ${PHASE7_MODEL_KEY}
+      PHASE7_TELEGRAM_TOKEN: ${PHASE7_TELEGRAM_TOKEN}
+      PHASE7_REDIS_URL: redis://messaging-redis:6379/0
+      PHASE7_CONTROL_REDIS_URL: redis://control-redis:6379/0
+      PHASE7_ADMIN_TOKEN: ${PHASE7_ADMIN_TOKEN}
+      PLATFORM_CONFIG_FILE: /app/config/phase7.full.example.json
+      NODE_ID: phase7-gateway-standby
+    volumes: [../configs:/app/config:ro]
+    command: ["gateway", "-addr", ":8080", "-consumer", "phase7-gateway-standby"]
+    ports: ["127.0.0.1:18084:8080"]
+    depends_on: {gateway: {condition: service_started}}

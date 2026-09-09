@@ -1,0 +1,12 @@
+receivers:
+  otlp:
+    protocols: {grpc: {}, http: {}}
+processors:
+  memory_limiter: {limit_mib: 1024, check_interval: 1s}
+  batch: {send_batch_size: 2048, timeout: 5s}
+exporters:
+  otlphttp: {endpoint: https://observability.example.invalid}
+service:
+  pipelines:
+    traces: {receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp]}
+    metrics: {receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp]}

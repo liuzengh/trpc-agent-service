@@ -1,0 +1,47 @@
+services:
+  redis-real-feishu:
+    image: redis:7.4.11-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [real-feishu-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  gateway-real-feishu:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: trpc-phase7:local
+    environment:
+      IDENTITY_SECRET: "${IDENTITY_SECRET}"
+      PHASE7_REDIS_URL: "redis://redis-real-feishu:6379/0"
+      PHASE7_FEISHU_APP_ID: "${PHASE7_FEISHU_APP_ID}"
+      PHASE7_FEISHU_APP_SECRET: "${PHASE7_FEISHU_APP_SECRET}"
+      PLATFORM_CONFIG_FILE: /app/config/phase7.real-feishu.example.json
+      NODE_ID: phase7-real-feishu-gateway
+    volumes: [../configs:/app/config:ro]
+    command: ["gateway", "-addr", ":8080", "-consumer", "phase7-real-feishu-gateway"]
+    ports: ["127.0.0.1:19080:8080"]
+    depends_on:
+      redis-real-feishu:
+        condition: service_healthy
+
+  worker-real-feishu:
+    image: trpc-phase7:local
+    environment:
+      IDENTITY_SECRET: "${IDENTITY_SECRET}"
+      PHASE7_REDIS_URL: "redis://redis-real-feishu:6379/0"
+      PHASE7_REAL_MODEL_KEY: "${PHASE7_REAL_MODEL_KEY}"
+      PLATFORM_CONFIG_FILE: /app/config/phase7.real-feishu.example.json
+      NODE_ID: phase7-real-feishu-worker
+    volumes: [../configs:/app/config:ro]
+    command: ["worker", "-health-addr", ":8081", "-consumer", "phase7-real-feishu-worker"]
+    ports: ["127.0.0.1:19081:8081"]
+    depends_on:
+      redis-real-feishu:
+        condition: service_healthy
+
+volumes:
+  real-feishu-data:

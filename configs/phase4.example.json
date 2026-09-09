@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "messaging": {
+    "redis_credential_ref": "env:PHASE4_REDIS_URL",
+    "key_prefix": "trpc-agent-service:phase4",
+    "lease_duration": "30s",
+    "heartbeat_interval": "10s",
+    "initial_backoff": "1s",
+    "max_backoff": "30s",
+    "max_attempts": 3,
+    "inbox_retention": "24h",
+    "reply_wait_timeout": "75s",
+    "session_fencing": "strong",
+    "session_lock_duration": "30s",
+    "session_wait_backoff": "100ms",
+    "session_wait_max_backoff": "2s",
+    "max_turn_events": 512,
+    "max_turn_bytes": 2097152,
+    "shutdown_timeout": "10s"
+  },
+  "tenants": [
+    {"id": "tenant-redis", "enabled": true}
+  ],
+  "storage_profiles": [
+    {
+      "tenant_id": "tenant-redis",
+      "id": "redis-main-v1",
+      "kind": "redis",
+      "credential_ref": "env:PHASE4_REDIS_URL",
+      "key_prefix": "trpc-agent-service:phase4"
+    }
+  ],
+  "agent_apps": [
+    {
+      "tenant_id": "tenant-redis",
+      "id": "assistant",
+      "enabled": true,
+      "active_config_version": "v1"
+    }
+  ],
+  "config_versions": [
+    {
+      "tenant_id": "tenant-redis",
+      "agent_app_id": "assistant",
+      "version": "v1",
+      "storage_profile_id": "redis-main-v1",
+      "instruction": "You are the Redis-backed tenant assistant.",
+      "model": {
+        "name": "model-name",
+        "base_url": "https://example.test/v1",
+        "credential_ref": "env:PHASE4_MODEL_KEY",
+        "request_timeout": "60s",
+        "max_output_tokens": 1024
+      }
+    }
+  ],
+  "channel_bindings": [
+    {
+      "id": "demo-redis",
+      "channel": "demo",
+      "external_account_id": "demo-redis",
+      "tenant_id": "tenant-redis",
+      "agent_app_id": "assistant",
+      "enabled": true
+    }
+  ]
+}

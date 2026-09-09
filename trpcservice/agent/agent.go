@@ -1,3 +1,2 @@
-// Package agent hosts tenant-specific agents built on tRPC-Agent-Go
-// (llmagent, graph, chain/parallel/cycle) and runner.Runner.
+// Package agent contains the phase 1 Runner cache and execution primitives.
 package agent

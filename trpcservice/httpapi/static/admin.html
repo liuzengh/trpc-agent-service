@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>平台管理</title>
+  <style>
+    :root { color-scheme:light; --ink:#202522; --muted:#68716c; --line:#d9dedb; --panel:#f5f7f5; --accent:#176b4d; --accent-dark:#0f553c; --danger:#a83b32; --warning:#9a650d; --white:#fff; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:var(--white); color:var(--ink); font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif; font-size:14px; letter-spacing:0; }
+    button,input { font:inherit; letter-spacing:0; }
+    button:focus-visible,input:focus-visible,[role="tab"]:focus-visible { outline:3px solid rgba(23,107,77,.2); outline-offset:1px; }
+    .topbar { min-height:58px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:16px; padding:0 24px; }
+    .brand { font-size:16px; font-weight:700; }
+    .top-actions { display:flex; align-items:center; gap:8px; }
+    .connection { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:#aeb5b0; }
+    .dot.ok { background:#278a60; }
+    .dot.error { background:var(--danger); }
+    .token { width:210px; height:34px; border:1px solid var(--line); border-radius:5px; padding:0 9px; }
+    button { min-height:34px; border:1px solid var(--accent); border-radius:5px; padding:0 13px; color:var(--white); background:var(--accent); font-weight:650; cursor:pointer; }
+    button:hover { background:var(--accent-dark); }
+    button.secondary { color:var(--ink); background:var(--white); border-color:var(--line); }
+    button.secondary:hover { background:var(--panel); }
+    nav { border-bottom:1px solid var(--line); padding:0 24px; overflow-x:auto; }
+    .tabs { width:min(100%,1280px); margin:0 auto; display:flex; min-width:max-content; }
+    [role="tab"] { min-height:44px; padding:0 16px; border:0; border-bottom:2px solid transparent; border-radius:0; color:var(--muted); background:transparent; font-weight:650; }
+    [role="tab"]:hover { color:var(--ink); background:var(--panel); }
+    [role="tab"][aria-selected="true"] { color:var(--accent); border-bottom-color:var(--accent); }
+    main { width:min(100%,1280px); margin:0 auto; padding:24px; }
+    .page-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:18px; }
+    h1 { margin:0; font-size:23px; line-height:1.3; }
+    h2 { margin:0 0 12px; font-size:16px; }
+    .subtle { margin:5px 0 0; color:var(--muted); }
+    .notice { display:none; margin-bottom:16px; padding:10px 12px; border-left:3px solid var(--danger); background:#fff7f6; color:var(--danger); }
+    .notice.show { display:block; }
+    .stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-bottom:24px; }
+    .stat { border:1px solid var(--line); border-radius:6px; padding:14px; min-height:84px; }
+    .stat-label { color:var(--muted); font-size:12px; }
+    .stat-value { margin-top:7px; font-size:25px; font-weight:750; }
+    section[data-view] { display:none; }
+    section[data-view].active { display:block; }
+    .band { margin-top:24px; }
+    .table-wrap { width:100%; overflow:auto; border-top:1px solid var(--line); }
+    table { width:100%; border-collapse:collapse; min-width:720px; }
+    th,td { padding:11px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-size:12px; font-weight:700; background:var(--panel); white-space:nowrap; }
+    td { overflow-wrap:anywhere; }
+    .mono { font-family:Consolas,"SFMono-Regular",monospace; font-size:12px; }
+    .badge { display:inline-flex; align-items:center; min-height:24px; padding:2px 7px; border-radius:4px; color:#245b45; background:#e9f5ef; font-size:12px; font-weight:700; white-space:nowrap; }
+    .badge.warn { color:var(--warning); background:#fff6df; }
+    .badge.bad { color:var(--danger); background:#fff0ee; }
+    .empty { padding:34px 10px; text-align:center; color:var(--muted); border-bottom:1px solid var(--line); }
+    .loading { color:var(--muted); }
+    @media (max-width:800px) {
+      .topbar { align-items:flex-start; flex-direction:column; padding:13px 16px; }
+      .top-actions { width:100%; flex-wrap:wrap; }
+      .token { flex:1; min-width:180px; }
+      nav { padding:0 8px; }
+      main { padding:18px 16px; }
+      .stats { grid-template-columns:1fr 1fr; }
+      .page-head { align-items:stretch; flex-direction:column; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Agent 平台管理</div>
+    <div class="top-actions">
+      <div class="connection"><span id="dot" class="dot"></span><span id="connection">未连接</span></div>
+      <input id="token" class="token" type="password" autocomplete="off" placeholder="输入 Admin Token" aria-label="Admin Token">
+      <button id="load" type="button">连接</button>
+      <button id="refresh" class="secondary" type="button" disabled>刷新</button>
+    </div>
+  </header>
+  <nav aria-label="管理视图"><div class="tabs" role="tablist">
+    <button role="tab" aria-selected="true" data-tab="overview">总览</button>
+    <button role="tab" aria-selected="false" data-tab="tenants">租户</button>
+    <button role="tab" aria-selected="false" data-tab="bindings">Bindings</button>
+    <button role="tab" aria-selected="false" data-tab="tasks">任务</button>
+    <button role="tab" aria-selected="false" data-tab="messages">最近消息</button>
+    <button role="tab" aria-selected="false" data-tab="audit">审计</button>
+  </div></nav>
+  <main>
+    <div class="page-head"><div><h1 id="title">运行总览</h1><p id="updated" class="subtle">输入 Token 后加载平台状态</p></div></div>
+    <div id="notice" class="notice" role="alert"></div>
+
+    <section data-view="overview" class="active">
+      <div class="stats">
+        <div class="stat"><div class="stat-label">租户</div><div id="tenant-count" class="stat-value">-</div></div>
+        <div class="stat"><div class="stat-label">启用 Binding</div><div id="binding-count" class="stat-value">-</div></div>
+        <div class="stat"><div class="stat-label">保留任务</div><div id="task-count" class="stat-value">-</div></div>
+        <div class="stat"><div class="stat-label">在线 Worker</div><div id="worker-count" class="stat-value">-</div></div>
+      </div>
+      <div class="band"><h2>近期任务</h2><div id="overview-tasks" class="table-wrap"></div></div>
+    </section>
+    <section data-view="tenants"><h2>租户列表</h2><div id="tenants-table" class="table-wrap"></div></section>
+    <section data-view="bindings"><h2>Binding 配置状态</h2><div id="bindings-table" class="table-wrap"></div></section>
+    <section data-view="tasks"><h2>任务状态</h2><div id="tasks-table" class="table-wrap"></div></section>
+    <section data-view="messages"><h2>最近消息</h2><p class="subtle">仅展示运行元数据，不展示消息正文和用户身份。</p><div id="messages-table" class="table-wrap"></div></section>
+    <section data-view="audit"><h2>审计记录</h2><div id="audit-table" class="table-wrap"></div></section>
+  </main>
+  <script>
+    const $=id=>document.getElementById(id);
+    const state={catalog:{tenants:[],bindings:[]},tasks:[],audit:[],nodes:[]};
+    const titles={overview:'运行总览',tenants:'租户列表',bindings:'Binding 状态',tasks:'任务状态',messages:'最近消息',audit:'审计记录'};
+    const columns={
+      tasks:[['received_at','时间'],['task_id','任务 ID'],['tenant_id','租户'],['agent_app_id','Agent'],['state','任务状态'],['attempt','尝试'],['node_id','节点'],['error_code','错误码']],
+      audit:[['occurred_at','时间'],['tenant_id','租户'],['channel','渠道'],['event_type','事件'],['decision','决策'],['tool_name','工具'],['error_type','错误'],['trace_id','Trace ID']]
+    };
+    let token='';
+    const text=value=>value===undefined||value===null||value===''?'-':String(value);
+    const when=value=>{if(!value||String(value).startsWith('0001-'))return '-';const date=new Date(value);return Number.isNaN(date.getTime())?text(value):date.toLocaleString('zh-CN',{hour12:false})};
+    const badge=value=>{const label=text(value);const good=['enabled','ready','succeeded','completed','allowed'];const bad=['disabled','offline','failed_terminal','denied','blocked'];const kind=bad.includes(label)?'bad':good.includes(label)?'':'warn';const span=document.createElement('span');span.className=`badge ${kind}`;span.textContent=label;return span};
+    const cell=(row,key)=>{if(key.endsWith('_at'))return when(row[key]);return text(row[key])};
+    function table(target,rows,defs,badges=[]){const root=$(target);root.textContent='';if(!rows.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='暂无数据';root.appendChild(empty);return}const table=document.createElement('table'),head=document.createElement('thead'),body=document.createElement('tbody'),tr=document.createElement('tr');for(const [,label] of defs){const th=document.createElement('th');th.textContent=label;tr.appendChild(th)}head.appendChild(tr);for(const row of rows){const line=document.createElement('tr');for(const [key] of defs){const td=document.createElement('td');if(badges.includes(key))td.appendChild(badge(row[key]));else{td.textContent=cell(row,key);if(key.includes('id'))td.className='mono'}line.appendChild(td)}body.appendChild(line)}table.append(head,body);root.appendChild(table)}
+    async function api(path){const response=await fetch(path,{headers:{Authorization:`Bearer ${token}`}});let body={};try{body=await response.json()}catch{}if(!response.ok)throw new Error(body.message||body.code||`请求失败 (${response.status})`);return body}
+    async function load(){token=$('token').value.trim();if(!token){showError('请输入 Admin Token');return}setBusy(true);try{const from=new Date(Date.now()-24*60*60*1000).toISOString();const [catalog,tasks,audit,nodes]=await Promise.all([api('/api/v1/admin/catalog'),api('/api/v1/admin/tasks?limit=100'),api(`/api/v1/admin/audit?limit=100&from=${encodeURIComponent(from)}`),api('/api/v1/admin/nodes')]);state.catalog=catalog;state.tasks=tasks.items||[];state.audit=(audit.items||[]).slice().reverse();state.nodes=nodes||[];render();$('dot').className='dot ok';$('connection').textContent='已连接';$('updated').textContent=`更新于 ${new Date().toLocaleString('zh-CN',{hour12:false})}`;$('notice').className='notice';$('refresh').disabled=false}catch(error){showError(error.message);$('dot').className='dot error';$('connection').textContent='连接失败'}finally{setBusy(false)}}
+    function setBusy(busy){$('load').disabled=busy;$('refresh').disabled=busy||!token;$('load').textContent=busy?'加载中':'连接'}
+    function showError(message){$('notice').textContent=message;$('notice').className='notice show'}
+    function render(){const tenants=state.catalog.tenants||[],bindings=state.catalog.bindings||[],tasks=state.tasks,audit=state.audit;$('tenant-count').textContent=tenants.length;$('binding-count').textContent=bindings.filter(item=>item.enabled).length;$('task-count').textContent=tasks.length;$('worker-count').textContent=state.nodes.filter(item=>item.role==='worker'&&item.state==='ready'&&new Date(item.lease_until)>new Date()).length;
+      table('overview-tasks',tasks.slice(0,8),columns.tasks,['state']);
+      table('tenants-table',tenants,[['id','租户 ID'],['enabled','状态']].map(([key,label])=>[key,label]),['enabled']);
+      table('bindings-table',bindings,[['id','Binding ID'],['channel','渠道'],['external_account_id','外部账号'],['tenant_id','租户'],['agent_app_id','Agent'],['enabled','状态']],['enabled']);
+      table('tasks-table',tasks,columns.tasks,['state']);
+      table('messages-table',tasks,[['received_at','时间'],['platform_message_id','平台消息 ID'],['channel','渠道'],['binding_id','Binding'],['tenant_id','租户'],['agent_app_id','Agent'],['task_id','任务 ID'],['state','执行状态'],['outbound_state','出站状态'],['request_id','Request ID'],['trace_id','Trace ID']],['state','outbound_state']);
+      table('audit-table',audit,columns.audit,['decision']);
+    }
+    document.querySelectorAll('[role="tab"]').forEach(tab=>tab.addEventListener('click',()=>{document.querySelectorAll('[role="tab"]').forEach(item=>item.setAttribute('aria-selected',String(item===tab)));document.querySelectorAll('section[data-view]').forEach(view=>view.classList.toggle('active',view.dataset.view===tab.dataset.tab));$('title').textContent=titles[tab.dataset.tab]}));
+    $('load').addEventListener('click',load);$('refresh').addEventListener('click',load);$('token').addEventListener('keydown',event=>{if(event.key==='Enter')load()});
+  </script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+services:
+  gateway:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  worker-1:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  worker-2:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    profiles: [obs]
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes: [./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro]
+    ports: ["127.0.0.1:14318:4318", "127.0.0.1:19464:9464"]
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: [obs]
+    volumes: [./prometheus.yml:/etc/prometheus/prometheus.yml:ro]
+    ports: ["127.0.0.1:19090:9090"]
+    depends_on: [otel-collector]

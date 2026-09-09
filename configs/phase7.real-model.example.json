@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "messaging": {
+    "redis_credential_ref": "env:PHASE7_REDIS_URL",
+    "key_prefix": "trpc-agent-service:phase7:real-model",
+    "session_fencing": "legacy"
+  },
+  "tenants": [{"id": "tenant-real-model", "enabled": true}],
+  "storage_profiles": [{
+    "tenant_id": "tenant-real-model",
+    "id": "redis-main-v1",
+    "kind": "redis",
+    "credential_ref": "env:PHASE7_REDIS_URL",
+    "key_prefix": "trpc-agent-service:phase7:real-model:tenant"
+  }],
+  "agent_apps": [{"tenant_id": "tenant-real-model", "id": "assistant", "enabled": true, "active_config_version": "v1"}],
+  "config_versions": [{
+    "tenant_id": "tenant-real-model",
+    "agent_app_id": "assistant",
+    "version": "v1",
+    "storage_profile_id": "redis-main-v1",
+    "instruction": "You are a concise assistant.",
+    "model": {
+      "name": "replace-with-model-name",
+      "base_url": "https://api.example.invalid/v1",
+      "credential_ref": "env:PHASE7_REAL_MODEL_KEY",
+      "request_timeout": "30s",
+      "max_output_tokens": 1024
+    }
+  }],
+  "channel_bindings": [{"id": "demo-real-model", "channel": "demo", "external_account_id": "demo-real-model", "tenant_id": "tenant-real-model", "agent_app_id": "assistant", "enabled": true}]
+}

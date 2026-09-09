@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "messaging": {
+    "redis_credential_ref": "env:PHASE5_REDIS_URL",
+    "key_prefix": "trpc-agent-service:phase5",
+    "lease_duration": "30s",
+    "heartbeat_interval": "10s",
+    "initial_backoff": "1s",
+    "max_backoff": "30s",
+    "max_attempts": 3,
+    "inbox_retention": "24h",
+    "reply_wait_timeout": "75s",
+    "session_fencing": "strong",
+    "session_lock_duration": "30s",
+    "session_wait_backoff": "100ms",
+    "session_wait_max_backoff": "2s",
+    "max_turn_events": 512,
+    "max_turn_bytes": 2097152,
+    "shutdown_timeout": "10s",
+    "outbound_max_attempts": 5,
+    "outbound_initial_backoff": "1s",
+    "outbound_max_backoff": "30s",
+    "outbound_send_timeout": "10s",
+    "outbound_claim_idle": "30s"
+  },
+  "tenants": [
+    {"id": "tenant-main", "enabled": true}
+  ],
+  "storage_profiles": [
+    {
+      "tenant_id": "tenant-main",
+      "id": "redis-main-v1",
+      "kind": "redis",
+      "credential_ref": "env:PHASE5_REDIS_URL",
+      "key_prefix": "trpc-agent-service:phase5"
+    }
+  ],
+  "agent_apps": [
+    {
+      "tenant_id": "tenant-main",
+      "id": "assistant",
+      "enabled": true,
+      "active_config_version": "v1"
+    }
+  ],
+  "config_versions": [
+    {
+      "tenant_id": "tenant-main",
+      "agent_app_id": "assistant",
+      "version": "v1",
+      "storage_profile_id": "redis-main-v1",
+      "instruction": "You are the tenant assistant.",
+      "model": {
+        "name": "model-name",
+        "base_url": "https://example.test/v1",
+        "credential_ref": "env:PHASE5_MODEL_KEY",
+        "request_timeout": "60s",
+        "max_output_tokens": 1024
+      }
+    }
+  ],
+  "channel_bindings": [
+    {
+      "id": "demo-binding",
+      "channel": "demo",
+      "external_account_id": "demo-binding",
+      "tenant_id": "tenant-main",
+      "agent_app_id": "assistant",
+      "enabled": true
+    },
+    {
+      "id": "telegram-main",
+      "channel": "telegram",
+      "external_account_id": "replace-with-telegram-bot-id",
+      "credential_ref": "env:PHASE5_TELEGRAM_TOKEN",
+      "tenant_id": "tenant-main",
+      "agent_app_id": "assistant",
+      "enabled": true
+    },
+    {
+      "id": "wecom-main",
+      "channel": "wecom_aibot",
+      "external_account_id": "replace-with-wecom-account-id",
+      "bot_id_ref": "env:PHASE5_WECOM_BOT_ID",
+      "bot_secret_ref": "env:PHASE5_WECOM_BOT_SECRET",
+      "tenant_id": "tenant-main",
+      "agent_app_id": "assistant",
+      "enabled": true
+    }
+  ]
+}

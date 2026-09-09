@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "messaging":{"redis_credential_ref":"env:PHASE7_REDIS_URL","key_prefix":"trpc-agent-service:phase7:light","session_fencing":"legacy"},
+  "tenants":[{"id":"tenant-redis","enabled":true}],
+  "storage_profiles":[{"tenant_id":"tenant-redis","id":"redis-main-v1","kind":"redis","credential_ref":"env:PHASE7_REDIS_URL","key_prefix":"trpc-agent-service:phase7:light:tenant"}],
+  "agent_apps":[{"tenant_id":"tenant-redis","id":"assistant","enabled":true,"active_config_version":"v1"}],
+  "config_versions":[{"tenant_id":"tenant-redis","agent_app_id":"assistant","version":"v1","storage_profile_id":"redis-main-v1","instruction":"Phase 7 light assistant","model":{"name":"mock-model","base_url":"http://mock-model:8090/v1","credential_ref":"env:PHASE7_MODEL_KEY","request_timeout":"5s","max_output_tokens":256}}],
+  "channel_bindings":[{"id":"demo-redis","channel":"demo","external_account_id":"demo-redis","tenant_id":"tenant-redis","agent_app_id":"assistant","enabled":true}]
+}

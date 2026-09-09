@@ -13,5 +13,29 @@ coverage.html
 
 vendor/
 
+# Local Phase 1 dependency/cache artifacts.
+.stage1-cache/
+.stage1-spike/
+
+# Local Phase 1.5 compatibility spike/cache artifacts.
+.stage15-cache/
+.stage15-spike/
+
+# Local Phase 5 dependency and test cache artifacts.
+.stage5-cache/
+
+# Local notes may contain credentials; never stage them.
+/这是一个伟大的开始.txt
+
 data/*
 !data/README.md
+
+# Local real-model smoke catalog; credentials remain in environment variables.
+/configs/phase2.smoke.json
+/configs/phase5.smoke.json
+
+# Phase 7 local secrets and evidence.
+/compose/.env
+/compose/phase7.real-*.json
+/phase7-evidence/
+/.phase7-gocache/

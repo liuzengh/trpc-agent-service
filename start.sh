@@ -15,6 +15,6 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   exit 0
 fi
 
-nohup "$ROOT/bin/trpc-service" >"$ROOT/data/trpc-service.log" 2>&1 &
+nohup "$ROOT/bin/trpc-service" serve "$@" >"$ROOT/data/trpc-service.log" 2>&1 &
 echo $! >"$PID_FILE"
 echo "started: pid=$(cat "$PID_FILE")"

@@ -1,0 +1,47 @@
+services:
+  redis-real-wecom:
+    image: redis:7.4.11-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [real-wecom-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  gateway-real-wecom:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: trpc-phase7:local
+    environment:
+      IDENTITY_SECRET: "${IDENTITY_SECRET}"
+      PHASE7_REDIS_URL: "redis://redis-real-wecom:6379/0"
+      PHASE7_WECOM_BOT_ID: "${PHASE7_WECOM_BOT_ID}"
+      PHASE7_WECOM_BOT_SECRET: "${PHASE7_WECOM_BOT_SECRET}"
+      PLATFORM_CONFIG_FILE: /app/config/phase7.real-wecom.example.json
+      NODE_ID: phase7-real-wecom-gateway
+    volumes: [../configs:/app/config:ro]
+    command: ["gateway", "-addr", ":8080", "-consumer", "phase7-real-wecom-gateway"]
+    ports: ["127.0.0.1:18080:8080"]
+    depends_on:
+      redis-real-wecom:
+        condition: service_healthy
+
+  worker-real-wecom:
+    image: trpc-phase7:local
+    environment:
+      IDENTITY_SECRET: "${IDENTITY_SECRET}"
+      PHASE7_REDIS_URL: "redis://redis-real-wecom:6379/0"
+      PHASE7_REAL_MODEL_KEY: "${PHASE7_REAL_MODEL_KEY}"
+      PLATFORM_CONFIG_FILE: /app/config/phase7.real-wecom.example.json
+      NODE_ID: phase7-real-wecom-worker
+    volumes: [../configs:/app/config:ro]
+    command: ["worker", "-health-addr", ":8081", "-consumer", "phase7-real-wecom-worker"]
+    ports: ["127.0.0.1:18081:8081"]
+    depends_on:
+      redis-real-wecom:
+        condition: service_healthy
+
+volumes:
+  real-wecom-data:

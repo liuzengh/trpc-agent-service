@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "messaging": {
+    "redis_credential_ref": "env:PHASE7_REDIS_URL",
+    "key_prefix": "trpc-agent-service:phase7:real-feishu",
+    "session_fencing": "legacy"
+  },
+  "tenants": [{"id": "tenant-feishu", "enabled": true}],
+  "storage_profiles": [{
+    "tenant_id": "tenant-feishu",
+    "id": "redis-main-v1",
+    "kind": "redis",
+    "credential_ref": "env:PHASE7_REDIS_URL",
+    "key_prefix": "trpc-agent-service:phase7:real-feishu:tenant"
+  }],
+  "agent_apps": [{"tenant_id": "tenant-feishu", "id": "assistant", "enabled": true, "active_config_version": "v1"}],
+  "config_versions": [{
+    "tenant_id": "tenant-feishu",
+    "agent_app_id": "assistant",
+    "version": "v1",
+    "storage_profile_id": "redis-main-v1",
+    "instruction": "You are a concise Feishu assistant.",
+    "model": {
+      "name": "deepseek-v4-flash",
+      "base_url": "https://api.deepseek.com",
+      "credential_ref": "env:PHASE7_REAL_MODEL_KEY",
+      "request_timeout": "60s",
+      "max_output_tokens": 1024
+    }
+  }],
+  "channel_bindings": [
+    {
+      "id": "demo-binding",
+      "channel": "demo",
+      "external_account_id": "demo-binding",
+      "tenant_id": "tenant-feishu",
+      "agent_app_id": "assistant",
+      "enabled": true
+    },
+    {
+      "id": "feishu-real",
+      "channel": "feishu",
+      "external_account_id": "feishu-real",
+      "bot_id_ref": "env:PHASE7_FEISHU_APP_ID",
+      "bot_secret_ref": "env:PHASE7_FEISHU_APP_SECRET",
+      "tenant_id": "tenant-feishu",
+      "agent_app_id": "assistant",
+      "enabled": true
+    }
+  ]
+}

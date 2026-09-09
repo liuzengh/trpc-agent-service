@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "messaging": {
+    "redis_credential_ref": "env:PHASE7_REDIS_URL",
+    "key_prefix": "trpc-agent-service:phase7:real-wecom",
+    "session_fencing": "legacy"
+  },
+  "tenants": [{"id": "tenant-wecom", "enabled": true}],
+  "storage_profiles": [{
+    "tenant_id": "tenant-wecom",
+    "id": "redis-main-v1",
+    "kind": "redis",
+    "credential_ref": "env:PHASE7_REDIS_URL",
+    "key_prefix": "trpc-agent-service:phase7:real-wecom:tenant"
+  }],
+  "agent_apps": [{"tenant_id": "tenant-wecom", "id": "assistant", "enabled": true, "active_config_version": "v1"}],
+  "config_versions": [{
+    "tenant_id": "tenant-wecom",
+    "agent_app_id": "assistant",
+    "version": "v1",
+    "storage_profile_id": "redis-main-v1",
+    "instruction": "You are a concise WeCom assistant.",
+    "model": {
+      "name": "deepseek-v4-flash",
+      "base_url": "https://api.deepseek.com",
+      "credential_ref": "env:PHASE7_REAL_MODEL_KEY",
+      "request_timeout": "60s",
+      "max_output_tokens": 1024
+    }
+  }],
+  "channel_bindings": [
+    {
+      "id": "demo-binding",
+      "channel": "demo",
+      "external_account_id": "demo-binding",
+      "tenant_id": "tenant-wecom",
+      "agent_app_id": "assistant",
+      "enabled": true
+    },
+    {
+      "id": "wecom-real",
+      "channel": "wecom_aibot",
+      "external_account_id": "wecom-real",
+      "bot_id_ref": "env:PHASE7_WECOM_BOT_ID",
+      "bot_secret_ref": "env:PHASE7_WECOM_BOT_SECRET",
+      "tenant_id": "tenant-wecom",
+      "agent_app_id": "assistant",
+      "enabled": true
+    }
+  ]
+}

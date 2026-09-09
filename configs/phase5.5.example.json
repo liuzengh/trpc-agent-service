@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "messaging": {
+    "redis_credential_ref": "env:PHASE55_REDIS_URL",
+    "key_prefix": "trpc-agent-service:phase55",
+    "lease_duration": "30s",
+    "heartbeat_interval": "10s",
+    "initial_backoff": "1s",
+    "max_backoff": "30s",
+    "max_attempts": 3,
+    "inbox_retention": "24h",
+    "reply_wait_timeout": "75s",
+    "session_fencing": "strong",
+    "session_lock_duration": "30s",
+    "session_wait_backoff": "100ms",
+    "session_wait_max_backoff": "2s",
+    "max_turn_events": 512,
+    "max_turn_bytes": 2097152,
+    "shutdown_timeout": "10s",
+    "outbound_max_attempts": 5,
+    "outbound_initial_backoff": "1s",
+    "outbound_max_backoff": "30s",
+    "outbound_send_timeout": "10s",
+    "outbound_claim_idle": "30s",
+    "persistence_timeout": "10s",
+    "persistence_max_attempts": 5,
+    "persistence_initial_backoff": "1s",
+    "persistence_max_backoff": "30s",
+    "persistence_payload_max_bytes": 4194304
+  },
+  "tenants": [
+    {"id": "tenant-redis", "enabled": true},
+    {"id": "tenant-postgres", "enabled": true},
+    {"id": "tenant-mysql", "enabled": true}
+  ],
+  "storage_profiles": [
+    {
+      "tenant_id": "tenant-redis",
+      "id": "redis-main-v1",
+      "kind": "redis",
+      "credential_ref": "env:PHASE55_REDIS_URL",
+      "key_prefix": "trpc-agent-service:phase55"
+    },
+    {
+      "tenant_id": "tenant-postgres",
+      "id": "postgres-main-v1",
+      "kind": "postgres",
+      "credential_ref": "env:PHASE55_POSTGRES_DSN",
+      "table_prefix": "p55pg",
+      "schema": "public",
+      "skip_db_init": false
+    },
+    {
+      "tenant_id": "tenant-mysql",
+      "id": "mysql-main-v1",
+      "kind": "mysql",
+      "credential_ref": "env:PHASE55_MYSQL_DSN",
+      "table_prefix": "p55my",
+      "skip_db_init": false
+    }
+  ],
+  "agent_apps": [
+    {"tenant_id": "tenant-redis", "id": "assistant", "enabled": true, "active_config_version": "v1"},
+    {"tenant_id": "tenant-postgres", "id": "assistant", "enabled": true, "active_config_version": "v1"},
+    {"tenant_id": "tenant-mysql", "id": "assistant", "enabled": true, "active_config_version": "v1"}
+  ],
+  "config_versions": [
+    {
+      "tenant_id": "tenant-redis",
+      "agent_app_id": "assistant",
+      "version": "v1",
+      "storage_profile_id": "redis-main-v1",
+      "instruction": "You are the Redis-backed tenant assistant.",
+      "model": {"name": "model-name", "base_url": "https://example.test/v1", "credential_ref": "env:PHASE55_MODEL_KEY", "request_timeout": "60s", "max_output_tokens": 1024}
+    },
+    {
+      "tenant_id": "tenant-postgres",
+      "agent_app_id": "assistant",
+      "version": "v1",
+      "storage_profile_id": "postgres-main-v1",
+      "instruction": "You are the PostgreSQL-backed tenant assistant.",
+      "model": {"name": "model-name", "base_url": "https://example.test/v1", "credential_ref": "env:PHASE55_MODEL_KEY", "request_timeout": "60s", "max_output_tokens": 1024}
+    },
+    {
+      "tenant_id": "tenant-mysql",
+      "agent_app_id": "assistant",
+      "version": "v1",
+      "storage_profile_id": "mysql-main-v1",
+      "instruction": "You are the MySQL-backed tenant assistant.",
+      "model": {"name": "model-name", "base_url": "https://example.test/v1", "credential_ref": "env:PHASE55_MODEL_KEY", "request_timeout": "60s", "max_output_tokens": 1024}
+    }
+  ],
+  "channel_bindings": [
+    {"id": "demo-redis", "channel": "demo", "external_account_id": "demo-redis", "tenant_id": "tenant-redis", "agent_app_id": "assistant", "enabled": true},
+    {"id": "demo-postgres", "channel": "demo", "external_account_id": "demo-postgres", "tenant_id": "tenant-postgres", "agent_app_id": "assistant", "enabled": true},
+    {"id": "demo-mysql", "channel": "demo", "external_account_id": "demo-mysql", "tenant_id": "tenant-mysql", "agent_app_id": "assistant", "enabled": true}
+  ]
+}

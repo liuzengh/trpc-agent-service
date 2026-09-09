@@ -1,0 +1,155 @@
+services:
+  messaging-redis:
+    image: redis:7.4.11-alpine
+    profiles: [full, light, ha, obs]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [messaging-data:/data]
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 2s, timeout: 2s, retries: 20}
+  control-redis:
+    image: redis:7.4.11-alpine
+    profiles: [full, ha, obs]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [control-data:/data]
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 2s, timeout: 2s, retries: 20}
+  postgres:
+    image: postgres:16.4-alpine
+    profiles: [full, ha, obs]
+    environment: {POSTGRES_USER: phase7, POSTGRES_PASSWORD: phase7, POSTGRES_DB: phase7}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U phase7 -d phase7"], interval: 2s, timeout: 3s, retries: 30}
+  mysql:
+    image: mysql:8.0.39
+    profiles: [full, ha, obs]
+    environment: {MYSQL_ROOT_PASSWORD: phase7, MYSQL_DATABASE: phase7, MYSQL_USER: phase7, MYSQL_PASSWORD: phase7}
+    volumes: [mysql-data:/var/lib/mysql]
+    healthcheck: {test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uphase7", "-pphase7"], interval: 3s, timeout: 3s, retries: 30}
+  mock-model:
+    image: trpc-phase7:local
+    profiles: [full, light, ha, obs]
+    entrypoint: ["mock-model"]
+    command: ["-addr", ":8090"]
+    expose: ["8090"]
+    healthcheck: {test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/healthz"], interval: 2s, timeout: 2s, retries: 20}
+  mock-telegram:
+    image: trpc-phase7:local
+    profiles: [full, light, ha, obs]
+    entrypoint: ["mock-telegram"]
+    command: ["-addr", ":8091"]
+    expose: ["8091"]
+    healthcheck: {test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8091/healthz"], interval: 2s, timeout: 2s, retries: 20}
+  sql-init:
+    image: trpc-phase7:local
+    profiles: [full, ha, obs]
+    environment:
+      IDENTITY_SECRET: "${IDENTITY_SECRET}"
+      PHASE7_MODEL_KEY: "${PHASE7_MODEL_KEY}"
+      PHASE7_POSTGRES_DSN: "postgres://phase7:phase7@postgres:5432/phase7?sslmode=disable"
+      PHASE7_MYSQL_DSN: "phase7:phase7@tcp(mysql:3306)/phase7?parseTime=true&charset=utf8mb4&loc=UTC"
+      PHASE7_REDIS_URL: "redis://messaging-redis:6379/0"
+      PHASE7_CONTROL_REDIS_URL: "redis://control-redis:6379/0"
+      PHASE7_ADMIN_TOKEN: "${PHASE7_ADMIN_TOKEN}"
+      PLATFORM_CONFIG_FILE: /app/config/phase7.full.example.json
+    volumes: [../configs:/app/config:ro]
+    command: ["sql-init", "-kind", "all"]
+    depends_on: {postgres: {condition: service_healthy}, mysql: {condition: service_healthy}, messaging-redis: {condition: service_healthy}}
+  sql-ready:
+    image: trpc-phase7:local
+    profiles: [full, ha, obs]
+    environment:
+      IDENTITY_SECRET: "${IDENTITY_SECRET}"
+      PHASE7_MODEL_KEY: "${PHASE7_MODEL_KEY}"
+      PHASE7_POSTGRES_DSN: "postgres://phase7:phase7@postgres:5432/phase7?sslmode=disable"
+      PHASE7_MYSQL_DSN: "phase7:phase7@tcp(mysql:3306)/phase7?parseTime=true&charset=utf8mb4&loc=UTC"
+      PHASE7_REDIS_URL: "redis://messaging-redis:6379/0"
+      PHASE7_CONTROL_REDIS_URL: "redis://control-redis:6379/0"
+      PHASE7_ADMIN_TOKEN: "${PHASE7_ADMIN_TOKEN}"
+      PLATFORM_CONFIG_FILE: /app/config/phase7.full.example.json
+    volumes: [../configs:/app/config:ro]
+    command: ["sql-ready", "-kind", "all"]
+    depends_on: {sql-init: {condition: service_completed_successfully}}
+  gateway:
+    build: {context: .., dockerfile: Dockerfile}
+    image: trpc-phase7:local
+    profiles: [full, ha, obs]
+    environment:
+      IDENTITY_SECRET: "${IDENTITY_SECRET}"
+      PHASE7_MODEL_KEY: "${PHASE7_MODEL_KEY}"
+      PHASE7_TELEGRAM_TOKEN: "${PHASE7_TELEGRAM_TOKEN}"
+      PHASE7_POSTGRES_DSN: "postgres://phase7:phase7@postgres:5432/phase7?sslmode=disable"
+      PHASE7_MYSQL_DSN: "phase7:phase7@tcp(mysql:3306)/phase7?parseTime=true&charset=utf8mb4&loc=UTC"
+      PHASE7_REDIS_URL: "redis://messaging-redis:6379/0"
+      PHASE7_CONTROL_REDIS_URL: "redis://control-redis:6379/0"
+      PHASE7_ADMIN_TOKEN: "${PHASE7_ADMIN_TOKEN}"
+      PLATFORM_CONFIG_FILE: /app/config/phase7.full.example.json
+      NODE_ID: "${NODE_ID}"
+    volumes: [../configs:/app/config:ro]
+    command: ["gateway", "-addr", ":8080", "-consumer", "phase7-gateway"]
+    ports: ["127.0.0.1:18080:8080"]
+    depends_on: {sql-ready: {condition: service_completed_successfully}, mock-model: {condition: service_healthy}, mock-telegram: {condition: service_healthy}, control-redis: {condition: service_healthy}}
+  worker-1:
+    image: trpc-phase7:local
+    profiles: [full, ha, obs]
+    environment:
+      IDENTITY_SECRET: "${IDENTITY_SECRET}"
+      PHASE7_MODEL_KEY: "${PHASE7_MODEL_KEY}"
+      PHASE7_TELEGRAM_TOKEN: "${PHASE7_TELEGRAM_TOKEN}"
+      PHASE7_POSTGRES_DSN: "postgres://phase7:phase7@postgres:5432/phase7?sslmode=disable"
+      PHASE7_MYSQL_DSN: "phase7:phase7@tcp(mysql:3306)/phase7?parseTime=true&charset=utf8mb4&loc=UTC"
+      PHASE7_REDIS_URL: "redis://messaging-redis:6379/0"
+      PHASE7_CONTROL_REDIS_URL: "redis://control-redis:6379/0"
+      PHASE7_ADMIN_TOKEN: "${PHASE7_ADMIN_TOKEN}"
+      PLATFORM_CONFIG_FILE: /app/config/phase7.full.example.json
+      NODE_ID: phase7-worker-1
+    volumes: [../configs:/app/config:ro]
+    command: ["worker", "-health-addr", ":8081", "-consumer", "phase7-worker-1"]
+    ports: ["127.0.0.1:18081:8081"]
+    depends_on: {sql-ready: {condition: service_completed_successfully}, control-redis: {condition: service_healthy}}
+  worker-2:
+    image: trpc-phase7:local
+    profiles: [full, ha, obs]
+    environment:
+      IDENTITY_SECRET: "${IDENTITY_SECRET}"
+      PHASE7_MODEL_KEY: "${PHASE7_MODEL_KEY}"
+      PHASE7_TELEGRAM_TOKEN: "${PHASE7_TELEGRAM_TOKEN}"
+      PHASE7_POSTGRES_DSN: "postgres://phase7:phase7@postgres:5432/phase7?sslmode=disable"
+      PHASE7_MYSQL_DSN: "phase7:phase7@tcp(mysql:3306)/phase7?parseTime=true&charset=utf8mb4&loc=UTC"
+      PHASE7_REDIS_URL: "redis://messaging-redis:6379/0"
+      PHASE7_CONTROL_REDIS_URL: "redis://control-redis:6379/0"
+      PHASE7_ADMIN_TOKEN: "${PHASE7_ADMIN_TOKEN}"
+      PLATFORM_CONFIG_FILE: /app/config/phase7.full.example.json
+      NODE_ID: phase7-worker-2
+    volumes: [../configs:/app/config:ro]
+    command: ["worker", "-health-addr", ":8081", "-consumer", "phase7-worker-2"]
+    ports: ["127.0.0.1:18082:8081"]
+    depends_on: {sql-ready: {condition: service_completed_successfully}, control-redis: {condition: service_healthy}}
+  gateway-light:
+    image: trpc-phase7:local
+    profiles: [light]
+    environment:
+      IDENTITY_SECRET: "${IDENTITY_SECRET}"
+      PHASE7_MODEL_KEY: "${PHASE7_MODEL_KEY}"
+      PHASE7_REDIS_URL: "redis://messaging-redis:6379/0"
+      PLATFORM_CONFIG_FILE: /app/config/phase7.light.example.json
+      NODE_ID: phase7-gateway-light
+    volumes: [../configs:/app/config:ro]
+    command: ["gateway", "-addr", ":8080", "-consumer", "phase7-gateway-light"]
+    ports: ["127.0.0.1:18080:8080"]
+    depends_on: {messaging-redis: {condition: service_healthy}, mock-model: {condition: service_healthy}}
+  worker-light:
+    image: trpc-phase7:local
+    profiles: [light]
+    environment:
+      IDENTITY_SECRET: "${IDENTITY_SECRET}"
+      PHASE7_MODEL_KEY: "${PHASE7_MODEL_KEY}"
+      PHASE7_REDIS_URL: "redis://messaging-redis:6379/0"
+      PLATFORM_CONFIG_FILE: /app/config/phase7.light.example.json
+      NODE_ID: phase7-worker-light
+    volumes: [../configs:/app/config:ro]
+    command: ["worker", "-health-addr", ":8081", "-consumer", "phase7-worker-light"]
+    ports: ["127.0.0.1:18083:8081"]
+    depends_on: {messaging-redis: {condition: service_healthy}, mock-model: {condition: service_healthy}}
+volumes:
+  messaging-data:
+  control-data:
+  postgres-data:
+  mysql-data:

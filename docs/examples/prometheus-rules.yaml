@@ -1,0 +1,6 @@
+groups:
+  - name: trpc-agent-service
+    rules:
+      - alert: TrpcAgentDegraded
+        expr: increase(trpc_agent_storage_errors_total[5m]) > 0
+        for: 5m

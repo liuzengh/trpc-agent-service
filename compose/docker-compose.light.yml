@@ -1,0 +1,5 @@
+services:
+  gateway-light:
+    profiles: [light]
+  worker-light:
+    profiles: [light]

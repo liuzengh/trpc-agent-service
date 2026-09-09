@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Console</title>
+  <style>
+    :root { color-scheme: light; --ink:#202522; --muted:#68716c; --line:#d9dedb; --panel:#f5f7f5; --accent:#176b4d; --accent-hover:#0f553c; --danger:#a83b32; --white:#fff; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:var(--white); color:var(--ink); font-family:Inter, "Segoe UI", "Microsoft YaHei", sans-serif; font-size:15px; letter-spacing:0; }
+    button, input, textarea { font:inherit; letter-spacing:0; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible { outline:3px solid rgba(23,107,77,.2); outline-offset:1px; }
+    .topbar { min-height:58px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:16px; padding:0 24px; }
+    .brand { font-size:16px; font-weight:700; }
+    .health { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:13px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:#b1b7b3; }
+    .dot.busy { background:#d19a28; }
+    .dot.ok { background:#278a60; }
+    .dot.error { background:var(--danger); }
+    main { width:min(100%, 920px); min-height:calc(100vh - 58px); margin:0 auto; display:grid; grid-template-rows:auto 1fr auto; }
+    .settings { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; padding:18px 24px; border-bottom:1px solid var(--line); }
+    label { display:grid; gap:6px; min-width:0; color:var(--muted); font-size:12px; font-weight:600; }
+    input { width:100%; height:38px; border:1px solid var(--line); border-radius:5px; padding:0 10px; color:var(--ink); background:var(--white); }
+    .conversation { min-height:300px; padding:28px 24px; display:flex; flex-direction:column; gap:12px; overflow-wrap:anywhere; }
+    .empty { margin:auto; color:var(--muted); font-size:14px; }
+    .message { max-width:78%; padding:10px 12px; border:1px solid var(--line); border-radius:7px; line-height:1.55; white-space:pre-wrap; }
+    .message.user { align-self:flex-end; background:var(--panel); }
+    .message.agent { align-self:flex-start; border-left:3px solid var(--accent); }
+    .message.error { align-self:flex-start; border-left:3px solid var(--danger); color:var(--danger); }
+    .meta { color:var(--muted); font-family:Consolas, monospace; font-size:11px; line-height:1.5; white-space:pre-wrap; }
+    .composer { border-top:1px solid var(--line); padding:18px 24px 22px; background:var(--white); }
+    .compose-row { display:grid; grid-template-columns:1fr 92px; gap:10px; align-items:stretch; }
+    textarea { width:100%; min-height:84px; max-height:220px; resize:vertical; border:1px solid var(--line); border-radius:6px; padding:11px 12px; color:var(--ink); }
+    button { border:0; border-radius:6px; background:var(--accent); color:var(--white); font-weight:700; cursor:pointer; padding:0 18px; }
+    button:hover { background:var(--accent-hover); }
+    button:disabled { background:#929b96; cursor:not-allowed; }
+    @media (max-width:700px) {
+      .topbar { padding:0 16px; }
+      main { min-height:calc(100vh - 58px); }
+      .settings { grid-template-columns:1fr 1fr; padding:14px 16px; gap:10px; }
+      .conversation { padding:20px 16px; }
+      .message { max-width:90%; }
+      .composer { padding:14px 16px 18px; }
+      .compose-row { grid-template-columns:1fr; }
+      button { min-height:44px; }
+    }
+    @media (max-width:390px) { .settings { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header class="topbar"><div class="brand">Agent Console</div><div class="health"><span id="dot" class="dot"></span><span id="status">待提交</span></div></header>
+  <main>
+    <section class="settings" aria-label="消息路由">
+      <label>Binding<input id="binding" value="demo-binding" autocomplete="off"></label>
+      <label>用户<input id="user" value="local-user" autocomplete="off"></label>
+      <label>会话<input id="conversation" value="local-conversation" autocomplete="off"></label>
+      <label>消息 ID<input id="message-id" autocomplete="off"></label>
+    </section>
+    <section id="messages" class="conversation" aria-live="polite"><div class="empty">暂无消息</div></section>
+    <section class="composer">
+      <div class="compose-row"><textarea id="text" aria-label="消息" placeholder="输入消息"></textarea><button id="send" type="button">发送</button></div>
+      <div id="meta" class="meta"></div>
+    </section>
+  </main>
+  <script>
+    const byId = id => document.getElementById(id);
+    const fields = { binding:byId('binding'), user:byId('user'), conversation:byId('conversation'), message:byId('message-id'), text:byId('text') };
+    const messages = byId('messages'), send = byId('send'), meta = byId('meta'), status = byId('status'), dot = byId('dot');
+    let pollTimer;
+    const newMessageID = () => `web-${Date.now()}-${Math.random().toString(16).slice(2,8)}`;
+    fields.message.value = newMessageID();
+    const setStatus = (label, kind='busy') => { status.textContent=label; dot.className=`dot ${kind}`; };
+    const addMessage = (kind, text) => { const empty=messages.querySelector('.empty'); if(empty) empty.remove(); const node=document.createElement('div'); node.className=`message ${kind}`; node.textContent=text; messages.appendChild(node); node.scrollIntoView({block:'end'}); };
+    const showMeta = data => { meta.textContent=[data.request_id&&`request ${data.request_id}`,data.trace_id&&`trace ${data.trace_id}`].filter(Boolean).join('  '); };
+    const poll = messageID => { clearInterval(pollTimer); pollTimer=setInterval(async()=>{ try { const response=await fetch(`/api/v1/web/messages/${encodeURIComponent(messageID)}?binding_id=${encodeURIComponent(fields.binding.value)}`); const data=await response.json(); showMeta(data); if(!response.ok) throw new Error(data.message||data.code||'查询失败'); if(data.status==='succeeded'){ clearInterval(pollTimer); addMessage('agent',data.text||''); setStatus('已完成','ok'); send.disabled=false; fields.message.value=newMessageID(); } else if(data.status==='failed'){ clearInterval(pollTimer); addMessage('error',data.error_code||'agent_failed'); setStatus('失败','error'); send.disabled=false; } else { setStatus(data.status==='processing'?'处理中':'已提交'); } } catch(error) { clearInterval(pollTimer); addMessage('error',error.message); setStatus('查询失败','error'); send.disabled=false; } },1500); };
+    send.addEventListener('click',async()=>{ const text=fields.text.value.trim(); if(!text||send.disabled) return; send.disabled=true; setStatus('提交中'); addMessage('user',text); const body={binding_id:fields.binding.value,message_id:fields.message.value,external_user_id:fields.user.value,conversation_id:fields.conversation.value,text}; try { const response=await fetch('/api/v1/web/messages',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}); const data=await response.json(); showMeta(data); if(!response.ok) throw new Error(data.message||data.code||'提交失败'); fields.text.value=''; setStatus('已提交'); poll(data.message_id); } catch(error) { addMessage('error',error.message); setStatus('提交失败','error'); send.disabled=false; } });
+  </script>
+</body>
+</html>

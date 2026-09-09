@@ -1,0 +1,10 @@
+.git
+.phase6-planning
+.phase7-gocache
+.stage*-cache
+.stage*-spike
+phase7-evidence
+*.md
+compose/.env
+compose/phase7.real-*.json
+tmp
