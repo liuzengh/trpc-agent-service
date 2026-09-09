@@ -61,7 +61,7 @@ func newProductionTestFixture(t *testing.T) *productionTestFixture {
 	t.Helper()
 	url := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
 	if url == "" {
-		t.Fatal(productionEvidenceBlocked)
+		t.Skip(productionEvidenceBlocked)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	base, err := postgres.NewPool(ctx, postgres.PostgresConfig{URL: url, MaxConns: 2, MinConns: 1})
