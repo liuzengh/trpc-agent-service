@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>tRPC Agent</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="layout" id="layout">
+  <div class="scrim" id="scrim"></div>
+
+  <aside class="sidebar" id="sidebar" aria-label="会话导航">
+    <div class="sidebar-head">
+      <span class="brand">tRPC Agent</span>
+      <button type="button" class="icon-button drawer-only" id="close-sidebar" title="关闭侧栏" aria-label="关闭侧栏">
+        <span class="icon icon-x" aria-hidden="true"></span>
+      </button>
+    </div>
+    <button type="button" class="new-chat" id="new-chat" title="新建对话">
+      <span class="icon icon-square-pen" aria-hidden="true"></span><span>新建对话</span>
+    </button>
+    <nav class="conversations" aria-label="对话列表">
+      <ul class="conversation-list" id="conversation-list"></ul>
+    </nav>
+    <div class="sidebar-foot">
+      <button type="button" class="ghost-button" id="open-settings" title="设置">
+        <span class="icon icon-settings" aria-hidden="true"></span><span>设置</span>
+      </button>
+    </div>
+  </aside>
+
+  <main class="chat">
+    <header class="chat-head">
+      <button type="button" class="icon-button drawer-only" id="toggle-sidebar"
+              title="打开侧栏" aria-label="打开侧栏" aria-controls="sidebar" aria-expanded="false">
+        <span class="icon icon-panel-left" aria-hidden="true"></span>
+      </button>
+      <h1 class="chat-title" id="chat-title">新对话</h1>
+      <details class="meta" id="meta">
+        <summary>会话信息</summary>
+        <dl class="meta-list">
+          <div class="meta-row"><dt>App</dt><dd id="meta-app">—</dd></div>
+          <div class="meta-row"><dt>Session</dt><dd id="meta-session">—</dd></div>
+          <div class="meta-row"><dt>Revision</dt><dd id="meta-revision">—</dd></div>
+          <div class="meta-row"><dt>Request</dt><dd id="meta-request">—</dd></div>
+        </dl>
+      </details>
+    </header>
+
+    <div class="messages" id="messages" tabindex="0" role="region" aria-label="对话记录">
+      <ol class="message-list" id="message-list"></ol>
+      <div class="empty" id="empty">
+        <p class="empty-title">开始新的对话</p>
+        <p class="empty-hint" id="empty-hint" hidden></p>
+      </div>
+    </div>
+
+    <form class="composer" id="composer">
+      <p class="composer-status" id="status" role="status" aria-live="polite"></p>
+      <div class="composer-row">
+        <label class="visually-hidden" for="input">消息</label>
+        <textarea id="input" class="composer-input" rows="1" placeholder="给 Agent 发送消息"
+                  autocomplete="off" spellcheck="false" enterkeyhint="send"></textarea>
+        <button type="submit" class="send-button" id="send" title="发送" aria-label="发送">
+          <span class="icon icon-send" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="stop-button" id="stop" title="停止生成" aria-label="停止生成" hidden>
+          <span class="icon icon-square" aria-hidden="true"></span>
+        </button>
+      </div>
+    </form>
+  </main>
+</div>
+
+<dialog class="settings" id="settings" aria-labelledby="settings-title">
+  <form method="dialog" class="settings-form" id="settings-form">
+    <div class="settings-head">
+      <h2 class="settings-title" id="settings-title">设置</h2>
+      <button type="submit" value="cancel" formnovalidate class="icon-button" title="关闭" aria-label="关闭">
+        <span class="icon icon-x" aria-hidden="true"></span>
+      </button>
+    </div>
+    <div class="field">
+      <label for="app-id">Agent App ID</label>
+      <input type="text" id="app-id" name="app-id" required autocomplete="off" spellcheck="false"
+             pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,127}"
+             title="1-128 个字符，可用 A-Z a-z 0-9 . _ -，且以字母或数字开头">
+    </div>
+    <div class="field">
+      <label for="credential">对话凭据</label>
+      <input type="password" id="credential" name="credential" required autocomplete="off"
+             spellcheck="false" pattern="[!-~]+"
+             title="只能使用可见 ASCII 字符，不含空格">
+      <p class="field-hint">凭据只保留在当前页面内存中，不会被存储；刷新后需要重新填写。</p>
+    </div>
+    <div class="settings-actions">
+      <button type="button" class="danger-button" id="disconnect">清除会话并断开</button>
+      <span class="settings-spacer"></span>
+      <button type="submit" value="cancel" formnovalidate class="ghost-button">取消</button>
+      <button type="submit" value="save" class="primary-button">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

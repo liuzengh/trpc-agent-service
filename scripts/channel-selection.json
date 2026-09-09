@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "base": "6e549b18441d2ceca35ec515c088a266607defb5",
+  "purpose": "Channel PostgreSQL Store candidate only; no Worker, startup wiring, or automatic recovery",
+  "files": [
+    {
+      "path": "trpcservice/channels/channels.go",
+      "sha256": "8e0f0f31de380be042b628ef5f2e99937bd299b60ae8f1bdca419532e52b1d78",
+      "lines": 467
+    },
+    {
+      "path": "trpcservice/channels/records.go",
+      "sha256": "2ee443d0aee4305f3b81abe7e93409a6e975ad21bad00b71a1be7b3b8babb6d7",
+      "lines": 654
+    },
+    {
+      "path": "trpcservice/channels/store.go",
+      "sha256": "5b7f72213c6a9bb3f4be51011188174c23d59a498468e5a6288ff40c06836302",
+      "lines": 984
+    },
+    {
+      "path": "trpcservice/channels/channelstest/channelstest.go",
+      "sha256": "8dc9b1af2e1901c44f7de36fcf0e2876d1461a2f4a1c97fd2938720453813e4e",
+      "lines": 1594
+    },
+    {
+      "path": "trpcservice/channels/postgres/inbox.go",
+      "sha256": "30046af4ca79c0b9e636aff9777ac291ec08c7df6e158f1550cd879133483e89",
+      "lines": 342
+    },
+    {
+      "path": "trpcservice/channels/postgres/integration_test.go",
+      "sha256": "49eff1167c674057abc859594bc2af7361c3383cd6d34bdc4e8108030e210c32",
+      "lines": 359
+    },
+    {
+      "path": "trpcservice/channels/postgres/migrate.go",
+      "sha256": "d3ff353cca41594bc0f1aa01c5a304f13d014a90104f41599229aa76a161e71f",
+      "lines": 375
+    },
+    {
+      "path": "trpcservice/channels/postgres/outbox.go",
+      "sha256": "673297c0084dd98f4b8a9edbb673d0860f26a3c744b573998bd1627d779f89d2",
+      "lines": 712
+    },
+    {
+      "path": "trpcservice/channels/postgres/postgres.go",
+      "sha256": "6368b18ae11606a28a3f9fc3fbb9372de1f392428185780a39ee301700c38b0a",
+      "lines": 354
+    },
+    {
+      "path": "trpcservice/channels/postgres/postgres_test.go",
+      "sha256": "9bbaa76824bc232900231120b0d71a4d71281851b912eabd930202e9324d6a11",
+      "lines": 28
+    },
+    {
+      "path": "trpcservice/channels/postgres/runs.go",
+      "sha256": "c65edde6e1d30d0fe3f9dd528b3a545a5b4b5f09578b1f397ac08450c2464bc9",
+      "lines": 744
+    }
+  ]
+}

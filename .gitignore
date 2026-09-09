@@ -8,6 +8,7 @@ bin/
 dist/
 coverage.out
 coverage.html
+/artifacts/demo/
 *.test
 *.exe
 

@@ -1,0 +1,85 @@
+# Local session backends for the session storage spike.
+#
+# These two services exist only so the gated integration tests have something
+# to talk to. Nothing the service runs by default reads this file: the shipped
+# backend is still in-memory, and `go test ./...` passes with nothing running.
+#
+#   docker compose -f deploy/docker-compose.session.yml up -d --wait
+#   docker compose -f deploy/docker-compose.session.yml down -v
+#
+# The credentials below are development placeholders, committed on purpose so
+# the spike reproduces on an empty machine. They are not secrets and must not
+# become one: both services publish on 127.0.0.1 only, so nothing off this host
+# can reach them. A real deployment supplies its own values through the
+# environment and never inherits these defaults.
+#
+# Every value is overridable:
+#
+#   TRPC_SERVICE_POSTGRES_PORT      host port for postgres   (default 55432)
+#   TRPC_SERVICE_POSTGRES_USER      role name                (default trpc)
+#   TRPC_SERVICE_POSTGRES_PASSWORD  role password            (default trpc-local-dev)
+#   TRPC_SERVICE_POSTGRES_DB        database name            (default trpc_session)
+#   TRPC_SERVICE_REDIS_PORT         host port for redis      (default 56379)
+#   TRPC_SERVICE_REDIS_PASSWORD     requirepass value        (default trpc-local-dev)
+#
+# The host ports are deliberately not 5432 and 6379: a developer machine often
+# already runs one of those, and binding the spike over a real database is a
+# worse failure than a port collision.
+
+name: trpc-session-spike
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${TRPC_SERVICE_POSTGRES_USER:-trpc}
+      POSTGRES_PASSWORD: ${TRPC_SERVICE_POSTGRES_PASSWORD:-trpc-local-dev}
+      POSTGRES_DB: ${TRPC_SERVICE_POSTGRES_DB:-trpc_session}
+    ports:
+      - "127.0.0.1:${TRPC_SERVICE_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 is load bearing. During first-boot initdb the entrypoint
+      # runs a temporary server on the unix socket only, so a socket-based
+      # pg_isready reports ready while the real server is still starting and
+      # `up --wait` returns too early.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # A password is set even locally so the connection URL carries userinfo,
+    # which is the shape the service has to redact out of its error messages.
+    command:
+      - redis-server
+      - --requirepass
+      - ${TRPC_SERVICE_REDIS_PASSWORD:-trpc-local-dev}
+      - --save
+      - "60 1"
+      - --appendonly
+      - "no"
+    environment:
+      # Consumed by the healthcheck below, not by the server.
+      REDIS_PASSWORD: ${TRPC_SERVICE_REDIS_PASSWORD:-trpc-local-dev}
+    ports:
+      - "127.0.0.1:${TRPC_SERVICE_REDIS_PORT:-56379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      # PING answers before the dataset finishes loading, so match on PONG
+      # rather than on the exit status, which is 0 for a LOADING reply too.
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  postgres-data:
+  redis-data:
