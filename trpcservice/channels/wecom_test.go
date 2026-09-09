@@ -109,13 +109,17 @@ func TestWecomCallbackMessage(t *testing.T) {
 	u := fmt.Sprintf("/callback/wecom/t1?msg_signature=%s&timestamp=%s&nonce=%s",
 		wecomTestSig, wecomTestTS, wecomTestNonce)
 	rw := httptest.NewRecorder()
-	in, err := a.Callback(rw, httptest.NewRequest(http.MethodPost, u, strings.NewReader(body)))
+	batch, err := a.Callback(rw, httptest.NewRequest(http.MethodPost, u, strings.NewReader(body)))
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
 	if rw.Body.String() != "success" {
 		t.Fatalf("ack body = %q, want success", rw.Body.String())
 	}
+	if len(batch) != 1 {
+		t.Fatalf("batch size = %d, want 1", len(batch))
+	}
+	in := batch[0]
 	if in.TenantID != "t1" || in.Channel != TypeWeCom || in.UserID != "mycreate" ||
 		in.Text != "hello" || in.MsgID != "4561255354251345929" {
 		t.Fatalf("inbound = %+v", in)
@@ -160,12 +164,12 @@ func TestWecomProbe(t *testing.T) {
 	u := fmt.Sprintf("/callback/wecom/t1?msg_signature=%s&timestamp=%s&nonce=%s&echostr=%s",
 		sig, wecomTestTS, wecomTestNonce, url.QueryEscape(enc))
 	rw := httptest.NewRecorder()
-	in, err := a.Callback(rw, httptest.NewRequest(http.MethodGet, u, nil))
+	msgs, err := a.Callback(rw, httptest.NewRequest(http.MethodGet, u, nil))
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	if in != nil {
-		t.Fatalf("probe must not produce inbound, got %+v", in)
+	if msgs != nil {
+		t.Fatalf("probe must not produce inbound, got %+v", msgs)
 	}
 	if rw.Body.String() != echo {
 		t.Fatalf("probe echo = %q, want %q", rw.Body.String(), echo)

@@ -32,7 +32,7 @@ type webchatRequest struct {
 }
 
 // Callback implements Adapter: accepts one chat message and ACKs with 202.
-func (c *WebChat) Callback(w http.ResponseWriter, r *http.Request) (*InboundMessage, error) {
+func (c *WebChat) Callback(w http.ResponseWriter, r *http.Request) ([]*InboundMessage, error) {
 	if r.Method != http.MethodPost {
 		return nil, fmt.Errorf("webchat callback requires POST")
 	}
@@ -47,7 +47,7 @@ func (c *WebChat) Callback(w http.ResponseWriter, r *http.Request) (*InboundMess
 		req.MsgID = fmt.Sprintf("%s-%d", req.User, time.Now().UnixNano())
 	}
 	w.WriteHeader(http.StatusAccepted)
-	return &InboundMessage{UserID: req.User, MsgID: req.MsgID, Text: req.Text}, nil
+	return []*InboundMessage{{UserID: req.User, MsgID: req.MsgID, Text: req.Text}}, nil
 }
 
 // Send implements Adapter: pushes one chunk/final to the user's SSE stream.

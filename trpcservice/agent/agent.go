@@ -11,7 +11,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
-	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -19,16 +19,19 @@ import (
 
 const (
 	appName      = "trpc-agent-service"
-	agentName    = "assistant"
 	defaultModel = "gpt-4o-mini"
 )
 
+// AgentName is the single first-phase agent identity; audit records and
+// traces label model calls with it.
+const AgentName = "assistant"
+
 // NewRunner builds one tenant's walking-skeleton runner: an LLMAgent backed
-// by the tenant's OpenAI-compatible model, streaming output, in-memory
-// session backend. The session service is intentionally in-memory here and
-// will be replaced by tenant-selected shared backends (redis/mysql/postgres)
-// via the Storage Adapter later.
-func NewRunner(t *tenant.Context) (runner.Runner, error) {
+// by the tenant's OpenAI-compatible model, streaming output, over the shared
+// session service (memory or redis, selected platform-wide via trpcservice/
+// storage). All tenants share one session.Service instance; isolation comes
+// from the {tenant}:{channel}:{user} session ids.
+func NewRunner(t *tenant.Context, sess session.Service) (runner.Runner, error) {
 	if t.Model.APIKey == "" {
 		return nil, fmt.Errorf("tenant %s: model api key is required", t.ID)
 	}
@@ -43,35 +46,41 @@ func NewRunner(t *tenant.Context) (runner.Runner, error) {
 	}
 	llm := openai.New(modelName, modelOpts...)
 
-	a := llmagent.New(agentName,
+	a := llmagent.New(AgentName,
 		llmagent.WithModel(llm),
 		llmagent.WithInstruction("You are a helpful assistant."),
 		llmagent.WithGenerationConfig(model.GenerationConfig{Stream: true}),
 	)
 
 	return runner.NewRunner(appName, a,
-		runner.WithSessionService(inmemory.NewSessionService()),
+		runner.WithSessionService(sess),
 	), nil
 }
 
-// Registry holds one Runner per tenant. Tenant isolation at this stage is
-// by separate Runner instances; per-tenant tool whitelists and guardrails
-// will hang off the same lookup later. The mutex guards hot swaps driven by
-// the Admin API; lookups only take a read lock.
+// Registry holds one Runner per tenant over a shared session service.
+// Tenant isolation at this stage is by separate Runner instances;
+// per-tenant tool whitelists and guardrails will hang off the same lookup
+// later. The mutex guards hot swaps driven by the Admin API; lookups only
+// take a read lock.
 type Registry struct {
 	mu      sync.RWMutex
 	runners map[string]runner.Runner
 	def     string
+	sess    session.Service
 }
 
-// NewRegistry builds a Runner for every tenant in the loaded config.
-func NewRegistry(cfg *config.Config) (*Registry, error) {
+// NewRegistry builds a Runner for every tenant in the loaded config, all
+// sharing sess. The backend choice is fixed at startup; switching backends
+// means a config change plus restart (first-phase limitation, see
+// docs/spec-storage-redis.md).
+func NewRegistry(cfg *config.Config, sess session.Service) (*Registry, error) {
 	r := &Registry{
 		runners: make(map[string]runner.Runner, len(cfg.Tenants)),
 		def:     cfg.DefaultTenant,
+		sess:    sess,
 	}
 	for id, t := range cfg.Tenants {
-		rr, err := NewRunner(t)
+		rr, err := NewRunner(t, sess)
 		if err != nil {
 			return nil, err
 		}
@@ -80,13 +89,13 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 	return r, nil
 }
 
-// Apply rebuilds the runner set for a new config (Admin API hot reload).
-// New runners are fully built before the swap, so a build failure keeps the
-// old set serving.
+// Apply rebuilds the runner set for a new config (Admin API hot reload),
+// reusing the same session service. New runners are fully built before the
+// swap, so a build failure keeps the old set serving.
 func (r *Registry) Apply(cfg *config.Config) error {
 	runners := make(map[string]runner.Runner, len(cfg.Tenants))
 	for id, t := range cfg.Tenants {
-		rr, err := NewRunner(t)
+		rr, err := NewRunner(t, r.sess)
 		if err != nil {
 			return err
 		}

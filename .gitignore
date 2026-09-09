@@ -11,6 +11,9 @@ coverage.html
 *.test
 *.exe
 
+# E2E smoke scratch dir: throwaway binary, config, audit trail and logs
+.smoke/
+
 vendor/
 
 # local secrets: commit config.example.yaml only

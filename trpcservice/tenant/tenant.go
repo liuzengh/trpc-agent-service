@@ -21,17 +21,42 @@ type WeComBinding struct {
 	EncodingAESKey string `yaml:"encoding_aes_key"`
 }
 
+// WeChatKfBinding is one WeChat customer service (微信客服) credential set.
+// Unlike WeCom there is no agent_id: replies target the open_kfid carried by
+// each callback event. All fields are secrets or identifiers filled by the
+// tenant admin; they must never be written to logs, traces, or error reports.
+type WeChatKfBinding struct {
+	CorpID         string `yaml:"corp_id"`
+	Secret         string `yaml:"secret"` // 微信客服 secret, distinct from the WeCom app secret
+	Token          string `yaml:"token"`
+	EncodingAESKey string `yaml:"encoding_aes_key"`
+}
+
 // Channels holds the IM channel bindings of one tenant.
 type Channels struct {
-	WeCom *WeComBinding `yaml:"wecom,omitempty"`
+	WeCom    *WeComBinding    `yaml:"wecom,omitempty"`
+	WeChatKf *WeChatKfBinding `yaml:"wechat_kf,omitempty"`
+}
+
+// Guardrails is the per-tenant governance policy enforced by the Gateway
+// (proposal doc 3.5): input checks run before the model call, output checks
+// run as a streaming tripwire over reply chunks. Zero value means no policy.
+type Guardrails struct {
+	// MaxInputBytes rejects longer inputs; 0 means unlimited.
+	MaxInputBytes int `yaml:"max_input_bytes,omitempty"`
+	// BlockedKeywords are matched case-insensitively against user input.
+	BlockedKeywords []string `yaml:"blocked_keywords,omitempty"`
+	// OutputBlockedKeywords trip the streaming output checker.
+	OutputBlockedKeywords []string `yaml:"output_blocked_keywords,omitempty"`
 }
 
 // Context is the per-tenant configuration carried across the platform.
 // Routing, execution, storage, and telemetry all key off ID (tenant_id).
 // The yaml tags double as the persistence and Admin API wire shape.
 type Context struct {
-	ID       string      `yaml:"id"`
-	Name     string      `yaml:"name,omitempty"`
-	Model    ModelConfig `yaml:"model"`
-	Channels Channels    `yaml:"channels,omitempty"`
+	ID         string      `yaml:"id"`
+	Name       string      `yaml:"name,omitempty"`
+	Model      ModelConfig `yaml:"model"`
+	Channels   Channels    `yaml:"channels,omitempty"`
+	Guardrails Guardrails  `yaml:"guardrails,omitempty"`
 }

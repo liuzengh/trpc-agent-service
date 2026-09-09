@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -23,16 +25,108 @@ const (
 	envBaseURL = "MODEL_BASE_URL"
 )
 
+// Session storage backend names and defaults (proposal doc 3.3). The
+// STORAGE_SESSION_* variables mirror the MODEL_* convenience for container
+// deployments that inject the backend without rewriting the config file.
+const (
+	BackendMemory = "memory"
+	BackendRedis  = "redis"
+
+	// DefaultKeyPrefix namespaces every session key; tenant isolation rides
+	// on the {tenant}:{channel}:{user} session id inside the prefix.
+	DefaultKeyPrefix = "trpc-agent-service:"
+
+	envStorageBackend  = "STORAGE_SESSION_BACKEND"
+	envStorageRedisURL = "STORAGE_SESSION_REDIS_URL"
+)
+
+// Observability defaults (proposal doc 3.5). Exporters are off unless the
+// config asks for stdout (local debugging) or otlp (collector deployment).
+const (
+	ExporterOff    = "off"
+	ExporterStdout = "stdout"
+	ExporterOTLP   = "otlp"
+
+	DefaultLogLevel       = "info"
+	DefaultMetricInterval = 15 * time.Second
+)
+
 // fileYAML is the on-disk shape; tenant.Context carries the yaml tags so
 // Load and Save round-trip through the same schema.
 type fileYAML struct {
 	DefaultTenant string           `yaml:"default_tenant,omitempty"`
+	Storage       *storageYAML     `yaml:"storage,omitempty"`
+	Log           *logYAML         `yaml:"log,omitempty"`
+	Audit         *auditYAML       `yaml:"audit,omitempty"`
+	Telemetry     *telemetryYAML   `yaml:"telemetry,omitempty"`
 	Tenants       []tenant.Context `yaml:"tenants"`
+}
+
+type storageYAML struct {
+	Session sessionStorageYAML `yaml:"session,omitempty"`
+}
+
+type sessionStorageYAML struct {
+	Backend    string `yaml:"backend,omitempty"`
+	RedisURL   string `yaml:"redis_url,omitempty"`
+	KeyPrefix  string `yaml:"key_prefix,omitempty"`
+	SessionTTL string `yaml:"session_ttl,omitempty"`
+}
+
+// SessionStorage is the validated platform-level session backend selection.
+type SessionStorage struct {
+	Backend    string        // BackendMemory (default) or BackendRedis
+	RedisURL   string        // required for BackendRedis, redis:// or rediss://
+	KeyPrefix  string        // defaults to DefaultKeyPrefix
+	SessionTTL time.Duration // 0 means no expiration
+}
+
+// Storage groups platform-level shared backends; per-tenant backend override
+// is second-phase Storage Adapter work and intentionally absent here.
+type Storage struct {
+	Session SessionStorage
+}
+
+// LogConfig selects the structured log level and encoding.
+type LogConfig struct {
+	Level string // debug|info|warn|error, default DefaultLogLevel
+	JSON  bool   // JSON encoding for container deployments
+}
+
+// AuditConfig points the append-only JSONL audit trail (proposal doc 3.5);
+// an empty File keeps audit records in the structured log only.
+type AuditConfig struct {
+	File string
+}
+
+// ExporterConfig selects a trace/metric exporter: off, stdout, or otlp
+// (OTLP/HTTP base endpoint, e.g. http://127.0.0.1:4318).
+type ExporterConfig struct {
+	Exporter string
+	Endpoint string
+}
+
+// MetricsExporterConfig adds the push interval of the metric exporter.
+type MetricsExporterConfig struct {
+	Exporter string
+	Endpoint string
+	Interval time.Duration
+}
+
+// TelemetryConfig drives the OpenTelemetry setup: traces carry the
+// end-to-end spans, metrics carry the tenant-labelled counters.
+type TelemetryConfig struct {
+	Traces  ExporterConfig
+	Metrics MetricsExporterConfig
 }
 
 // Config is the loaded and validated platform configuration.
 type Config struct {
 	DefaultTenant string
+	Storage       Storage
+	Log           LogConfig
+	Audit         AuditConfig
+	Telemetry     TelemetryConfig
 	Tenants       map[string]*tenant.Context
 }
 
@@ -68,6 +162,12 @@ func Load(path string) (*Config, error) {
 	if cfg.DefaultTenant == "" && len(f.Tenants) > 0 {
 		cfg.DefaultTenant = f.Tenants[0].ID
 	}
+	if cfg.Storage, err = parseStorage(f.Storage); err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
+	}
+	if cfg.Log, cfg.Audit, cfg.Telemetry, err = parseObservability(f.Log, f.Audit, f.Telemetry); err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
@@ -77,8 +177,8 @@ func Load(path string) (*Config, error) {
 }
 
 // Validate checks the invariants shared by Load, Save, and the Admin API:
-// at least one tenant, complete model settings, complete wecom bindings,
-// and an existing default tenant.
+// at least one tenant, complete model settings, complete channel bindings,
+// a usable session storage backend, and an existing default tenant.
 func (c *Config) Validate() error {
 	if len(c.Tenants) == 0 {
 		return fmt.Errorf("at least one tenant is required")
@@ -93,6 +193,18 @@ func (c *Config) Validate() error {
 		if err := validateWeCom(id, t.Channels.WeCom); err != nil {
 			return err
 		}
+		if err := validateWeChatKf(id, t.Channels.WeChatKf); err != nil {
+			return err
+		}
+		if err := validateGuardrails(id, t.Guardrails); err != nil {
+			return err
+		}
+	}
+	if err := c.validateStorage(); err != nil {
+		return err
+	}
+	if err := c.validateObservability(); err != nil {
+		return err
 	}
 	if _, ok := c.Tenants[c.DefaultTenant]; !ok {
 		return fmt.Errorf("default_tenant %q is not defined", c.DefaultTenant)
@@ -113,7 +225,13 @@ func Save(path string, cfg *Config) error {
 	}
 	sort.Strings(ids)
 
-	f := fileYAML{DefaultTenant: cfg.DefaultTenant}
+	f := fileYAML{
+		DefaultTenant: cfg.DefaultTenant,
+		Storage:       storageToYAML(cfg.Storage),
+		Log:           logToYAML(cfg.Log),
+		Audit:         auditToYAML(cfg.Audit),
+		Telemetry:     telemetryToYAML(cfg.Telemetry),
+	}
 	for _, id := range ids {
 		f.Tenants = append(f.Tenants, *cfg.Tenants[id])
 	}
@@ -129,6 +247,233 @@ func Save(path string, cfg *Config) error {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
 	return nil
+}
+
+// parseStorage normalizes the on-disk storage section: it fills defaults,
+// parses session_ttl, and applies the STORAGE_SESSION_* overrides so the
+// result is ready for validateStorage.
+func parseStorage(y *storageYAML) (Storage, error) {
+	s := Storage{Session: SessionStorage{Backend: BackendMemory, KeyPrefix: DefaultKeyPrefix}}
+	if y != nil {
+		if y.Session.Backend != "" {
+			s.Session.Backend = y.Session.Backend
+		}
+		s.Session.RedisURL = y.Session.RedisURL
+		if y.Session.KeyPrefix != "" {
+			s.Session.KeyPrefix = y.Session.KeyPrefix
+		}
+		if y.Session.SessionTTL != "" {
+			d, err := time.ParseDuration(y.Session.SessionTTL)
+			if err != nil {
+				return Storage{}, fmt.Errorf("storage.session.session_ttl %q: %w", y.Session.SessionTTL, err)
+			}
+			if d < 0 {
+				return Storage{}, fmt.Errorf("storage.session.session_ttl must not be negative")
+			}
+			s.Session.SessionTTL = d
+		}
+	}
+	applyStorageEnv(&s.Session)
+	return s, nil
+}
+
+func applyStorageEnv(ss *SessionStorage) {
+	if v := os.Getenv(envStorageBackend); v != "" {
+		ss.Backend = v
+	}
+	if v := os.Getenv(envStorageRedisURL); v != "" {
+		ss.RedisURL = v
+	}
+}
+
+// validateStorage rejects unknown backends and half-filled redis settings at
+// load time, so a typo surfaces at startup instead of on the first message.
+func (c *Config) validateStorage() error {
+	ss := c.Storage.Session
+	switch ss.Backend {
+	case "", BackendMemory:
+		return nil
+	case BackendRedis:
+		if ss.RedisURL == "" {
+			return fmt.Errorf("storage.session.redis_url is required when backend is %s", BackendRedis)
+		}
+		if !strings.HasPrefix(ss.RedisURL, "redis://") && !strings.HasPrefix(ss.RedisURL, "rediss://") {
+			return fmt.Errorf("storage.session.redis_url %q must start with redis:// or rediss://", ss.RedisURL)
+		}
+		return nil
+	default:
+		return fmt.Errorf("storage.session.backend %q must be %s or %s", ss.Backend, BackendMemory, BackendRedis)
+	}
+}
+
+// storageToYAML serializes the storage section, omitting it entirely when it
+// is the pure default so Save output stays diff-clean for existing configs.
+func storageToYAML(s Storage) *storageYAML {
+	ss := s.Session
+	if ss.Backend == "" || (ss.Backend == BackendMemory && ss.RedisURL == "" &&
+		(ss.KeyPrefix == "" || ss.KeyPrefix == DefaultKeyPrefix) && ss.SessionTTL == 0) {
+		return nil
+	}
+	y := sessionStorageYAML{Backend: ss.Backend, RedisURL: ss.RedisURL}
+	if ss.KeyPrefix != "" && ss.KeyPrefix != DefaultKeyPrefix {
+		y.KeyPrefix = ss.KeyPrefix
+	}
+	if ss.SessionTTL > 0 {
+		y.SessionTTL = ss.SessionTTL.String()
+	}
+	return &storageYAML{Session: y}
+}
+
+// logYAML / auditYAML / telemetryYAML are the on-disk observability shape;
+// everything optional so absent sections keep the pure defaults.
+type logYAML struct {
+	Level string `yaml:"level,omitempty"`
+	JSON  bool   `yaml:"json,omitempty"`
+}
+
+type auditYAML struct {
+	File string `yaml:"file,omitempty"`
+}
+
+type telemetryYAML struct {
+	Traces  exporterYAML        `yaml:"traces,omitempty"`
+	Metrics metricsExporterYAML `yaml:"metrics,omitempty"`
+}
+
+type exporterYAML struct {
+	Exporter string `yaml:"exporter,omitempty"`
+	Endpoint string `yaml:"endpoint,omitempty"`
+}
+
+type metricsExporterYAML struct {
+	Exporter string `yaml:"exporter,omitempty"`
+	Endpoint string `yaml:"endpoint,omitempty"`
+	Interval string `yaml:"interval,omitempty"`
+}
+
+// parseObservability normalizes the log/audit/telemetry sections, filling
+// defaults so the rest of the platform can read them without nil checks.
+func parseObservability(l *logYAML, a *auditYAML, t *telemetryYAML) (LogConfig, AuditConfig, TelemetryConfig, error) {
+	lc := LogConfig{Level: DefaultLogLevel}
+	if l != nil {
+		if l.Level != "" {
+			lc.Level = l.Level
+		}
+		lc.JSON = l.JSON
+	}
+	ac := AuditConfig{}
+	if a != nil {
+		ac.File = a.File
+	}
+	tc := TelemetryConfig{
+		Traces:  ExporterConfig{Exporter: ExporterOff},
+		Metrics: MetricsExporterConfig{Exporter: ExporterOff, Interval: DefaultMetricInterval},
+	}
+	if t != nil {
+		if t.Traces.Exporter != "" {
+			tc.Traces.Exporter = t.Traces.Exporter
+		}
+		tc.Traces.Endpoint = t.Traces.Endpoint
+		if t.Metrics.Exporter != "" {
+			tc.Metrics.Exporter = t.Metrics.Exporter
+		}
+		tc.Metrics.Endpoint = t.Metrics.Endpoint
+		if t.Metrics.Interval != "" {
+			d, err := time.ParseDuration(t.Metrics.Interval)
+			if err != nil {
+				return lc, ac, tc, fmt.Errorf("telemetry.metrics.interval %q: %w", t.Metrics.Interval, err)
+			}
+			if d <= 0 {
+				return lc, ac, tc, fmt.Errorf("telemetry.metrics.interval must be positive")
+			}
+			tc.Metrics.Interval = d
+		}
+	}
+	return lc, ac, tc, nil
+}
+
+// validateObservability rejects unknown levels/exporters and half-filled
+// otlp settings at load time, like validateStorage does for redis.
+func (c *Config) validateObservability() error {
+	switch c.Log.Level {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("log.level %q must be debug, info, warn, or error", c.Log.Level)
+	}
+	if err := validateExporter("telemetry.traces", c.Telemetry.Traces.Exporter, c.Telemetry.Traces.Endpoint); err != nil {
+		return err
+	}
+	return validateExporter("telemetry.metrics", c.Telemetry.Metrics.Exporter, c.Telemetry.Metrics.Endpoint)
+}
+
+func validateExporter(section, exporter, endpoint string) error {
+	switch exporter {
+	case "", ExporterOff, ExporterStdout:
+		return nil
+	case ExporterOTLP:
+		if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+			return fmt.Errorf("%s.endpoint %q must start with http:// or https:// when exporter is %s", section, endpoint, ExporterOTLP)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%s.exporter %q must be %s, %s, or %s", section, exporter, ExporterOff, ExporterStdout, ExporterOTLP)
+	}
+}
+
+// validateGuardrails fails fast on unusable policies: negative limits or
+// empty keywords would silently disable or mis-fire the checks.
+func validateGuardrails(tenantID string, g tenant.Guardrails) error {
+	if g.MaxInputBytes < 0 {
+		return fmt.Errorf("tenant %q: guardrails.max_input_bytes must not be negative", tenantID)
+	}
+	for _, kw := range g.BlockedKeywords {
+		if strings.TrimSpace(kw) == "" {
+			return fmt.Errorf("tenant %q: guardrails.blocked_keywords must not contain empty entries", tenantID)
+		}
+	}
+	for _, kw := range g.OutputBlockedKeywords {
+		if strings.TrimSpace(kw) == "" {
+			return fmt.Errorf("tenant %q: guardrails.output_blocked_keywords must not contain empty entries", tenantID)
+		}
+	}
+	return nil
+}
+
+// logToYAML / auditToYAML / telemetryToYAML omit pure-default sections so
+// Save output stays diff-clean, mirroring storageToYAML.
+func logToYAML(l LogConfig) *logYAML {
+	if l.Level == DefaultLogLevel && !l.JSON {
+		return nil
+	}
+	y := logYAML{Level: l.Level, JSON: l.JSON}
+	if l.Level == DefaultLogLevel {
+		y.Level = ""
+	}
+	return &y
+}
+
+func auditToYAML(a AuditConfig) *auditYAML {
+	if a.File == "" {
+		return nil
+	}
+	return &auditYAML{File: a.File}
+}
+
+func telemetryToYAML(t TelemetryConfig) *telemetryYAML {
+	tracesDefault := t.Traces.Exporter == ExporterOff && t.Traces.Endpoint == ""
+	metricsDefault := t.Metrics.Exporter == ExporterOff && t.Metrics.Endpoint == "" &&
+		(t.Metrics.Interval == 0 || t.Metrics.Interval == DefaultMetricInterval)
+	if tracesDefault && metricsDefault {
+		return nil
+	}
+	y := telemetryYAML{
+		Traces:  exporterYAML{Exporter: t.Traces.Exporter, Endpoint: t.Traces.Endpoint},
+		Metrics: metricsExporterYAML{Exporter: t.Metrics.Exporter, Endpoint: t.Metrics.Endpoint},
+	}
+	if t.Metrics.Interval > 0 && t.Metrics.Interval != DefaultMetricInterval {
+		y.Metrics.Interval = t.Metrics.Interval.String()
+	}
+	return &y
 }
 
 // validateWeCom fails fast on half-filled channel bindings: a declared
@@ -156,6 +501,30 @@ func (c *Config) WeComBinding(tenantID string) (*tenant.WeComBinding, bool) {
 	return nil, false
 }
 
+// validateWeChatKf applies the same fail-fast rule as validateWeCom: a
+// declared wechat_kf block must be complete.
+func validateWeChatKf(tenantID string, k *tenant.WeChatKfBinding) error {
+	if k == nil {
+		return nil
+	}
+	if k.CorpID == "" || k.Secret == "" || k.Token == "" || k.EncodingAESKey == "" {
+		return fmt.Errorf("tenant %q: channels.wechat_kf is incomplete (corp_id, secret, token, encoding_aes_key are all required)", tenantID)
+	}
+	if len(k.EncodingAESKey) != 43 {
+		return fmt.Errorf("tenant %q: channels.wechat_kf.encoding_aes_key must be 43 characters", tenantID)
+	}
+	return nil
+}
+
+// WeChatKfBinding returns the WeChat customer service binding of tenantID.
+// Tenants without one reject wechat_kf callbacks with a clear error.
+func (c *Config) WeChatKfBinding(tenantID string) (*tenant.WeChatKfBinding, bool) {
+	if t, ok := c.Tenants[tenantID]; ok && t.Channels.WeChatKf != nil {
+		return t.Channels.WeChatKf, true
+	}
+	return nil, false
+}
+
 // fromEnv builds the legacy single-tenant config from environment variables.
 func fromEnv(path string) (*Config, error) {
 	apiKey := os.Getenv(envAPIKey)
@@ -176,8 +545,20 @@ func fromEnv(path string) (*Config, error) {
 			BaseURL: os.Getenv(envBaseURL),
 		},
 	}
+	st, err := parseStorage(nil)
+	if err != nil {
+		return nil, err
+	}
+	lc, ac, tc, err := parseObservability(nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
 	return &Config{
 		DefaultTenant: t.ID,
+		Storage:       st,
+		Log:           lc,
+		Audit:         ac,
+		Telemetry:     tc,
 		Tenants:       map[string]*tenant.Context{t.ID: t},
 	}, nil
 }

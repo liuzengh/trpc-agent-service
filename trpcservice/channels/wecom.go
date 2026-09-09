@@ -90,7 +90,7 @@ type wecomMessage struct {
 // Callback implements Adapter. It answers the URL-verification probe (GET)
 // and message callbacks (POST) directly on the ResponseWriter, returning
 // nil for probes and non-text messages after the ACK.
-func (w *WeCom) Callback(rw http.ResponseWriter, r *http.Request) (*InboundMessage, error) {
+func (w *WeCom) Callback(rw http.ResponseWriter, r *http.Request) ([]*InboundMessage, error) {
 	tenantID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/callback/wecom/"), "/")
 	b, ok := w.lookup(tenantID)
 	if !ok {
@@ -149,7 +149,7 @@ func (w *WeCom) Callback(rw http.ResponseWriter, r *http.Request) (*InboundMessa
 	if msg.MsgID == 0 {
 		in.MsgID = fmt.Sprintf("%s-%d", msg.FromUserName, msg.CreateTime)
 	}
-	return in, nil
+	return []*InboundMessage{in}, nil
 }
 
 // Send implements Adapter: aggregates streaming chunks per conversation and
@@ -220,29 +220,14 @@ func (w *WeCom) accessToken(ctx context.Context, b *tenant.WeComBinding) (string
 	}
 	w.mu.Unlock()
 
-	u := fmt.Sprintf("%s/cgi-bin/gettoken?corpid=%s&corpsecret=%s",
-		w.apiBase, url.QueryEscape(b.CorpID), url.QueryEscape(b.CorpSecret))
-	var out struct {
-		ErrCode     int    `json:"errcode"`
-		ErrMsg      string `json:"errmsg"`
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
-	if err := w.doJSON(ctx, http.MethodGet, u, nil, &out); err != nil {
+	token, ttl, err := fetchAccessToken(ctx, w.client, w.apiBase, b.CorpID, b.CorpSecret)
+	if err != nil {
 		return "", err
 	}
-	if out.ErrCode != 0 || out.AccessToken == "" {
-		return "", &wecomAPIError{ErrCode: out.ErrCode, ErrMsg: out.ErrMsg}
-	}
-
-	ttl := time.Duration(out.ExpiresIn-300) * time.Second
-	if ttl < time.Minute {
-		ttl = time.Minute
-	}
 	w.mu.Lock()
-	w.tokens[b.CorpID] = &wecomToken{token: out.AccessToken, expiresAt: time.Now().Add(ttl)}
+	w.tokens[b.CorpID] = &wecomToken{token: token, expiresAt: time.Now().Add(ttl)}
 	w.mu.Unlock()
-	return out.AccessToken, nil
+	return token, nil
 }
 
 // sendText posts one text app message, retrying once with a fresh token
@@ -283,7 +268,7 @@ func (w *WeCom) postMessage(ctx context.Context, b *tenant.WeComBinding, token, 
 		ErrCode int    `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
 	}
-	if err := w.doJSON(ctx, http.MethodPost, u, body, &out); err != nil {
+	if err := apiDoJSON(ctx, w.client, http.MethodPost, u, body, &out); err != nil {
 		return err
 	}
 	if out.ErrCode != 0 {
@@ -292,7 +277,34 @@ func (w *WeCom) postMessage(ctx context.Context, b *tenant.WeComBinding, token, 
 	return nil
 }
 
-func (w *WeCom) doJSON(ctx context.Context, method, u string, body []byte, out any) error {
+// fetchAccessToken calls the gettoken endpoint shared by WeCom apps and
+// WeChat KF (each adapter passes its own secret and keeps its own cache).
+// The returned TTL is already clamped to expire 5 minutes early.
+func fetchAccessToken(ctx context.Context, client *http.Client, apiBase, corpID, secret string) (string, time.Duration, error) {
+	u := fmt.Sprintf("%s/cgi-bin/gettoken?corpid=%s&corpsecret=%s",
+		apiBase, url.QueryEscape(corpID), url.QueryEscape(secret))
+	var out struct {
+		ErrCode     int    `json:"errcode"`
+		ErrMsg      string `json:"errmsg"`
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := apiDoJSON(ctx, client, http.MethodGet, u, nil, &out); err != nil {
+		return "", 0, err
+	}
+	if out.ErrCode != 0 || out.AccessToken == "" {
+		return "", 0, &wecomAPIError{ErrCode: out.ErrCode, ErrMsg: out.ErrMsg}
+	}
+	ttl := time.Duration(out.ExpiresIn-300) * time.Second
+	if ttl < time.Minute {
+		ttl = time.Minute
+	}
+	return out.AccessToken, ttl, nil
+}
+
+// apiDoJSON performs one JSON API call against the WeCom-family endpoints
+// (qyapi.weixin.qq.com), decoding the response into out.
+func apiDoJSON(ctx context.Context, client *http.Client, method, u string, body []byte, out any) error {
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
@@ -304,7 +316,7 @@ func (w *WeCom) doJSON(ctx context.Context, method, u string, body []byte, out a
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := w.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
