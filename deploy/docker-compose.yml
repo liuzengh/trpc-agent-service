@@ -1,0 +1,415 @@
+x-app-security: &app-security
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  postgres:
+    image: postgres:15.8-alpine@sha256:8b963ea3038c3b32182ee7f592ccde21242fa7c5fd9d1b72aa333c27f1bfc809
+    environment:
+      POSTGRES_DB: trpc_agent
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d trpc_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.108.0@sha256:923eb1cfae32fe09676cfd74762b2b237349f2273888529594f6c6ffe1fb3d7e
+    command: ["--config=/etc/otelcol/config.yml"]
+    volumes:
+      - ./otel-collector.yml:/etc/otelcol/config.yml:ro
+    ports:
+      - "127.0.0.1:${OTEL_GRPC_HOST_PORT:-4317}:4317"
+      - "127.0.0.1:${OTEL_HTTP_HOST_PORT:-4318}:4318"
+    restart: unless-stopped
+
+  migrate:
+    <<: *app-security
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.migrate
+    command: ["up"]
+    environment:
+      DATABASE_URL: postgres://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trpc_agent?sslmode=disable
+      DATABASE_ALLOW_INSECURE: "true"
+      MIGRATION_TIMEOUT: ${MIGRATION_TIMEOUT:-30m}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  data-migrate:
+    <<: *app-security
+    profiles: ["operations"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.data-migrate
+    environment:
+      DATABASE_URL: postgres://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trpc_agent?sslmode=disable
+      DATABASE_ALLOW_INSECURE: "true"
+      STORAGE_BACKEND_PROFILES: '[{"id":"local-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN","allowInsecure":true},{"id":"local-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL","allowInsecure":true}]'
+      DATA_PLANE_PROFILES: "${DATA_PLANE_PROFILES:-[]}"
+      DATA_PLANE_QDRANT_API_KEY: ${DATA_PLANE_QDRANT_API_KEY:-}
+      DATA_PLANE_EMBEDDING_API_KEY: ${DATA_PLANE_EMBEDDING_API_KEY:-}
+      DATA_PLANE_S3_ACCESS_KEY: ${DATA_PLANE_S3_ACCESS_KEY:-}
+      DATA_PLANE_S3_SECRET_KEY: ${DATA_PLANE_S3_SECRET_KEY:-}
+      TENANT_POSTGRES_DSN: postgres://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trpc_agent?sslmode=disable
+      TENANT_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  gateway:
+    <<: *app-security
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    ports:
+      - "127.0.0.1:${GATEWAY_HOST_PORT:-8080}:8080"
+    environment:
+      DATABASE_URL: postgres://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trpc_agent?sslmode=disable
+      DATABASE_ALLOW_INSECURE: "true"
+      REDIS_URL: redis://redis:6379
+      STORAGE_BACKEND_PROFILES: '[{"id":"local-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN","allowInsecure":true},{"id":"local-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL","allowInsecure":true}]'
+      DATA_PLANE_PROFILES: "${DATA_PLANE_PROFILES:-[]}"
+      PORT: "8080"
+      FAIR_QUEUE_ENABLED: ${FAIR_QUEUE_ENABLED:-false}
+      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
+      AUDIT_IDENTITY_HMAC_KEY: ${AUDIT_IDENTITY_HMAC_KEY:-}
+      # Gateway resolves only the selected callback binding. Secret values stay
+      # outside tenant JSON and are never mounted into Consumer/Admin.
+      TRPC_SECRET_WECOM_TOKEN: ${TRPC_SECRET_WECOM_TOKEN:-}
+      TRPC_SECRET_WECOM_CORP_SECRET: ${TRPC_SECRET_WECOM_CORP_SECRET:-}
+      TRPC_SECRET_WECOM_AES: ${TRPC_SECRET_WECOM_AES:-}
+      TRPC_SECRET_TELEGRAM_BOT_TOKEN: ${TRPC_SECRET_TELEGRAM_BOT_TOKEN:-}
+      TRPC_SECRET_TELEGRAM_WEBHOOK: ${TRPC_SECRET_TELEGRAM_WEBHOOK:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      # Local-only convenience: production deployments must set
+      # METRICS_AUTH_TOKEN and remove this flag.
+      METRICS_ALLOW_UNAUTHENTICATED: "true"
+      METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:-}
+      METRICS_TENANT_ALLOWLIST: ${METRICS_TENANT_ALLOWLIST:-}
+      METRICS_AGENT_ALLOWLIST: ${METRICS_AGENT_ALLOWLIST:-}
+      METRICS_MODEL_ALLOWLIST: ${METRICS_MODEL_ALLOWLIST:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    <<: *app-security
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    environment:
+      DATABASE_URL: postgres://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trpc_agent?sslmode=disable
+      DATABASE_ALLOW_INSECURE: "true"
+      REDIS_URL: redis:6379
+      STORAGE_BACKEND_PROFILES: '[{"id":"local-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN","allowInsecure":true},{"id":"local-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL","allowInsecure":true}]'
+      DATA_PLANE_PROFILES: "${DATA_PLANE_PROFILES:-[]}"
+      MCP_PROFILES: "${MCP_PROFILES:-[]}"
+      # Operator-owned data-plane credentials are available only to Worker.
+      # DATA_PLANE_PROFILES names the subset actually used by each profile.
+      DATA_PLANE_QDRANT_API_KEY: ${DATA_PLANE_QDRANT_API_KEY:-}
+      DATA_PLANE_EMBEDDING_API_KEY: ${DATA_PLANE_EMBEDDING_API_KEY:-}
+      DATA_PLANE_S3_ACCESS_KEY: ${DATA_PLANE_S3_ACCESS_KEY:-}
+      DATA_PLANE_S3_SECRET_KEY: ${DATA_PLANE_S3_SECRET_KEY:-}
+      # Example operator-owned MCP credential. MCP_PROFILES refers to it with
+      # env://TRPC_SECRET_MCP_SUPPORT_AUTH; tenant JSON never carries the value.
+      TRPC_SECRET_MCP_SUPPORT_AUTH: ${TRPC_SECRET_MCP_SUPPORT_AUTH:-}
+      TRPC_SECRET_OPENAI_API_KEY: ${TRPC_SECRET_OPENAI_API_KEY:-}
+      TRPC_OPENAI_BASE_URL: ${TRPC_OPENAI_BASE_URL:-}
+      TENANT_POSTGRES_DSN: postgres://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trpc_agent?sslmode=disable
+      TENANT_REDIS_URL: redis://redis:6379/0
+      PORT: "9090"
+      EXECUTION_TIMEOUT: ${EXECUTION_TIMEOUT:-90s}
+      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
+      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?set SERVICE_AUTH_SECRET in .env}
+      AUDIT_IDENTITY_HMAC_KEY: ${AUDIT_IDENTITY_HMAC_KEY:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      SHUTDOWN_TIMEOUT: 150s
+      WORKER_CACHE_SIZE: ${WORKER_CACHE_SIZE:-128}
+      WORKER_CACHE_IDLE_TTL: ${WORKER_CACHE_IDLE_TTL:-10m}
+      WORKER_CACHE_SWEEP_INTERVAL: ${WORKER_CACHE_SWEEP_INTERVAL:-1m}
+      EXECUTION_LEASE_TTL: ${EXECUTION_LEASE_TTL:-15m}
+      EXECUTION_HEARTBEAT_INTERVAL: ${EXECUTION_HEARTBEAT_INTERVAL:-4m}
+      EXECUTION_RECONCILE_INTERVAL: ${EXECUTION_RECONCILE_INTERVAL:-1m}
+      EXECUTION_RECONCILE_BATCH: ${EXECUTION_RECONCILE_BATCH:-100}
+      # Local-only convenience: production deployments must set
+      # METRICS_AUTH_TOKEN and remove this flag.
+      METRICS_ALLOW_UNAUTHENTICATED: "true"
+      METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:-}
+      METRICS_TENANT_ALLOWLIST: ${METRICS_TENANT_ALLOWLIST:-}
+      METRICS_AGENT_ALLOWLIST: ${METRICS_AGENT_ALLOWLIST:-}
+      METRICS_MODEL_ALLOWLIST: ${METRICS_MODEL_ALLOWLIST:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    stop_grace_period: 180s
+
+  summary-worker:
+    <<: *app-security
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.summary-worker
+    environment:
+      DATABASE_URL: postgres://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trpc_agent?sslmode=disable
+      DATABASE_ALLOW_INSECURE: "true"
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND_PROFILES: '[{"id":"local-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN","allowInsecure":true},{"id":"local-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL","allowInsecure":true}]'
+      DATA_PLANE_PROFILES: "${DATA_PLANE_PROFILES:-[]}"
+      TENANT_POSTGRES_DSN: postgres://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trpc_agent?sslmode=disable
+      TENANT_REDIS_URL: redis://redis:6379/0
+      PORT: "9093"
+      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
+      TRPC_SECRET_OPENAI_API_KEY: ${TRPC_SECRET_OPENAI_API_KEY:-}
+      TRPC_OPENAI_BASE_URL: ${TRPC_OPENAI_BASE_URL:-}
+      SUMMARY_CONCURRENCY: ${SUMMARY_CONCURRENCY:-4}
+      SUMMARY_POLL_INTERVAL: ${SUMMARY_POLL_INTERVAL:-250ms}
+      SUMMARY_JOB_TIMEOUT: ${SUMMARY_JOB_TIMEOUT:-2m}
+      SUMMARY_LEASE_TTL: ${SUMMARY_LEASE_TTL:-3m}
+      SUMMARY_SESSION_LOCK_TTL: ${SUMMARY_SESSION_LOCK_TTL:-30s}
+      SUMMARY_MIN_EVENTS: ${SUMMARY_MIN_EVENTS:-20}
+      SUMMARY_MAX_WORDS: ${SUMMARY_MAX_WORDS:-256}
+      SUMMARY_MAX_OUTPUT_TOKENS: ${SUMMARY_MAX_OUTPUT_TOKENS:-512}
+      SHUTDOWN_TIMEOUT: ${SUMMARY_SHUTDOWN_TIMEOUT:-3m}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      # Local-only convenience: production deployments must set
+      # METRICS_AUTH_TOKEN and remove this flag.
+      METRICS_ALLOW_UNAUTHENTICATED: "true"
+      METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:-}
+      METRICS_TENANT_ALLOWLIST: ${METRICS_TENANT_ALLOWLIST:-}
+      METRICS_AGENT_ALLOWLIST: ${METRICS_AGENT_ALLOWLIST:-}
+      METRICS_MODEL_ALLOWLIST: ${METRICS_MODEL_ALLOWLIST:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9093/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    stop_grace_period: 360s
+
+  consumer:
+    <<: *app-security
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.consumer
+    environment:
+      DATABASE_URL: postgres://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trpc_agent?sslmode=disable
+      DATABASE_ALLOW_INSECURE: "true"
+      WORKER_ENDPOINT: http://worker:9090
+      # The Compose stack is an explicitly isolated development exception.
+      # Production consumers must use HTTPS or the separately attested mesh mode.
+      WORKER_TRANSPORT_MODE: development
+      PORT: "9091"
+      CONCURRENCY: ${CONSUMER_CONCURRENCY:-4}
+      # Fair scheduling is opt-in and requires migration 035. The local stack
+      # keeps the compatibility global FIFO path unless explicitly enabled.
+      FAIR_QUEUE_ENABLED: ${FAIR_QUEUE_ENABLED:-false}
+      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
+      STORAGE_BACKEND_PROFILES: '[{"id":"local-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN","allowInsecure":true},{"id":"local-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL","allowInsecure":true}]'
+      DATA_PLANE_PROFILES: "${DATA_PLANE_PROFILES:-[]}"
+      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?set SERVICE_AUTH_SECRET in .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      # Must match Worker EXECUTION_TIMEOUT. Consumer verifies the live Worker
+      # health capability before claiming Inbox work.
+      WORKER_EXECUTION_TIMEOUT: ${EXECUTION_TIMEOUT:-90s}
+      PROCESS_TIMEOUT: ${PROCESS_TIMEOUT:-150s}
+      LEASE_DURATION: ${INBOX_LEASE_DURATION:-3m}
+      # Each Consumer process runs one bounded shared-queue expiry reaper.
+      EXPIRY_REAP_INTERVAL: ${EXPIRY_REAP_INTERVAL:-1m}
+      EXPIRY_REAP_BATCH_SIZE: ${EXPIRY_REAP_BATCH_SIZE:-100}
+      SHUTDOWN_TIMEOUT: 180s
+      # Local-only convenience: production deployments must set
+      # METRICS_AUTH_TOKEN and remove this flag.
+      METRICS_ALLOW_UNAUTHENTICATED: "true"
+      METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:-}
+      METRICS_TENANT_ALLOWLIST: ${METRICS_TENANT_ALLOWLIST:-}
+      METRICS_AGENT_ALLOWLIST: ${METRICS_AGENT_ALLOWLIST:-}
+      METRICS_MODEL_ALLOWLIST: ${METRICS_MODEL_ALLOWLIST:-}
+    depends_on:
+      worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9091/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    stop_grace_period: 210s
+
+  delivery:
+    <<: *app-security
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.delivery
+    environment:
+      DATABASE_URL: postgres://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trpc_agent?sslmode=disable
+      DATABASE_ALLOW_INSECURE: "true"
+      PORT: "9092"
+      CONCURRENCY: ${DELIVERY_CONCURRENCY:-4}
+      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
+      TRPC_SECRET_WECOM_TOKEN: ${TRPC_SECRET_WECOM_TOKEN:-}
+      TRPC_SECRET_WECOM_CORP_SECRET: ${TRPC_SECRET_WECOM_CORP_SECRET:-}
+      TRPC_SECRET_WECOM_AES: ${TRPC_SECRET_WECOM_AES:-}
+      TRPC_SECRET_TELEGRAM_BOT_TOKEN: ${TRPC_SECRET_TELEGRAM_BOT_TOKEN:-}
+      TRPC_SECRET_TELEGRAM_WEBHOOK: ${TRPC_SECRET_TELEGRAM_WEBHOOK:-}
+      STORAGE_BACKEND_PROFILES: '[{"id":"local-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN","allowInsecure":true},{"id":"local-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL","allowInsecure":true}]'
+      DATA_PLANE_PROFILES: "${DATA_PLANE_PROFILES:-[]}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      DELIVERY_TIMEOUT: ${DELIVERY_TIMEOUT:-30s}
+      LEASE_DURATION: ${OUTBOX_LEASE_DURATION:-1m}
+      # Delivery also runs the same safe multi-replica reaper, so a Consumer
+      # outage cannot leave final delivery attempts in PROCESSING forever.
+      EXPIRY_REAP_INTERVAL: ${EXPIRY_REAP_INTERVAL:-1m}
+      EXPIRY_REAP_BATCH_SIZE: ${EXPIRY_REAP_BATCH_SIZE:-100}
+      SHUTDOWN_TIMEOUT: 60s
+      # Local-only convenience: production deployments must set
+      # METRICS_AUTH_TOKEN and remove this flag.
+      METRICS_ALLOW_UNAUTHENTICATED: "true"
+      METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:-}
+      METRICS_TENANT_ALLOWLIST: ${METRICS_TENANT_ALLOWLIST:-}
+      METRICS_AGENT_ALLOWLIST: ${METRICS_AGENT_ALLOWLIST:-}
+      METRICS_MODEL_ALLOWLIST: ${METRICS_MODEL_ALLOWLIST:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9092/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    stop_grace_period: 90s
+
+  admin:
+    <<: *app-security
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.admin
+    ports:
+      - "127.0.0.1:${ADMIN_HOST_PORT:-8081}:8081"
+    environment:
+      DATABASE_URL: postgres://agent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trpc_agent?sslmode=disable
+      DATABASE_ALLOW_INSECURE: "true"
+      PORT: "8081"
+      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
+      ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:?set ADMIN_API_TOKEN in .env}
+      ADMIN_PRINCIPALS_JSON: ${ADMIN_PRINCIPALS_JSON:-}
+      STORAGE_BACKEND_PROFILES: '[{"id":"local-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN","allowInsecure":true},{"id":"local-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL","allowInsecure":true}]'
+      DATA_PLANE_PROFILES: "${DATA_PLANE_PROFILES:-[]}"
+      MCP_PROFILES: "${MCP_PROFILES:-[]}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+      # Local-only convenience: production deployments must set
+      # METRICS_AUTH_TOKEN and remove this flag.
+      METRICS_ALLOW_UNAUTHENTICATED: "true"
+      METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:-}
+      METRICS_TENANT_ALLOWLIST: ${METRICS_TENANT_ALLOWLIST:-}
+      METRICS_AGENT_ALLOWLIST: ${METRICS_AGENT_ALLOWLIST:-}
+      METRICS_MODEL_ALLOWLIST: ${METRICS_MODEL_ALLOWLIST:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9095}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-rules.yml:/etc/prometheus/rules/agent-platform.yml:ro
+      - prometheus_data:/prometheus
+    environment:
+      METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        umask 077;
+        printf '%s' "$${METRICS_AUTH_TOKEN:-}" > /tmp/metrics-token;
+        exec /bin/prometheus
+        --config.file=/etc/prometheus/prometheus.yml
+        --storage.tsdb.path=/prometheus
+    depends_on:
+      - gateway
+      - worker
+      - summary-worker
+      - consumer
+      - delivery
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.4@sha256:886b56d5534e54f69a8cfcb4b8928da8fc753178a7a3d20c3f9b04b660169805
+    ports:
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in .env}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

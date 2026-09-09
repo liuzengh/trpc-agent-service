@@ -1,0 +1,16 @@
+.git
+.github
+.agent
+.env
+.env.*
+**/.env
+**/.env.*
+*.log
+*.out
+coverage*
+bin/
+dist/
+docs/
+test/
+.playwright-cli/
+output/playwright/

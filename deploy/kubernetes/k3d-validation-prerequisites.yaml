@@ -1,0 +1,129 @@
+# Local K3d infrastructure only. Credential values are generated at runtime;
+# this file contains references and immutable image digests, not secrets.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector: {app: postgres}
+  ports:
+  - {name: postgres, port: 5432, targetPort: 5432}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: postgres
+        image: platform-registry:5000/infra/postgres@sha256:68c8f729caca8638396647002948c0ab753fda787cbee9e887f7166169c6b87e
+        imagePullPolicy: IfNotPresent
+        env:
+        # A fresh local-path PVC root is owned by the provisioner. initdb must
+        # own its data directory so that it can enforce mode 0700 as UID 70.
+        - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+        - {name: POSTGRES_DB, value: trpc_agent}
+        - {name: POSTGRES_USER, value: agent}
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: postgres-auth, key: password}
+        ports:
+        - {name: postgres, containerPort: 5432}
+        readinessProbe:
+          exec: {command: [pg_isready, -U, agent, -d, trpc_agent]}
+          periodSeconds: 3
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: "1", memory: 1Gi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: ["ALL"]}
+        volumeMounts:
+        - {name: data, mountPath: /var/lib/postgresql/data}
+  volumeClaimTemplates:
+  - metadata: {name: data}
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests: {storage: 2Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector: {app: redis}
+  ports:
+  - {name: redis, port: 6379, targetPort: 6379}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels: {app: redis}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  template:
+    metadata:
+      labels: {app: redis}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: redis
+        image: platform-registry:5000/infra/redis@sha256:1db42ccef14898aa29bae778452d567534b59c107129cbc1163fb552de184d3c
+        imagePullPolicy: IfNotPresent
+        command: [sh, -ec]
+        args: ['exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"']
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: redis-auth, key: password}
+        ports:
+        - {name: redis, containerPort: 6379}
+        readinessProbe:
+          exec:
+            command: [sh, -ec, 'redis-cli -a "$REDIS_PASSWORD" ping | grep -qx PONG']
+          periodSeconds: 3
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {cpu: 500m, memory: 512Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: ["ALL"]}
+        volumeMounts:
+        - {name: data, mountPath: /data}
+  volumeClaimTemplates:
+  - metadata: {name: data}
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests: {storage: 1Gi}

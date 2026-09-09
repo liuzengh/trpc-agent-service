@@ -1,0 +1,197 @@
+groups:
+  - name: agent-platform-reliability
+    rules:
+      - alert: AgentDurableAuditWriteFailing
+        expr: increase(agent_audit_write_failures_total{sink="durable"}[5m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: Required audit records cannot be persisted
+          runbook_url: docs/SLO.md#audit-sink-failure
+
+      - alert: AgentAuditLogMirrorFailing
+        expr: increase(agent_audit_write_failures_total{sink="mirror"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Audit process log mirror is failing
+          runbook_url: docs/SLO.md#audit-sink-failure
+
+      - alert: AgentInboxLagHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(agent_pipeline_queue_lag_seconds_bucket{stage="consumer"}[10m]))) > 120
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: Inbox p99 queue lag exceeds 120 seconds
+          runbook_url: docs/SLO.md#inbox-lag
+
+      - alert: AgentOutboxLagHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(agent_pipeline_queue_lag_seconds_bucket{stage="delivery"}[10m]))) > 60
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: Outbox p99 queue lag exceeds 60 seconds
+          runbook_url: docs/SLO.md#delivery-retry-storm
+
+      - alert: AgentInboxBacklogOldestHigh
+        expr: max(agent_pipeline_queue_oldest_age_seconds{queue="inbox"}) > 120
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: Oldest automatic Inbox message exceeds 120 seconds
+          runbook_url: docs/SLO.md#inbox-lag
+
+      - alert: AgentOutboxBacklogOldestHigh
+        expr: max(agent_pipeline_queue_oldest_age_seconds{queue="outbox"}) > 60
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: Oldest automatic Outbox message exceeds 60 seconds
+          runbook_url: docs/SLO.md#delivery-retry-storm
+
+      - alert: AgentQueueInspectionFailing
+        expr: increase(agent_pipeline_queue_inspection_failures_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Durable queue inspection snapshots are failing
+          runbook_url: docs/SLO.md#queue-inspection
+
+      - alert: AgentDeliveryRetryStorm
+        expr: sum(rate(agent_pipeline_retries_total{stage="delivery"}[5m])) / clamp_min(sum(rate(agent_pipeline_messages_total{stage="delivery"}[5m])), 0.001) > 0.2
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: Delivery retries exceed 20 percent of attempts
+          runbook_url: docs/SLO.md#delivery-retry-storm
+
+      - alert: AgentFenceRejected
+        expr: increase(agent_pipeline_fence_rejections_total[10m]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: A stale queue lease attempted to commit
+          runbook_url: docs/SLO.md#fence-rejection
+
+      - alert: AgentWorkerCacheSaturated
+        expr: increase(agent_worker_cache_saturation_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: Every bounded Worker Runner cache slot is active
+          runbook_url: docs/SLO.md#worker-cache-saturation
+
+      - alert: AgentExecutionReconcilerFailing
+        expr: increase(agent_execution_reconcile_errors_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Stale execution reconciliation is failing
+          runbook_url: docs/SLO.md#execution-reconciliation
+
+      - alert: AgentGatewayErrorBudgetFastBurn
+        expr: |
+          (
+            sum(rate(agent_gateway_webhooks_total{result=~"accepted|persistence_error"}[5m])) > 0
+            and
+            (
+              (1 - sum(rate(agent_gateway_webhooks_total{result="accepted"}[5m]))
+                / clamp_min(sum(rate(agent_gateway_webhooks_total{result=~"accepted|persistence_error"}[5m])), 0.001))
+              / 0.0005 > 14.4
+            )
+          )
+          and
+          (
+            sum(rate(agent_gateway_webhooks_total{result=~"accepted|persistence_error"}[1h])) > 0
+            and
+            (
+              (1 - sum(rate(agent_gateway_webhooks_total{result="accepted"}[1h]))
+                / clamp_min(sum(rate(agent_gateway_webhooks_total{result=~"accepted|persistence_error"}[1h])), 0.001))
+              / 0.0005 > 14.4
+            )
+          )
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: Gateway availability is rapidly consuming its monthly error budget
+          runbook_url: docs/SLO.md#error-budget
+
+      - alert: AgentGatewayErrorBudgetSlowBurn
+        expr: |
+          (
+            sum(rate(agent_gateway_webhooks_total{result=~"accepted|persistence_error"}[30m])) > 0
+            and
+            (
+              (1 - sum(rate(agent_gateway_webhooks_total{result="accepted"}[30m]))
+                / clamp_min(sum(rate(agent_gateway_webhooks_total{result=~"accepted|persistence_error"}[30m])), 0.001))
+              / 0.0005 > 6
+            )
+          )
+          and
+          (
+            sum(rate(agent_gateway_webhooks_total{result=~"accepted|persistence_error"}[6h])) > 0
+            and
+            (
+              (1 - sum(rate(agent_gateway_webhooks_total{result="accepted"}[6h]))
+                / clamp_min(sum(rate(agent_gateway_webhooks_total{result=~"accepted|persistence_error"}[6h])), 0.001))
+              / 0.0005 > 6
+            )
+          )
+        for: 15m
+        labels:
+          severity: page
+        annotations:
+          summary: Gateway availability is steadily consuming its monthly error budget
+          runbook_url: docs/SLO.md#error-budget
+
+      - alert: AgentTenantQueueAdmissionRejecting
+        expr: sum(rate(agent_gateway_webhooks_total{result="queue_full"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Tenant Inbox backlog admission is rejecting webhooks
+          runbook_url: docs/SLO.md#queue-admission
+
+      - alert: AgentSummaryFailuresBurst
+        expr: sum(increase(agent_summary_runs_total{result="failed"}[10m])) >= 5
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Durable Summary processing failures are repeating
+          runbook_url: docs/SLO.md#summary-generation
+
+      - alert: AgentSummaryFailureRatioHigh
+        expr: |
+          (
+            sum(increase(agent_summary_runs_total{result="failed"}[10m]))
+            / clamp_min(sum(increase(agent_summary_runs_total[10m])), 1)
+          ) > 0.2
+          and
+          sum(increase(agent_summary_runs_total[10m])) >= 10
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: More than 20 percent of Summary attempts are failing
+          runbook_url: docs/SLO.md#summary-generation
+
+      - alert: AgentSummaryLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(agent_summary_run_duration_seconds_bucket[10m]))) > 60
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Summary generation p95 exceeds 60 seconds
+          runbook_url: docs/SLO.md#summary-generation

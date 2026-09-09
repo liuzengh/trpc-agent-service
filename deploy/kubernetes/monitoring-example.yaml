@@ -1,0 +1,31 @@
+# Optional Prometheus Operator integration. This resource is intentionally not
+# applied by scripts/k8s_apply.sh because the CRD and Prometheus selectors are
+# cluster-owned. Install it only after the operator is available.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: agent-platform
+  labels:
+    app.kubernetes.io/part-of: agent-platform
+spec:
+  selector:
+    matchExpressions:
+    - key: app
+      operator: In
+      values:
+      - agent-gateway
+      - agent-worker
+      - agent-summary-worker
+      - agent-consumer
+      - agent-delivery
+      - agent-admin
+  podMetricsEndpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+    authorization:
+      type: Bearer
+      credentials:
+        name: metrics-auth
+        key: token

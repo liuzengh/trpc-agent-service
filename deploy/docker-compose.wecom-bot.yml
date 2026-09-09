@@ -1,0 +1,48 @@
+# Add this overlay and an operator-generated tenant binding override to the
+# base Compose file. This connector owns one bot; do not scale its replicas.
+services:
+  gateway:
+    environment:
+      TRPC_SECRET_WECOM_BOT_BRIDGE_TOKEN: ${TRPC_SECRET_WECOM_BOT_BRIDGE_TOKEN:?WeCom bridge token required}
+  delivery:
+    environment:
+      WECOM_BOT_BRIDGE_URL: http://wecom-bot:8090
+      TRPC_SECRET_WECOM_BOT_BRIDGE_TOKEN: ${TRPC_SECRET_WECOM_BOT_BRIDGE_TOKEN:?WeCom bridge token required}
+  wecom-bot:
+    profiles: [wecom-bot]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.wecom-bot
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      WECOM_BOT_ID: ${WECOM_BOT_ID:?WeCom Bot ID required}
+      WECOM_BOT_SECRET: ${WECOM_BOT_SECRET:?WeCom long connection Secret required}
+      TRPC_SECRET_WECOM_BOT_BRIDGE_TOKEN: ${TRPC_SECRET_WECOM_BOT_BRIDGE_TOKEN:?WeCom bridge token required}
+      WECOM_BOT_GATEWAY_BASE_URL: http://gateway:8080
+      WECOM_BOT_WEBHOOK_ROUTE_KEY: ${WECOM_BOT_WEBHOOK_ROUTE_KEY:?WeCom route required}
+      WECOM_BOT_STATE_DIR: /state
+      PORT: "8090"
+      HTTPS_PROXY: ${CONTAINER_HTTPS_PROXY:-}
+      HTTP_PROXY: ${CONTAINER_HTTPS_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,gateway
+    volumes:
+      - wecom_bot_state:/state
+    healthcheck:
+      test: [CMD, wget, -qO-, http://localhost:8090/health]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      gateway:
+        condition: service_healthy
+    # A rejected subscription or replacement by another owner requires an
+    # operator decision. Automatic restart would repeatedly kick that owner.
+    restart: "no"
+    stop_grace_period: 30s
+volumes:
+  wecom_bot_state:

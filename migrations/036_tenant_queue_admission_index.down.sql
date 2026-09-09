@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_inbox_queue_admission_tenant_status;

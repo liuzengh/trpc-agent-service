@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>tRPC Agent · 管理控制台</title>
+  <link rel="icon" href="/console/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/console/styles.css">
+  <script src="/console/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <div id="login-view" class="login-layout">
+    <section class="login-story" aria-label="平台介绍">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">t</span><span>tRPC Agent</span></div>
+      <div class="story-copy"><h1>Agent 管理平台</h1><p>租户配置、应用发布与请求查询</p></div>
+      <p class="story-foot">tRPC-Agent-Go</p>
+    </section>
+    <main class="login-main" id="login-main"><div class="login-card"><h2>登录控制台</h2><p class="muted">请输入管理员签发的访问令牌。</p><form id="login-form"><label for="access-token">访问令牌 <span class="required">*</span></label><input id="access-token" name="access-token" type="password" required autocomplete="off" spellcheck="false" placeholder="输入访问令牌"><p class="field-help">刷新页面或退出登录后，需重新输入令牌。</p><div id="login-error" class="form-error" role="alert" hidden></div><button id="login-submit" class="btn primary wide" type="submit">进入工作区</button></form></div></main>
+  </div>
+  <div id="workspace" class="workspace" hidden>
+    <aside class="sidebar" id="sidebar" aria-label="主导航">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">t</span><span>tRPC Agent<span class="brand-caption">管理控制台</span></span></div>
+      <div class="scope-picker"><label for="tenant-select">当前租户</label><select id="tenant-select" aria-label="选择当前租户"></select><button id="create-tenant" class="sidebar-create" type="button" hidden><span aria-hidden="true">＋</span> 创建租户</button></div>
+      <p class="nav-label">工作区</p>
+      <nav id="navigation">
+        <button type="button" data-page="overview" class="nav-item active" aria-current="page"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>运行概览</button>
+        <button type="button" data-page="apps" class="nav-item"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 17l9 5 9-5"/></svg>应用与发布</button>
+        <button type="button" data-page="backends" class="nav-item"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/></svg>后端组合</button>
+        <button type="button" data-page="requests" class="nav-item"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 5h7a5 5 0 0 1 0 10h-4a4 4 0 0 0 0 8M17 19h-4M3 12v9"/></svg>请求追踪</button>
+        <button type="button" data-page="audit" class="nav-item"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h14v18H5zM9 8h6M9 12h6M9 16h4"/></svg>操作审计</button>
+        <button type="button" data-page="migrations" class="nav-item"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h17m-4-4 4 4-4 4M21 17H4m4-4-4 4 4 4"/></svg>数据迁移</button>
+      </nav>
+      <div class="sidebar-bottom"><div class="connection"><span class="status-dot"></span>已登录</div><div class="identity"><span class="avatar" aria-hidden="true">A</span><div><strong id="principal-role"></strong><small id="principal-id"></small></div><button id="logout" type="button" title="退出登录" aria-label="退出登录">退出</button></div></div>
+    </aside>
+    <div class="work-area"><header class="topbar"><button id="menu-toggle" class="btn icon-only" aria-expanded="false" aria-controls="sidebar" aria-label="展开导航" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><div class="breadcrumb">工作区 <span aria-hidden="true">/</span> <strong id="breadcrumb-title">运行概览</strong></div><div class="topbar-right"><span id="scope-name" class="scope-name"></span></div></header>
+      <main id="main" tabindex="-1"><div class="page-heading"><div><h1 id="page-title">运行概览</h1><p id="page-description" class="muted"></p></div><div class="heading-actions"><span id="updated-at" class="updated-at"></span><button id="refresh" class="btn" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7V3m0 4h-4M4 17v4m0-4h4M5 8a8 8 0 0 1 14-3l1 2M4 17l1 2a8 8 0 0 0 14-3"/></svg>刷新数据</button></div></div><div id="page-content" aria-live="polite"></div></main>
+      <footer class="workspace-footer"><span>tRPC Agent · 管理控制台</span></footer>
+    </div>
+  </div>
+  <dialog id="action-dialog" aria-labelledby="dialog-title"><form id="action-form"><div class="dialog-header"><div><p class="eyebrow" id="dialog-eyebrow">操作</p><h2 id="dialog-title"></h2></div><button class="btn icon-only" id="dialog-close" type="button" aria-label="关闭对话框">×</button></div><div id="dialog-body" class="dialog-body"></div><div id="dialog-error" class="form-error" role="alert" hidden></div><div class="dialog-footer"><button id="dialog-back" class="btn" type="button" hidden>上一步</button><span class="spacer"></span><button id="dialog-cancel" class="btn" type="button">取消</button><button id="dialog-submit" class="btn primary" type="submit">保存</button></div></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <noscript><p class="no-script">操作台需要 JavaScript。请启用后刷新页面。</p></noscript>
+</body>
+</html>

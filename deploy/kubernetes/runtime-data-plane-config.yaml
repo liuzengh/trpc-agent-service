@@ -1,0 +1,12 @@
+# Safe baseline: applications start with no Knowledge/Artifact profiles and
+# fail closed if a tenant tries to bind one. Replace profiles.json through the
+# release overlay; keep credentials in runtime-data-plane-credentials.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: runtime-data-plane-profiles
+data:
+  profiles.json: '[]'
+  # Operator-owned MCP endpoints and allowlisted remote tool names. Header
+  # values remain in a Secret and are resolved only by Worker.
+  mcp-profiles.json: '[]'

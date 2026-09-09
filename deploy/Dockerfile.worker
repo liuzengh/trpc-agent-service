@@ -1,0 +1,26 @@
+ARG GO_IMAGE=golang:1.26.7-alpine3.24@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468
+ARG RUNTIME_IMAGE=alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+
+FROM ${GO_IMAGE} AS builder
+
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -trimpath -o /out/worker ./cmd/worker
+
+FROM ${RUNTIME_IMAGE}
+
+RUN apk --no-cache add ca-certificates wget
+
+WORKDIR /app
+
+COPY --from=builder /out/worker .
+
+USER 65532:65532
+EXPOSE 9090
+
+ENTRYPOINT ["./worker"]

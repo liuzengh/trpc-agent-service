@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-admin
+  labels:
+    app: agent-admin
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-admin
+  template:
+    metadata:
+      labels:
+        app: agent-admin
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+      - maxSkew: 1
+        minDomains: 2
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector: {matchLabels: {app: agent-admin}}
+      containers:
+      - name: admin
+        image: trpc-agent-admin:0.1.0
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: ["ALL"]}
+        ports:
+        - containerPort: 8081
+          name: http
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: url
+        - name: MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: master-key
+              key: key
+        - name: ADMIN_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: admin-api-token
+              key: token
+        - name: ADMIN_PRINCIPALS_JSON
+          valueFrom:
+            secretKeyRef:
+              name: admin-api-token
+              key: principals-json
+              optional: true
+        - name: METRICS_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: metrics-auth
+              key: token
+        - name: STORAGE_BACKEND_PROFILES
+          value: '[{"id":"tenant-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN"},{"id":"tenant-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL"}]'
+        - name: DATA_PLANE_PROFILES
+          valueFrom:
+            configMapKeyRef:
+              name: runtime-data-plane-profiles
+              key: profiles.json
+        - name: MCP_PROFILES
+          valueFrom:
+            configMapKeyRef:
+              name: runtime-data-plane-profiles
+              key: mcp-profiles.json
+        - name: PORT
+          value: "8081"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "otel-collector.observability.svc:4317"
+        - name: OTEL_EXPORTER_OTLP_INSECURE
+          value: "false"
+        - name: OTEL_EXPORTER_OTLP_CERTIFICATE
+          value: "/var/run/secrets/otel/ca.crt"
+        volumeMounts:
+        - name: otel-ca
+          mountPath: /var/run/secrets/otel
+          readOnly: true
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: 8081
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: otel-ca
+        secret:
+          secretName: otel-collector-tls
+          items:
+          - key: ca.crt
+            path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-admin
+spec:
+  selector:
+    app: agent-admin
+  ports:
+  - port: 8081
+    targetPort: 8081
+    protocol: TCP
+  type: ClusterIP

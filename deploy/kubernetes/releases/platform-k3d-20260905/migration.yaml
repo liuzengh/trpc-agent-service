@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agent-migrate
+  annotations:
+    # Release rendering must replace this with bootstrap, compatible, or
+    # breaking. Breaking releases must also add a matching
+    # agent.trpc.io/breaking-change-id annotation.
+    agent.trpc.io/schema-class: bootstrap
+spec:
+  backoffLimit: 5
+  activeDeadlineSeconds: 1860
+  template:
+    metadata:
+      labels: {app: agent-migrate}
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: migrate
+        image: platform-registry:5000/platform/migrate@sha256:8a3822391bec617daed6b93f91ed02e579c35b591a471673456afe635e818b3b
+        imagePullPolicy: IfNotPresent
+        securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+        args: ["up"]
+        env:
+        - {name: DATABASE_URL, valueFrom: {secretKeyRef: {name: db-credentials, key: url}}}
+        - {name: DATABASE_ALLOW_INSECURE, value: "true"}
+        - {name: MIGRATION_TIMEOUT, value: "30m"}

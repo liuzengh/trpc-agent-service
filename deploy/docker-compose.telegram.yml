@@ -1,0 +1,70 @@
+# Local Telegram polling stack. Use with docker-compose.yml and the bootstrap's
+# tenant-scoped authorization override. No public webhook or polling port.
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:${TELEGRAM_POSTGRES_PORT:-64532}:5432"
+  otel-collector:
+    ports: !override
+      - "127.0.0.1:${TELEGRAM_OTLP_GRPC_PORT:-64327}:4317"
+      - "127.0.0.1:${TELEGRAM_OTLP_HTTP_PORT:-64328}:4318"
+  admin:
+    ports: !override
+      - "127.0.0.1:${TELEGRAM_ADMIN_PORT:-48081}:8081"
+  gateway:
+    ports: !override
+      - "127.0.0.1:${TELEGRAM_GATEWAY_PORT:-48080}:8080"
+  worker:
+    environment:
+      HTTPS_PROXY: ${CONTAINER_HTTPS_PROXY:-}
+      HTTP_PROXY: ${CONTAINER_HTTPS_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,postgres,redis,otel-collector,gateway,worker,admin
+  summary-worker:
+    environment:
+      HTTPS_PROXY: ${CONTAINER_HTTPS_PROXY:-}
+      HTTP_PROXY: ${CONTAINER_HTTPS_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,postgres,redis,otel-collector,gateway,worker,admin
+  delivery:
+    environment:
+      HTTPS_PROXY: ${CONTAINER_HTTPS_PROXY:-}
+      HTTP_PROXY: ${CONTAINER_HTTPS_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,postgres,redis,otel-collector,gateway,worker,admin
+  prometheus:
+    profiles: [monitoring]
+  grafana:
+    profiles: [monitoring]
+  telegram-poller:
+    profiles: [telegram]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.telegram-poller
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      TRPC_SECRET_TELEGRAM_BOT_TOKEN: ${TRPC_SECRET_TELEGRAM_BOT_TOKEN:?Telegram bot token required}
+      TRPC_SECRET_TELEGRAM_WEBHOOK: ${TRPC_SECRET_TELEGRAM_WEBHOOK:?Telegram internal webhook secret required}
+      TELEGRAM_GATEWAY_BASE_URL: http://gateway:8080
+      TELEGRAM_WEBHOOK_ROUTE_KEY: ${TELEGRAM_WEBHOOK_ROUTE_KEY:?Telegram route key required}
+      TELEGRAM_EXPECTED_BOT_ID: ${TELEGRAM_EXPECTED_BOT_ID:?Telegram bot identity required}
+      TELEGRAM_STATE_PATH: /state/telegram.json
+      TELEGRAM_POLL_TIMEOUT: 30s
+      HTTPS_PROXY: ${CONTAINER_HTTPS_PROXY:-}
+      HTTP_PROXY: ${CONTAINER_HTTPS_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,postgres,redis,otel-collector,gateway,worker,admin
+    volumes:
+      - telegram_state:/state
+    depends_on:
+      gateway:
+        condition: service_healthy
+      consumer:
+        condition: service_healthy
+      delivery:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 45s
+volumes:
+  telegram_state:

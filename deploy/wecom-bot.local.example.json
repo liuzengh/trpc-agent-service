@@ -1,0 +1,10 @@
+{
+  "WECOM_BOT_ID": "",
+  "WECOM_BOT_SECRET": "",
+  "WECOM_ALLOWED_USER_ID": [],
+  "TRPC_SECRET_OPENAI_API_KEY": "",
+  "TRPC_OPENAI_BASE_URL": "",
+  "MODEL_NAME": "gpt-4o-mini",
+  "SYSTEM_PROMPT": "",
+  "CONTAINER_HTTPS_PROXY": ""
+}

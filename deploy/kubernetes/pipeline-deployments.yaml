@@ -1,0 +1,130 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-consumer
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: agent-consumer}
+  template:
+    metadata:
+      labels: {app: agent-consumer}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 210
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+      topologySpreadConstraints:
+      - maxSkew: 1
+        minDomains: 2
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector: {matchLabels: {app: agent-consumer}}
+      containers:
+      - name: consumer
+        image: trpc-agent-consumer:0.1.0
+        securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+        ports: [{name: http, containerPort: 9091}]
+        env:
+        - {name: DATABASE_URL, valueFrom: {secretKeyRef: {name: db-credentials, key: url}}}
+        - {name: MASTER_KEY, valueFrom: {secretKeyRef: {name: master-key, key: key}}}
+        - {name: SERVICE_AUTH_SECRET, valueFrom: {secretKeyRef: {name: service-auth, key: key}}}
+        - {name: METRICS_AUTH_TOKEN, valueFrom: {secretKeyRef: {name: metrics-auth, key: token}}}
+        # Fair admission prevents one noisy tenant from monopolizing consumers.
+        # Four workers per Pod is the locally measured safe profile; increase
+        # only after re-running the durable-queue capacity scenario.
+        - {name: FAIR_QUEUE_ENABLED, value: "true"}
+        - {name: CONCURRENCY, value: "4"}
+        - {name: STORAGE_BACKEND_PROFILES, value: '[{"id":"tenant-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN"},{"id":"tenant-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL"}]'}
+        - {name: DATA_PLANE_PROFILES, valueFrom: {configMapKeyRef: {name: runtime-data-plane-profiles, key: profiles.json}}}
+        - {name: WORKER_ENDPOINT, value: "http://agent-worker:9090"}
+        # Worker does not terminate TLS itself. Keep this fail-closed until
+        # the namespace has an enforced service-mesh mTLS policy; an overlay
+        # may set the assertion to true only after that policy is verified.
+        - {name: WORKER_TRANSPORT_MODE, value: "mesh"}
+        - {name: WORKER_MESH_MTLS_ASSERTED, value: "false"}
+        - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "otel-collector.observability.svc:4317"}
+        - {name: OTEL_EXPORTER_OTLP_INSECURE, value: "false"}
+        - {name: OTEL_EXPORTER_OTLP_CERTIFICATE, value: "/var/run/secrets/otel/ca.crt"}
+        # This value is an expected live Worker capability, not a second
+        # independent timeout. Keep it sourced from the same release value as
+        # Worker EXECUTION_TIMEOUT in a production overlay.
+        - {name: WORKER_EXECUTION_TIMEOUT, value: "90s"}
+        - {name: PROCESS_TIMEOUT, value: "150s"}
+        - {name: LEASE_DURATION, value: "3m"}
+        - {name: EXPIRY_REAP_INTERVAL, value: "1m"}
+        - {name: EXPIRY_REAP_BATCH_SIZE, value: "100"}
+        - {name: SHUTDOWN_TIMEOUT, value: "180s"}
+        volumeMounts:
+        - {name: otel-ca, mountPath: /var/run/secrets/otel, readOnly: true}
+        readinessProbe: {httpGet: {path: /health, port: 9091}, periodSeconds: 5}
+        livenessProbe: {httpGet: {path: /live, port: 9091}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 250m, memory: 256Mi}
+          limits: {cpu: "1", memory: 1Gi}
+      volumes:
+      - name: otel-ca
+        secret:
+          secretName: otel-collector-tls
+          items:
+          - key: ca.crt
+            path: ca.crt
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-delivery
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: agent-delivery}
+  template:
+    metadata:
+      labels: {app: agent-delivery}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+      topologySpreadConstraints:
+      - maxSkew: 1
+        minDomains: 2
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector: {matchLabels: {app: agent-delivery}}
+      containers:
+      - name: delivery
+        image: trpc-agent-delivery:0.1.0
+        securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+        ports: [{name: http, containerPort: 9092}]
+        env:
+        - {name: DATABASE_URL, valueFrom: {secretKeyRef: {name: db-credentials, key: url}}}
+        - {name: MASTER_KEY, valueFrom: {secretKeyRef: {name: master-key, key: key}}}
+        - {name: TRPC_SECRET_WECOM_TOKEN, valueFrom: {secretKeyRef: {name: channel-credentials, key: wecom-callback-token, optional: true}}}
+        - {name: TRPC_SECRET_WECOM_CORP_SECRET, valueFrom: {secretKeyRef: {name: channel-credentials, key: wecom-corp-secret, optional: true}}}
+        - {name: TRPC_SECRET_WECOM_AES, valueFrom: {secretKeyRef: {name: channel-credentials, key: wecom-encoding-aes-key, optional: true}}}
+        - {name: TRPC_SECRET_TELEGRAM_BOT_TOKEN, valueFrom: {secretKeyRef: {name: channel-credentials, key: telegram-bot-token, optional: true}}}
+        - {name: TRPC_SECRET_TELEGRAM_WEBHOOK, valueFrom: {secretKeyRef: {name: channel-credentials, key: telegram-webhook-secret, optional: true}}}
+        - {name: METRICS_AUTH_TOKEN, valueFrom: {secretKeyRef: {name: metrics-auth, key: token}}}
+        - {name: STORAGE_BACKEND_PROFILES, value: '[{"id":"tenant-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN"},{"id":"tenant-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL"}]'}
+        - {name: DATA_PLANE_PROFILES, valueFrom: {configMapKeyRef: {name: runtime-data-plane-profiles, key: profiles.json}}}
+        - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "otel-collector.observability.svc:4317"}
+        - {name: OTEL_EXPORTER_OTLP_INSECURE, value: "false"}
+        - {name: OTEL_EXPORTER_OTLP_CERTIFICATE, value: "/var/run/secrets/otel/ca.crt"}
+        - {name: DELIVERY_TIMEOUT, value: "30s"}
+        - {name: LEASE_DURATION, value: "1m"}
+        - {name: EXPIRY_REAP_INTERVAL, value: "1m"}
+        - {name: EXPIRY_REAP_BATCH_SIZE, value: "100"}
+        - {name: SHUTDOWN_TIMEOUT, value: "60s"}
+        volumeMounts:
+        - {name: otel-ca, mountPath: /var/run/secrets/otel, readOnly: true}
+        readinessProbe: {httpGet: {path: /health, port: 9092}, periodSeconds: 5}
+        livenessProbe: {httpGet: {path: /live, port: 9092}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 250m, memory: 256Mi}
+          limits: {cpu: "1", memory: 1Gi}
+      volumes:
+      - name: otel-ca
+        secret:
+          secretName: otel-collector-tls
+          items:
+          - key: ca.crt
+            path: ca.crt

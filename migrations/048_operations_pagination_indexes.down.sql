@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_execution_operations_tenant_time_id;
+DROP INDEX IF EXISTS idx_inbox_operations_tenant_time_id;

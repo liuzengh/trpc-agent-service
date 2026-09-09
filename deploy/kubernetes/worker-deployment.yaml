@@ -1,0 +1,222 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-worker
+  labels:
+    app: agent-worker
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: agent-worker
+  template:
+    metadata:
+      labels:
+        app: agent-worker
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 180
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+      - maxSkew: 1
+        minDomains: 2
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector: {matchLabels: {app: agent-worker}}
+      containers:
+      - name: worker
+        image: trpc-agent-worker:0.1.0
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: ["ALL"]}
+        ports:
+        - containerPort: 9090
+          name: http
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: redis-credentials
+              key: url
+        - name: STORAGE_BACKEND_PROFILES
+          value: '[{"id":"tenant-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN"},{"id":"tenant-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL"}]'
+        - name: DATA_PLANE_PROFILES
+          valueFrom:
+            configMapKeyRef:
+              name: runtime-data-plane-profiles
+              key: profiles.json
+        - name: MCP_PROFILES
+          valueFrom:
+            configMapKeyRef:
+              name: runtime-data-plane-profiles
+              key: mcp-profiles.json
+        - name: TRPC_SECRET_MCP_SUPPORT_AUTH
+          valueFrom:
+            secretKeyRef:
+              name: mcp-profile-credentials
+              key: support-authorization
+              optional: true
+        - name: TRPC_SECRET_OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: model-provider-credentials
+              key: openai-api-key
+              optional: true
+        - name: DATA_PLANE_QDRANT_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: runtime-data-plane-credentials
+              key: qdrant-api-key
+        - name: DATA_PLANE_EMBEDDING_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: runtime-data-plane-credentials
+              key: embedding-api-key
+        - name: DATA_PLANE_S3_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: runtime-data-plane-credentials
+              key: s3-access-key
+        - name: DATA_PLANE_S3_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: runtime-data-plane-credentials
+              key: s3-secret-key
+        - name: TENANT_POSTGRES_DSN
+          valueFrom:
+            secretKeyRef:
+              name: tenant-storage-credentials
+              key: postgres-url
+        - name: TENANT_REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: tenant-storage-credentials
+              key: redis-url
+        - name: MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: master-key
+              key: key
+        - name: SERVICE_AUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: service-auth
+              key: key
+        - name: AUDIT_IDENTITY_HMAC_KEY
+          valueFrom:
+            secretKeyRef:
+              name: audit-identity
+              key: key
+        - name: METRICS_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: metrics-auth
+              key: token
+        - name: PORT
+          value: "9090"
+        # Consumer verifies this live value through the Worker health capability;
+        # PROCESS_TIMEOUT must additionally reserve response and persistence time.
+        - name: EXECUTION_TIMEOUT
+          value: "90s"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "otel-collector.observability.svc:4317"
+        - name: OTEL_EXPORTER_OTLP_INSECURE
+          value: "false"
+        - name: OTEL_EXPORTER_OTLP_CERTIFICATE
+          value: "/var/run/secrets/otel/ca.crt"
+        - name: SHUTDOWN_TIMEOUT
+          value: "150s"
+        - name: WORKER_CACHE_SIZE
+          value: "128"
+        - name: WORKER_CACHE_IDLE_TTL
+          value: "10m"
+        - name: WORKER_CACHE_SWEEP_INTERVAL
+          value: "1m"
+        - name: EXECUTION_LEASE_TTL
+          value: "15m"
+        - name: EXECUTION_HEARTBEAT_INTERVAL
+          value: "4m"
+        - name: EXECUTION_RECONCILE_INTERVAL
+          value: "1m"
+        - name: EXECUTION_RECONCILE_BATCH
+          value: "100"
+        volumeMounts:
+        - name: otel-ca
+          mountPath: /var/run/secrets/otel
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "2000m"
+          limits:
+            memory: "4Gi"
+            cpu: "4000m"
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: 9090
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9090
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: otel-ca
+        secret:
+          secretName: otel-collector-tls
+          items:
+          - key: ca.crt
+            path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-worker
+spec:
+  selector:
+    app: agent-worker
+  ports:
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agent-worker-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: agent-worker
+  minReplicas: 5
+  maxReplicas: 20
+  metrics:
+  - type: ContainerResource
+    containerResource:
+      name: cpu
+      container: worker
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: ContainerResource
+    containerResource:
+      name: memory
+      container: worker
+      target:
+        type: Utilization
+        averageUtilization: 80

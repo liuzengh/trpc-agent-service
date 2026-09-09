@@ -1,0 +1,41 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: agent-gateway}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app: agent-gateway}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: agent-worker}
+spec:
+  minAvailable: 3
+  selector: {matchLabels: {app: agent-worker}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: agent-summary-worker}
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app: agent-summary-worker}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: agent-consumer}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app: agent-consumer}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: agent-delivery}
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app: agent-delivery}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: agent-admin}
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app: agent-admin}}

@@ -1,8 +1,7 @@
 # 文档目录
 
-在此放置架构设计、时序图、数据模型和运维方案。建议至少包含：
+## 参赛方案
 
-- 系统架构图：Gateway、Worker、Channel Adapter、Storage Adapter、Plugin / Guardrail、Telemetry
-- 核心时序图：IM 消息 → Runner 执行 → Tool 调用 → Session / Memory 写入 → IM 回复
-- 数据模型与多后端适配说明
-- 风险清单
+- [王子龙：多租户节点化 Agent 部署平台](solution-design-wangzilong.md)
+
+方案入口汇集架构图、核心时序、数据模型、同步幂等、多后端适配、风险清单与实现代码。项目的八项阅读导航与启动方式见[项目首页](../README.md)。

@@ -1,0 +1,205 @@
+name: verify
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+    tags: ["platform-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15.8-alpine@sha256:8b963ea3038c3b32182ee7f592ccde21242fa7c5fd9d1b72aa333c27f1bfc809
+        env:
+          POSTGRES_USER: agent
+          POSTGRES_PASSWORD: integration-password
+          POSTGRES_DB: trpc_agent
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U agent -d trpc_agent"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7.4-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      qdrant:
+        image: qdrant/qdrant:v1.16.3@sha256:0425e3e03e7fd9b3dc95c4214546afe19de2eb2e28ca621441a56663ac6e1f46
+        ports: ["6333:6333", "6334:6334"]
+    env:
+      TEST_DATABASE_URL: postgres://agent:integration-password@localhost:5432/trpc_agent?sslmode=disable
+      TEST_REDIS_URL: redis://localhost:6379/0
+      TEST_QDRANT_HOST: localhost
+      TEST_QDRANT_GRPC_PORT: "6334"
+      TEST_MINIO_ENDPOINT: localhost:9000
+      TEST_MINIO_ACCESS_KEY: validation-minio-user
+      TEST_MINIO_SECRET_KEY: validation-minio-password-not-for-deployment
+      POSTGRES_PASSWORD: validation-only-password
+      MASTER_KEY: validation-only-master-key-32-bytes-minimum
+      SERVICE_AUTH_SECRET: validation-only-service-secret-32-bytes
+      ADMIN_API_TOKEN: validation-only-admin-token-32-bytes
+      GRAFANA_PASSWORD: validation-only-grafana-password
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: "1.26.7"
+        cache: true
+    - name: Start MinIO integration backend
+      run: >-
+        docker run --detach --name ci-minio --publish 9000:9000
+        --env MINIO_ROOT_USER=validation-minio-user
+        --env MINIO_ROOT_PASSWORD=validation-minio-password-not-for-deployment
+        minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+        server /data --address :9000
+    - name: Wait for Qdrant and MinIO
+      run: |
+        for attempt in {1..60}; do
+          if curl --fail --silent --show-error http://127.0.0.1:6333/readyz >/dev/null \
+            && curl --fail --silent --show-error http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "Qdrant or MinIO did not become ready" >&2
+        exit 1
+    # ci_evidence.py executes the pinned command `bash ./scripts/require_secure_go.sh`
+    # as the first gate and records its output with the rest of this job's evidence.
+    - name: Record reproducible source gates
+      run: python3 scripts/ci_evidence.py run --job go --output "$RUNNER_TEMP/ci-evidence/go"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ci-evidence-go
+        path: ${{ runner.temp }}/ci-evidence/go
+        if-no-files-found: error
+        retention-days: 14
+
+  go-1-25-compatibility:
+    needs: go
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: "1.25.14"
+        cache: true
+    - name: Record Go 1.25 compatibility gates
+      run: python3 scripts/ci_evidence.py run --job go-1-25-compatibility --output "$RUNNER_TEMP/ci-evidence/go-1-25-compatibility"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ci-evidence-go-1-25
+        path: ${{ runner.temp }}/ci-evidence/go-1-25-compatibility
+        if-no-files-found: error
+        retention-days: 14
+
+  vulnerability-scan:
+    needs: go-1-25-compatibility
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    # Keep vulnerability analysis on the same patched toolchain as the
+    # production build; Go 1.25 remains the minimum source compatibility line.
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: "1.26.7"
+        cache: true
+    # The vulnerability job also records `bash ./scripts/require_secure_go.sh`
+    # before govulncheck so the toolchain provenance is part of the evidence.
+    - name: Record vulnerability gates
+      run: python3 scripts/ci_evidence.py run --job vulnerability-scan --output "$RUNNER_TEMP/ci-evidence/vulnerability-scan"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ci-evidence-vulnerability
+        path: ${{ runner.temp }}/ci-evidence/vulnerability-scan
+        if-no-files-found: error
+        retention-days: 14
+
+  evidence-gates:
+    needs: vulnerability-scan
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Require all recorded gates to succeed
+      if: ${{ needs.vulnerability-scan.result != 'success' }}
+      run: exit 1
+
+  windows-package:
+    needs: evidence-gates
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        pattern: ci-evidence-*
+        path: ${{ runner.temp }}/ci-evidence-input
+        merge-multiple: false
+    - name: Verify completed gate evidence
+      shell: pwsh
+      run: |
+        python scripts/ci_evidence.py verify `
+          --input (Join-Path $env:RUNNER_TEMP 'ci-evidence-input') `
+          --output (Join-Path $env:RUNNER_TEMP 'ci-evidence-verified')
+    - name: Test submission packaging contracts
+      shell: pwsh
+      run: ./scripts/test_package_all_materials.ps1
+    - name: Test local IM bootstrap contracts
+      shell: pwsh
+      run: |
+        ./scripts/test_telegram_local_bootstrap.ps1
+        ./scripts/test_wecom_bot_local_bootstrap.ps1
+    - name: Validate merged local IM deployment configuration
+      shell: pwsh
+      run: ./scripts/test_im_compose_contracts.ps1
+    - name: Build the submission archive
+      shell: pwsh
+      run: |
+        ./scripts/package_all_materials.ps1 -RepoRoot $PWD.Path `
+          -WorkspaceRoot (Join-Path $env:RUNNER_TEMP 'submission-workspace') `
+          -OutputRoot (Join-Path $env:RUNNER_TEMP 'submission-output') `
+          -PackageDate 20260909 `
+          -EvidenceFiles (Get-ChildItem (Join-Path $env:RUNNER_TEMP 'ci-evidence-verified') -File | ForEach-Object FullName)
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: windows-submission
+        path: ${{ runner.temp }}/submission-output/*.zip
+        if-no-files-found: error
+        retention-days: 14
+
+  linux-package:
+    needs: windows-package
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: "1.26.7"
+        cache: false
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: windows-submission
+        path: submission
+    - name: Extract and verify the Windows-built archive
+      shell: bash
+      run: |
+        unzip -q submission/enterprise-multi-tenant-agent-platform-20260909.zip -d unpacked
+        cd unpacked/enterprise-multi-tenant-agent-platform-20260909
+        sha256sum --check --quiet SHA256SUMS_20260909.txt
+        cd platform-source
+        for script in scripts/*.sh; do
+          test -x "$script"
+          if LC_ALL=C grep -q $'\r' "$script"; then
+            echo "Shell script contains CR bytes: $script" >&2
+            exit 1
+          fi
+          bash -n "$script"
+        done
+        ./scripts/test_checksum_output.sh
+        ./scripts/require_secure_go.sh
+        ./scripts/static_verify.sh
+        go mod verify
+        go test -buildvcs=false -count=1 ./...

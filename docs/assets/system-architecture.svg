@@ -1,0 +1,310 @@
+<svg xmlns="http://www.w3.org/2000/svg" id="platform-architecture" width="1840" height="2040" viewBox="0 0 1840 2040" role="img" aria-labelledby="pa-title pa-description">
+<title id="pa-title">基于 tRPC-Agent-Go 的多租户 Agent 平台系统架构</title>
+<desc id="pa-description">控制面管理租户、应用版本、通道绑定、工具权限及后端授权。企业微信和 Telegram 回调由 Gateway 验签后持久化至 PostgreSQL Inbox；Consumer 领取消息，经内部签名调用无状态 Worker。Worker 复用 tRPC-Agent-Go Runner 并在进程内装配租户级治理与数据服务，结果返回后由 Consumer 原子完成 Inbox、回复 Outbox 和待生成摘要任务。Delivery 可靠投递回复；Summary Worker 独立调用模型并发布摘要 checkpoint。Session 和 Memory 分别选择 Redis 或 PostgreSQL；Knowledge 使用 Qdrant，Artifact 使用 S3 或 MinIO 保存正文并在 PostgreSQL 保存版本元数据。协调 Redis、配置、审计、迁移记录和租户可选数据后端职责分离。可信 trace 在 Gateway 建立，traceparent 随队列持久化并在消费时恢复，串联模型、工具、存储及回复。各进程可独立扩展，故障通过持久化任务与租约接管恢复。</desc>
+<defs>
+  <marker id="pa-arrow-message" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#087f83"/></marker>
+  <marker id="pa-arrow-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#386ba6"/></marker>
+  <marker id="pa-arrow-control" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#737d8e"/></marker>
+  <style>
+    #platform-architecture text{font-family:"Microsoft YaHei","Noto Sans CJK SC","PingFang SC",Arial,sans-serif;fill:#1b314b;letter-spacing:0}
+    #platform-architecture .pa-title{font-size:34px;font-weight:700;letter-spacing:.3px}
+    #platform-architecture .pa-subtitle{font-size:20px;fill:#52647a}
+    #platform-architecture .pa-section{font-size:24px;font-weight:700}
+    #platform-architecture .pa-section-number{font-size:20px;font-weight:700;fill:#087f83}
+    #platform-architecture .pa-node{font-size:23px;font-weight:700}
+    #platform-architecture .pa-body{font-size:20px}
+    #platform-architecture .pa-small{font-size:18px;fill:#52647a}
+    #platform-architecture .pa-tiny{font-size:17px;fill:#52647a}
+    #platform-architecture .pa-tag{font-size:17px;fill:#52647a}
+    #platform-architecture .pa-emphasis{font-size:19px;fill:#08757a;font-weight:700}
+    #platform-architecture .pa-edge-label{font-size:18px;fill:#52647a;paint-order:stroke;stroke:#fff;stroke-width:6px;stroke-linejoin:round}
+    #platform-architecture .pa-blue{font-size:19px;fill:#305f98;font-weight:700}
+    #platform-architecture .pa-card{fill:#fff;stroke:#bccbd7;stroke-width:1.5}
+    #platform-architecture .pa-process{fill:#fff;stroke:#639ca2;stroke-width:1.8}
+    #platform-architecture .pa-external{fill:#f4f6f9;stroke:#c6d0dc;stroke-width:1.4}
+    #platform-architecture .pa-pg{fill:#f1f6fc;stroke:#779ac2;stroke-width:1.8}
+    #platform-architecture .pa-coord{fill:#fff9ef;stroke:#c9b188;stroke-width:1.6}
+    #platform-architecture .pa-sdk{fill:#edf6f5;stroke:#a5c9c6;stroke-width:1}
+    #platform-architecture .pa-session{fill:#f5f8fc;stroke:#a8bdd5;stroke-width:1.5}
+    #platform-architecture .pa-knowledge{fill:#f4f9f5;stroke:#abc6b2;stroke-width:1.5}
+    #platform-architecture .pa-artifact{fill:#fff9f2;stroke:#d1bda1;stroke-width:1.5}
+    #platform-architecture .pa-rule{fill:none;stroke:#dce4ec;stroke-width:1.2}
+    #platform-architecture .pa-message{fill:none;stroke:#087f83;stroke-width:2.6;stroke-linejoin:round;marker-end:url(#pa-arrow-message)}
+    #platform-architecture .pa-data{fill:none;stroke:#386ba6;stroke-width:2;stroke-linejoin:round;marker-end:url(#pa-arrow-data)}
+    #platform-architecture .pa-data-both{fill:none;stroke:#386ba6;stroke-width:2;stroke-linejoin:round;marker-start:url(#pa-arrow-data);marker-end:url(#pa-arrow-data)}
+    #platform-architecture .pa-message-both{fill:none;stroke:#087f83;stroke-width:2.6;stroke-linejoin:round;marker-start:url(#pa-arrow-message);marker-end:url(#pa-arrow-message)}
+    #platform-architecture .pa-bus{fill:none;stroke:#386ba6;stroke-width:2;stroke-linejoin:round}
+    #platform-architecture .pa-control{fill:none;stroke:#737d8e;stroke-width:1.8;stroke-dasharray:7 5;stroke-linejoin:round;marker-end:url(#pa-arrow-control)}
+    #platform-architecture .pa-step{fill:#087f83}
+    #platform-architecture .pa-steptext{font-size:18px;fill:#fff;font-weight:700}
+    #platform-architecture .pa-white{font-size:18px;fill:#fff}
+  </style>
+</defs>
+<rect width="1840" height="2040" fill="#fff"/>
+<rect x="56" y="42" width="6" height="64" rx="3" fill="#087f83"/>
+<text x="80" y="71" class="pa-title" >基于 tRPC-Agent-Go 的多租户 Agent 平台</text>
+<text x="80" y="108" class="pa-subtitle" >共享状态支撑无状态节点 · 按租户隔离配置、权限、数据、密钥与成本</text>
+<path d="M1310 55 H1352" class="pa-message"/>
+<text x="1366" y="61" class="pa-small" >消息主链</text>
+<path d="M1550 55 H1592" class="pa-data"/>
+<text x="1606" y="61" class="pa-small" >状态 / 数据</text>
+<path d="M1310 98 H1352" class="pa-control"/>
+<text x="1366" y="104" class="pa-small" >控制 / 观测</text>
+<text x="1550" y="104" class="pa-small" >×N  独立部署与扩展</text>
+<path d="M56 129 H1784" class="pa-rule"/>
+<text x="56" y="162" class="pa-section-number" >01</text>
+<text x="98" y="162" class="pa-section" >控制面</text>
+<text x="1784" y="161" class="pa-small" text-anchor="end">不可变配置发布 · 租户级授权 · 可审计运维</text>
+<g id="pa-admin" data-node="admin">
+<rect x="56" y="183" width="560" height="163" rx="8" class="pa-card"/>
+<text x="78" y="220" class="pa-node" >Admin API</text>
+<text x="596" y="219" class="pa-tag" text-anchor="end">×N</text>
+<text x="78" y="250" class="pa-small" >Tenant / Agent App / Version / Channel Binding</text>
+<text x="78" y="285" class="pa-body" >模型配置 · 工具权限 · 审批 · 审计策略</text>
+<text x="78" y="318" class="pa-small" >灰度发布 / 配置回滚 → PostgreSQL</text>
+</g>
+<g id="pa-profiles" data-node="profiles">
+<rect x="644" y="183" width="552" height="163" rx="8" class="pa-card"/>
+<text x="666" y="220" class="pa-node" >Storage Profile Catalog</text>
+<text x="666" y="250" class="pa-small" >实例选择 · 租户授权 · 命名空间 · SecretRef</text>
+<text x="666" y="285" class="pa-body" >按 domain + backend + profile 解析后端</text>
+<text x="666" y="318" class="pa-small" >Admin 准入校验；执行进程按权限装配</text>
+</g>
+<g id="pa-migration" data-node="migration">
+<rect x="1224" y="183" width="560" height="163" rx="8" class="pa-card"/>
+<text x="1246" y="220" class="pa-node" >data-migrate</text>
+<text x="1764" y="219" class="pa-tag" text-anchor="end">运维任务</text>
+<text x="1246" y="250" class="pa-small" >Session / Knowledge / Artifact 在线迁移</text>
+<text x="1246" y="285" class="pa-body" >复制 → 增量同步 → 影子校验 → 路由切换</text>
+<text x="1246" y="318" class="pa-small" >持久 intent / journal / CAS · 故障回滚</text>
+</g>
+<path d="M82 346 V372 H30 V960 H332" class="pa-control"/>
+<path d="M644 236 H616" class="pa-control"/>
+<path d="M920 346 V378 H1100 V458" class="pa-control"/>
+<text x="976" y="369" class="pa-edge-label" >授权装配</text>
+<path d="M1760 346 V378 H1810 V1123 H1460 V1093" class="pa-control"/>
+<path d="M56 388 H1784" class="pa-rule"/>
+<text x="56" y="421" class="pa-section-number" >02</text>
+<text x="98" y="421" class="pa-section" >消息接入与执行</text>
+<text x="1784" y="420" class="pa-small" text-anchor="end">六类常驻进程独立扩展 · Worker 无需 sticky session</text>
+<g id="pa-im-input" data-node="im-input">
+<rect x="56" y="458" width="220" height="220" rx="8" class="pa-external"/>
+<text x="78" y="495" class="pa-node" >IM 平台</text>
+<text x="78" y="536" class="pa-body" >企业微信</text>
+<text x="78" y="566" class="pa-small" >应用单聊 · 文本</text>
+<text x="78" y="608" class="pa-body" >Telegram</text>
+<text x="78" y="638" class="pa-small" >单聊 / 群聊 · 文本</text>
+</g>
+<g id="pa-gateway" data-node="gateway">
+<rect x="332" y="458" width="294" height="272" rx="8" class="pa-process"/>
+<text x="354" y="495" class="pa-node" >Agent Gateway</text>
+<text x="606" y="494" class="pa-tag" text-anchor="end">×N</text>
+<text x="354" y="537" class="pa-emphasis" >Channel Adapter</text>
+<text x="354" y="568" class="pa-small" >验签 / 解密 / 用户身份映射</text>
+<path d="M354 589 H604" class="pa-rule"/>
+<text x="354" y="625" class="pa-body" >租户与会话路由</text>
+<text x="354" y="657" class="pa-body" >限流 / 回调去重 / 持久入队</text>
+<text x="354" y="704" class="pa-emphasis" >Inbox 提交成功后确认回调</text>
+</g>
+<g id="pa-consumer" data-node="consumer">
+<rect x="682" y="458" width="296" height="272" rx="8" class="pa-process"/>
+<text x="704" y="495" class="pa-node" >Consumer Pool</text>
+<text x="958" y="494" class="pa-tag" text-anchor="end">×N</text>
+<text x="704" y="537" class="pa-body" >持久化消息领取</text>
+<text x="704" y="573" class="pa-body" >会话 FIFO / 租户公平调度</text>
+<text x="704" y="609" class="pa-body" >任务租约 / 恢复接管</text>
+<path d="M704 633 H956" class="pa-rule"/>
+<text x="704" y="670" class="pa-body" >调用 Worker → 提交完成</text>
+<text x="704" y="704" class="pa-emphasis" >结果复用 / 重试与故障恢复</text>
+</g>
+<g id="pa-worker" data-node="worker">
+<rect x="1034" y="458" width="470" height="310" rx="8" class="pa-process"/>
+<text x="1056" y="495" class="pa-node" >Agent Worker Pool</text>
+<text x="1484" y="494" class="pa-tag" text-anchor="end">×N</text>
+<rect x="1056" y="516" width="426" height="74" rx="5" class="pa-sdk"/>
+<text x="1072" y="544" class="pa-emphasis" >复用  tRPC-Agent-Go runner.Runner</text>
+<text x="1072" y="574" class="pa-tiny" >Agent 编排 · Model · Tool · Session / Memory</text>
+<text x="1056" y="620" class="pa-small" >平台治理：Plugin / Callbacks / Guardrail 策略</text>
+<text x="1056" y="651" class="pa-small" >授权 / 审批 / 脱敏 / 预算 / 审计</text>
+<path d="M1056 670 H1482" class="pa-rule"/>
+<text x="1056" y="700" class="pa-blue" >Storage Adapter</text>
+<text x="1280" y="700" class="pa-small" >Session / Memory</text>
+<text x="1056" y="733" class="pa-blue" >Data Plane Resolver</text>
+<text x="1270" y="733" class="pa-small" >Knowledge / Artifact</text>
+<text x="1056" y="756" class="pa-tiny" >进程内装配；运行上下文绑定租户与固定版本</text>
+</g>
+<g id="pa-providers" data-node="providers">
+<rect x="1560" y="458" width="224" height="220" rx="8" class="pa-external"/>
+<text x="1582" y="495" class="pa-node" >模型与工具</text>
+<text x="1582" y="535" class="pa-body" >模型 Provider</text>
+<text x="1582" y="575" class="pa-body" >Tool / MCP</text>
+<text x="1582" y="618" class="pa-small" >受控业务系统</text>
+<text x="1582" y="649" class="pa-small" >超时 / 取消 / 审计</text>
+</g>
+<path d="M276 555 H332" class="pa-message"/>
+<circle cx="304" cy="524" r="15" class="pa-step"/>
+<text x="304" y="530" class="pa-steptext" text-anchor="middle">1</text>
+<path d="M978 549 H1034" class="pa-message"/>
+<circle cx="1006" cy="520" r="15" class="pa-step"/>
+<text x="1006" y="526" class="pa-steptext" text-anchor="middle">3</text>
+<path d="M1034 603 H978" class="pa-message"/>
+<text x="822" y="443" class="pa-edge-label" >HMAC / nonce / traceparent</text>
+<path d="M1504 554 H1560" class="pa-message"/>
+<text x="56" y="844" class="pa-section" >可靠提交边界</text>
+<text x="78" y="958" class="pa-edge-label" >配置 / 审计</text>
+<text x="56" y="1001" class="pa-small" >lease 约束并发</text>
+<text x="56" y="1035" class="pa-small" >fence 拒绝陈旧提交</text>
+<text x="56" y="1075" class="pa-small" >外部副作用独立恢复</text>
+<g id="pa-postgres" data-node="postgres">
+<rect x="332" y="875" width="1172" height="218" rx="8" class="pa-pg"/>
+<text x="354" y="912" class="pa-node" >PostgreSQL · 平台权威状态</text>
+<text x="1484" y="911" class="pa-tag" text-anchor="end">事务与持久化恢复</text>
+<path d="M354 929 H1482" class="pa-rule"/>
+<path d="M728 947 V1071" class="pa-rule"/>
+<path d="M1110 947 V1071" class="pa-rule"/>
+<text x="354" y="963" class="pa-blue" >消息与执行事实</text>
+<text x="354" y="999" class="pa-body" >Inbox / Outbox / 执行结果</text>
+<text x="354" y="1031" class="pa-small" >会话序号 / fence / 发送状态</text>
+<text x="354" y="1063" class="pa-small" >traceparent 随队列持久化</text>
+<text x="750" y="963" class="pa-blue" >Consumer 完成事务</text>
+<text x="750" y="999" class="pa-body" >Inbox 完成 + Outbox 回复</text>
+<text x="750" y="1031" class="pa-small" >+ 按需入队的 Summary 任务</text>
+<text x="750" y="1063" class="pa-small" >事务提交后推进会话处理</text>
+<text x="1132" y="963" class="pa-blue" >配置、摘要与数据元信息</text>
+<text x="1132" y="999" class="pa-small" >配置 / 运行审计 / 管理审计</text>
+<text x="1132" y="1031" class="pa-tiny" >Summary checkpoint / Artifact 版本</text>
+<text x="1132" y="1063" class="pa-small" >迁移 intent / journal / route</text>
+</g>
+<g id="pa-redis-coordination" data-node="redis-coordination">
+<rect x="1560" y="875" width="224" height="218" rx="8" class="pa-coord"/>
+<text x="1582" y="912" class="pa-node" >协调 Redis</text>
+<text x="1582" y="955" class="pa-body" >会话 lease</text>
+<text x="1582" y="991" class="pa-small" >nonce / token 预算</text>
+<text x="1582" y="1033" class="pa-small" >协调状态独立配置</text>
+<text x="1582" y="1065" class="pa-small" >与租户数据后端分离</text>
+</g>
+<path d="M479 730 V875" class="pa-message"/>
+<circle cx="450" cy="799" r="15" class="pa-step"/>
+<text x="450" y="805" class="pa-steptext" text-anchor="middle">2</text>
+<text x="500" y="807" class="pa-edge-label" >幂等入队</text>
+<path d="M830 730 V875" class="pa-message-both"/>
+<text x="850" y="800" class="pa-edge-label" >领取 / 原子完成</text>
+<text x="850" y="826" class="pa-edge-label" >结果与摘要回执</text>
+<path d="M1220 768 V875" class="pa-data-both"/>
+<text x="1240" y="846" class="pa-edge-label" >固定版本 / 结果 / 摘要</text>
+<path d="M1450 768 V805 H1672 V875" class="pa-data"/>
+<text x="1516" y="836" class="pa-edge-label" >lease / nonce / 预算</text>
+<g id="pa-im-output" data-node="im-output">
+<rect x="56" y="1180" width="220" height="186" rx="8" class="pa-external"/>
+<text x="78" y="1217" class="pa-node" >IM 回复 API</text>
+<text x="78" y="1257" class="pa-small" >企业微信 / Telegram</text>
+<text x="78" y="1293" class="pa-small" >文本回复 / 渠道限流</text>
+<text x="78" y="1337" class="pa-tiny" >回执不明进入发送核对</text>
+</g>
+<g id="pa-delivery" data-node="delivery">
+<rect x="332" y="1180" width="646" height="186" rx="8" class="pa-process"/>
+<text x="354" y="1217" class="pa-node" >Delivery Pool</text>
+<text x="958" y="1216" class="pa-tag" text-anchor="end">×N</text>
+<text x="354" y="1257" class="pa-emphasis" >Channel Adapter · 进程内回复适配</text>
+<text x="354" y="1293" class="pa-body" >分段 / 限流 / 重试 / 发送结果核对</text>
+<text x="354" y="1337" class="pa-small" >领取 Outbox，恢复 traceparent 后投递并回写发送状态</text>
+</g>
+<g id="pa-summary" data-node="summary">
+<rect x="1034" y="1180" width="470" height="186" rx="8" class="pa-process"/>
+<text x="1056" y="1217" class="pa-node" >Summary Worker Pool</text>
+<text x="1484" y="1216" class="pa-tag" text-anchor="end">×N</text>
+<text x="1056" y="1257" class="pa-body" >冻结事件前缀 → 生成摘要 → CAS 发布</text>
+<text x="1056" y="1293" class="pa-small" >Session Adapter / context 取消 / 事件排空</text>
+<text x="1056" y="1337" class="pa-small" >独立于 IM 回复；下一轮 Worker 注入摘要</text>
+</g>
+<g id="pa-summary-model" data-node="summary-model">
+<rect x="1560" y="1180" width="224" height="186" rx="8" class="pa-external"/>
+<text x="1582" y="1217" class="pa-node" >模型服务 · 摘要</text>
+<text x="1582" y="1257" class="pa-body" >模型 Provider</text>
+<text x="1582" y="1293" class="pa-small" >独立调用与超时</text>
+<text x="1582" y="1337" class="pa-small" >调用取消 / 响应超时</text>
+</g>
+<path d="M520 1093 V1180" class="pa-message-both"/>
+<circle cx="491" cy="1139" r="15" class="pa-step"/>
+<text x="491" y="1145" class="pa-steptext" text-anchor="middle">4</text>
+<text x="544" y="1147" class="pa-edge-label" >Outbox 领取 / 状态回写</text>
+<path d="M332 1273 H276" class="pa-message"/>
+<circle cx="304" cy="1242" r="15" class="pa-step"/>
+<text x="304" y="1248" class="pa-steptext" text-anchor="middle">5</text>
+<path d="M1220 1093 V1180" class="pa-data-both"/>
+<text x="1240" y="1161" class="pa-edge-label" >Summary job / checkpoint</text>
+<path d="M1425 1180 V1145 H1672 V1093" class="pa-data"/>
+<text x="1570" y="1136" class="pa-edge-label" >lease / 预算</text>
+<path d="M1504 1245 H1560" class="pa-message"/>
+<path d="M56 1404 H1784" class="pa-rule"/>
+<text x="56" y="1437" class="pa-section-number" >03</text>
+<text x="98" y="1437" class="pa-section" >租户数据面 · 按域独立选择</text>
+<text x="1784" y="1436" class="pa-small" text-anchor="end">租户级后端与实例选择</text>
+<path d="M1504 700 H1520 V1468 H258" class="pa-bus"/>
+<path d="M258 1468 V1530" class="pa-data"/>
+<path d="M694 1468 V1530" class="pa-data"/>
+<path d="M1504 733 H1540 V1494 H1130" class="pa-bus"/>
+<path d="M1130 1494 V1530" class="pa-data"/>
+<path d="M1540 1494 H1574 V1530" class="pa-data"/>
+<path d="M1100 1366 V1395 H30 V1600 H56" class="pa-data"/>
+<text x="510" y="1390" class="pa-edge-label" >摘要读取已提交的 Session Event</text>
+<text x="288" y="1498" class="pa-edge-label" >Session / Memory · 两域分别路由</text>
+<text x="1200" y="1484" class="pa-edge-label" >Knowledge / Artifact</text>
+<g id="pa-session-data" data-node="session-data">
+<rect x="56" y="1530" width="404" height="258" rx="8" class="pa-session"/>
+<text x="78" y="1567" class="pa-node" >Session</text>
+<text x="78" y="1597" class="pa-small" >会话 Event / State / 会话代次</text>
+<text x="78" y="1641" class="pa-blue" >Redis 或 PostgreSQL</text>
+<path d="M78 1660 H438" class="pa-rule"/>
+<text x="78" y="1692" class="pa-small" >共享持久状态 / 会话串行化</text>
+<text x="78" y="1724" class="pa-small" >写入 fence / 跨节点读取</text>
+<text x="78" y="1756" class="pa-small" >在线迁移 / 切换 / 回滚</text>
+</g>
+<g id="pa-memory-data" data-node="memory-data">
+<rect x="492" y="1530" width="404" height="258" rx="8" class="pa-session"/>
+<text x="514" y="1567" class="pa-node" >Memory</text>
+<text x="514" y="1597" class="pa-small" >用户长期记忆 / 原生检索</text>
+<text x="514" y="1641" class="pa-blue" >Redis 或 PostgreSQL</text>
+<path d="M514 1660 H874" class="pa-rule"/>
+<text x="514" y="1692" class="pa-small" >提交后依后端读语义跨节点可见</text>
+<text x="514" y="1724" class="pa-small" >tenant / app / 实际用户隔离</text>
+<text x="514" y="1756" class="pa-small" >独立于 Session 的实例与配置</text>
+</g>
+<g id="pa-knowledge-data" data-node="knowledge-data">
+<rect x="928" y="1530" width="404" height="258" rx="8" class="pa-knowledge"/>
+<text x="950" y="1567" class="pa-node" >Knowledge</text>
+<text x="950" y="1597" class="pa-small" >向量 / 检索载荷 / 知识索引</text>
+<text x="950" y="1641" class="pa-blue" >Qdrant · 向量库</text>
+<path d="M950 1660 H1310" class="pa-rule"/>
+<text x="950" y="1692" class="pa-small" >租户 / 应用命名空间</text>
+<text x="950" y="1724" class="pa-small" >增量镜像 / 删除状态 / 切换</text>
+<text x="950" y="1756" class="pa-small" >数据等价与检索效果分别验收</text>
+</g>
+<g id="pa-artifact-data" data-node="artifact-data">
+<rect x="1364" y="1530" width="420" height="258" rx="8" class="pa-artifact"/>
+<text x="1386" y="1567" class="pa-node" >Artifact</text>
+<text x="1386" y="1597" class="pa-small" >对象正文 / 版本元数据</text>
+<text x="1386" y="1641" class="pa-blue" >S3 / MinIO + PostgreSQL</text>
+<path d="M1386 1660 H1762" class="pa-rule"/>
+<text x="1386" y="1692" class="pa-small" >对象存储保存正文；SQL 记录版本</text>
+<text x="1386" y="1724" class="pa-small" >内容哈希 / 删除标记 / 租户前缀</text>
+<text x="1386" y="1756" class="pa-small" >持久记录驱动失败恢复与同步</text>
+</g>
+<text x="56" y="1824" class="pa-emphasis" >租户 A：Session → Redis，Memory → PostgreSQL</text>
+<text x="820" y="1824" class="pa-emphasis" >租户 B：Session → PostgreSQL，Memory → Redis</text>
+<text x="1784" y="1824" class="pa-small" text-anchor="end">共享或专用实例</text>
+<path d="M56 1846 H1784" class="pa-rule"/>
+<text x="56" y="1879" class="pa-section-number" >04</text>
+<text x="98" y="1879" class="pa-section" >治理、追踪与故障恢复</text>
+<text x="1784" y="1878" class="pa-small" text-anchor="end">配置 / 权限 / 数据 / 工具 / 日志 / 密钥 / 成本隔离</text>
+<text x="56" y="1917" class="pa-body" >Gateway 建立可信 trace → Inbox / Outbox 持久化 traceparent → Consumer / Worker / Delivery 恢复上下文</text>
+<text x="56" y="1949" class="pa-small" >关联维度：tenant_id / agent / user_id / session_id / trace_id；覆盖 Runner、Tool、Session、Memory 与 IM 回复</text>
+<text x="56" y="1990" class="pa-emphasis" >全部应用进程</text>
+<path d="M220 1984 H270" class="pa-control"/>
+<text x="286" y="1990" class="pa-body" >OTel Collector · OTLP</text>
+<text x="664" y="1990" class="pa-body" >Prometheus · /metrics</text>
+<path d="M928 1984 H994" class="pa-control"/>
+<text x="1010" y="1990" class="pa-body" >Alertmanager</text>
+<text x="1784" y="1990" class="pa-small" text-anchor="end">队列 / 延迟 / 错误 / token / 租户成本</text>
+<path d="M664 1984 H534 V2010 H168 V1998" class="pa-control"/>
+</svg>

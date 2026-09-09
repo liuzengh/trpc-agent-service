@@ -1,0 +1,166 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-gateway
+  labels:
+    app: agent-gateway
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: agent-gateway
+  template:
+    metadata:
+      labels:
+        app: agent-gateway
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+      - maxSkew: 1
+        minDomains: 2
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector: {matchLabels: {app: agent-gateway}}
+      containers:
+      - name: gateway
+        image: trpc-agent-gateway:0.1.0
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: ["ALL"]}
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: redis-credentials
+              key: url
+        - name: MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: master-key
+              key: key
+        - name: TRPC_SECRET_WECOM_TOKEN
+          valueFrom:
+            secretKeyRef: {name: channel-credentials, key: wecom-callback-token, optional: true}
+        - name: TRPC_SECRET_WECOM_CORP_SECRET
+          valueFrom:
+            secretKeyRef: {name: channel-credentials, key: wecom-corp-secret, optional: true}
+        - name: TRPC_SECRET_WECOM_AES
+          valueFrom:
+            secretKeyRef: {name: channel-credentials, key: wecom-encoding-aes-key, optional: true}
+        - name: TRPC_SECRET_TELEGRAM_BOT_TOKEN
+          valueFrom:
+            secretKeyRef: {name: channel-credentials, key: telegram-bot-token, optional: true}
+        - name: TRPC_SECRET_TELEGRAM_WEBHOOK
+          valueFrom:
+            secretKeyRef: {name: channel-credentials, key: telegram-webhook-secret, optional: true}
+        - name: AUDIT_IDENTITY_HMAC_KEY
+          valueFrom:
+            secretKeyRef:
+              name: audit-identity
+              key: key
+        - name: METRICS_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: metrics-auth
+              key: token
+        - name: STORAGE_BACKEND_PROFILES
+          value: '[{"id":"tenant-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN"},{"id":"tenant-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL"}]'
+        - name: DATA_PLANE_PROFILES
+          valueFrom:
+            configMapKeyRef:
+              name: runtime-data-plane-profiles
+              key: profiles.json
+        - name: PORT
+          value: "8080"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "otel-collector.observability.svc:4317"
+        - name: OTEL_EXPORTER_OTLP_INSECURE
+          value: "false"
+        - name: OTEL_EXPORTER_OTLP_CERTIFICATE
+          value: "/var/run/secrets/otel/ca.crt"
+        volumeMounts:
+        - name: otel-ca
+          mountPath: /var/run/secrets/otel
+          readOnly: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: otel-ca
+        secret:
+          secretName: otel-collector-tls
+          items:
+          - key: ca.crt
+            path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-gateway
+spec:
+  selector:
+    app: agent-gateway
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+  # Terminate public TLS and enforce callback rate/body limits at a dedicated
+  # Ingress/Gateway controller in a namespace labelled for public-ingress.
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agent-gateway-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: agent-gateway
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: ContainerResource
+    containerResource:
+      name: cpu
+      container: gateway
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: ContainerResource
+    containerResource:
+      name: memory
+      container: gateway
+      target:
+        type: Utilization
+        averageUtilization: 80

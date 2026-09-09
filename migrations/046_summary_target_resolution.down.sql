@@ -1,0 +1,1 @@
+ALTER TABLE summary_jobs DROP COLUMN target_resolution_lease_version;

@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-summary-worker
+  labels:
+    app: agent-summary-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-summary-worker
+  template:
+    metadata:
+      labels:
+        app: agent-summary-worker
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 360
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+      - maxSkew: 1
+        minDomains: 2
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector: {matchLabels: {app: agent-summary-worker}}
+      containers:
+      - name: summary-worker
+        image: trpc-agent-summary-worker:0.1.0
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: ["ALL"]}
+        ports:
+        - containerPort: 9093
+          name: http
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef: {name: db-credentials, key: url}
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef: {name: redis-credentials, key: url}
+        - name: STORAGE_BACKEND_PROFILES
+          value: '[{"id":"tenant-postgres","backend":"postgres","connectionEnv":"TENANT_POSTGRES_DSN"},{"id":"tenant-redis","backend":"redis","connectionEnv":"TENANT_REDIS_URL"}]'
+        - name: DATA_PLANE_PROFILES
+          valueFrom:
+            configMapKeyRef:
+              name: runtime-data-plane-profiles
+              key: profiles.json
+        - name: TENANT_POSTGRES_DSN
+          valueFrom:
+            secretKeyRef: {name: tenant-storage-credentials, key: postgres-url}
+        - name: TENANT_REDIS_URL
+          valueFrom:
+            secretKeyRef: {name: tenant-storage-credentials, key: redis-url}
+        - name: MASTER_KEY
+          valueFrom:
+            secretKeyRef: {name: master-key, key: key}
+        - name: TRPC_SECRET_OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef: {name: model-provider-credentials, key: openai-api-key, optional: true}
+        - name: METRICS_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef: {name: metrics-auth, key: token}
+        - {name: PORT, value: "9093"}
+        - {name: SUMMARY_CONCURRENCY, value: "4"}
+        - {name: SUMMARY_POLL_INTERVAL, value: "250ms"}
+        - {name: SUMMARY_JOB_TIMEOUT, value: "2m"}
+        - {name: SUMMARY_LEASE_TTL, value: "3m"}
+        - {name: SUMMARY_SESSION_LOCK_TTL, value: "30s"}
+        - {name: SUMMARY_MIN_EVENTS, value: "20"}
+        - {name: SUMMARY_MAX_WORDS, value: "256"}
+        - {name: SUMMARY_MAX_OUTPUT_TOKENS, value: "512"}
+        - {name: SHUTDOWN_TIMEOUT, value: "3m"}
+        - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "otel-collector.observability.svc:4317"}
+        - {name: OTEL_EXPORTER_OTLP_INSECURE, value: "false"}
+        - {name: OTEL_EXPORTER_OTLP_CERTIFICATE, value: "/var/run/secrets/otel/ca.crt"}
+        volumeMounts:
+        - {name: otel-ca, mountPath: /var/run/secrets/otel, readOnly: true}
+        resources:
+          requests: {cpu: 500m, memory: 512Mi}
+          limits: {cpu: "2", memory: 2Gi}
+        livenessProbe:
+          httpGet: {path: /live, port: 9093}
+          initialDelaySeconds: 20
+          periodSeconds: 10
+        readinessProbe:
+          httpGet: {path: /health, port: 9093}
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: otel-ca
+        secret:
+          secretName: otel-collector-tls
+          items:
+          - {key: ca.crt, path: ca.crt}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agent-summary-worker-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: agent-summary-worker
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: ContainerResource
+    containerResource:
+      name: cpu
+      container: summary-worker
+      target: {type: Utilization, averageUtilization: 70}
+  - type: ContainerResource
+    containerResource:
+      name: memory
+      container: summary-worker
+      target: {type: Utilization, averageUtilization: 80}
