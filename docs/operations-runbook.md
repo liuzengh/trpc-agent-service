@@ -164,6 +164,8 @@ docker compose --profile observability up -d
 
 新版工作台从 `0.3.0-rc.1` 提供，需要 schema 24。先升级 Admin/Worker，再开放工作台。网页调试使用独立 SQL 调试队列，不会被旧版 IM Worker 误领；旧版本的管理页不支持新的登录会话。升级不会自动发布 Agent 版本或迁移已有 IM 会话。
 
+Docker 多阶段构建在 Node 阶段完成页面编译，运行镜像只包含 Go 程序。构建网络无法访问默认 Go 模块代理时，可传入 `--build-arg GOPROXY=https://goproxy.cn,direct`，按部署环境选择可信代理；不需要关闭 TLS 或校验和验证。
+
 页面以 Agent 为中心组织操作：
 
 - 在“Agent 应用”创建应用并进入工作台；展示名称、说明和接入状态在“应用设置”修改。新应用优先继承租户会话后端，没有默认绑定时注册部署者的 startup_config 会话后端。
