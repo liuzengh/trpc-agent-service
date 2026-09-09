@@ -8,6 +8,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 )
 
@@ -32,6 +33,7 @@ type memoryQueueOutbox struct {
 }
 
 type memoryRun struct {
+	lifetime            runtimecontext.MessageLifetime
 	createdAt           time.Time
 	startedAt           time.Time
 	completedAt         time.Time
@@ -56,6 +58,7 @@ type memoryOutbound struct {
 // MemoryJournal is a process-local transactional model for tests and the
 // dependency-free tutorial.
 type MemoryJournal struct {
+	dispositions  map[string]memoryDisposition
 	parts         map[string]OutboundPart
 	mu            sync.Mutex
 	closed        bool
@@ -107,6 +110,9 @@ func (j *MemoryJournal) Accept(
 		result.Duplicate = true
 		return result, nil
 	}
+	if entry, ok := j.dispositions[inboundKey]; ok && entry.tenant == request.Scope.TenantID {
+		return AcceptResult{Ignored: true}, nil
+	}
 	conversation := j.conversations[conversationKey]
 	if conversation == nil {
 		conversation = &memoryConversation{
@@ -140,6 +146,7 @@ func (j *MemoryJournal) Accept(
 	scope.RevisionID = conversation.revisionID
 	traceParent, traceState := outboundTraceHeaders(ctx)
 	task := workqueue.AgentTask{
+		Lifetime:          request.Lifetime,
 		ChatType:          request.ChatType,
 		Media:             request.Media,
 		InboundID:         result.InboundID,
@@ -181,7 +188,7 @@ func (j *MemoryJournal) Accept(
 		nextAttempt: time.Now(),
 	}
 	j.inbound[inboundKey] = memoryInbound{result: result, payloadHash: payloadHash}
-	j.runs[result.RequestID] = &memoryRun{createdAt: time.Now().UTC(), bindingID: scope.ChannelBindingID, revisionID: scope.RevisionID, channel: scope.ChannelType, tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "queued"}
+	j.runs[result.RequestID] = &memoryRun{lifetime: request.Lifetime, createdAt: time.Now().UTC(), bindingID: scope.ChannelBindingID, revisionID: scope.RevisionID, channel: scope.ChannelType, tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "queued"}
 	return result, nil
 }
 
@@ -282,7 +289,7 @@ func (j *MemoryJournal) MarkRunRunning(
 	if run.status == "completed" {
 		return nil
 	}
-	if run.status == "dead" {
+	if run.status == "dead" || run.status == "expired" {
 		return ErrRunTerminal
 	}
 	run.status = "running"
@@ -305,7 +312,7 @@ func (j *MemoryJournal) CompleteRun(
 	if run == nil {
 		return fmt.Errorf("agent run not found")
 	}
-	if run.status == "dead" {
+	if run.status == "dead" || run.status == "expired" {
 		return ErrRunTerminal
 	}
 	if result.WorkerID != "" && run.workerID != result.WorkerID && run.status != "completed" {
@@ -350,7 +357,7 @@ func (j *MemoryJournal) FailRun(
 	if run == nil {
 		return fmt.Errorf("agent run not found")
 	}
-	if run.status != "completed" && run.status != "dead" {
+	if run.status != "completed" && run.status != "dead" && run.status != "expired" {
 		if len(expectedWorker) > 0 && run.workerID != expectedWorker[0] {
 			return ErrRunSuperseded
 		}
@@ -377,7 +384,7 @@ func (j *MemoryJournal) TerminalFailRun(ctx context.Context, task workqueue.Agen
 	if run == nil {
 		return false, fmt.Errorf("agent run not found")
 	}
-	if run.status == "completed" {
+	if run.status == "completed" || run.status == "expired" {
 		return false, nil
 	}
 	if run.tenantID != task.Scope.TenantID || run.appID != task.Scope.AppID {

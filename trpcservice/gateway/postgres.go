@@ -60,6 +60,13 @@ func (j *PostgresJournal) Accept(
 		return AcceptResult{}, fmt.Errorf("begin inbound transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	var ignored bool
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM channel_message_disposition WHERE tenant_id=$1 AND channel_binding_id=$2 AND message_id=$3)`, request.Scope.TenantID, request.Scope.ChannelBindingID, request.ExternalMessageID).Scan(&ignored); err != nil {
+		return AcceptResult{}, err
+	}
+	if ignored {
+		return AcceptResult{Ignored: true}, nil
+	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO conversation(
     conversation_id, tenant_id, app_id, channel_binding_id, session_id,
@@ -91,9 +98,10 @@ FOR UPDATE`,
 		return AcceptResult{}, fmt.Errorf("lock conversation: %w", err)
 	}
 	payload, err := json.Marshal(map[string]any{
-		"text":         request.Text,
-		"chat_type":    request.ChatType,
-		"reply_target": request.ReplyTarget,
+		"message_lifetime": request.Lifetime,
+		"text":             request.Text,
+		"chat_type":        request.ChatType,
+		"reply_target":     request.ReplyTarget,
 	})
 	if err != nil {
 		return AcceptResult{}, fmt.Errorf("marshal inbound payload: %w", err)
@@ -149,14 +157,16 @@ RETURNING last_turn_seq`, conversationID).Scan(&turnSeq); err != nil {
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO agent_run(
     request_id, tenant_id, app_id, revision_id, conversation_id,
-    turn_seq, status, created_at
-) VALUES ($1, $2, $3, $4, $5, $6, 'queued', now())`,
+    turn_seq, status, created_at, message_mode, message_expires_at
+) VALUES ($1, $2, $3, $4, $5, $6, 'queued', now(),NULLIF($7,''),$8)`,
 		requestID,
 		request.Scope.TenantID,
 		request.Scope.AppID,
 		pinnedRevisionID,
 		conversationID,
 		turnSeq,
+		request.Lifetime.Mode,
+		nullTime(request.Lifetime.ExpiresAt),
 	); err != nil {
 		return AcceptResult{}, fmt.Errorf("insert Agent run: %w", err)
 	}
@@ -196,6 +206,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,'pending')`, stableID("out_", requestID),
 			RevisionID: pinnedRevisionID, TurnSeq: turnSeq}, nil
 	}
 	task := workqueue.AgentTask{
+		Lifetime:          request.Lifetime,
 		ChatType:          request.ChatType,
 		Media:             request.Media,
 		InboundID:         inboundID,
@@ -389,7 +400,7 @@ func (j *PostgresJournal) MarkRunRunning(
 UPDATE agent_run
 SET status = 'running', worker_id = $2, started_at = COALESCE(started_at, now()),
     error_type = NULL, error_message = NULL
-WHERE request_id = $1 AND status NOT IN ('completed','dead')`, requestID, workerID)
+WHERE request_id = $1 AND status NOT IN ('completed','dead','expired')`, requestID, workerID)
 	if err != nil {
 		return fmt.Errorf("mark Agent run running: %w", err)
 	}
@@ -411,7 +422,7 @@ WHERE request_id = $1 AND status NOT IN ('completed','dead')`, requestID, worker
 	if status == "completed" {
 		return nil
 	}
-	if status == "dead" {
+	if status == "dead" || status == "expired" {
 		return ErrRunTerminal
 	}
 	return fmt.Errorf("agent run %q cannot start from status %q", requestID, status)
@@ -432,7 +443,7 @@ UPDATE agent_run
 SET status = 'completed', fencing_token = $2, agent_name = $3,
     prompt_tokens = $4, completion_tokens = $5, cost = $6, trace_id = NULLIF($7, ''),
     completed_at = now(), error_type = NULLIF($9,''), error_message = NULL
-WHERE request_id = $1 AND fencing_token <= $2 AND status <> 'dead' AND ($8='' OR worker_id=$8 OR status='completed')`,
+WHERE request_id = $1 AND fencing_token <= $2 AND status NOT IN ('dead','expired') AND ($8='' OR worker_id=$8 OR status='completed')`,
 		task.RequestID,
 		result.FencingToken,
 		result.AgentName,
@@ -508,7 +519,7 @@ func (j *PostgresJournal) FailRun(
 	result, err := j.db.ExecContext(ctx, `
 UPDATE agent_run
 SET status = 'failed', error_type = $2, error_message = $3, completed_at = now()
-WHERE request_id = $1 AND status NOT IN ('completed','dead') AND ($4='' OR worker_id=$4)`, requestID, errorType, errorText, owner)
+WHERE request_id = $1 AND status NOT IN ('completed','dead','expired') AND ($4='' OR worker_id=$4)`, requestID, errorType, errorText, owner)
 	if err != nil {
 		return fmt.Errorf("fail Agent run: %w", err)
 	}
@@ -521,7 +532,7 @@ WHERE request_id = $1 AND status NOT IN ('completed','dead') AND ($4='' OR worke
 		if err := j.db.QueryRowContext(ctx, `SELECT status FROM agent_run WHERE request_id=$1`, requestID).Scan(&status); err != nil {
 			return err
 		}
-		if status != "completed" && status != "dead" {
+		if status != "completed" && status != "dead" && status != "expired" {
 			return ErrRunSuperseded
 		}
 	}
@@ -653,6 +664,10 @@ func (j *PostgresJournal) Ready(ctx context.Context) error {
 	}
 	if err := j.db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping inbound PostgreSQL: %w", err)
+	}
+	var ready bool
+	if err := j.db.QueryRowContext(ctx, `SELECT to_regclass('channel_message_disposition') IS NOT NULL AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('agent_run') AND attname='message_expires_at' AND NOT attisdropped)`).Scan(&ready); err != nil || !ready {
+		return fmt.Errorf("message lifecycle schema unavailable; apply migration 025")
 	}
 	return nil
 }

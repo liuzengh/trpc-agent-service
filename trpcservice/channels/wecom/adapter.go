@@ -32,13 +32,14 @@ import (
 const defaultAPIBase = "https://qyapi.weixin.qq.com"
 
 type bindingConfig struct {
-	CorpID              string `json:"corp_id"`
-	AgentID             int64  `json:"agent_id"`
-	CallbackTokenRef    string `json:"callback_token_ref"`
-	EncodingAESKeyRef   string `json:"encoding_aes_key_ref"`
-	AppSecretRef        string `json:"app_secret_ref"`
-	APIBaseURL          string `json:"api_base_url,omitempty"`
-	MaxClockSkewSeconds int64  `json:"max_clock_skew_seconds,omitempty"`
+	MessagePolicy       *channels.MessagePolicy `json:"message_policy,omitempty"`
+	CorpID              string                  `json:"corp_id"`
+	AgentID             int64                   `json:"agent_id"`
+	CallbackTokenRef    string                  `json:"callback_token_ref"`
+	EncodingAESKeyRef   string                  `json:"encoding_aes_key_ref"`
+	AppSecretRef        string                  `json:"app_secret_ref"`
+	APIBaseURL          string                  `json:"api_base_url,omitempty"`
+	MaxClockSkewSeconds int64                   `json:"max_clock_skew_seconds,omitempty"`
 }
 
 type tokenEntry struct {
@@ -370,6 +371,9 @@ func providerError(operation string, code int, message string) error {
 }
 
 func parseBinding(binding controlplane.ChannelBinding) (bindingConfig, error) {
+	if _, err := channels.ParseMessagePolicy(binding.Config); err != nil {
+		return bindingConfig{}, err
+	}
 	if binding.ChannelType != "wecom" || binding.Status != controlplane.StatusActive {
 		return bindingConfig{}, fmt.Errorf("WeCom binding is unavailable")
 	}

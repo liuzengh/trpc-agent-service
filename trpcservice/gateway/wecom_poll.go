@@ -129,15 +129,24 @@ func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBi
 	if err != nil {
 		return 0, err
 	}
+	policy, err := channels.ParseMessagePolicy(b.Config)
+	if err != nil {
+		return 0, err
+	}
 	now := p.now().UTC().Truncate(time.Second)
 	to := now.Add(-p.opts.SettleDelay).Truncate(time.Second)
 	if !to.After(checkpoint.Through) {
 		return 0, nil
 	}
-	if max := checkpoint.Through.Add(p.opts.Window); to.After(max) {
-		to = max
+	if policy.Mode == channels.ReliableMessages {
+		if max := checkpoint.Through.Add(p.opts.Window); to.After(max) {
+			to = max
+		}
 	}
 	from := checkpoint.Through.Add(-p.opts.Overlap)
+	if policy.Mode == channels.RealtimeMessages {
+		from = now.Add(-policy.MaxAge())
+	}
 	if from.Before(cfg.Start()) {
 		from = cfg.Start()
 	}
@@ -195,7 +204,16 @@ func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBi
 	}
 	// Optimistic version check prevents an old reader from regressing a newer
 	// checkpoint even if a distributed lease was lost during an I/O pause.
-	if err := p.state.Advance(ctx, key, checkpoint, to); err != nil {
+	if policy.Mode == channels.RealtimeMessages {
+		state, ok := p.state.(wecommcp.RealtimeStore)
+		if !ok {
+			return count, errors.New("realtime checkpoint store unavailable")
+		}
+		err = state.AdvanceRecent(ctx, b, key, checkpoint, from, to)
+	} else {
+		err = p.state.Advance(ctx, key, checkpoint, to)
+	}
+	if err != nil {
 		return count, err
 	}
 	p.opts.Metrics.RecordChannelPoll(ctx, b.TenantID, "ok", now.Sub(to))

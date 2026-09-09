@@ -32,6 +32,7 @@ type DeliveryState struct {
 // Store is shared by receivers/senders. Attempts have no lease expiry: an
 // interrupted non-idempotent send must not become automatically sendable again.
 type Store interface {
+	RealtimeStore
 	Checkpoint(context.Context, PollKey, string, time.Time) (Checkpoint, error)
 	Advance(context.Context, PollKey, Checkpoint, time.Time) error
 	Seen(context.Context, PollKey, string) (bool, error)
@@ -59,6 +60,7 @@ func NewStore(repository controlplane.Repository) (Store, error) {
 }
 
 type MemoryStore struct {
+	gaps        []scopedGap
 	mu          sync.Mutex
 	checkpoints map[PollKey]Checkpoint
 	seen        map[PollKey]map[string]bool

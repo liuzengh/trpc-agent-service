@@ -24,15 +24,16 @@ import (
 const defaultAPIBase = "https://api.telegram.org"
 
 type bindingConfig struct {
-	AttachmentsEnabled bool    `json:"attachments_enabled,omitempty"`
-	BotTokenRef        string  `json:"bot_token_ref"`
-	WebhookSecretRef   string  `json:"webhook_secret_ref"`
-	APIBaseURL         string  `json:"api_base_url,omitempty"`
-	BotUserID          int64   `json:"bot_user_id,omitempty"`
-	BotUsername        string  `json:"bot_username,omitempty"`
-	AllowedChatIDs     []int64 `json:"allowed_chat_ids,omitempty"`
-	RequireMention     bool    `json:"require_mention,omitempty"`
-	IgnoreBotMessages  bool    `json:"ignore_bot_messages,omitempty"`
+	MessagePolicy      *channels.MessagePolicy `json:"message_policy,omitempty"`
+	AttachmentsEnabled bool                    `json:"attachments_enabled,omitempty"`
+	BotTokenRef        string                  `json:"bot_token_ref"`
+	WebhookSecretRef   string                  `json:"webhook_secret_ref"`
+	APIBaseURL         string                  `json:"api_base_url,omitempty"`
+	BotUserID          int64                   `json:"bot_user_id,omitempty"`
+	BotUsername        string                  `json:"bot_username,omitempty"`
+	AllowedChatIDs     []int64                 `json:"allowed_chat_ids,omitempty"`
+	RequireMention     bool                    `json:"require_mention,omitempty"`
+	IgnoreBotMessages  bool                    `json:"ignore_bot_messages,omitempty"`
 }
 
 type Adapter struct {
@@ -381,6 +382,9 @@ func (a *Adapter) Send(
 }
 
 func parseBinding(binding controlplane.ChannelBinding) (bindingConfig, error) {
+	if _, err := channels.ParseMessagePolicy(binding.Config); err != nil {
+		return bindingConfig{}, err
+	}
 	if binding.ChannelType != "telegram" || binding.Status != controlplane.StatusActive {
 		return bindingConfig{}, fmt.Errorf("telegram binding is unavailable")
 	}

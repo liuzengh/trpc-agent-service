@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 )
@@ -32,6 +33,25 @@ func (h *Handler) handleChannelDiagnostics(w http.ResponseWriter, r *http.Reques
 		"rejections": []wecommcp.RejectedMessage{}, "checkpoints": []wecommcp.CheckpointView{},
 	}
 	issues := []string{}
+	if policy, err := channels.ParseMessagePolicy(binding.Config); err == nil && channels.RealtimeChannel(binding.ChannelType) {
+		result["message_policy"] = policy
+	}
+	if store, ok := h.service.runReader.(gateway.DispositionStore); ok {
+		items, err := store.ListDispositions(ctx, in.TenantID, binding.ID, 20)
+		if err != nil {
+			issues = append(issues, "暂时无法读取过期消息记录")
+		} else {
+			result["dispositions"] = items
+		}
+	}
+	if store, ok := h.service.channelState.(wecommcp.RealtimeStore); ok && binding.ChannelType == wecommcp.ChannelType {
+		items, err := store.ListGaps(ctx, in.TenantID, binding.ID, 10)
+		if err != nil {
+			issues = append(issues, "暂时无法读取近期窗口审计")
+		} else {
+			result["gaps"] = items
+		}
+	}
 	switch binding.ChannelType {
 	case "telegram", "wecom":
 		result["callback_path"] = "/callbacks/" + binding.ChannelType + "/" + binding.CallbackKey

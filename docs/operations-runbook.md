@@ -125,7 +125,7 @@ docker compose --profile observability up -d
 
 1. 备份配置、当前二进制和数据库，先核对未完成工具及 unknown/attempting 发送事实。
 2. 停止旧 Worker/Jobs/Sender，不能混跑不兼容的队列、权限或分段发送协议。
-3. 构建，使用迁移身份应用缺失 migrations；当前控制面 schema 为 24，不能修改已应用 SQL 文件。024 只新增控制台/调试表，不重建业务会话。更新 Admin/Worker 的新增表权限后再启动新版本；不要以运行账号自动执行 DDL。
+3. 构建，使用迁移身份应用缺失 migrations；当前控制面 schema 为 25，不能修改已应用 SQL 文件。024 增加控制台/调试表，025 增加聊天时效、过期消息记录与近期窗口审计，不重建业务会话。同步更新 Gateway/Relay/Worker/Admin 权限后再启动新版本；不要以运行账号自动执行 DDL。
 4. 核对新增表/函数/Redis 命令权限，再启动候选实例，检查就绪和受控请求。
 5. Agent 行为通过不可变 Revision、stable/canary 和 conversation pin 灰度；切回稳定 revision 不会自动迁移已 pin 的会话。
 6. 数据迁移按[迁移协议](data-consistency.md)执行。回滚配置不会撤销已提交的工作项或已发送消息，不得恢复旧备份后盲目重放。
@@ -153,7 +153,7 @@ docker compose --profile observability up -d
 - 队列持续错误：检查依赖、所有权和退避，不清队列强行恢复。
 - unknown/attempting：先核对供应商或工具业务事实，不自动重发，也不直接手改成成功。
 - MCP 接收卡住：用 Admin 的 channel-rejections/checkpoints 查询和带版本 recover 接口；不能清空 seen 记录跳过历史缺口。
-- 企业微信消息 MCP 停机后可能仍在补读历史：对比检查点 `through_at` 与当前时间，不能只看绑定为 active。当前默认每 10 秒处理一个约 1 分钟的历史窗口，长时间停机会产生明显追赶延迟。若业务允许跳过旧消息，必须明确取得跳过时段的授权，先禁用对应绑定并等在途读取结束，再以当前绑定/检查点版本调用 recover（`action=resume`、明确 `from`、`acknowledge_gap=true`），核对恢复审计后重新启用；不得静默跳到当前时间。群消息还必须满足该绑定的 `mention_prefix`，应在 IM 中选择并 @ 对应机器人。
+- 企业微信消息 MCP 默认近期优先：重启直接查近期窗口，不再扫描停机期间的空时间段。当前轮询间隔 5 秒、落盘等待 2 秒，实际响应还受上游和模型耗时影响；对比 `through_at` 判断接收是否健康。只有显式选择 `reliable` 才继续完整补读；该模式如需人工跳过历史，仍应暂停绑定、明确时段并经带版本 recover 接口记录审计。群消息还必须满足绑定的 `mention_prefix`，应在 IM 中选择并 @ 对应机器人。
 
 `./clean.sh` 默认预览；`--apply` 仅归档已知构建产物，运行 PID 存在时拒绝。私有快照和临时个人工具不属于交付仓库，数据卷也不能仅因停止或显示 reclaimable 就删除。
 
@@ -164,6 +164,12 @@ docker compose --profile observability up -d
 管理工作台随 Agent 二进制内嵌，运行时不需要 Node/npm 或额外前端服务。配置 `TRPC_AGENT_ADMIN_ENABLED=true` 和已有的 Admin Token/Principals，在 admin/all 角色启动后访问 `http://127.0.0.1:8080/admin/ui/`，输入 **Admin Token**，不是模型或 IM Key。登录换取最长 8 小时的 HttpOnly 会话，刷新后恢复；长期 Token 不进入浏览器本地存储。远程浏览器登录要求 HTTPS，本机回环 HTTP 仅用于开发。
 
 新版工作台从 `0.3.0-rc.1` 提供，需要 schema 24。先升级 Admin/Worker，再开放工作台。网页调试使用独立 SQL 调试队列，不会被旧版 IM Worker 误领；旧版本的管理页不支持新的登录会话。升级不会自动发布 Agent 版本或迁移已有 IM 会话。
+
+当前 `0.3.0-rc.2` 需要 schema 25。在通道编辑页选择“近期优先”及 30～120 秒有效期；未配置时使用近期优先、120 秒。Telegram 延迟投递和企业微信近期查询都遵守该策略。入站过期消息记录后确认接收，但不进入会话、审批、附件导入或 Agent；已排队但从未开始的过期请求标记为 `expired`，不调用模型/工具、不创建旧回复。已经开始执行的任务及其结果投递不受此聊天时效规则影响。升级前缺少源时间的未启动 IM 任务按原平台接收时间计算有效期，HTTP 业务任务及网页调试不套用 IM 时效。
+
+绑定 JSON 示例为 `"message_policy":{"mode":"realtime","max_age_seconds":120}`。`mode=reliable` 是明确选择处理旧消息，不是实时聊天推荐配置。按近期策略跨过的时间段写入 `channel_poll_gap`，单条过期/无效时间消息写入 `channel_message_disposition`；只记录元数据，不拉取过期区间正文，不修改既有 Session/Memory，也不删除 IM 平台原始聊天。
+
+不可混跑忽略时效的旧 Worker，也不能把 schema 24 的回退结论用于本次升级；如需回退，应先停止接收并核对队列、过期任务与已执行操作，使用理解 `expired` 终态的兼容构建。过期判断只发生在首次执行前，已开始或结果未知的操作保留原有记录与恢复规则。
 
 Docker 多阶段构建在 Node 阶段完成页面编译，运行镜像只包含 Go 程序。构建网络无法访问默认 Go 模块代理时，可传入 `--build-arg GOPROXY=https://goproxy.cn,direct`，按部署环境选择可信代理；不需要关闭 TLS 或校验和验证。
 

@@ -24,7 +24,7 @@ func (j *PostgresJournal) TerminalFailRun(ctx context.Context, task workqueue.Ag
 		task.RequestID, task.Scope.TenantID, task.Scope.AppID).Scan(&status, &owner); err != nil {
 		return false, err
 	}
-	if status == "completed" {
+	if status == "completed" || status == "expired" {
 		return false, nil
 	}
 	if status == "running" && result.WorkerID != "" && owner != result.WorkerID {

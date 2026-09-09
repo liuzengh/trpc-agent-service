@@ -148,6 +148,7 @@ const labels: Record<string, string> = {
   succeeded: "成功",
   completed: "已完成",
   completed_with_issues: "处理结束 · 有限制",
+  expired: "已过期 · 未执行",
   dead: "已停止重试",
   failed: "失败",
   awaiting_approval: "等待审批",

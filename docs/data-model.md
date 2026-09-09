@@ -12,13 +12,15 @@
 
 以下 DDL 是最小逻辑模型，省略了组织成员、RBAC、计费明细和知识文档分片等扩展表。
 
-当前仓库的可执行 schema 由 [001–024 migrations](../trpcservice/database/migrations) 管理，核心包括：
+当前仓库的可执行 schema 由 [001–025 migrations](../trpcservice/database/migrations) 管理，核心包括：
 
 024 增加控制台存储：`admin_session`（登录摘要与到期时间）、`agent_draft`（带版本的草稿）、`debug_snapshot`（不可变执行配置）、`debug_session`（发起者与独立运行身份）、`debug_run`（消息、租约、审批关联和结果）、`debug_event`、`debug_tool_execution`、`debug_tool_approval`、`debug_approval_decision` 和 `console_worker`。这些表使用 tenant_id + record_id 主键、owner_id、app_id、status、version、JSONB data 和时间字段；具体数据形状由 Go 类型约束。
 
 认证表与调试表分开授予数据库权限，Worker 不获得 admin_session 读取权限。调试审批/Journal 不复用正式 IM 外键，避免把临时快照伪装成发布版本。调试快照不能从正常发布与通道路由中读取；草稿发布在 PostgreSQL 中对草稿/App 加锁，并原子创建版本、切换稳定指针和更新草稿发布标记。
 
 发布、回滚和灰度操作的审计写入参与同一 PostgreSQL 事务，重复草稿发布不追加重复历史。`background_job.payload.source_request_id` 保存新任务的因果关联，查询接口只返回元数据；旧任务不回填推测的关联。`console_worker.data.checks` 保存带时间、租户、后端绑定和配置指纹的只读观测，心跳记录一分钟到期，过期数据由 Worker 清理。
+
+025 增加 `agent_run.message_mode/message_expires_at`，由已验签入站链路写入并随任务携带，客户端不能填写以延长自己的请求期限。首次执行在持有运行记录行锁时检查有效期，只有 `queued` 且 `started_at IS NULL` 的任务可转为 `expired`；开始执行与过期判定互斥。`channel_message_disposition` 以租户/绑定/外部消息编号去重记录不执行的消息；`channel_poll_gap` 在同一事务中记录被实时策略略过的区间和推进后的检查点。它们不同于人工恢复审计，不会自动触发历史回放。
 
 ```text
 tenant / agent_app / agent_revision

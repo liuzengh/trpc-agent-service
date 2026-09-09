@@ -91,6 +91,15 @@ func (r *OutboxRelay) publish(ctx context.Context, item QueueOutboxItem) error {
 	defer span.End()
 	span.SetAttributes(attribute.String("tenant.id", item.Task.Scope.TenantID), attribute.String("gen_ai.request.id", item.Task.RequestID))
 	task := item.Task
+	if admission, ok := r.journal.(RunAdmission); ok {
+		expired, err := admission.ExpireUnstarted(ctx, task)
+		if err != nil {
+			return err
+		}
+		if expired {
+			return nil
+		}
+	}
 	task.TraceParent, task.TraceState = outboundTraceHeaders(ctx)
 	return r.queue.Publish(ctx, task)
 }

@@ -349,6 +349,12 @@ func run() error {
 		_ = sessionCoordinator.Close()
 		return fmt.Errorf("build inbound journal: %w", err)
 	}
+	startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
+	err = inboundJournal.Ready(startupCtx)
+	cancelStartup()
+	if err != nil {
+		return fmt.Errorf("check message lifecycle schema: %w", err)
+	}
 	gatewayIntake, err := gateway.NewIntake(
 		routeResolver,
 		inboundJournal,
@@ -618,7 +624,7 @@ func run() error {
 	}
 	defer func() { _ = pollCoordinator.Close() }()
 	wecomPoller, err := gateway.NewWeComPoller(controlPlaneRepository, wecomMCPAdapter, callbackGateway, wecomMCPState, pollCoordinator, gateway.WeComPollOptions{
-		Targets: wecomMCPTargets, Interval: 10 * time.Second, Window: time.Minute, Overlap: time.Minute, SettleDelay: 5 * time.Second, Timeout: 45 * time.Second, Audit: auditWriter, Metrics: metricRecorder,
+		Targets: wecomMCPTargets, Interval: 5 * time.Second, Window: time.Minute, Overlap: time.Minute, SettleDelay: 2 * time.Second, Timeout: 45 * time.Second, Audit: auditWriter, Metrics: metricRecorder,
 	})
 	if err != nil {
 		return fmt.Errorf("build WeCom MCP receiver: %w", err)

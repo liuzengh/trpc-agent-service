@@ -10,6 +10,7 @@ import (
 // AgentTask contains everything a Worker needs after an inbound transaction
 // commits. It contains trusted scope resolved by the Gateway.
 type AgentTask struct {
+	Lifetime          runtimecontext.MessageLifetime `json:"message_lifetime,omitempty"`
 	ChatType          string                         `json:"chat_type,omitempty"`
 	Media             *runtimecontext.MediaReference `json:"media,omitempty"`
 	InboundID         string                         `json:"inbound_id"`

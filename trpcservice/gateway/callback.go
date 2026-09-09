@@ -6,10 +6,12 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -101,6 +103,33 @@ func (g *CallbackGateway) AcceptPolled(ctx context.Context, binding controlplane
 func (g *CallbackGateway) acceptVerifiedMessage(ctx context.Context, binding controlplane.ChannelBinding, message channels.InboundEnvelope) error {
 	if strings.TrimSpace(message.Text) == "" {
 		return nil
+	}
+	if channels.RealtimeChannel(binding.ChannelType) {
+		policy, err := channels.ParseMessagePolicy(binding.Config)
+		if err != nil {
+			return err
+		}
+		lifetime := runtimecontext.MessageLifetime{Mode: policy.Mode, OccurredAt: message.OccurredAt}
+		if policy.Mode == channels.RealtimeMessages {
+			now := time.Now()
+			reason := ""
+			if message.OccurredAt.IsZero() || message.OccurredAt.Unix() <= 0 || message.OccurredAt.After(now.Add(30*time.Second)) {
+				reason = "invalid_message_time"
+			} else {
+				lifetime.ExpiresAt = message.OccurredAt.Add(policy.MaxAge())
+				if !now.Before(lifetime.ExpiresAt) {
+					reason = "message_expired"
+				}
+			}
+			if reason != "" {
+				store, ok := g.intake.journal.(DispositionStore)
+				if !ok {
+					return fmt.Errorf("message disposition store unavailable")
+				}
+				return store.RecordDisposition(ctx, binding, message, reason)
+			}
+		}
+		ctx = runtimecontext.WithMessageLifetime(ctx, lifetime)
 	}
 	userID, sessionID := channels.RuntimeIdentity(
 		binding.ID,

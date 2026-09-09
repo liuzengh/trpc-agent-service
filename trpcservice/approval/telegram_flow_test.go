@@ -178,6 +178,7 @@ func TestTelegramApprovalFlow(t *testing.T) {
 			post := func(update, user, chat, thread int64, text string, replyToBot bool) {
 				t.Helper()
 				message := map[string]any{
+					"date":       time.Now().Unix(),
 					"message_id": update, "from": map[string]any{"id": user},
 					"chat": map[string]any{"id": chat, "type": "supergroup"}, "message_thread_id": thread, "text": text,
 				}

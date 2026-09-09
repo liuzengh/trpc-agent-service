@@ -561,6 +561,9 @@ func (s *Service) CreateChannelBinding(
 	if err := s.authorizeChannelSecrets(ctx, binding); err != nil {
 		return controlplane.ChannelBinding{}, err
 	}
+	if err := validateChannelShape(binding); err != nil {
+		return controlplane.ChannelBinding{}, err
+	}
 	if binding.Status == "" {
 		binding.Status = controlplane.StatusActive
 	}

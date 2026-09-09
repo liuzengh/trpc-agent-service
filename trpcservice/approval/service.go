@@ -90,7 +90,8 @@ func (s *Service) HandleApprovalDecision(
 		// Keep the original continuation identity/payload for safe redelivery
 		// of approvals created by older deployments.
 		accepted, err = s.journal.Accept(ctx, gateway.InboundRequest{
-			Scope: scope, ExternalMessageID: record.DecisionMessageID,
+			Lifetime: runtimecontext.MessageLifetimeFromContext(ctx),
+			Scope:    scope, ExternalMessageID: record.DecisionMessageID,
 			UserID: record.UserID, SessionID: record.SessionID, ChatType: input.ChatType,
 			Text:              record.ResumeText + "\n\n[平台可信上下文：用户已批准工具 " + record.ToolName + "]",
 			ReplyTarget:       record.ReplyTarget,

@@ -7,6 +7,7 @@ import {
   Drawer,
   Form,
   Input,
+  InputNumber,
   Modal,
   Select,
   Skeleton,
@@ -330,6 +331,8 @@ export function ResourcePage({
     form.setFieldsValue({
       status: "disabled",
       channel_type: "telegram",
+      message_mode: "realtime",
+      message_age: 120,
       resource_type: "session",
       backend_type: "inmemory",
       region: "local",
@@ -343,6 +346,8 @@ export function ResourcePage({
     form.resetFields();
     form.setFieldsValue({
       ...selected,
+      message_mode: selected.config?.message_policy?.mode || "realtime",
+      message_age: selected.config?.message_policy?.max_age_seconds || 120,
       config: JSON.stringify(selected.config || {}, null, 2),
       quota_config: JSON.stringify(selected.quota_config || {}, null, 2),
       audit_policy: JSON.stringify(selected.audit_policy || {}, null, 2),
@@ -360,6 +365,8 @@ export function ResourcePage({
             ? "channel-bindings"
             : "backend-bindings";
       let body: Dict = { ...values, tenant_id: tenant };
+      delete body.message_mode;
+      delete body.message_age;
       if (kind === "tenants") {
         if (edit) {
           path = "tenants/policies";
@@ -375,6 +382,17 @@ export function ResourcePage({
         }
       } else {
         body.config = JSON.parse(values.config || "{}");
+        if (
+          kind === "channels" &&
+          ["telegram", "wecom", "wecom_mcp"].includes(
+            edit ? selected!.channel_type : values.channel_type,
+          )
+        ) {
+          body.config.message_policy = {
+            mode: values.message_mode || "realtime",
+            max_age_seconds: values.message_age || 120,
+          };
+        }
         if (edit) {
           path = "channel-bindings/update";
           body = {
@@ -734,6 +752,28 @@ export function ResourcePage({
                       ]}
                     />
                   </Form.Item>
+                  <Form.Item
+                    name="message_mode"
+                    label="聊天消息处理策略"
+                    help="适用于 IM 通道。近期优先不会自动执行过期请求；完整补读可能让历史积压延迟新消息。"
+                  >
+                    <Select
+                      options={[
+                        { value: "realtime", label: "近期优先（默认）" },
+                        {
+                          value: "reliable",
+                          label: "完整补读（明确需要历史处理时启用）",
+                        },
+                      ]}
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    name="message_age"
+                    label="近期消息有效期（秒）"
+                    help="30～120 秒；只约束尚未开始的聊天请求，不中断已经执行的操作。"
+                  >
+                    <InputNumber min={30} max={120} precision={0} />
+                  </Form.Item>
                 </>
               ) : (
                 <>
@@ -923,6 +963,7 @@ export function RunsPage({
               ...[
                 "running",
                 "completed",
+                "expired",
                 "failed",
                 "unknown",
                 "awaiting_approval",
@@ -931,6 +972,7 @@ export function RunsPage({
                 label: {
                   running: "执行中",
                   completed: "已完成",
+                  expired: "已过期 · 未执行",
                   failed: "失败",
                   unknown: "待核对",
                   awaiting_approval: "等待审批",
@@ -1086,9 +1128,17 @@ export function RunsPage({
             />
             {detail.error_type && (
               <Alert
-                type="error"
-                title={detail.error_type}
-                description="执行失败不代表外部操作已回滚；未知结果请先核对。"
+                type={detail.status === "expired" ? "info" : "error"}
+                title={
+                  detail.status === "expired"
+                    ? "聊天消息已过期，未进入 Agent 执行"
+                    : detail.error_type
+                }
+                description={
+                  detail.status === "expired"
+                    ? "未调用模型或工具，也未补发旧回复。如仍需要处理，请发送一条新消息。"
+                    : "执行失败不代表外部操作已回滚；未知结果请先核对。"
+                }
               />
             )}
             <h4>工具执行</h4>

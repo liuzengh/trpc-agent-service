@@ -100,9 +100,29 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		return true, fmt.Errorf("reject invalid task scope: %w", err)
 	}
 	if task.Attempt >= w.opts.MaxAttempts {
+		if admission, ok := w.journal.(gateway.RunAdmission); ok {
+			expired, err := admission.ExpireUnstarted(ctx, task)
+			if err != nil {
+				return true, err
+			}
+			if expired {
+				return true, delivery.Ack(ctx)
+			}
+		}
 		return true, w.retryOrAck(ctx, delivery, task, gateway.ErrRunTerminal)
 	}
-	if err := w.journal.MarkRunRunning(ctx, task.RequestID, w.opts.WorkerID); err != nil {
+	var admissionErr error
+	if admission, ok := w.journal.(gateway.RunAdmission); ok {
+		expired, err := admission.StartRun(ctx, task, w.opts.WorkerID)
+		admissionErr = err
+		if err == nil && expired {
+			w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "expired", time.Since(started))
+			return true, delivery.Ack(ctx)
+		}
+	} else {
+		admissionErr = w.journal.MarkRunRunning(ctx, task.RequestID, w.opts.WorkerID)
+	}
+	if err := admissionErr; err != nil {
 		if errors.Is(err, gateway.ErrRunTerminal) {
 			return true, delivery.Ack(ctx)
 		}

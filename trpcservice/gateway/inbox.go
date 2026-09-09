@@ -22,6 +22,7 @@ var (
 
 // InboundRequest is the normalized message accepted by the durable Gateway.
 type InboundRequest struct {
+	Lifetime          runtimecontext.MessageLifetime
 	Media             *runtimecontext.MediaReference
 	Scope             runtimecontext.Scope
 	ExternalMessageID string
@@ -40,6 +41,7 @@ type InboundRequest struct {
 
 // AcceptResult identifies the durable records created for an inbound message.
 type AcceptResult struct {
+	Ignored        bool   `json:"ignored,omitempty"`
 	InboundID      string `json:"inbound_id"`
 	RequestID      string `json:"request_id"`
 	ConversationID string `json:"conversation_id"`

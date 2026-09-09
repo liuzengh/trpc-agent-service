@@ -107,6 +107,7 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 		}
 	}
 	result, err := i.journal.Accept(ctx, InboundRequest{
+		Lifetime:          runtimecontext.MessageLifetimeFromContext(ctx),
 		Media:             input.Media,
 		Scope:             scope,
 		ExternalMessageID: input.ExternalMessageID,
@@ -119,6 +120,9 @@ func (i *Intake) Accept(ctx context.Context, input IntakeRequest) (AcceptResult,
 	})
 	if err != nil {
 		return AcceptResult{}, err
+	}
+	if result.Ignored {
+		return result, nil
 	}
 	if i.audit != nil {
 		decision := "inbound_accepted"

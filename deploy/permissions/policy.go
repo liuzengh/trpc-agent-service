@@ -31,6 +31,9 @@ func SQL(schema, prefix string) (string, error) {
 		if role == "jobs" {
 			fmt.Fprintf(&out, "GRANT EXECUTE ON FUNCTION %s.platform_audit_prune(TEXT,INTEGER) TO %s;\n", schema, name)
 		}
+		if role == "relay" {
+			fmt.Fprintf(&out, "GRANT UPDATE (status,error_type,completed_at) ON %s.agent_run TO %s;\nGRANT SELECT (tenant_id,request_id), UPDATE (status,processed_at) ON %s.inbound_message TO %s;\n", schema, name, schema, name)
+		}
 		if role == "admin" {
 			fmt.Fprintf(&out, "GRANT EXECUTE ON FUNCTION %s.platform_reconcile_outbound_part(TEXT,TEXT,INTEGER,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT) TO %s;\n", schema, name)
 			fmt.Fprintf(&out, "GRANT EXECUTE ON FUNCTION %s.platform_tenant_policy_update(TEXT,BIGINT,JSONB,JSONB,TEXT,TEXT) TO %s;\n", schema, name)
@@ -66,6 +69,7 @@ func roleGrants(role string) map[string][]string {
 	}
 	switch role {
 	case "gateway":
+		add("SELECT,INSERT", "channel_poll_gap", "channel_message_disposition")
 		add("SELECT", "platform_backlog")
 		add("SELECT", control...)
 		add("SELECT,INSERT,UPDATE", "conversation", "inbound_message", "agent_run", "tool_approval", "approval_decision_message", "channel_poll_checkpoint")
@@ -85,6 +89,7 @@ func roleGrants(role string) map[string][]string {
 		add("SELECT,INSERT,UPDATE", "tool_execution", "tool_operation", "tool_approval", "background_job")
 		add("UPDATE", "backend_migration")
 	case "relay":
+		add("SELECT", "agent_run", "conversation", "channel_binding")
 		add("SELECT,UPDATE", "queue_outbox")
 	case "sender":
 		add("SELECT,INSERT,UPDATE", "outbound_part")
@@ -99,6 +104,7 @@ func roleGrants(role string) map[string][]string {
 		add("UPDATE", "backend_binding", "backend_migration")
 		add("SELECT,INSERT,UPDATE", "background_job")
 	case "admin":
+		add("SELECT", "channel_poll_gap", "channel_message_disposition")
 		add("SELECT", "schema_migration", "agent_run", "conversation", "outbound_message", "console_worker")
 		add("SELECT,INSERT,UPDATE,DELETE", "admin_session", "agent_draft", "debug_snapshot", "debug_session", "debug_run", "debug_event", "debug_tool_execution", "debug_tool_approval", "debug_approval_decision")
 		add("SELECT", "outbound_part")

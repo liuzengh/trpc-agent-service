@@ -76,6 +76,7 @@ func TestPollingRestartOverlapAndPartialAcceptance(t *testing.T) {
 	if n, err := second.ProcessOnce(context.Background()); err != nil || n != 1 {
 		t.Fatalf("resume: %d %v", n, err)
 	}
+	second.now = func() time.Time { return time.Date(2026, 9, 6, 0, 2, 10, 0, time.UTC) }
 	if n, err := second.ProcessOnce(context.Background()); err != nil || n != 0 {
 		t.Fatalf("overlap: %d %v", n, err)
 	}
@@ -107,6 +108,14 @@ func TestPollingReadFailureCancellationAndDisabledBinding(t *testing.T) {
 				}
 			}
 			if kind == "old_checkpoint" {
+				var cfg map[string]any
+				_ = json.Unmarshal(b.Config, &cfg)
+				cfg["message_policy"] = map[string]string{"mode": "reliable"}
+				raw, _ := json.Marshal(cfg)
+				_, err := repo.UpdateChannelBinding(context.Background(), b.TenantID, b.ID, raw, b.Status, b.Version)
+				if err != nil {
+					t.Fatal(err)
+				}
 				p.now = func() time.Time { return start.Add(8 * 24 * time.Hour) }
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -134,7 +143,7 @@ func TestPolledIngressUsesApprovalPathAndRejectsStaleBinding(t *testing.T) {
 	registry, _ := channels.NewRegistry(channels.NewTestAdapter())
 	decisions := &approvalDecisionTestHandler{}
 	g, _ := NewCallbackGateway(repo, registry, intake, WithApprovalDecisionHandler(decisions))
-	message := channels.InboundEnvelope{ExternalMessageID: "fp", ExternalUserID: "human", ExternalChatID: "group", ChatType: "group", MessageType: "text", Text: "批准 apr_test", ReplyTarget: "group"}
+	message := channels.InboundEnvelope{OccurredAt: time.Now(), ExternalMessageID: "fp", ExternalUserID: "human", ExternalChatID: "group", ChatType: "group", MessageType: "text", Text: "批准 apr_test", ReplyTarget: "group"}
 	if err := g.AcceptPolled(context.Background(), b, message); err != nil || decisions.calls != 1 || len(journal.Tasks()) != 0 {
 		t.Fatal("polled approval bypassed shared handling")
 	}

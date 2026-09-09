@@ -110,7 +110,7 @@ func TestEnabledAttachmentIsQueuedWithoutParsingCaptionAsApproval(t *testing.T) 
 	approvals := &approvalDecisionTestHandler{}
 	registry, _ := channels.NewRegistry(callbackTestAdapter{})
 	g, _ := NewCallbackGateway(repo, registry, intake, WithApprovalDecisionHandler(approvals))
-	message := channels.InboundEnvelope{ExternalMessageID: "attachment-id", ExternalUserID: "user", ExternalChatID: "chat", ChatType: "direct", MessageType: "file", Text: "批准 apr_00000000000000000000000000000000", Media: &channels.MediaReference{FileID: "provider-file"}, ReplyTarget: "chat"}
+	message := channels.InboundEnvelope{OccurredAt: time.Now(), ExternalMessageID: "attachment-id", ExternalUserID: "user", ExternalChatID: "chat", ChatType: "direct", MessageType: "file", Text: "批准 apr_00000000000000000000000000000000", Media: &channels.MediaReference{FileID: "provider-file"}, ReplyTarget: "chat"}
 	for i := 0; i < 2; i++ {
 		if err := g.acceptVerifiedMessage(context.Background(), binding, message); err != nil {
 			t.Fatal(err)

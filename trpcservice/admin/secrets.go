@@ -70,6 +70,11 @@ func (s *Service) authorizeChannelSecrets(ctx context.Context, binding controlpl
 }
 
 func validateChannelShape(binding controlplane.ChannelBinding) error {
+	if channels.RealtimeChannel(binding.ChannelType) {
+		if _, err := channels.ParseMessagePolicy(binding.Config); err != nil {
+			return invalidf("invalid message policy")
+		}
+	}
 	if binding.ChannelType == wecommcp.ChannelType {
 		if _, err := wecommcp.ParseBinding(binding); err != nil {
 			return invalidf("invalid WeCom MCP binding config")

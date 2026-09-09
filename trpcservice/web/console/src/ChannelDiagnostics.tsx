@@ -69,6 +69,69 @@ export function ChannelDiagnostics({
                 : []),
             ]}
           />
+          {data.message_policy && (
+            <Alert
+              type={
+                data.message_policy.mode === "realtime" ? "info" : "warning"
+              }
+              showIcon
+              title={
+                data.message_policy.mode === "realtime"
+                  ? `近期优先 · 有效期 ${data.message_policy.max_age_seconds} 秒`
+                  : "完整补读 · 离线历史可能延迟新消息"
+              }
+              description="过期聊天不触发 Agent 或工具，不补发旧回复。已经开始执行的任务保留原有执行与恢复记录。"
+            />
+          )}
+          {!!data.gaps?.length && (
+            <>
+              <h4>按近期策略跳过的历史区间</h4>
+              <Table
+                size="small"
+                pagination={false}
+                rowKey="recorded_at"
+                dataSource={data.gaps}
+                columns={[
+                  {
+                    title: "原进度",
+                    render: (_, r: Dict) => date(r.previous_through),
+                  },
+                  {
+                    title: "近期窗口起点",
+                    render: (_, r: Dict) => date(r.recent_from),
+                  },
+                  {
+                    title: "记录时间",
+                    render: (_, r: Dict) => date(r.recorded_at),
+                  },
+                ]}
+              />
+            </>
+          )}
+          {!!data.dispositions?.length && (
+            <>
+              <h4>未执行的过期消息</h4>
+              <Table
+                size="small"
+                pagination={false}
+                rowKey="message_id"
+                dataSource={data.dispositions}
+                columns={[
+                  {
+                    title: "原消息时间",
+                    render: (_, r: Dict) => date(r.occurred_at),
+                  },
+                  {
+                    title: "处理原因",
+                    render: (_, r: Dict) =>
+                      r.reason === "message_expired"
+                        ? "聊天消息已过期"
+                        : "消息时间无效",
+                  },
+                ]}
+              />
+            </>
+          )}
           {data.issues?.map((issue: string, index: number) => (
             <Alert key={index} type="warning" showIcon title={issue} />
           ))}

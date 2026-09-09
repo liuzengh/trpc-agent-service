@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 )
 
@@ -23,10 +24,11 @@ type BindingConfig struct {
 	MentionPrefix  string   `json:"mention_prefix"`
 	// whitespace is strict; prefix supports the observed UI format where the
 	// body is directly adjacent to a display name. No entity metadata is given.
-	MentionStyle string `json:"mention_style,omitempty"`
-	Timezone     string `json:"timezone"`
-	StartAt      string `json:"start_at"`
-	DedupeMode   string `json:"dedupe_mode"`
+	MentionStyle  string                  `json:"mention_style,omitempty"`
+	Timezone      string                  `json:"timezone"`
+	StartAt       string                  `json:"start_at"`
+	DedupeMode    string                  `json:"dedupe_mode"`
+	MessagePolicy *channels.MessagePolicy `json:"message_policy,omitempty"`
 }
 
 func ParseBinding(binding controlplane.ChannelBinding) (BindingConfig, error) {
@@ -39,6 +41,9 @@ func ParseBinding(binding controlplane.ChannelBinding) (BindingConfig, error) {
 	}
 	if cfg.MentionStyle == "" {
 		cfg.MentionStyle = "whitespace"
+	}
+	if _, err := channels.ParseMessagePolicy(binding.Config); err != nil {
+		return cfg, err
 	}
 	if !validIDs(cfg.AllowedChatIDs, 20) || !validIDs(cfg.AllowedUserIDs, 100) ||
 		cfg.DedupeMode != "fingerprint-v1" || !strings.HasPrefix(cfg.MentionPrefix, "@") ||
@@ -84,6 +89,9 @@ func (c BindingConfig) Start() time.Time {
 }
 
 func ConfigFingerprint(binding controlplane.ChannelBinding, cfg BindingConfig) string {
+	// Delivery freshness is not source identity. Keep legacy fingerprints
+	// stable and let binding-version checks fence concurrent policy edits.
+	cfg.MessagePolicy = nil
 	data, _ := json.Marshal(struct {
 		App, Account, Ref string
 		Config            BindingConfig
