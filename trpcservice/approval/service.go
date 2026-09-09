@@ -86,6 +86,7 @@ func (s *Service) HandleApprovalDecision(
 		return true, err
 	}
 	var accepted gateway.AcceptResult
+	scope.BindingVersion = input.Scope.BindingVersion
 	if record.Status == StatusApproved {
 		// Keep the original continuation identity/payload for safe redelivery
 		// of approvals created by older deployments.

@@ -57,6 +57,14 @@ func NewWeComPoller(repository controlplane.Repository, reader WeComWindowReader
 }
 
 func (p *WeComPoller) ProcessOnce(ctx context.Context) (int, error) {
+	return p.processOnce(ctx, false)
+}
+
+func (p *WeComPoller) ProcessBackfillOnce(ctx context.Context) (int, error) {
+	return p.processOnce(ctx, true)
+}
+
+func (p *WeComPoller) processOnce(ctx context.Context, backfill bool) (int, error) {
 	count := 0
 	var failures error
 	for _, target := range p.opts.Targets {
@@ -90,7 +98,7 @@ func (p *WeComPoller) ProcessOnce(ctx context.Context) (int, error) {
 			if ctx.Err() != nil {
 				return count, context.Cause(ctx)
 			}
-			n, err := p.pollGroup(ctx, binding, cfg, chat)
+			n, err := p.pollGroup(ctx, binding, cfg, chat, backfill)
 			count += n
 			if err != nil {
 				failures = errors.Join(failures, err)
@@ -100,7 +108,7 @@ func (p *WeComPoller) ProcessOnce(ctx context.Context) (int, error) {
 	return count, failures
 }
 
-func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBinding, cfg wecommcp.BindingConfig, chat string) (accepted int, pollErr error) {
+func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBinding, cfg wecommcp.BindingConfig, chat string, backfill bool) (accepted int, pollErr error) {
 	ctx, cancel := context.WithTimeout(parent, p.opts.Timeout)
 	defer cancel()
 	ctx, span := otel.Tracer("trpc-agent-service/gateway").Start(ctx, "wecom_mcp.poll")
@@ -115,7 +123,11 @@ func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBi
 	h := sha256.Sum256([]byte(chat))
 	chatHash := hex.EncodeToString(h[:])
 	key := wecommcp.PollKey{TenantID: b.TenantID, BindingID: b.ID, ChatHash: chatHash}
-	lease, err := p.coordinator.Acquire(ctx, coordination.Key{AppName: "wecom-poll/" + b.TenantID, UserID: b.ID, SessionID: chatHash})
+	lane := "wecom-poll/"
+	if backfill {
+		lane = "wecom-backfill/"
+	}
+	lease, err := p.coordinator.Acquire(ctx, coordination.Key{AppName: lane + b.TenantID, UserID: b.ID, SessionID: chatHash})
 	if err != nil {
 		return 0, err
 	}
@@ -135,7 +147,7 @@ func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBi
 	}
 	now := p.now().UTC().Truncate(time.Second)
 	to := now.Add(-p.opts.SettleDelay).Truncate(time.Second)
-	if !to.After(checkpoint.Through) {
+	if !backfill && !to.After(checkpoint.Through) {
 		return 0, nil
 	}
 	if policy.Mode == channels.ReliableMessages {
@@ -152,6 +164,22 @@ func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBi
 	}
 	if from.Before(checkpoint.Floor) {
 		from = checkpoint.Floor
+	}
+	var gap wecommcp.Gap
+	if backfill {
+		var found bool
+		gap, found, err = p.state.NextGap(ctx, key)
+		if err != nil || !found {
+			return 0, err
+		}
+		if gap.ConfigHash != checkpoint.ConfigHash || gap.Cursor.Before(checkpoint.Floor) {
+			return 0, p.state.AdvanceGap(ctx, b, key, gap, gap.Cursor, "checkpoint_changed")
+		}
+		from = gap.Cursor
+		to = minTime(gap.RecentFrom, from.Add(p.opts.Window+p.opts.Overlap))
+		if from.Before(now.Add(-7 * 24 * time.Hour)) {
+			return 0, p.state.AdvanceGap(ctx, b, key, gap, from, "source_retention_exceeded")
+		}
 	}
 	if from.Before(now.Add(-7 * 24 * time.Hour)) {
 		return 0, errPollRetention
@@ -204,7 +232,9 @@ func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBi
 	}
 	// Optimistic version check prevents an old reader from regressing a newer
 	// checkpoint even if a distributed lease was lost during an I/O pause.
-	if policy.Mode == channels.RealtimeMessages {
+	if backfill {
+		err = p.state.AdvanceGap(ctx, b, key, gap, to, "")
+	} else if policy.Mode == channels.RealtimeMessages {
 		state, ok := p.state.(wecommcp.RealtimeStore)
 		if !ok {
 			return count, errors.New("realtime checkpoint store unavailable")
@@ -216,7 +246,11 @@ func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBi
 	if err != nil {
 		return count, err
 	}
-	p.opts.Metrics.RecordChannelPoll(ctx, b.TenantID, "ok", now.Sub(to))
+	outcome := "ok"
+	if backfill {
+		outcome = "backfill_ok"
+	}
+	p.opts.Metrics.RecordChannelPoll(ctx, b.TenantID, outcome, now.Sub(to))
 	return count, nil
 }
 
@@ -243,6 +277,25 @@ func (p *WeComPoller) failure(ctx context.Context, target config.WeComMCPTarget,
 	return errors.New("WeCom MCP receiver window failed; checkpoint not advanced")
 }
 func (p *WeComPoller) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// Separate bounded loops and leases: a slow historical read cannot occupy
+	// the recent receiver. Both paths share Inbox and channel deduplication.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(p.opts.Interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			_, _ = p.ProcessBackfillOnce(ctx)
+		}
+	}()
+	defer func() { cancel(); <-done }()
 	ticker := time.NewTicker(p.opts.Interval)
 	defer ticker.Stop()
 	for {
@@ -253,4 +306,11 @@ func (p *WeComPoller) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }

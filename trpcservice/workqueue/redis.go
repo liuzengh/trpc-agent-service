@@ -111,6 +111,14 @@ func (q *RedisQueue) Publish(ctx context.Context, task AgentTask) error {
 }
 
 func (q *RedisQueue) Receive(ctx context.Context) (Delivery, error) {
+	return q.receive(ctx, q.blockTimeout)
+}
+
+func (q *RedisQueue) TryReceive(ctx context.Context) (Delivery, error) {
+	return q.receive(ctx, -1)
+}
+
+func (q *RedisQueue) receive(ctx context.Context, block time.Duration) (Delivery, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -133,7 +141,7 @@ func (q *RedisQueue) Receive(ctx context.Context) (Delivery, error) {
 		Consumer: q.consumer,
 		Streams:  []string{q.stream, ">"},
 		Count:    1,
-		Block:    q.blockTimeout,
+		Block:    block,
 	}).Result()
 	if errors.Is(err, redis.Nil) || (err == nil && len(streams) == 0) {
 		return nil, ErrNoMessage

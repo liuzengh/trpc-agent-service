@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
@@ -17,7 +18,8 @@ import (
 // PostgresJournal stores inbound, conversation, run and queue-outbox records
 // in one transaction. The caller owns db.
 type PostgresJournal struct {
-	db *sql.DB
+	db        *sql.DB
+	relayTurn atomic.Uint64
 }
 
 func NewPostgresJournal(db *sql.DB) (*PostgresJournal, error) {
@@ -230,11 +232,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,'pending')`, stableID("out_", requestID),
 		return AcceptResult{}, fmt.Errorf("marshal Agent task: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO queue_outbox(outbox_id, topic, partition_key, payload)
-VALUES ($1, 'agent.run', $2, $3::jsonb)`,
+INSERT INTO queue_outbox(outbox_id, topic, partition_key, payload,lane)
+VALUES ($1, 'agent.run', $2, $3::jsonb,$4)`,
 		stableID("qout_", requestID),
 		request.Scope.StorageScope+"|"+request.UserID+"|"+request.SessionID,
 		string(taskJSON),
+		outboxLane(task),
 	); err != nil {
 		return AcceptResult{}, fmt.Errorf("insert queue outbox: %w", err)
 	}
@@ -300,7 +303,7 @@ WITH candidates AS (
     WHERE status IN ('pending', 'publishing')
       AND next_attempt_at <= now()
       AND (locked_until IS NULL OR locked_until < now())
-    ORDER BY created_at
+    ORDER BY (lane='backlog')=$4 DESC,created_at
     FOR UPDATE SKIP LOCKED
     LIMIT $1
 )
@@ -311,7 +314,7 @@ SET status = 'publishing',
     attempt_count = attempt_count + 1
 FROM candidates c
 WHERE q.outbox_id = c.outbox_id
-RETURNING q.outbox_id, q.payload`, limit, workerID, postgresInterval(lease))
+RETURNING q.outbox_id, q.payload`, limit, workerID, postgresInterval(lease), j.relayTurn.Add(1)%5 == 0)
 	if err != nil {
 		return nil, fmt.Errorf("claim queue outbox: %w", err)
 	}
@@ -443,7 +446,7 @@ UPDATE agent_run
 SET status = 'completed', fencing_token = $2, agent_name = $3,
     prompt_tokens = $4, completion_tokens = $5, cost = $6, trace_id = NULLIF($7, ''),
     completed_at = now(), error_type = NULLIF($9,''), error_message = NULL
-WHERE request_id = $1 AND fencing_token <= $2 AND status NOT IN ('dead','expired') AND ($8='' OR worker_id=$8 OR status='completed')`,
+WHERE request_id = $1 AND fencing_token <= $2 AND status NOT IN ('dead','expired') AND schedule_generation=$10 AND ($8='' OR worker_id=$8 OR status='completed')`,
 		task.RequestID,
 		result.FencingToken,
 		result.AgentName,
@@ -453,6 +456,7 @@ WHERE request_id = $1 AND fencing_token <= $2 AND status NOT IN ('dead','expired
 		result.TraceID,
 		result.WorkerID,
 		result.ErrorType,
+		task.Generation,
 	)
 	if err != nil {
 		return fmt.Errorf("complete Agent run: %w", err)
@@ -475,7 +479,7 @@ INSERT INTO outbound_message(
     outbound_id, tenant_id, app_id, channel_binding_id, request_id,
     conversation_id, payload, status
 ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending')
-ON CONFLICT (request_id) DO NOTHING`,
+ON CONFLICT (request_id,message_kind) DO NOTHING`,
 		stableID("out_", task.RequestID),
 		task.Scope.TenantID,
 		task.Scope.AppID,
@@ -666,8 +670,8 @@ func (j *PostgresJournal) Ready(ctx context.Context) error {
 		return fmt.Errorf("ping inbound PostgreSQL: %w", err)
 	}
 	var ready bool
-	if err := j.db.QueryRowContext(ctx, `SELECT to_regclass('channel_message_disposition') IS NOT NULL AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('agent_run') AND attname='message_expires_at' AND NOT attisdropped)`).Scan(&ready); err != nil || !ready {
-		return fmt.Errorf("message lifecycle schema unavailable; apply migration 025")
+	if err := j.db.QueryRowContext(ctx, `SELECT to_regclass('channel_message_disposition') IS NOT NULL AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('agent_run') AND attname='schedule_generation' AND NOT attisdropped)`).Scan(&ready); err != nil || !ready {
+		return fmt.Errorf("message recovery schema unavailable; apply migration 026")
 	}
 	return nil
 }

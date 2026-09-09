@@ -18,6 +18,7 @@ import (
 var (
 	ErrBindingNotFound = errors.New("channel binding not found")
 	ErrRouteDisabled   = errors.New("channel route is disabled")
+	ErrBindingChanged  = errors.New("channel authorization changed while request was pending")
 )
 
 // Resolver derives tenant and Agent application identity from a callback key.
@@ -100,7 +101,25 @@ func (r *ControlPlaneResolver) ResolveFor(
 	if err != nil {
 		return runtimecontext.Scope{}, fmt.Errorf("build runtime scope: %w", err)
 	}
+	scope.BindingVersion = binding.Version
 	return scope, nil
+}
+
+// Revalidate reuses route validation without repinning a conversation to the
+// latest revision. Changed channel authorization requires a new user decision.
+func (r *ControlPlaneResolver) Revalidate(ctx context.Context, scope runtimecontext.Scope) error {
+	b, err := r.repository.GetChannelBinding(ctx, scope.TenantID, scope.ChannelBindingID)
+	if err != nil {
+		return err
+	}
+	current, err := r.Resolve(ctx, b.CallbackKey)
+	if err != nil {
+		return err
+	}
+	if current.TenantID != scope.TenantID || current.AppID != scope.AppID || current.ChannelType != scope.ChannelType || (scope.BindingVersion != 0 && current.BindingVersion != scope.BindingVersion) {
+		return ErrBindingChanged
+	}
+	return nil
 }
 
 type rolloutPolicy struct {

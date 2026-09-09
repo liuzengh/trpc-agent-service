@@ -16,6 +16,8 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/modelops"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/toolexec"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
@@ -23,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
+	"golang.org/x/sync/errgroup"
 )
 
 // Runtime is the tenant-scoped Agent execution boundary used by a Worker.
@@ -31,6 +34,8 @@ type Runtime interface {
 }
 
 type Options struct {
+	Authorize   func(context.Context, workqueue.AgentTask) error
+	Concurrency int
 	Attachments interface {
 		Import(context.Context, workqueue.AgentTask) (string, error)
 	}
@@ -67,6 +72,9 @@ func New(
 	if opts.WorkerID == "" || opts.MaxAttempts <= 0 || opts.RetryDelay <= 0 {
 		return nil, fmt.Errorf("Worker options are invalid")
 	}
+	if opts.Concurrency < 0 || opts.Concurrency > 64 {
+		return nil, errors.New("Worker concurrency must be between 0 and 64")
+	}
 	return &Worker{queue: queue, journal: journal, runtime: runtime, opts: opts}, nil
 }
 
@@ -101,11 +109,11 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	}
 	if task.Attempt >= w.opts.MaxAttempts {
 		if admission, ok := w.journal.(gateway.RunAdmission); ok {
-			expired, err := admission.ExpireUnstarted(ctx, task)
+			skip, err := admission.SkipDelivery(ctx, task)
 			if err != nil {
 				return true, err
 			}
-			if expired {
+			if skip {
 				return true, delivery.Ack(ctx)
 			}
 		}
@@ -113,25 +121,56 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	}
 	var admissionErr error
 	if admission, ok := w.journal.(gateway.RunAdmission); ok {
-		expired, err := admission.StartRun(ctx, task, w.opts.WorkerID)
+		skip, err := admission.StartRun(ctx, task, w.opts.WorkerID)
 		admissionErr = err
-		if err == nil && expired {
-			w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "expired", time.Since(started))
+		if err == nil && skip {
+			w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "skipped_delivery", time.Since(started))
 			return true, delivery.Ack(ctx)
 		}
 	} else {
 		admissionErr = w.journal.MarkRunRunning(ctx, task.RequestID, w.opts.WorkerID)
 	}
 	if err := admissionErr; err != nil {
+		if errors.Is(err, gateway.ErrEarlierTurn) {
+			return true, w.deferRun(ctx, delivery, task, "session_order", time.Now().Add(2*time.Second))
+		}
 		if errors.Is(err, gateway.ErrRunTerminal) {
 			return true, delivery.Ack(ctx)
 		}
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
+	if recovery, ok := w.journal.(gateway.RunRecovery); ok && task.Media == nil {
+		at, err := recovery.DependencyReadyAt(ctx, task)
+		if err != nil {
+			return true, err
+		}
+		if at.After(time.Now()) {
+			return true, w.deferRun(ctx, delivery, task, "model_unavailable", at)
+		}
+	}
+	if w.opts.Authorize != nil {
+		if err := w.opts.Authorize(ctx, task); err != nil {
+			if errors.Is(err, routing.ErrRouteDisabled) || errors.Is(err, routing.ErrBindingChanged) {
+				if e := w.journal.FailRun(ctx, task.RequestID, "authorization_changed", err, w.opts.WorkerID); e != nil {
+					return true, e
+				}
+				_, e := w.journal.TerminalFailRun(ctx, task, gateway.RunResult{WorkerID: w.opts.WorkerID, ErrorType: "authorization_changed", Reply: "接入配置或授权已变更，本请求已停止自动执行。此前操作不会自动回滚，请先核对执行记录。请求编号：" + task.RequestID, TraceID: audit.TraceID(ctx), TraceParent: background.TraceParent(ctx)})
+				if e != nil {
+					return true, e
+				}
+				return true, delivery.Ack(ctx)
+			}
+			// Control-plane unavailability is not evidence of revoked access.
+			return true, err
+		}
+	}
 	releaseQuota := func() {}
 	if w.opts.Quota != nil && task.Media == nil {
 		lease, quotaErr := w.opts.Quota.AcquireRunLease(ctx, task.Scope.TenantID)
 		if quotaErr != nil {
+			if errors.Is(quotaErr, tenant.ErrConcurrencyLimited) {
+				return true, w.deferRun(ctx, delivery, task, "tenant_capacity", time.Now().Add(2*time.Second))
+			}
 			failErr := w.journal.FailRun(ctx, task.RequestID, "tenant_quota", quotaErr, w.opts.WorkerID)
 			auditErr := w.recordAudit(
 				ctx, task, gateway.RunResult{}, "run_rejected", "tenant_quota", started,
@@ -167,6 +206,20 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		})
 	}
 	if runErr != nil {
+		if errors.Is(runErr, modelops.ErrUnavailable) && task.Media == nil && ctx.Err() == nil {
+			safe := true
+			if w.opts.ToolJournal != nil {
+				executions, err := w.opts.ToolJournal.ListByRequest(ctx, task.Scope.TenantID, task.RequestID)
+				if err != nil {
+					return true, err
+				}
+				safe = len(executions) == 0
+			}
+			if safe {
+				delay := min(30*time.Second, 5*time.Second*time.Duration(1<<min(task.DeferredCount, 3)))
+				return true, w.deferRun(ctx, delivery, task, "model_unavailable", time.Now().Add(delay))
+			}
+		}
 		failureType := "agent_execution"
 		if task.Media != nil {
 			failureType = "attachment_import"
@@ -248,6 +301,21 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	return true, nil
+}
+
+func (w *Worker) deferRun(ctx context.Context, delivery workqueue.Delivery, task workqueue.AgentTask, reason string, at time.Time) error {
+	recovery, ok := w.journal.(gateway.RunRecovery)
+	if !ok {
+		return errors.New("durable run recovery unavailable")
+	}
+	if err := recovery.DeferRun(ctx, task, w.opts.WorkerID, reason, at); err != nil {
+		return err
+	}
+	w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "waiting", 0)
+	if err := w.recordAudit(ctx, task, gateway.RunResult{}, "run_deferred", reason, time.Now()); err != nil {
+		return err
+	}
+	return delivery.Ack(ctx)
 }
 
 func (w *Worker) enqueueSessionJobs(ctx context.Context, task workqueue.AgentTask) error {
@@ -420,6 +488,24 @@ func (w *Worker) retryDelivery(ctx context.Context, delivery workqueue.Delivery)
 // Run keeps consuming until cancellation. Individual task errors do not stop
 // the worker because their run state and retry decision are already durable.
 func (w *Worker) Run(ctx context.Context) error {
+	if w.opts.Concurrency <= 1 {
+		return w.run(ctx)
+	}
+	group, ctx := errgroup.WithContext(ctx)
+	for i := 0; i < w.opts.Concurrency; i++ {
+		lane := *w
+		lane.opts.WorkerID = fmt.Sprintf("%s-%d", w.opts.WorkerID, i)
+		if i == 0 {
+			if q, ok := w.queue.(interface{ ForegroundQueue() workqueue.Queue }); ok {
+				lane.queue = q.ForegroundQueue()
+			}
+		}
+		group.Go(func() error { return lane.run(ctx) })
+	}
+	return group.Wait()
+}
+
+func (w *Worker) run(ctx context.Context) error {
 	for {
 		processed, err := w.ProcessOne(ctx)
 		if ctx.Err() != nil {

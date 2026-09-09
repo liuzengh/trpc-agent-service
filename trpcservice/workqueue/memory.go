@@ -50,6 +50,20 @@ func (q *MemoryQueue) Receive(ctx context.Context) (Delivery, error) {
 	}
 }
 
+func (q *MemoryQueue) TryReceive(ctx context.Context) (Delivery, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case task := <-q.messages:
+		return &memoryDelivery{queue: q, task: task}, nil
+	case <-q.closeCtx.Done():
+		return nil, errors.New("memory work queue is closed")
+	default:
+		return nil, ErrNoMessage
+	}
+}
+
 func (q *MemoryQueue) Ready(ctx context.Context) error {
 	if ctx != nil && ctx.Err() != nil {
 		return context.Cause(ctx)

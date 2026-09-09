@@ -2,8 +2,6 @@ package gateway
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
 	"sort"
 	"time"
@@ -24,8 +22,9 @@ type DispositionStore interface {
 	ListDispositions(context.Context, string, string, int) ([]Disposition, error)
 }
 type RunAdmission interface {
+	// The boolean means this delivery is obsolete/terminal, not time-expired.
 	StartRun(context.Context, workqueue.AgentTask, string) (bool, error)
-	ExpireUnstarted(context.Context, workqueue.AgentTask) (bool, error)
+	SkipDelivery(context.Context, workqueue.AgentTask) (bool, error)
 }
 
 func nullTime(t time.Time) any {
@@ -110,7 +109,7 @@ func (j *MemoryJournal) ListDispositions(ctx context.Context, tenant, binding st
 func (j *PostgresJournal) StartRun(ctx context.Context, task workqueue.AgentTask, workerID string) (bool, error) {
 	return j.admitRun(ctx, task, workerID, true)
 }
-func (j *PostgresJournal) ExpireUnstarted(ctx context.Context, task workqueue.AgentTask) (bool, error) {
+func (j *PostgresJournal) SkipDelivery(ctx context.Context, task workqueue.AgentTask) (bool, error) {
 	return j.admitRun(ctx, task, "", false)
 }
 func (j *PostgresJournal) admitRun(ctx context.Context, task workqueue.AgentTask, workerID string, start bool) (bool, error) {
@@ -119,42 +118,27 @@ func (j *PostgresJournal) admitRun(ctx context.Context, task workqueue.AgentTask
 		return false, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var status, mode, channel string
-	var started, expiry sql.NullTime
-	var created time.Time
-	var config []byte
-	err = tx.QueryRowContext(ctx, `SELECT r.status,r.started_at,COALESCE(r.message_mode,''),r.message_expires_at,r.created_at,COALESCE(b.channel_type,''),COALESCE(b.config,'{}'::jsonb) FROM agent_run r LEFT JOIN conversation c ON c.conversation_id=r.conversation_id AND c.tenant_id=r.tenant_id LEFT JOIN channel_binding b ON b.channel_binding_id=c.channel_binding_id AND b.tenant_id=r.tenant_id WHERE r.request_id=$1 AND r.tenant_id=$2 AND r.app_id=$3 FOR UPDATE OF r`, task.RequestID, task.Scope.TenantID, task.Scope.AppID).Scan(&status, &started, &mode, &expiry, &created, &channel, &config)
+	// Turn sequences are allocated under the conversation lock at intake.
+	// An earlier nonterminal run remains a barrier even while its retry waits.
+	var status string
+	var generation int64
+	err = tx.QueryRowContext(ctx, `SELECT status,schedule_generation FROM agent_run WHERE request_id=$1 AND tenant_id=$2 AND app_id=$3 FOR UPDATE`, task.RequestID, task.Scope.TenantID, task.Scope.AppID).Scan(&status, &generation)
 	if err != nil {
 		return false, errors.New("run admission unavailable")
 	}
-	if status == "expired" {
-		return true, tx.Commit()
-	}
-	if status == "queued" && !started.Valid && mode == "" && channels.RealtimeChannel(channel) {
-		policy, e := channels.ParseMessagePolicy(json.RawMessage(config))
-		if e != nil {
-			return false, e
-		}
-		mode = policy.Mode
-		if mode == channels.RealtimeMessages {
-			expiry = sql.NullTime{Time: created.Add(policy.MaxAge()), Valid: true}
-		}
-	}
-	if status == "queued" && !started.Valid && mode == channels.RealtimeMessages && expiry.Valid && !time.Now().Before(expiry.Time) {
-		if _, err = tx.ExecContext(ctx, `UPDATE agent_run SET status='expired',error_type='message_expired',completed_at=now() WHERE request_id=$1`, task.RequestID); err != nil {
-			return false, err
-		}
-		if _, err = tx.ExecContext(ctx, `UPDATE inbound_message SET status='expired',processed_at=now() WHERE tenant_id=$1 AND request_id=$2`, task.Scope.TenantID, task.RequestID); err != nil {
-			return false, err
-		}
+	if status == "expired" || status == "dead" || generation != task.Generation {
 		return true, tx.Commit()
 	}
 	if start {
-		if status == "dead" {
-			return false, ErrRunTerminal
-		}
 		if status != "completed" {
-			if _, err = tx.ExecContext(ctx, `UPDATE agent_run SET status='running',worker_id=$2,started_at=COALESCE(started_at,now()),error_type=NULL,error_message=NULL WHERE request_id=$1`, task.RequestID, workerID); err != nil {
+			var pending bool
+			if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_run WHERE conversation_id=$1 AND turn_seq<$2 AND status IN ('queued','running','failed','waiting'))`, task.ConversationID, task.TurnSeq).Scan(&pending); err != nil {
+				return false, err
+			}
+			if pending {
+				return false, ErrEarlierTurn
+			}
+			if _, err = tx.ExecContext(ctx, `UPDATE agent_run SET status='running',worker_id=$2,started_at=COALESCE(started_at,now()),error_type=NULL,error_message=NULL,completed_at=NULL,next_attempt_at=NULL WHERE request_id=$1`, task.RequestID, workerID); err != nil {
 				return false, err
 			}
 		}
@@ -164,7 +148,7 @@ func (j *PostgresJournal) admitRun(ctx context.Context, task workqueue.AgentTask
 func (j *MemoryJournal) StartRun(ctx context.Context, task workqueue.AgentTask, workerID string) (bool, error) {
 	return j.admitRun(ctx, task, workerID, true)
 }
-func (j *MemoryJournal) ExpireUnstarted(ctx context.Context, task workqueue.AgentTask) (bool, error) {
+func (j *MemoryJournal) SkipDelivery(ctx context.Context, task workqueue.AgentTask) (bool, error) {
 	return j.admitRun(ctx, task, "", false)
 }
 func (j *MemoryJournal) admitRun(ctx context.Context, task workqueue.AgentTask, workerID string, start bool) (bool, error) {
@@ -177,26 +161,16 @@ func (j *MemoryJournal) admitRun(ctx context.Context, task workqueue.AgentTask, 
 	if r == nil || r.tenantID != task.Scope.TenantID || r.appID != task.Scope.AppID {
 		return false, errors.New("run admission unavailable")
 	}
-	if r.status == "expired" {
-		return true, nil
-	}
-	deadline := r.lifetime.ExpiresAt
-	mode := r.lifetime.Mode
-	if mode == "" && channels.RealtimeChannel(r.channel) {
-		mode = channels.RealtimeMessages
-		deadline = r.createdAt.Add(2 * time.Minute)
-	}
-	if r.status == "queued" && r.startedAt.IsZero() && mode == channels.RealtimeMessages && !deadline.IsZero() && !time.Now().Before(deadline) {
-		r.status = "expired"
-		r.errType = "message_expired"
-		r.completedAt = time.Now().UTC()
+	if r.status == "expired" || r.status == "dead" || r.generation != task.Generation {
 		return true, nil
 	}
 	if start {
-		if r.status == "dead" {
-			return false, ErrRunTerminal
-		}
 		if r.status != "completed" {
+			for _, earlier := range j.runs {
+				if earlier.conversationID == task.ConversationID && earlier.turnSeq < task.TurnSeq && pendingRun(earlier.status) {
+					return false, ErrEarlierTurn
+				}
+			}
 			r.status = "running"
 			r.workerID = workerID
 			if r.startedAt.IsZero() {

@@ -33,6 +33,11 @@ type memoryQueueOutbox struct {
 }
 
 type memoryRun struct {
+	generation          int64
+	deferredCount       int
+	nextAttempt         time.Time
+	conversationID      string
+	turnSeq             int64
 	lifetime            runtimecontext.MessageLifetime
 	createdAt           time.Time
 	startedAt           time.Time
@@ -188,7 +193,7 @@ func (j *MemoryJournal) Accept(
 		nextAttempt: time.Now(),
 	}
 	j.inbound[inboundKey] = memoryInbound{result: result, payloadHash: payloadHash}
-	j.runs[result.RequestID] = &memoryRun{lifetime: request.Lifetime, createdAt: time.Now().UTC(), bindingID: scope.ChannelBindingID, revisionID: scope.RevisionID, channel: scope.ChannelType, tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "queued"}
+	j.runs[result.RequestID] = &memoryRun{conversationID: result.ConversationID, turnSeq: result.TurnSeq, lifetime: request.Lifetime, createdAt: time.Now().UTC(), bindingID: scope.ChannelBindingID, revisionID: scope.RevisionID, channel: scope.ChannelType, tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "queued"}
 	return result, nil
 }
 
@@ -318,6 +323,10 @@ func (j *MemoryJournal) CompleteRun(
 	if result.WorkerID != "" && run.workerID != result.WorkerID && run.status != "completed" {
 		return ErrRunSuperseded
 	}
+	if run.generation != task.Generation {
+		return ErrRunSuperseded
+	}
+	j.cancelWaitingNotice(task.RequestID)
 	if run.status == "completed" && run.result.FencingToken > result.FencingToken {
 		return fmt.Errorf("stale Agent run fencing token")
 	}
@@ -384,7 +393,7 @@ func (j *MemoryJournal) TerminalFailRun(ctx context.Context, task workqueue.Agen
 	if run == nil {
 		return false, fmt.Errorf("agent run not found")
 	}
-	if run.status == "completed" || run.status == "expired" {
+	if run.status == "completed" || run.status == "expired" || run.generation != task.Generation {
 		return false, nil
 	}
 	if run.tenantID != task.Scope.TenantID || run.appID != task.Scope.AppID {
@@ -393,7 +402,11 @@ func (j *MemoryJournal) TerminalFailRun(ctx context.Context, task workqueue.Agen
 	if run.status == "running" && result.WorkerID != "" && run.workerID != result.WorkerID {
 		return false, ErrRunSuperseded
 	}
-	run.status, run.errType = "dead", "retry_exhausted"
+	if result.ErrorType == "" {
+		result.ErrorType = "retry_exhausted"
+	}
+	run.status, run.errType = "dead", result.ErrorType
+	j.cancelWaitingNotice(task.RequestID)
 	run.completedAt = time.Now().UTC()
 	id := stableID("out_", task.RequestID)
 	if j.outbound[id] == nil {
@@ -435,7 +448,7 @@ func (j *MemoryJournal) ClaimOutbound(
 		if len(result) >= limit {
 			break
 		}
-		if outbound.status == "sent" || outbound.status == "dead" ||
+		if (outbound.status != "pending" && outbound.status != "sending") ||
 			outbound.nextAttempt.After(now) ||
 			(outbound.lockedBy != "" && outbound.lockedUntil.After(now)) {
 			continue

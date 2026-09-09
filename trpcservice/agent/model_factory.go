@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/modelops"
+	"github.com/openai/openai-go/option"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	openai "trpc.group/trpc-go/trpc-agent-go/model/openai"
 )
@@ -23,6 +25,7 @@ func BuildModel(cfg config.ModelConfig) (model.Model, error) {
 		}
 		options := []openai.Option{
 			openai.WithAPIKey(cfg.APIKey),
+			openai.WithOpenAIOptions(option.WithMiddleware(modelops.AvailabilityMiddleware), option.WithMaxRetries(0)),
 		}
 		if cfg.BaseURL != "" {
 			options = append(options, openai.WithBaseURL(cfg.BaseURL))

@@ -21,6 +21,10 @@ Redis、MySQL 和 PostgreSQL Session 适配器可以保证单次 `AppendEvent` �
 
 当前 Redis Streams 消费组不保证按 conversation 分区；同一会话整轮串行化依赖 Session Coordinator 的跨节点租约和 fencing token。队列分区是可选的调度优化，不能代替此正确性约束。重投和网络分区时仍可能短暂出现旧消费者，关键提交必须核对所有权。
 
+schema 26 的 Worker 在运行记录行锁内检查更早 `turn_seq` 是否仍处于 queued/running/failed/waiting；后续请求通过现有 Outbox 延迟调度，不占住执行槽等待前文。恢复任务携带调度代数，旧 Redis 投递不能覆盖新一代任务。近期与积压各用一个现有 Redis Streams 队列，共享原租约/ACK/重领实现，按 4:1 的调度机会消费，空队列允许另一边借用；这不是耗时或成本的严格比例。
+
+模型不可用的长延迟恢复只适用于尚未产生模型输出、没有工具执行记录的请求。已执行/未知工具结果继续按原 Journal 处理。tRPC-Agent-Go 仍负责 Runner/LLMAgent/模型 HTTP 与 Event；平台通过官方模型回调和 OpenAI middleware 扩展识别暂时故障，关闭 SDK 的叠加即时重试，延迟调度复用 PostgreSQL Outbox。Session Service 的薄适配在既有 Session 租约内按 RequestID 去重用户入站事件，其余存储行为仍委托框架后端。只有能够确认请求未发出的 dial 失败才释放模型预留，超时或未知计费结果保留保守结算。
+
 Redis 租约示例：
 
 ```text

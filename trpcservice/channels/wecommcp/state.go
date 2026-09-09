@@ -33,6 +33,7 @@ type DeliveryState struct {
 // interrupted non-idempotent send must not become automatically sendable again.
 type Store interface {
 	RealtimeStore
+	BackfillStore
 	Checkpoint(context.Context, PollKey, string, time.Time) (Checkpoint, error)
 	Advance(context.Context, PollKey, Checkpoint, time.Time) error
 	Seen(context.Context, PollKey, string) (bool, error)

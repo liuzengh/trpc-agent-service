@@ -14,6 +14,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/modelops"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
@@ -199,7 +200,7 @@ func newRuntimeWithCompiler(
 		return nil, errors.New("default Agent is required")
 	}
 
-	runnerOptions := []runner.Option{runner.WithSessionService(sessionService)}
+	runnerOptions := []runner.Option{runner.WithSessionService(&requestSession{Service: sessionService})}
 	runnerOptions = append(runnerOptions, extraRunnerOptions...)
 	return &Runtime{
 		runner:         runner.NewRunner(defaultRunnerAppName, defaultAgent, runnerOptions...),
@@ -214,6 +215,7 @@ func newTutorialAgent(selectedModel model.Model, stream bool) agentcore.Agent {
 	return llmagent.New(
 		tutorialAgentName,
 		llmagent.WithModel(selectedModel),
+		llmagent.WithModelCallbacks(modelops.AddAvailabilityCallbacks(nil)),
 		llmagent.WithDescription("A minimal agent for learning tRPC-Agent-Go"),
 		llmagent.WithInstruction(
 			"Reply clearly and use the conversation history supplied by the session. "+
@@ -358,6 +360,7 @@ func (r *Runtime) executeIdempotentChat(
 	input ChatInput,
 ) (ChatResult, error) {
 	runCtx, feedback := governance.WithFeedback(attempt.Context())
+	runCtx, availability := modelops.ObserveAvailability(runCtx)
 	compiledAgent, runErr := r.compiler.Compile(runCtx, input.Scope)
 	var policyOptions []agentcore.RunOption
 	var usagePricing UsagePricing
@@ -393,6 +396,9 @@ func (r *Runtime) executeIdempotentChat(
 	defer cancel()
 	if runErr != nil {
 		failErr := attempt.Fail(finalizeCtx)
+		if availability.CanWait() && requestCtx.Err() == nil {
+			runErr = modelops.ErrUnavailable
+		}
 		if failErr != nil {
 			return ChatResult{}, errors.Join(
 				runErr,

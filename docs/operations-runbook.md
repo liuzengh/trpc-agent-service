@@ -109,7 +109,7 @@ docker build -t trpc-agent-service:local .
 
 镜像为非 root 运行，排除私有配置、数据、`bin`、`dist` 和日志。最小部署是一个 all 进程加共享 PostgreSQL/Redis；按需使用对象、向量和观测后端。
 
-生产将同一程序按 `gateway / relay / worker / sender / jobs / admin` 分别启动。多个 Worker 共享 Session、协调器、队列与控制面，不需要负载均衡 sticky session；单个异步 Worker 当前一次处理一个任务。
+生产将同一程序按 `gateway / relay / worker / sender / jobs / admin` 分别启动。多个 Worker 共享 Session、协调器、队列与控制面，不需要负载均衡 sticky session。`TRPC_AGENT_WORKER_CONCURRENCY` 默认 4（1～64），大于 1 时预留一个执行槽只接近期流量，其余槽公平处理两类队列。供应商并发上限和租户额度仍是额外约束，运行中的操作不会被强行抢占。
 
 Kubernetes 模板位于 [deploy/kubernetes](../deploy/kubernetes/platform.yaml)。顺序是：准备分角色 Secret 与依赖 → 应用命名空间/网络策略 → 独立 migration Job → 六角色 Deployment/Service → Ingress。镜像地址、账号、namespace/Pod 标签与真实外连范围必须由部署者核对；模板验证不等于已在集群生效。
 
@@ -125,7 +125,7 @@ docker compose --profile observability up -d
 
 1. 备份配置、当前二进制和数据库，先核对未完成工具及 unknown/attempting 发送事实。
 2. 停止旧 Worker/Jobs/Sender，不能混跑不兼容的队列、权限或分段发送协议。
-3. 构建，使用迁移身份应用缺失 migrations；当前控制面 schema 为 25，不能修改已应用 SQL 文件。024 增加控制台/调试表，025 增加聊天时效、过期消息记录与近期窗口审计，不重建业务会话。同步更新 Gateway/Relay/Worker/Admin 权限后再启动新版本；不要以运行账号自动执行 DDL。
+3. 构建，使用迁移身份应用缺失 migrations；当前控制面 schema 为 26，不能修改已应用 SQL 文件。026 增加持久化等待、调度代数、独立补读进度和等待提示/最终回复区分，不重建业务会话。Worker 需要 INSERT queue_outbox，Gateway 需要 UPDATE channel_poll_gap；同步更新权限后再启动新版本，不给 Worker 开放修改投递状态的权限。
 4. 核对新增表/函数/Redis 命令权限，再启动候选实例，检查就绪和受控请求。
 5. Agent 行为通过不可变 Revision、stable/canary 和 conversation pin 灰度；切回稳定 revision 不会自动迁移已 pin 的会话。
 6. 数据迁移按[迁移协议](data-consistency.md)执行。回滚配置不会撤销已提交的工作项或已发送消息，不得恢复旧备份后盲目重放。
@@ -134,7 +134,7 @@ docker compose --profile observability up -d
 
 ## 6. 容量与恢复
 
-所需活跃并发约为“峰值 turn/s × 平均执行秒数”。当前每 Worker 的业务队列执行并发为 1，另有独立的网页调试执行并发 1，两者共享租户并发与预算限制。节点数量还需考虑模型供应商配额、SQL 连接池和故障余量；不能用同步 `/chat` 的并发推断异步队列容量。
+所需活跃并发约为“峰值 turn/s × 平均执行秒数”。每节点业务并发默认 4，另有独立的网页调试执行并发 1，两者共享租户并发与预算限制。等待恢复不占执行槽，但占持久存储，需要监控 `run/waiting` 和 `backfill/pending/blocked` 积压。节点数量还需考虑模型配额、SQL 连接池和故障余量，不能用同步 `/chat` 并发推断异步队列容量。
 
 `trpc-loadgen` 测量 `/inbound` ACK 吞吐和分位延迟；完整容量还要测队列排空时间、最终完成/送达数、token、成本、SQL/Redis QPS、GC、取消时延和失败率。真实模型压测必须先设预算与供应商限额，不使用生产 IM 群压测。
 
@@ -153,7 +153,7 @@ docker compose --profile observability up -d
 - 队列持续错误：检查依赖、所有权和退避，不清队列强行恢复。
 - unknown/attempting：先核对供应商或工具业务事实，不自动重发，也不直接手改成成功。
 - MCP 接收卡住：用 Admin 的 channel-rejections/checkpoints 查询和带版本 recover 接口；不能清空 seen 记录跳过历史缺口。
-- 企业微信消息 MCP 默认近期优先：重启直接查近期窗口，不再扫描停机期间的空时间段。当前轮询间隔 5 秒、落盘等待 2 秒，实际响应还受上游和模型耗时影响；对比 `through_at` 判断接收是否健康。只有显式选择 `reliable` 才继续完整补读；该模式如需人工跳过历史，仍应暂停绑定、明确时段并经带版本 recover 接口记录审计。群消息还必须满足绑定的 `mention_prefix`，应在 IM 中选择并 @ 对应机器人。
+- 企业微信消息 MCP 默认近期优先：近期循环先查最近窗口，另一个循环限速补读新记录的历史缺口。当前轮询间隔 5 秒、落盘等待 2 秒，响应仍受上游和模型影响；同时查看近期 `through_at` 与补读 `cursor_at/status`，不能仅以近期进度健康推断没有漏读。人工跳过历史仍需暂停绑定、明确时段并经带版本 recover 接口记录审计。群消息须满足 `mention_prefix`。
 
 `./clean.sh` 默认预览；`--apply` 仅归档已知构建产物，运行 PID 存在时拒绝。私有快照和临时个人工具不属于交付仓库，数据卷也不能仅因停止或显示 reclaimable 就删除。
 
@@ -165,11 +165,11 @@ docker compose --profile observability up -d
 
 新版工作台从 `0.3.0-rc.1` 提供，需要 schema 24。先升级 Admin/Worker，再开放工作台。网页调试使用独立 SQL 调试队列，不会被旧版 IM Worker 误领；旧版本的管理页不支持新的登录会话。升级不会自动发布 Agent 版本或迁移已有 IM 会话。
 
-当前 `0.3.0-rc.2` 需要 schema 25。在通道编辑页选择“近期优先”及 30～120 秒有效期；未配置时使用近期优先、120 秒。Telegram 延迟投递和企业微信近期查询都遵守该策略。入站过期消息记录后确认接收，但不进入会话、审批、附件导入或 Agent；已排队但从未开始的过期请求标记为 `expired`，不调用模型/工具、不创建旧回复。已经开始执行的任务及其结果投递不受此聊天时效规则影响。升级前缺少源时间的未启动 IM 任务按原平台接收时间计算有效期，HTTP 业务任务及网页调试不套用 IM 时效。
+当前 `0.3.0-rc.3` 需要 schema 26。“近期优先”的 30～120 秒是接收窗口，不是请求有效期；配置键 `max_age_seconds` 为兼容保留。已接收消息持久保存，模型尚未产生输出且无工具执行时，暂时连接故障进入 waiting，5/10/20/30 秒退避，不消耗普通执行错误的三次尝试。模型恢复后自动继续，管理页展示等待原因与下一次调度时间。每条请求最多一条等待提示；未发出的提示会在最终完成时撤回，已经发送或结果未知的提示不能撤销。
 
-绑定 JSON 示例为 `"message_policy":{"mode":"realtime","max_age_seconds":120}`。`mode=reliable` 是明确选择处理旧消息，不是实时聊天推荐配置。按近期策略跨过的时间段写入 `channel_poll_gap`，单条过期/无效时间消息写入 `channel_message_disposition`；只记录元数据，不拉取过期区间正文，不修改既有 Session/Memory，也不删除 IM 平台原始聊天。
+绑定 JSON 示例仍为 `"message_policy":{"mode":"realtime","max_age_seconds":120}`。近期与后台补读分别持有租约、游标，共享 Inbox 去重；只读已授权群、成员及起点后的区间，超过源保留期或恢复下界冲突会 blocked，需管理员核对。补读消息按平台接收顺序进入会话，不倒插历史。启动不会重放旧版 dead/expired/disposition/skipped 记录。执行前重新核对路由和新任务记录的 Binding 版本，接入授权变化时终止并反馈，不自动沿用旧授权。
 
-不可混跑忽略时效的旧 Worker，也不能把 schema 24 的回退结论用于本次升级；如需回退，应先停止接收并核对队列、过期任务与已执行操作，使用理解 `expired` 终态的兼容构建。过期判断只发生在首次执行前，已开始或结果未知的操作保留原有记录与恢复规则。
+禁止混跑旧 Worker/Relay/Sender：旧代码不理解调度代数和新的回复唯一约束。Redis ACL 应覆盖原 stream 和同前缀 `-backlog` stream；现有按 queue 前缀授权的模板可复用。schema 24 的回退结论不覆盖本次升级，回退必须先停接收与消费、保留等待任务和出站事实，使用兼容 schema 26 的构建；不能把旧二进制直接指向新 schema。
 
 Docker 多阶段构建在 Node 阶段完成页面编译，运行镜像只包含 Go 程序。构建网络无法访问默认 Go 模块代理时，可传入 `--build-arg GOPROXY=https://goproxy.cn,direct`，按部署环境选择可信代理；不需要关闭 TLS 或校验和验证。
 

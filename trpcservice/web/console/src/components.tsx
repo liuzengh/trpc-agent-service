@@ -144,6 +144,7 @@ const labels: Record<string, string> = {
   disabled: "已停用",
   suspended: "已暂停",
   queued: "排队中",
+  waiting: "等待恢复",
   running: "执行中",
   succeeded: "成功",
   completed: "已完成",
@@ -171,7 +172,7 @@ export function Status({ value }: { value?: string }) {
     ? "success"
     : ["failed", "unavailable", "dead"].includes(value || "")
       ? "error"
-      : ["running", "queued"].includes(value || "")
+      : ["running", "queued", "waiting"].includes(value || "")
         ? "processing"
         : [
               "unknown",

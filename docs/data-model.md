@@ -12,7 +12,7 @@
 
 以下 DDL 是最小逻辑模型，省略了组织成员、RBAC、计费明细和知识文档分片等扩展表。
 
-当前仓库的可执行 schema 由 [001–025 migrations](../trpcservice/database/migrations) 管理，核心包括：
+当前仓库的可执行 schema 由 [001–026 migrations](../trpcservice/database/migrations) 管理，核心包括：
 
 024 增加控制台存储：`admin_session`（登录摘要与到期时间）、`agent_draft`（带版本的草稿）、`debug_snapshot`（不可变执行配置）、`debug_session`（发起者与独立运行身份）、`debug_run`（消息、租约、审批关联和结果）、`debug_event`、`debug_tool_execution`、`debug_tool_approval`、`debug_approval_decision` 和 `console_worker`。这些表使用 tenant_id + record_id 主键、owner_id、app_id、status、version、JSONB data 和时间字段；具体数据形状由 Go 类型约束。
 
@@ -20,7 +20,9 @@
 
 发布、回滚和灰度操作的审计写入参与同一 PostgreSQL 事务，重复草稿发布不追加重复历史。`background_job.payload.source_request_id` 保存新任务的因果关联，查询接口只返回元数据；旧任务不回填推测的关联。`console_worker.data.checks` 保存带时间、租户、后端绑定和配置指纹的只读观测，心跳记录一分钟到期，过期数据由 Worker 清理。
 
-025 增加 `agent_run.message_mode/message_expires_at`，由已验签入站链路写入并随任务携带，客户端不能填写以延长自己的请求期限。首次执行在持有运行记录行锁时检查有效期，只有 `queued` 且 `started_at IS NULL` 的任务可转为 `expired`；开始执行与过期判定互斥。`channel_message_disposition` 以租户/绑定/外部消息编号去重记录不执行的消息；`channel_poll_gap` 在同一事务中记录被实时策略略过的区间和推进后的检查点。它们不同于人工恢复审计，不会自动触发历史回放。
+025 的 `message_mode/message_expires_at` 及过期终态保留用于历史审计；026 不再按消息年龄终止新请求。`agent_run` 新增 `schedule_generation`、`next_attempt_at`、`deferred_count`，用于等待恢复和拒绝旧投递；`queue_outbox.lane` 区分近期与积压任务。每次延迟调度在同一事务更新 Run 并追加下一代 Outbox，提交后才 ACK 旧 Redis 消息。
+
+`outbound_message.message_kind` 区分 `waiting` 与 `result`，唯一约束改为 `(request_id,message_kind)`，不会让等待提示占用最终回复的位置。受限触发器在 Run 结束时撤回尚未发送的等待提示，Worker 仍没有直接修改投递状态的权限。`channel_poll_gap` 新增状态、源配置指纹、补读游标和稳定错误分类；旧区间默认 `skipped`，新缺口从 `pending` 推进到 `completed` 或 `blocked`。`channel_message_disposition` 继续保存旧忽略记录与无效时间记录，不自动重放。
 
 ```text
 tenant / agent_app / agent_revision

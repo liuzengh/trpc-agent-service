@@ -363,9 +363,7 @@ func (c *RevisionCompiler) compileRevision(
 	if err != nil {
 		return nil, err
 	}
-	if modelCallbacks != nil {
-		agentOptions = append(agentOptions, llmagent.WithModelCallbacks(modelCallbacks))
-	}
+	agentOptions = append(agentOptions, llmagent.WithModelCallbacks(modelops.AddAvailabilityCallbacks(modelCallbacks)))
 	if toolCallbacks := toolexec.NewCallbacks(
 		c.toolJournal, c.auditWriter, revision.ID,
 	); toolCallbacks != nil {

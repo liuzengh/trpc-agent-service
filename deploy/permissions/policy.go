@@ -69,7 +69,8 @@ func roleGrants(role string) map[string][]string {
 	}
 	switch role {
 	case "gateway":
-		add("SELECT,INSERT", "channel_poll_gap", "channel_message_disposition")
+		add("SELECT,INSERT,UPDATE", "channel_poll_gap")
+		add("SELECT,INSERT", "channel_message_disposition")
 		add("SELECT", "platform_backlog")
 		add("SELECT", control...)
 		add("SELECT,INSERT,UPDATE", "conversation", "inbound_message", "agent_run", "tool_approval", "approval_decision_message", "channel_poll_checkpoint")
@@ -84,6 +85,7 @@ func roleGrants(role string) map[string][]string {
 		add("SELECT", control...)
 		add("SELECT,INSERT,UPDATE", "resource_sync")
 		add("SELECT", "conversation")
+		add("INSERT", "queue_outbox")
 		add("SELECT,UPDATE", "inbound_message", "agent_run")
 		add("SELECT,INSERT", "outbound_message", "work_item")
 		add("SELECT,INSERT,UPDATE", "tool_execution", "tool_operation", "tool_approval", "background_job")

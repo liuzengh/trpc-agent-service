@@ -9,25 +9,27 @@ import (
 )
 
 type RunView struct {
-	AppName          string    `json:"app_name,omitempty"`
-	Kind             string    `json:"kind"`
-	RequestID        string    `json:"request_id"`
-	TenantID         string    `json:"tenant_id"`
-	AppID            string    `json:"app_id"`
-	RevisionID       string    `json:"revision_id"`
-	AgentName        string    `json:"agent_name"`
-	Channel          string    `json:"channel"`
-	BindingID        string    `json:"binding_id,omitempty"`
-	LatencyMS        *int64    `json:"latency_ms,omitempty"`
-	Status           string    `json:"status"`
-	ErrorType        string    `json:"error_type,omitempty"`
-	TraceID          string    `json:"trace_id,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	PromptTokens     int       `json:"prompt_tokens"`
-	CompletionTokens int       `json:"completion_tokens"`
-	Cost             float64   `json:"cost"`
-	Reply            string    `json:"reply,omitempty"`
-	Delivery         any       `json:"delivery,omitempty"`
+	NextAttemptAt    *time.Time `json:"next_attempt_at,omitempty"`
+	DeferredCount    int        `json:"deferred_count,omitempty"`
+	AppName          string     `json:"app_name,omitempty"`
+	Kind             string     `json:"kind"`
+	RequestID        string     `json:"request_id"`
+	TenantID         string     `json:"tenant_id"`
+	AppID            string     `json:"app_id"`
+	RevisionID       string     `json:"revision_id"`
+	AgentName        string     `json:"agent_name"`
+	Channel          string     `json:"channel"`
+	BindingID        string     `json:"binding_id,omitempty"`
+	LatencyMS        *int64     `json:"latency_ms,omitempty"`
+	Status           string     `json:"status"`
+	ErrorType        string     `json:"error_type,omitempty"`
+	TraceID          string     `json:"trace_id,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	PromptTokens     int        `json:"prompt_tokens"`
+	CompletionTokens int        `json:"completion_tokens"`
+	Cost             float64    `json:"cost"`
+	Reply            string     `json:"reply,omitempty"`
+	Delivery         any        `json:"delivery,omitempty"`
 }
 type RunFilter struct {
 	TenantID, AppID, Status, BeforeID string
@@ -94,7 +96,7 @@ func (j *PostgresJournal) ReadRun(ctx context.Context, tenant, id string, includ
 		Attempts  int    `json:"attempts"`
 		ErrorType string `json:"error_type,omitempty"`
 	}
-	err = j.db.QueryRowContext(ctx, `SELECT status,attempt_count,COALESCE(last_error_type,'') FROM outbound_message WHERE tenant_id=$1 AND request_id=$2`, tenant, id).Scan(&delivery.Status, &delivery.Attempts, &delivery.ErrorType)
+	err = j.db.QueryRowContext(ctx, `SELECT status,attempt_count,COALESCE(last_error_type,'') FROM outbound_message WHERE tenant_id=$1 AND request_id=$2 ORDER BY (message_kind='result') DESC LIMIT 1`, tenant, id).Scan(&delivery.Status, &delivery.Attempts, &delivery.ErrorType)
 	if err == nil {
 		v.Delivery = delivery
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -102,12 +104,15 @@ func (j *PostgresJournal) ReadRun(ctx context.Context, tenant, id string, includ
 	}
 	if includeReply {
 		var text sql.NullString
-		err = j.db.QueryRowContext(ctx, `SELECT payload->>'text' FROM outbound_message WHERE tenant_id=$1 AND request_id=$2`, tenant, id).Scan(&text)
+		err = j.db.QueryRowContext(ctx, `SELECT payload->>'text' FROM outbound_message WHERE tenant_id=$1 AND request_id=$2 ORDER BY (message_kind='result') DESC LIMIT 1`, tenant, id).Scan(&text)
 		if err == nil {
 			v.Reply = text.String
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return v, errors.New("reply query unavailable")
 		}
+	}
+	if err = j.db.QueryRowContext(ctx, `SELECT next_attempt_at,deferred_count FROM agent_run WHERE tenant_id=$1 AND request_id=$2`, tenant, id).Scan(&v.NextAttemptAt, &v.DeferredCount); err != nil {
+		return v, errors.New("recovery query unavailable")
 	}
 	return v, nil
 }
@@ -116,6 +121,11 @@ func memoryRunView(id string, r *memoryRun) RunView {
 	if !r.startedAt.IsZero() && !r.completedAt.IsZero() {
 		ms := max(int64(0), r.completedAt.Sub(r.startedAt).Milliseconds())
 		v.LatencyMS = &ms
+	}
+	v.DeferredCount = r.deferredCount
+	if r.status == "waiting" {
+		at := r.nextAttempt
+		v.NextAttemptAt = &at
 	}
 	return v
 }
@@ -164,9 +174,12 @@ func (j *MemoryJournal) ReadRun(_ context.Context, tenant, id string, includeRep
 	if includeReply {
 		v.Reply = r.result.Reply
 	}
-	for _, out := range j.outbound {
-		if out.item.TenantID == tenant && out.item.RequestID == id {
+	for _, outID := range []string{stableID("out_", id), stableID("wait_", id)} {
+		if out := j.outbound[outID]; out != nil && out.item.TenantID == tenant {
 			v.Delivery = map[string]any{"status": out.status, "attempts": out.item.AttemptCount}
+			if includeReply {
+				v.Reply = out.item.Text
+			}
 			break
 		}
 	}

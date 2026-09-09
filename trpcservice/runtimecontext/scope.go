@@ -35,6 +35,7 @@ func ParseStorageScope(value string) (tenantID string, appID string, err error) 
 
 // Scope is the tenant/application/channel boundary for one Agent turn.
 type Scope struct {
+	BindingVersion   int64 `json:"binding_version,omitempty"`
 	TenantID         string
 	AppID            string
 	RevisionID       string

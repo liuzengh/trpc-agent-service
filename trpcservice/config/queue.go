@@ -14,15 +14,16 @@ const (
 
 // QueueConfig configures the Agent task queue.
 type QueueConfig struct {
-	Backend      string
-	RedisURL     string
-	RedisPrefix  string
-	Stream       string
-	Group        string
-	Consumer     string
-	BlockTimeout time.Duration
-	ClaimMinIdle time.Duration
-	MaxLen       int64
+	WorkerConcurrency int
+	Backend           string
+	RedisURL          string
+	RedisPrefix       string
+	Stream            string
+	Group             string
+	Consumer          string
+	BlockTimeout      time.Duration
+	ClaimMinIdle      time.Duration
+	MaxLen            int64
 }
 
 func LoadQueueConfigFromEnv() (QueueConfig, error) {
@@ -31,15 +32,16 @@ func LoadQueueConfigFromEnv() (QueueConfig, error) {
 		backend = QueueBackendMemory
 	}
 	cfg := QueueConfig{
-		Backend:      backend,
-		RedisURL:     strings.TrimSpace(os.Getenv("REDIS_URL")),
-		RedisPrefix:  strings.TrimSpace(os.Getenv("REDIS_KEY_PREFIX")),
-		Stream:       strings.TrimSpace(os.Getenv("TRPC_AGENT_QUEUE_STREAM")),
-		Group:        strings.TrimSpace(os.Getenv("TRPC_AGENT_QUEUE_GROUP")),
-		Consumer:     strings.TrimSpace(os.Getenv("TRPC_AGENT_QUEUE_CONSUMER")),
-		BlockTimeout: time.Second,
-		ClaimMinIdle: 30 * time.Second,
-		MaxLen:       100000,
+		WorkerConcurrency: 4,
+		Backend:           backend,
+		RedisURL:          strings.TrimSpace(os.Getenv("REDIS_URL")),
+		RedisPrefix:       strings.TrimSpace(os.Getenv("REDIS_KEY_PREFIX")),
+		Stream:            strings.TrimSpace(os.Getenv("TRPC_AGENT_QUEUE_STREAM")),
+		Group:             strings.TrimSpace(os.Getenv("TRPC_AGENT_QUEUE_GROUP")),
+		Consumer:          strings.TrimSpace(os.Getenv("TRPC_AGENT_QUEUE_CONSUMER")),
+		BlockTimeout:      time.Second,
+		ClaimMinIdle:      30 * time.Second,
+		MaxLen:            100000,
 	}
 	if cfg.RedisPrefix == "" {
 		cfg.RedisPrefix = defaultRedisKeyPrefix
@@ -51,6 +53,12 @@ func LoadQueueConfigFromEnv() (QueueConfig, error) {
 		cfg.Group = "agent-workers"
 	}
 	var err error
+	if cfg.WorkerConcurrency, err = parsePositiveIntEnv("TRPC_AGENT_WORKER_CONCURRENCY", cfg.WorkerConcurrency); err != nil {
+		return QueueConfig{}, err
+	}
+	if cfg.WorkerConcurrency > 64 {
+		return QueueConfig{}, fmt.Errorf("TRPC_AGENT_WORKER_CONCURRENCY must not exceed 64")
+	}
 	if cfg.BlockTimeout, err = parsePositiveDurationEnv(
 		"TRPC_AGENT_QUEUE_BLOCK_TIMEOUT", cfg.BlockTimeout,
 	); err != nil {

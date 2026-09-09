@@ -535,6 +535,10 @@ func run() error {
 		return fmt.Errorf("build queue outbox relay: %w", err)
 	}
 	agentWorker, err := worker.New(agentQueue, inboundJournal, runtime, worker.Options{
+		Authorize: func(ctx context.Context, task workqueue.AgentTask) error {
+			return routeResolver.Revalidate(ctx, task.Scope)
+		},
+		Concurrency:       queueConfig.WorkerConcurrency,
 		Attachments:       attachmentService,
 		WorkerID:          "worker-" + nodeID,
 		MaxAttempts:       3,

@@ -755,22 +755,22 @@ export function ResourcePage({
                   <Form.Item
                     name="message_mode"
                     label="聊天消息处理策略"
-                    help="适用于 IM 通道。近期优先不会自动执行过期请求；完整补读可能让历史积压延迟新消息。"
+                    help="近期优先：及时接收新消息，历史缺口独立补读；消息不会仅因等待时间过长而丢弃。"
                   >
                     <Select
                       options={[
                         { value: "realtime", label: "近期优先（默认）" },
                         {
                           value: "reliable",
-                          label: "完整补读（明确需要历史处理时启用）",
+                          label: "按历史顺序接收（可能延迟近期消息）",
                         },
                       ]}
                     />
                   </Form.Item>
                   <Form.Item
                     name="message_age"
-                    label="近期消息有效期（秒）"
-                    help="30～120 秒；只约束尚未开始的聊天请求，不中断已经执行的操作。"
+                    label="近期接收窗口（秒）"
+                    help="30～120 秒；这是企业微信的优先接收窗口，不是消息过期时间。"
                   >
                     <InputNumber min={30} max={120} precision={0} />
                   </Form.Item>
@@ -962,6 +962,7 @@ export function RunsPage({
               { value: "", label: "全部状态" },
               ...[
                 "running",
+                "waiting",
                 "completed",
                 "expired",
                 "failed",
@@ -971,6 +972,7 @@ export function RunsPage({
                 value,
                 label: {
                   running: "执行中",
+                  waiting: "等待恢复",
                   completed: "已完成",
                   expired: "已过期 · 未执行",
                   failed: "失败",
@@ -1128,14 +1130,18 @@ export function RunsPage({
             />
             {detail.error_type && (
               <Alert
-                type={detail.status === "expired" ? "info" : "error"}
+                type={["expired", "waiting"].includes(detail.status) ? "info" : "error"}
                 title={
-                  detail.status === "expired"
+                  detail.status === "waiting"
+                    ? (detail.error_type === "session_order" ? "等待本会话前一条请求完成" : detail.error_type === "tenant_capacity" ? "等待租户并发名额" : "等待模型服务恢复")
+                    : detail.status === "expired"
                     ? "聊天消息已过期，未进入 Agent 执行"
                     : detail.error_type
                 }
                 description={
-                  detail.status === "expired"
+                  detail.status === "waiting"
+                    ? `请求已持久保存，无需重复发送。下次调度：${date(detail.next_attempt_at)}。`
+                    : detail.status === "expired"
                     ? "未调用模型或工具，也未补发旧回复。如仍需要处理，请发送一条新消息。"
                     : "执行失败不代表外部操作已回滚；未知结果请先核对。"
                 }

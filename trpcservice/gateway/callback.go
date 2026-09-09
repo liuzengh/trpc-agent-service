@@ -115,11 +115,6 @@ func (g *CallbackGateway) acceptVerifiedMessage(ctx context.Context, binding con
 			reason := ""
 			if message.OccurredAt.IsZero() || message.OccurredAt.Unix() <= 0 || message.OccurredAt.After(now.Add(30*time.Second)) {
 				reason = "invalid_message_time"
-			} else {
-				lifetime.ExpiresAt = message.OccurredAt.Add(policy.MaxAge())
-				if !now.Before(lifetime.ExpiresAt) {
-					reason = "message_expired"
-				}
 			}
 			if reason != "" {
 				store, ok := g.intake.journal.(DispositionStore)

@@ -11,8 +11,8 @@ import (
 const RealtimeMessages = "realtime"
 const ReliableMessages = "reliable"
 
-// MessagePolicy applies to unstarted chat requests, never execution recovery.
-// A reliable subscription deliberately opts into processing older messages.
+// MessagePolicy controls scheduling, not message retention. Realtime receives
+// recent messages first and backfills gaps independently; reliable scans in order.
 type MessagePolicy struct {
 	Mode          string `json:"mode,omitempty"`
 	MaxAgeSeconds int    `json:"max_age_seconds,omitempty"`
@@ -53,6 +53,7 @@ func ParseMessagePolicy(raw json.RawMessage) (MessagePolicy, error) {
 	}
 	return p.Effective()
 }
+// MaxAge is the recent-window size (the JSON name is retained for compatibility).
 func (p MessagePolicy) MaxAge() time.Duration { return time.Duration(p.MaxAgeSeconds) * time.Second }
 func RealtimeChannel(kind string) bool {
 	return kind == "telegram" || kind == "wecom_mcp" || kind == "wecom"

@@ -77,15 +77,15 @@ export function ChannelDiagnostics({
               showIcon
               title={
                 data.message_policy.mode === "realtime"
-                  ? `近期优先 · 有效期 ${data.message_policy.max_age_seconds} 秒`
+                  ? `近期优先 · 接收窗口 ${data.message_policy.max_age_seconds} 秒`
                   : "完整补读 · 离线历史可能延迟新消息"
               }
-              description="过期聊天不触发 Agent 或工具，不补发旧回复。已经开始执行的任务保留原有执行与恢复记录。"
+              description="新消息优先接收，历史缺口在独立后台补读；已接收请求会持久保存。模型暂时不可用时等待恢复，不因消息年龄直接丢弃。"
             />
           )}
           {!!data.gaps?.length && (
             <>
-              <h4>按近期策略跳过的历史区间</h4>
+              <h4>历史补读进度（旧版本跳过记录不会自动重放）</h4>
               <Table
                 size="small"
                 pagination={false}
@@ -101,6 +101,14 @@ export function ChannelDiagnostics({
                     render: (_, r: Dict) => date(r.recent_from),
                   },
                   {
+                    title: "补读状态",
+                    render: (_, r: Dict) => ({ pending: "补读中", completed: "已补读", blocked: `需处理：${r.last_error}`, skipped: "旧版跳过 · 未重放" }[String(r.status)] || r.status),
+                  },
+                  {
+                    title: "补读进度",
+                    render: (_, r: Dict) => date(r.cursor_at),
+                  },
+                  {
                     title: "记录时间",
                     render: (_, r: Dict) => date(r.recorded_at),
                   },
@@ -110,7 +118,7 @@ export function ChannelDiagnostics({
           )}
           {!!data.dispositions?.length && (
             <>
-              <h4>未执行的过期消息</h4>
+              <h4>历史忽略 / 无效消息记录</h4>
               <Table
                 size="small"
                 pagination={false}

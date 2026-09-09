@@ -14,6 +14,11 @@ import (
 )
 
 type Gap struct {
+	Status           string    `json:"status"`
+	Cursor           time.Time `json:"cursor_at"`
+	Version          int64     `json:"checkpoint_version"`
+	ConfigHash       string    `json:"-"`
+	LastError        string    `json:"last_error,omitempty"`
 	PreviousThrough  time.Time `json:"previous_through"`
 	RecentFrom       time.Time `json:"recent_from"`
 	ProcessedThrough time.Time `json:"processed_through"`
@@ -67,7 +72,7 @@ func (s *PostgresStore) AdvanceRecent(ctx context.Context, b controlplane.Channe
 		return err
 	}
 	if from.After(cp.Through) {
-		_, err = tx.ExecContext(ctx, `INSERT INTO channel_poll_gap(tenant_id,channel_binding_id,chat_hash,checkpoint_version,previous_through,recent_from,processed_through,reason,trace_id) VALUES($1,$2,$3,$4,$5,$6,$7,'realtime_window',$8)`, key.TenantID, key.BindingID, key.ChatHash, cp.Version+1, cp.Through, from, to, audit.TraceID(ctx))
+		_, err = tx.ExecContext(ctx, `INSERT INTO channel_poll_gap(tenant_id,channel_binding_id,chat_hash,checkpoint_version,previous_through,recent_from,processed_through,reason,trace_id,status,config_hash,cursor_at) VALUES($1,$2,$3,$4,$5,$6,$7,'realtime_window',$8,'pending',$9,$5)`, key.TenantID, key.BindingID, key.ChatHash, cp.Version+1, cp.Through, from, to, audit.TraceID(ctx), cp.ConfigHash)
 		if err != nil {
 			return errors.New("cannot persist realtime gap audit")
 		}
@@ -88,7 +93,7 @@ func (s *MemoryStore) AdvanceRecent(ctx context.Context, b controlplane.ChannelB
 		return ErrStateConflict
 	}
 	if from.After(current.Through) {
-		s.gaps = append(s.gaps, scopedGap{key, Gap{PreviousThrough: current.Through, RecentFrom: from, ProcessedThrough: to, RecordedAt: time.Now().UTC(), Reason: "realtime_window"}})
+		s.gaps = append(s.gaps, scopedGap{key, Gap{Status: "pending", Cursor: current.Through, Version: cp.Version + 1, ConfigHash: cp.ConfigHash, PreviousThrough: current.Through, RecentFrom: from, ProcessedThrough: to, RecordedAt: time.Now().UTC(), Reason: "realtime_window"}})
 	}
 	current.Through = to
 	current.Version++
@@ -123,7 +128,7 @@ func (s *PostgresStore) ListGaps(ctx context.Context, tenant, binding string, li
 	if limit < 1 || limit > 100 {
 		return nil, ErrStateConflict
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT previous_through,recent_from,processed_through,recorded_at,reason FROM channel_poll_gap WHERE tenant_id=$1 AND channel_binding_id=$2 ORDER BY recorded_at DESC LIMIT $3`, tenant, binding, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT previous_through,recent_from,processed_through,recorded_at,reason,status,COALESCE(cursor_at,previous_through),checkpoint_version,last_error FROM channel_poll_gap WHERE tenant_id=$1 AND channel_binding_id=$2 ORDER BY recorded_at DESC LIMIT $3`, tenant, binding, limit)
 	if err != nil {
 		return nil, errors.New("realtime gap audit unavailable")
 	}
@@ -131,7 +136,7 @@ func (s *PostgresStore) ListGaps(ctx context.Context, tenant, binding string, li
 	items := []Gap{}
 	for rows.Next() {
 		var g Gap
-		if err = rows.Scan(&g.PreviousThrough, &g.RecentFrom, &g.ProcessedThrough, &g.RecordedAt, &g.Reason); err != nil {
+		if err = rows.Scan(&g.PreviousThrough, &g.RecentFrom, &g.ProcessedThrough, &g.RecordedAt, &g.Reason, &g.Status, &g.Cursor, &g.Version, &g.LastError); err != nil {
 			return nil, err
 		}
 		items = append(items, g)

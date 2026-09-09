@@ -10,6 +10,10 @@ import (
 // AgentTask contains everything a Worker needs after an inbound transaction
 // commits. It contains trusted scope resolved by the Gateway.
 type AgentTask struct {
+	// Generation advances only when the journal commits a new scheduled delivery.
+	Generation        int64                          `json:"schedule_generation,omitempty"`
+	DeferredCount     int                            `json:"deferred_count,omitempty"`
+	Background        bool                           `json:"background,omitempty"`
 	Lifetime          runtimecontext.MessageLifetime `json:"message_lifetime,omitempty"`
 	ChatType          string                         `json:"chat_type,omitempty"`
 	Media             *runtimecontext.MediaReference `json:"media,omitempty"`

@@ -67,6 +67,7 @@ func (m *Model) GenerateContent(parent context.Context, request *model.Request) 
 	}
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(parent, m.options.Timeout)
+	ctx, availability := ObserveAvailability(ctx)
 	copyRequest := *request
 	output := m.options.MaxCompletionTokens
 	if request.MaxTokens != nil && *request.MaxTokens > 0 && *request.MaxTokens < output {
@@ -106,7 +107,11 @@ func (m *Model) GenerateContent(parent context.Context, request *model.Request) 
 			err = errors.New("provider returned no response stream")
 		}
 		// Sending may have succeeded remotely even when opening the stream fails.
-		settleErr := m.settle(parent, r, r.Prompt, r.Completion, r.Cost, true)
+		p, c, cost := r.Prompt, r.Completion, r.Cost
+		if availability.DefinitelyNotSent() {
+			p, c, cost = 0, 0, 0
+		}
+		settleErr := m.settle(parent, r, p, c, cost, !availability.DefinitelyNotSent())
 		m.finish(parent, started, err)
 		return nil, errors.Join(errors.New("model provider call failed"), settleErr)
 	}
@@ -146,11 +151,13 @@ func (m *Model) GenerateContent(parent context.Context, request *model.Request) 
 				}
 			}
 		}
-		if callErr != nil || !haveUsage {
+		if availability.DefinitelyNotSent() && !haveUsage {
+			p, c = 0, 0
+		} else if callErr != nil || !haveUsage {
 			p = max(p, r.Prompt)
 			c = max(c, r.Completion)
 		}
-		settleErr := m.settle(parent, r, p, c, m.cost(p, c), callErr != nil || !haveUsage)
+		settleErr := m.settle(parent, r, p, c, m.cost(p, c), (callErr != nil || !haveUsage) && !availability.DefinitelyNotSent())
 		m.finish(parent, started, errors.Join(callErr, settleErr))
 		if settleErr != nil || callErr != nil {
 			terminal := &model.Response{Done: true, Error: &model.ResponseError{Type: "model_accounting_error", Message: "model call or usage settlement failed"}}
