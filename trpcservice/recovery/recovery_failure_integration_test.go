@@ -245,7 +245,7 @@ func TestBackupIntegrityFailureMatrix(t *testing.T) {
 	})
 	t.Run("manifest_damaged", func(t *testing.T) {
 		damaged := append([]byte(nil), manifestRaw...)
-		damaged[len(damaged)/2] = 'x'
+		damaged[0] = 'x'
 		dir := rebuild(t, damaged, archiveRaw, true)
 		if _, err := VerifyBackup(ctx, VerifyConfig{BackupDir: dir}, runner); !errors.Is(err, ErrIntegrityMismatch) {
 			t.Fatalf("damaged manifest category: %v", categoryForTest(err))

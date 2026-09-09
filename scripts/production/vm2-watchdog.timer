@@ -1,0 +1,7 @@
+[Unit]
+Description=Docker bridge watchdog timer
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+[Install]
+WantedBy=timers.target

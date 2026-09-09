@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/capacity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
@@ -57,6 +58,25 @@ type Config struct {
 	LockGuard       time.Duration
 	RetryPolicy     RetryPolicy
 	Now             func() time.Time
+	// Budget is the optional durable sender budget (capacity.ScopeGuard
+	// satisfies the interface; scope "sender"). When wired, a send holds one
+	// sender-scope slot per tenant for the send duration; exhaustion skips
+	// the item without a Send call or attempt increment — the claim lock
+	// expires and the message is redelivered (bounded backpressure).
+	// Tenants without a sender budget row are not enforced (fail-open).
+	// Nil keeps historical behavior.
+	Budget BudgetGuard
+}
+
+// senderBudgetScope is the capacity scope key for outbound dispatch; it
+// mirrors capacity.ScopeSender without importing the capacity package.
+const senderBudgetScope = "sender"
+
+// BudgetGuard is the durable sender-budget seam implemented by
+// capacity.ScopeGuard. It exists so the dispatcher stays testable without a
+// database and so the capacity package can evolve independently.
+type BudgetGuard interface {
+	AcquireScope(ctx context.Context, tenantID, scope, ownerID string, ttl time.Duration) (func(), error)
 }
 
 func (c Config) withDefaults() (Config, error) {
@@ -130,8 +150,13 @@ type Stats struct {
 	MutationErrors    uint64
 	LockLost          uint64
 	ShutdownAbandoned uint64
-	LastOutcome       OutcomeClass
-	LastErrorCategory string
+	// SkippedBudgetExhausted counts items skipped before Send because the
+	// tenant's durable sender budget was exhausted (or the budget backend
+	// failed). The message stays claimed until its lock expires and is then
+	// redelivered, so no attempt counter moves.
+	SkippedBudgetExhausted uint64
+	LastOutcome            OutcomeClass
+	LastErrorCategory      string
 }
 
 type workItem struct {
@@ -273,6 +298,27 @@ func (d *Dispatcher) process(item workItem, ctx context.Context) {
 	if !d.sendAllowed(ctx, message) {
 		d.addStat(func(s *Stats) { s.ShutdownAbandoned++ })
 		return
+	}
+	// WS-8 durable sender budget: hold one sender-scope slot across the
+	// send. Exhaustion skips the item (no Send, no attempt increment); the
+	// claim lock expires and the message is redelivered — bounded
+	// backpressure without distorting retry accounting. A budget backend
+	// failure also skips the cycle and is recorded as a mutation error
+	// (fail closed: never send unaccounted).
+	if d.config.Budget != nil {
+		releaseBudget, budgetErr := d.config.Budget.AcquireScope(ctx, item.tenant.TenantID, senderBudgetScope, d.config.OwnerID, time.Until(message.LockedUntil.Add(d.config.LockGuard)))
+		if budgetErr != nil {
+			if errors.Is(budgetErr, capacity.ErrCapacityFull) {
+				d.addStat(func(s *Stats) { s.SkippedBudgetExhausted++ })
+				return
+			}
+			d.recordError(budgetErr, "sender budget acquire")
+			d.addStat(func(s *Stats) { s.SkippedBudgetExhausted++ })
+			return
+		}
+		if releaseBudget != nil {
+			defer releaseBudget()
+		}
 	}
 	deadline := message.LockedUntil.Add(-d.config.LockGuard)
 	sendCtx, cancel := context.WithDeadline(ctx, deadline)

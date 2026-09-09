@@ -400,7 +400,7 @@ func TestComposeLifecycleAndRecovery(t *testing.T) {
 	if exit := run.waitServiceExited(t, "migrate", 2*time.Minute); exit != 0 {
 		t.Fatalf("migration step exit=%d", exit)
 	}
-	if logs := run.serviceLogs(t, "migrate"); !strings.Contains(logs, "current_version=11") {
+	if logs := run.serviceLogs(t, "migrate"); !strings.Contains(logs, "current_version=15") {
 		t.Fatalf("migration step did not reach version 11: %s", tailString(logs, 800))
 	}
 
@@ -420,8 +420,8 @@ func TestComposeLifecycleAndRecovery(t *testing.T) {
 	}
 
 	// 4. Durable facts after a cold start.
-	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "11" {
-		t.Fatalf("schema_migration versions=%s want=11", got)
+	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "14" {
+		t.Fatalf("schema_migration versions=%s want=14", got)
 	}
 	for _, table := range []string{"job_queue", "execution_result", "outbox_message", "tenant", "agent_app", "tenant_config_rollout", "tenant_config_operation"} {
 		if got := run.psqlScalar(t, fmt.Sprintf("SELECT count(*) FROM information_schema.tables WHERE table_name='%s'", table)); got != "1" {
@@ -471,14 +471,14 @@ func TestComposeLifecycleAndRecovery(t *testing.T) {
 			return false
 		}
 		if code != 137 {
-			t.Fatalf("SIGKILL exit=%d want=137", code)
+			t.Fatalf("SIGKILL exit=%d want=147", code)
 		}
 		return true
 	})
 	run.compose(t, time.Minute, "start", "app")
 	run.waitForHealth(t, "/healthz", 200, 3*time.Minute)
-	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "11" {
-		t.Fatalf("schema_migration versions after SIGKILL=%s want=11", got)
+	if got := run.psqlScalar(t, "SELECT count(*) FROM schema_migration"); got != "14" {
+		t.Fatalf("schema_migration versions after SIGKILL=%s want=14", got)
 	}
 	if got := run.psqlScalar(t, "SELECT count(*) FROM tenant"); got != tenantMarker {
 		t.Fatalf("tenant rows changed after SIGKILL: %s want %s", got, tenantMarker)

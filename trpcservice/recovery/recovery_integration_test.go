@@ -69,8 +69,8 @@ func TestBackupRestoreDrill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: category=%v detail=%q", categoryForTest(err), err.Error())
 	}
-	if len(verified.TOCTables) != 24 {
-		t.Fatalf("TOC audit table count: got %d want 24", len(verified.TOCTables))
+	if len(verified.TOCTables) != 26 {
+		t.Fatalf("TOC audit table count: got %d want 26", len(verified.TOCTables))
 	}
 
 	// Backup hygiene: fresh 0700 directory, 0600 files, and a manifest that

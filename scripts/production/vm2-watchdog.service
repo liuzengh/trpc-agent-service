@@ -1,0 +1,5 @@
+[Unit]
+Description=Docker bridge watchdog
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/docker-bridge-watchdog.sh

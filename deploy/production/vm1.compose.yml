@@ -85,6 +85,8 @@ services:
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     secrets:
       - redis_password
+    ports:
+      - "192.168.1.6:6379:6379"
     volumes:
       - redisdata:/data
       - /opt/p2prod/redis.conf:/usr/local/etc/redis/redis.conf:ro
@@ -109,9 +111,8 @@ services:
     command:
       - |
         set -eu
-        PGHOST="$(cat /opt/p2prod/app-pg-host)"
-        export DATABASE_URL="postgres://postgres:$(cat /run/secrets/pg_postgres_password)@$${PGHOST}:5432/trpc_agent?sslmode=disable"
-        export DATABASE_RUNTIME_URL="postgres://trpc_runtime:$(cat /run/secrets/pg_runtime_password)@$${PGHOST}:5432/trpc_agent?sslmode=disable"
+        export DATABASE_URL="postgres://postgres:$(cat /run/secrets/pg_postgres_password)@vm1-pg:5432/trpc_agent?sslmode=disable"
+        export DATABASE_RUNTIME_URL="postgres://trpc_runtime:$(cat /run/secrets/pg_runtime_password)@vm1-pg:5432/trpc_agent?sslmode=disable"
         export RATE_LIMIT_REDIS_URL="redis://:$(cat /run/secrets/redis_password)@redis:6379/0"
         exec su-exec app /usr/local/bin/trpc-service
     secrets:

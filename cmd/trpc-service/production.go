@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/admission"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/capacity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/lark"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
@@ -513,7 +514,15 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 	if err != nil {
 		return nil, errors.New("coordination initialization failed")
 	}
-	jobQueue, err := queue.NewPostgresQueue(pool, queue.PostgresQueueConfig{})
+	// WS-8 durable capacity budgets: one shared guard drives the ingress,
+	// worker and sender accounting. Enforcement activates only for tenants
+	// with explicit capacity_budget rows; seeding none keeps the runtime
+	// behavior unchanged (fail-open everywhere).
+	capacityGuard, capacityGuardErr := capacity.NewScopeGuard(pool, lifecycleDuration("CAPACITY_BUDGET_TTL", 10*time.Minute))
+	if capacityGuardErr != nil {
+		return nil, errors.New("capacity budget guard initialization failed")
+	}
+	jobQueue, err := queue.NewPostgresQueue(pool, queue.PostgresQueueConfig{WorkerBudgetAccounting: true})
 	if err != nil {
 		return nil, errors.New("job queue initialization failed")
 	}
@@ -656,6 +665,7 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 		OwnerID: config.ownerID, Tenants: []tenant.TenantContext{baseTenantContext(config)},
 		ClaimBatchSize: dispatcherBatch, Concurrency: dispatcherConcurrency,
 		ClaimInterval: lifecycleDuration("DISPATCHER_CLAIM_INTERVAL", time.Second), ShutdownTimeout: lifecycleDuration("DISPATCHER_SHUTDOWN_TIMEOUT", 5*time.Second),
+		Budget: capacityGuard,
 	})
 	if err != nil {
 		return nil, errors.New("dispatcher initialization failed")
@@ -696,7 +706,7 @@ func assembleProductionWithDependencies(ctx context.Context, responder platformR
 		}
 		ingressResolveAgent = snapshotResolver.ResolveForIngress
 	}
-	ingress, err := gateway.NewIngress(gateway.IngressConfig{Claims: coordination, Gateway: asyncGateway, Resolver: resolver, Identity: identityResolver, Audit: metadataRegistry, ResolveAgent: ingressResolveAgent, Adapters: adapters, OwnerID: config.ownerID, RateLimiter: rateLimiter, Admission: admissionGate, Telemetry: capacityTelemetryAdapter{metrics: telemetryRuntime.Metrics()}})
+	ingress, err := gateway.NewIngress(gateway.IngressConfig{Claims: coordination, Gateway: asyncGateway, Resolver: resolver, Identity: identityResolver, Audit: metadataRegistry, ResolveAgent: ingressResolveAgent, Adapters: adapters, OwnerID: config.ownerID, RateLimiter: rateLimiter, Admission: admissionGate, DurableBudget: capacityGuard, Telemetry: capacityTelemetryAdapter{metrics: telemetryRuntime.Metrics()}})
 	if err != nil {
 		return nil, errors.New("webhook ingress initialization failed")
 	}

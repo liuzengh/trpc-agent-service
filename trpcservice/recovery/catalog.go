@@ -25,6 +25,7 @@ var tenantTables = []string{
 	"session_lease", "execution_result", "job_queue",
 	"channel_binding_audit", "vector_projection_task",
 	"vector_rebuild_run", "tenant_config_rollout", "tenant_config_operation",
+	"capacity_reservation", "capacity_budget",
 }
 
 // migrationCatalogTable is the migration directory table; present in the

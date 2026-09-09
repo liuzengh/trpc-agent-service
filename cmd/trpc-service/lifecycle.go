@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -516,7 +517,25 @@ func runService(ctx context.Context, signals <-chan os.Signal, stdout, stderr io
 	})
 }
 
+// failStartupService deliberately keeps the cause out of process logs
+// (secret hygiene). G_D_STARTUP_DEBUG=1 opts into a masked cause dump for
+// incident diagnosis; the mask strips credentials from connection strings.
+func debugStartupCause(phase string, cause error) {
+	if os.Getenv("G_D_STARTUP_DEBUG") != "1" || cause == nil {
+		return
+	}
+	masked := cause.Error()
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`://[^:@/\s]+:[^@/\s]+@`),
+		regexp.MustCompile(`(?i)(password|secret|token|api[-_]?key)[=:][^\s,]+`),
+	} {
+		masked = re.ReplaceAllString(masked, "$1=***")
+	}
+	fmt.Fprintf(os.Stderr, "startup failure phase=%s cause=%s\n", phase, masked)
+}
+
 func failStartupService(server processHTTPServer, _ net.Listener, serveDone <-chan error, runtime *productionRuntime, phase string, cause error) (int, error) {
+	debugStartupCause(phase, cause)
 	cleanupErr := error(nil)
 	if runtime != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), startupCleanupTimeout)

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/admission"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/capacity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/ratelimit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
@@ -79,26 +80,36 @@ type IngressConfig struct {
 	// Admission is the optional process-local bounded slot budget. Nil
 	// keeps historical behavior; production compositions always wire it.
 	Admission *admission.Gate
+	// DurableBudget is the optional cross-process durable admission budget
+	// (capacity.ScopeGuard, scope "ingress"). Unlike Admission it is shared
+	// by every app instance through PostgreSQL, so it bounds the aggregate
+	// concurrent admitted requests per tenant. Nil keeps historical
+	// behavior; a tenant without an ingress budget row is not enforced
+	// (fail-open). The reservation is held for the request duration and
+	// released on every return path; a lost release is healed by the
+	// reservation TTL.
+	DurableBudget *capacity.ScopeGuard
 	// Telemetry is the optional capacity observability surface. Nil
 	// disables capacity metrics; it never changes outcomes.
 	Telemetry IngressAdmissionTelemetry
 }
 
 type Ingress struct {
-	resolver     tenant.TenantResolver
-	identity     tenant.IdentityResolver
-	audit        storage.BindingAuditRepository
-	claims       storage.ClaimStore
-	gateway      *Gateway
-	resolveAgent func(context.Context, tenant.TenantContext) (agent.AgentSpec, error)
-	adapters     map[string]WebhookAdapter
-	ownerID      string
-	claimTTL     time.Duration
-	jobTimeout   time.Duration
-	now          func() time.Time
-	rateLimiter  *ratelimit.RateLimiter
-	admission    *admission.Gate
-	telemetry    IngressAdmissionTelemetry
+	resolver      tenant.TenantResolver
+	identity      tenant.IdentityResolver
+	audit         storage.BindingAuditRepository
+	claims        storage.ClaimStore
+	gateway       *Gateway
+	resolveAgent  func(context.Context, tenant.TenantContext) (agent.AgentSpec, error)
+	adapters      map[string]WebhookAdapter
+	ownerID       string
+	claimTTL      time.Duration
+	jobTimeout    time.Duration
+	now           func() time.Time
+	rateLimiter   *ratelimit.RateLimiter
+	admission     *admission.Gate
+	durableBudget *capacity.ScopeGuard
+	telemetry     IngressAdmissionTelemetry
 }
 
 func NewIngress(config IngressConfig) (*Ingress, error) {
@@ -127,7 +138,7 @@ func NewIngress(config IngressConfig) (*Ingress, error) {
 		}
 		adapters[channel] = adapter
 	}
-	return &Ingress{resolver: config.Resolver, identity: config.Identity, audit: config.Audit, claims: config.Claims, gateway: config.Gateway, resolveAgent: config.ResolveAgent, adapters: adapters, ownerID: config.OwnerID, claimTTL: config.ClaimTTL, jobTimeout: config.JobTimeout, now: config.Now, rateLimiter: config.RateLimiter, admission: config.Admission, telemetry: config.Telemetry}, nil
+	return &Ingress{resolver: config.Resolver, identity: config.Identity, audit: config.Audit, claims: config.Claims, gateway: config.Gateway, resolveAgent: config.ResolveAgent, adapters: adapters, ownerID: config.OwnerID, claimTTL: config.ClaimTTL, jobTimeout: config.JobTimeout, now: config.Now, rateLimiter: config.RateLimiter, admission: config.Admission, durableBudget: config.DurableBudget, telemetry: config.Telemetry}, nil
 }
 
 func (i *Ingress) Handle(ctx context.Context, channel, externalAppID string, request *http.Request, body []byte) WebhookResult {
@@ -222,6 +233,23 @@ func (i *Ingress) Handle(ctx context.Context, channel, externalAppID string, req
 		}
 		i.observeAdmission("allowed")
 		defer release()
+	}
+	// WS-8 durable admission budget: after the process-local gate and
+	// strictly before the dedup claim and durable enqueue. Exhaustion is
+	// the same bounded capacity rejection as the admission gate; a budget
+	// backend failure is fail-closed 503 (never an admission).
+	if i.durableBudget != nil {
+		releaseBudget, budgetErr := i.durableBudget.AcquireScope(ctx, tc.TenantID, capacity.ScopeIngress, i.ownerID, i.claimTTL)
+		if budgetErr != nil {
+			if errors.Is(budgetErr, capacity.ErrCapacityFull) {
+				i.observeAdmission("capacity_exhausted")
+				return capacityResult()
+			}
+			return failureResult(http.StatusServiceUnavailable)
+		}
+		if releaseBudget != nil {
+			defer releaseBudget()
+		}
 	}
 	agentSpec, err := i.resolveAgent(ctx, tc)
 	if err != nil {

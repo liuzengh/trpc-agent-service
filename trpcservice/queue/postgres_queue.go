@@ -27,6 +27,14 @@ type PostgresQueueConfig struct {
 	MaxJobAge              time.Duration
 	MaxVisibilityExtension time.Duration
 	PollInterval           time.Duration
+	// WorkerBudgetAccounting enables the WS-8 durable worker-budget
+	// accounting on the terminal queue paths: Ack and both Nack outcomes
+	// release the worker-scope capacity slot taken by the claim. The claim
+	// side accounts inside trpc_queue_claim_next (migration 000015). The
+	// accounting statements are no-ops for tenants without a budget row,
+	// so enabling it is safe before any budget is seeded. Default false
+	// keeps compositions that predate the capacity tables byte-identical.
+	WorkerBudgetAccounting bool
 }
 
 func (c PostgresQueueConfig) withDefaults() (PostgresQueueConfig, error) {
@@ -52,6 +60,7 @@ type PostgresQueue struct {
 	maxJobAge              time.Duration
 	maxVisibilityExtension time.Duration
 	pollInterval           time.Duration
+	workerBudgetAccounting bool
 
 	mu     sync.RWMutex
 	closed bool
@@ -72,7 +81,27 @@ func NewPostgresQueue(pool *pgxpool.Pool, config PostgresQueueConfig) (*Postgres
 		maxJobAge:              config.MaxJobAge,
 		maxVisibilityExtension: config.MaxVisibilityExtension,
 		pollInterval:           config.PollInterval,
+		workerBudgetAccounting: config.WorkerBudgetAccounting,
 	}, nil
+}
+
+// releaseWorkerBudgetSlot decrements the tenant's worker-scope budget
+// active_count by one. It runs inside the caller's transaction (tenant GUC
+// already set), is a no-op for tenants without a budget row and never fails
+// the terminal path: an accounting error is surfaced only through the
+// returned error for observability, while the queue outcome stands.
+func (q *PostgresQueue) releaseWorkerBudgetSlot(ctx context.Context, tx pgx.Tx, tenantID string) error {
+	if !q.workerBudgetAccounting {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE capacity_budget
+		SET active_count = GREATEST(active_count - 1, 0), updated_at = clock_timestamp()
+		WHERE tenant_id = $1 AND scope = 'worker' AND enabled`,
+		tenantID); err != nil {
+		return fmt.Errorf("queue: worker budget release: %w", err)
+	}
+	return nil
 }
 
 func (q *PostgresQueue) Enqueue(ctx context.Context, job AgentJob) (QueueReceipt, error) {
@@ -274,6 +303,9 @@ func (q *PostgresQueue) Ack(ctx context.Context, delivery Delivery) error {
 	if result.RowsAffected() != 1 {
 		return ErrDeliveryExpired
 	}
+	if err := q.releaseWorkerBudgetSlot(ctx, tx, delivery.Job.Tenant.TenantID); err != nil {
+		return err
+	}
 	return commitQueueTx(ctx, tx, "ack")
 }
 
@@ -323,6 +355,11 @@ func (q *PostgresQueue) Nack(ctx context.Context, delivery Delivery, options Nac
 	}
 	if result.RowsAffected() != 1 {
 		return ErrDeliveryExpired
+	}
+	// Both Nack outcomes release the worker slot: a requeued job re-acquires
+	// it on its next claim (no double counting), a discarded job is terminal.
+	if err := q.releaseWorkerBudgetSlot(ctx, tx, delivery.Job.Tenant.TenantID); err != nil {
+		return err
 	}
 	return commitQueueTx(ctx, tx, "nack")
 }
