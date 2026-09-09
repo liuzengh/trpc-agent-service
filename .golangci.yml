@@ -1,0 +1,29 @@
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - misspell
+    - gosec
+    - gocritic
+  settings:
+    errcheck:
+      # blank-identifier assignments are a deliberate discard in this repo
+      check-blank: false
+  exclusions:
+    generated: lax
+    rules:
+      # test files use weak/random primitives and fixture credentials on purpose
+      - path: _test\.go
+        linters:
+          - gosec
+    paths:
+      - data/secrets

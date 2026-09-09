@@ -1,0 +1,61 @@
+# Admin API: tenant/app/binding management, migrations, audit query.
+# Internal network only (design 5.4): ClusterIP, no Ingress; mTLS via
+# TRPC_ADMIN_TLS_* when your org issues client certs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: trpc-admin}
+  template:
+    metadata:
+      labels: {app: trpc-admin}
+    spec:
+      containers:
+        - name: admin
+          image: trpc-agent-service:v1 # pin a release tag; never :latest in production
+          args: ["admin"]
+          envFrom:
+            - configMapRef: {name: trpc-service-config}
+            - secretRef: {name: trpc-service-infra}
+          env:
+            - {name: TRPC_ADMIN_TOKEN, valueFrom: {secretKeyRef: {name: trpc-admin-token, key: token}}}
+            # kubelet readiness probes and Prometheus scrape the pod IP, which
+            # a loopback-only metrics bind would not serve.
+            - {name: TRPC_METRICS_ADDR, value: ":8082"}
+          volumeMounts:
+            # KMS bootstrap token -> TRPC_SECRETS_DIR; without this mount the
+            # resolver fails closed and the pod CrashLoops at startup.
+            - {name: kms-bootstrap, mountPath: /etc/trpc/secrets, readOnly: true}
+          ports:
+            - {containerPort: 8081, name: http}
+            # /metrics lives here, not on the admin port: that mux carries
+            # nothing but token-gated /admin/* routes.
+            - {containerPort: 8082, name: metrics}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          readinessProbe:
+            httpGet: {path: /metrics, port: metrics}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: {cpu: "250m", memory: "256Mi"}
+            limits: {cpu: "1", memory: "2Gi"}
+      volumes:
+        - name: kms-bootstrap
+          secret:
+            secretName: trpc-kms-bootstrap
+            items: [{key: token, path: kms-bootstrap-token}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trpc-admin
+spec:
+  type: ClusterIP # never exposed externally
+  selector: {app: trpc-admin}
+  ports:
+    - {port: 8081, targetPort: http}

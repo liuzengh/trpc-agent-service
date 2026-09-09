@@ -15,6 +15,11 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   exit 0
 fi
 
-nohup "$ROOT/bin/trpc-service" >"$ROOT/data/trpc-service.log" 2>&1 &
+# Security defaults are closed everywhere, including local dev: the mock
+# channel stays off, and the Admin API requires TRPC_ADMIN_TOKEN. Local
+# opt-ins are explicit, e.g.:
+#   TRPC_ADMIN_TOKEN=dev-insecure TRPC_MOCK_CHANNEL=true ./start.sh
+
+nohup "$ROOT/bin/trpc-service" serve >"$ROOT/data/trpc-service.log" 2>&1 &
 echo $! >"$PID_FILE"
 echo "started: pid=$(cat "$PID_FILE")"

@@ -1,0 +1,72 @@
+# Agent Worker: consumes stream:inbound and runs agents. Stateless (sessions
+# live in Redis/PG); HPA scales on CPU as a backstop — the real signal is the
+# stream backlog (stream_length), which needs prometheus-adapter to feed
+# custom metrics to the HPA; see design 5.2.5.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: trpc-worker}
+  template:
+    metadata:
+      labels: {app: trpc-worker}
+    spec:
+      terminationGracePeriodSeconds: 130 # drain: model timeout x retry + slack
+      containers:
+        - name: worker
+          image: trpc-agent-service:v1 # pin a release tag; never :latest in production
+          args: ["worker"]
+          envFrom:
+            - configMapRef: {name: trpc-service-config}
+            - secretRef: {name: trpc-service-infra}
+          volumeMounts:
+            # KMS bootstrap token -> TRPC_SECRETS_DIR; without this mount the
+            # resolver fails closed and the pod CrashLoops at startup.
+            - {name: kms-bootstrap, mountPath: /etc/trpc/secrets, readOnly: true}
+          env:
+            - {name: TRPC_METRICS_ADDR, value: ":8082"}
+          ports:
+            - {containerPort: 8082, name: metrics}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          readinessProbe:
+            httpGet: {path: /metrics, port: metrics}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /metrics, port: metrics}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests: {cpu: "500m", memory: "512Mi"}
+            limits: {cpu: "2", memory: "4Gi"}
+      volumes:
+        - name: kms-bootstrap
+          secret:
+            secretName: trpc-kms-bootstrap
+            items: [{key: token, path: kms-bootstrap-token}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: trpc-worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: trpc-worker
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    # CPU is the backstop only: worker load is LLM-wait IO. Prefer a custom
+    # metric on the stream backlog via prometheus-adapter, e.g.:
+    #   - type: Pods
+    #     pods: {metric: {name: stream_length}, target: {type: AverageValue, averageValue: "10000"}}
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}

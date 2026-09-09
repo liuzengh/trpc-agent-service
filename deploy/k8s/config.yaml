@@ -1,0 +1,45 @@
+# Shared environment for all trpc-service roles. Secrets stay as references
+# (TRPC_*_REF) — plaintext lives in the KMS/secret store, never here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trpc-service-config
+data:
+  TRPC_LOG_LEVEL: "info"
+  TRPC_LOG_FORMAT: "json"
+  TRPC_SESSION_BACKEND: "redis"
+  TRPC_GATEWAY_RATE_QPS: "50"
+  TRPC_GATEWAY_RATE_BURST: "100"
+  TRPC_MODEL_TIMEOUT: "60s"
+  TRPC_SUMMARY_EVENT_THRESHOLD: "20"
+  TRPC_ARCHIVE_RETENTION: "720h"
+  TRPC_SECRET_RESOLVER: "kms" # file for dev, kms in production
+  # The KMS resolver's bearer token bootstraps from a file under this dir
+  # (buildSecretResolver refuses to start without it), so every role
+  # Deployment mounts the trpc-kms-bootstrap Secret here.
+  TRPC_SECRETS_DIR: "/etc/trpc/secrets"
+  # The mock callback is an unauthenticated message injector: off in
+  # production (the binary default is already off; stated here so a future
+  # default flip cannot silently re-arm it).
+  TRPC_MOCK_CHANNEL: "false"
+  # The admin listener defaults to loopback (design 5.4: internal only); the
+  # cluster-internal Service needs it on all interfaces.
+  TRPC_ADMIN_ADDR: ":8081"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector.trpc-infra.svc:4317" # Jaeger/Tempo via collector
+---
+# Infrastructure addresses and secret REFS. In production these come from a
+# Secret object (stringData below is the shape, values are placeholders).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: trpc-service-infra
+type: Opaque
+stringData:
+  TRPC_PG_DSN: "postgres://trpc:CHANGE_ME@postgres.trpc-infra.svc:5432/trpc"
+  TRPC_REDIS_ADDR: "redis.trpc-infra.svc:6379"
+  TRPC_MODEL_APIKEY_REF: "deepseek-apikey" # a REFERENCE, not the key
+  TRPC_S3_ENDPOINT: "minio.trpc-infra.svc:9000"
+  TRPC_S3_ACCESSKEY_REF: "s3-accesskey"
+  TRPC_S3_SECRETKEY_REF: "s3-secretkey"
+  TRPC_KMS_ENDPOINT: "http://kms.trpc-infra.svc:8080"
+  TRPC_KMS_TOKEN_REF: "kms-bootstrap-token" # file name under TRPC_SECRETS_DIR, not a secret value

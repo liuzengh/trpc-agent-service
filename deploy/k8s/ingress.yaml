@@ -1,0 +1,64 @@
+# Public entry point for the IM platforms' webhooks.
+#
+# Why an Ingress and not a LoadBalancer Service: WeCom and WeChat KF only
+# accept an HTTPS callback URL served with a trusted certificate, so TLS has to
+# terminate somewhere the hostname and the cert are both known. The gateway
+# Service stays ClusterIP and this is the only externally reachable hop.
+#
+# Apply order (see README.md): config.yaml and the two Secrets first, then
+# db-init, then gateway/worker/admin, then this — the Ingress backend does not
+# have to exist yet, but a webhook configured against a dead backend is a
+# silent black hole at the IM side.
+#
+# No controller tuning is needed: the gateway answers every callback
+# synchronously and immediately (the work happens off Redis Stream), so the
+# default read timeout sits comfortably above WeCom's 5s response deadline. Do
+# not add retry annotations — a retried POST is a duplicate delivery, which the
+# dedup layer absorbs but the latency budget does not.
+#
+# Placeholders to replace before applying:
+#   spec.rules[].host       your public callback hostname
+#   spec.tls[].secretName   the Secret holding that hostname's certificate
+#   spec.ingressClassName   your ingress controller (nginx shown)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: trpc-gateway
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - trpc-agent.example.com
+      secretName: trpc-tls
+  rules:
+    - host: trpc-agent.example.com
+      http:
+        paths:
+          # Multi-tenant dispatch: /callback/{channel}/{binding_id}, mounted by
+          # web.BindingDispatcher. channel_binding.webhook_path is filled with
+          # this shape, so it is the path that has to be reachable.
+          - path: /callback
+            pathType: Prefix
+            backend:
+              service:
+                name: trpc-gateway
+                port: {number: 80}
+          # Legacy single-binding defaults, still mounted per adapter
+          # (wecom.CallbackPath / wxkf.CallbackPath). Drop these two entries
+          # once every binding uses /callback/{channel}/{binding_id}.
+          - path: /wecom/callback
+            pathType: Prefix
+            backend:
+              service:
+                name: trpc-gateway
+                port: {number: 80}
+          - path: /wxkf/callback
+            pathType: Prefix
+            backend:
+              service:
+                name: trpc-gateway
+                port: {number: 80}
+          # Deliberately absent: /mock/callback. The mock channel is an
+          # unauthenticated message injector (off unless TRPC_MOCK_CHANNEL=true);
+          # giving it a public path would hand out a way to forge inbound
+          # messages for any binding.

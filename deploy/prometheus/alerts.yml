@@ -1,0 +1,121 @@
+# Alert rules for trpc-agent-service (design 5.2.4). Loaded via rule_files in
+# prometheus.yml; route them to your receiver of choice in Alertmanager.
+groups:
+  - name: trpc-agent-service
+    rules:
+      # Queue backlog: >50k entries means consumers are hopelessly behind and
+      # the MAXLEN truncation boundary is near (the no-loss guarantee ends
+      # there — see design 5.1.4).
+      - alert: StreamBacklogHigh
+        expr: stream_length{stream=~"stream:inbound|stream:outbound"} > 50000
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "stream {{ $labels.stream }} backlog {{ $value }} entries"
+
+      # A pending entry idle for >5min means its consumer crashed or is stuck;
+      # the reaper should have claimed it long ago.
+      - alert: StreamPendingStuck
+        expr: stream_oldest_pending_seconds > 300
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "oldest pending in {{ $labels.stream }}/{{ $labels.group }} is {{ $value }}s old"
+
+      # senders-ws backlog: the wecomws leader holds both the connections and
+      # this consumer group — a growing pending count means leaderless (no
+      # replica holds the lease) or a wedged WS send.
+      - alert: SendersWsBacklog
+        expr: stream_pending{group="senders-ws"} > 50
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "senders-ws backlog {{ $value }}: wecomws leaderless or wedged"
+
+      # Anything in the dead-letter stream needs human intervention.
+      - alert: DeadLetterPresent
+        expr: stream_length{stream="stream:deadletter"} > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value }} dead-lettered messages await intervention"
+
+      # Worker processing p95 beyond the 15s end-to-end budget (design §1).
+      - alert: WorkerProcessSlow
+        expr: histogram_quantile(0.95, rate(worker_process_duration_milliseconds_bucket[5m])) > 15000
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "worker process p95 {{ $value }}ms exceeds the 15s budget"
+
+      # End-to-end p95 (callback → reply landed on IM) beyond the 15s goal.
+      - alert: EndToEndSlow
+        expr: histogram_quantile(0.95, rate(im_end_to_end_duration_milliseconds_bucket[5m])) > 15000
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "end-to-end p95 {{ $value }}ms exceeds the 15s goal"
+
+      # Processing error rate above 1%.
+      - alert: ProcessErrorRateHigh
+        expr: |
+          sum(rate(worker_process_error_total[5m]))
+            / clamp_min(sum(rate(im_inbound_total[5m])), 1) > 0.01
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "process error rate {{ $value }} > 1%"
+
+      # IM delivery success rate below 99%. The denominator counts
+      # deliverable outcomes only: skipped_other_group marks messages
+      # another consumer group owns (they are counted again by that group),
+      # and skipped_duplicate marks dedup hits; including either makes the
+      # ratio dip below 99% whenever the wecomws share of traffic exceeds
+      # ~1%.
+      - alert: IMDeliveryDegraded
+        expr: |
+          sum(rate(im_outbound_total{result="ok"}[5m]))
+            / clamp_min(sum(rate(im_outbound_total{result=~"ok|error"}[5m])), 1) < 0.99
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "IM delivery success {{ $value }} < 99%"
+
+      # Send pacing is leaving messages pending for reaper takeover: an IM
+      # platform limit is biting.
+      - alert: SendRateLimited
+        expr: rate(send_rate_limited_total[10m]) > 0
+        for: 10m
+        labels: {severity: info}
+        annotations:
+          summary: "outbound sends left pending by pacing on {{ $labels.channel }}"
+
+      # Gateway admission control rejects traffic (rate limit or backpressure).
+      - alert: GatewayRejecting
+        expr: rate(gateway_rejected_total[5m]) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "gateway rejecting callbacks: reason={{ $labels.reason }}"
+
+      # Model call p95 beyond 20s per tenant/model: at that point the model,
+      # not the platform, is eating the 15s end-to-end budget on every slow
+      # request (the worker timeout is the only backstop left).
+      - alert: ModelCallSlow
+        expr: histogram_quantile(0.95, sum by (le, tenant_id, model) (rate(llm_call_duration_milliseconds_bucket[5m]))) > 20000
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "model {{ $labels.model }} p95 {{ $value }}ms for tenant {{ $labels.tenant_id }}"
+
+      # Session backend error rate above 1% per backend: history reads/writes
+      # are failing, which surfaces as lost context or failed runs. Grouped by
+      # backend so a low-traffic backend is not diluted by the global rate.
+      - alert: SessionStoreErrorRateHigh
+        expr: |
+          sum by (backend) (rate(session_store_duration_milliseconds_count{result="error"}[5m]))
+            / clamp_min(sum by (backend) (rate(session_store_duration_milliseconds_count[5m])), 1) > 0.01
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "session backend {{ $labels.backend }} error rate {{ $value }} > 1%"

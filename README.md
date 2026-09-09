@@ -139,13 +139,37 @@
 
 ## 快速开始
 
+安全默认全部关闭（Admin API 必须带 token 启动、mock 通道默认关），本地演示需要
+显式声明。**第一次使用请跟着 [`docs/quickstart.md`](docs/quickstart.md) 走**——10 分钟跑通第一条消息、
+看到回复、建一个自己的租户。之后要做的事（审批、观测、接真实 IM、写自己的工具与通道、
+按角色部署、配置与排查）都在 [`docs/guide.md`](docs/guide.md)。
+
 ```bash
 git clone https://github.com/liuzengh/trpc-agent-service.git
 cd trpc-agent-service
 
+# 1. 启动依赖（pgvector/postgres、redis、minio、jaeger、prometheus，共 5 个容器）
+docker compose up -d
+
+# 2. 放模型密钥：文件名就是配置里的引用名（见 docs/guide.md 附录 A）
+mkdir -p data/secrets && echo -n 'sk-你的key' > data/secrets/deepseek-apikey
+
+# 3. 构建并启动。Admin API 无 token 拒绝启动；mock 通道是无鉴权注入器，仅本地
+#    演示时显式开启；metrics 默认 8082，被别的程序占了就换一个；session 落
+#    postgres 才能用 SQL 查对话（默认 redis，PG 的会话表会是空的）。
 ./build.sh
-./start.sh
+TRPC_ADMIN_TOKEN=dev-insecure TRPC_MOCK_CHANNEL=true \
+TRPC_METRICS_ADDR=127.0.0.1:8083 TRPC_SESSION_BACKEND=postgres ./start.sh
+
+# 4. 发一条消息。回调立即返回 accepted，回复走异步链路，约 20s 后按
+#    docs/quickstart.md 第 2 章的 SQL 查询取正文。
+curl -X POST 127.0.0.1:8080/mock/callback -H 'Content-Type: application/json' \
+  -d '{"msg_id":"demo-001","user_id":"u-demo","text":"用一句话说明什么是幂等"}'
 ```
+
+生产部署（k8s）：注入真实 `TRPC_ADMIN_TOKEN`（deploy/k8s/admin.yaml 经
+Secret 引用）、保持 `TRPC_MOCK_CHANNEL=false`，部署步骤见 `deploy/k8s/README.md`
+（含数据库 schema 初始化 Job）。
 
 停止服务：
 

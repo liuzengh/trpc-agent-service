@@ -1,17 +1,22 @@
 .idea
 .vscode
+.qoder
 .DS_Store
 *.log
 *.swp
 
 bin/
 dist/
+/trpc-service
 coverage.out
 coverage.html
 *.test
 *.exe
 
 vendor/
+node_modules/
+cmd/testweb
+trpcservice/channels/testweb
 
 data/*
 !data/README.md

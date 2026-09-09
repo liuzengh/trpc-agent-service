@@ -1,0 +1,104 @@
+# Minimal runnable dev environment: PG + Redis + MinIO.
+# The trpc-service binary itself runs locally via `go run` / `./start.sh`
+# and is deliberately not in compose (easier debugging).
+#
+#   docker compose up -d      # start all dependencies
+#   docker compose down       # stop (data persists in named volumes)
+#   docker compose down -v    # stop and wipe data (init.sql reruns on next start)
+#
+# Channel enablement happens on the service process env (unset = disabled):
+#   TRPC_WECOM_CORP_ID=...            # wecom webhook channel
+#   TRPC_WXKF_CORP_ID=... TRPC_WXKF_KF_ACCOUNT=...  # wechat kf channel
+#   # WeCom smart-bot WebSocket channel; bots live in channel_binding.config:
+#   TRPC_WECOMWS_ADDR=wss://openws.work.weixin.qq.com
+#   # TRPC_WECOMWS_PING_INTERVAL=30s TRPC_WECOMWS_LEADER_TTL=15s
+#   # TRPC_WECOMWS_RESYNC_INTERVAL=15s TRPC_WECOMWS_SEGMENT_BYTES=2048
+# Prometheus (below) scrapes the service on the host, so /metrics must be
+# reachable from the compose network: run the service with TRPC_METRICS_ADDR=:8082.
+
+services:
+  postgres:
+    # Official pgvector image = postgres:16 + the vector extension
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: trpc
+      POSTGRES_PASSWORD: trpc-dev-only # local dev only; production goes through KMS
+      POSTGRES_DB: trpc
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Genesis scripts: executed only on first startup of an empty volume,
+      # in alphabetical order (init.sql schema first, then seed.sql demo data)
+      - ./deploy/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./deploy/db/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trpc -d trpc"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    # AOF everysec: persistence backstop for Streams, dedup keys and locks
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      # Host port 6379 is often taken by other local services; expose 6380 instead
+      - "6380:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    # Artifact file storage (S3-compatible)
+    image: minio/minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: trpc
+      MINIO_ROOT_PASSWORD: trpc-dev-only # local dev only
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  jaeger:
+    # Trace backend for local dev: receives OTLP gRPC on 4317, UI on 16686.
+    # Point the service at it with OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317
+    # (gRPC exporter wants host:port, no scheme)
+    image: jaegertracing/jaeger:2.5.0
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "16686:16686" # UI
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:16686/api/services >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  prometheus:
+    # Metrics backend for local dev: scrapes the service's /metrics, UI on 9090.
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    extra_hosts:
+      # The service runs on the host (go run / start.sh), not in compose.
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "9090:9090"
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

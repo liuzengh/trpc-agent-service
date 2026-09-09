@@ -1,0 +1,185 @@
+# CI gate: the integration tests run against real services and a run with
+# skips > 0 or coverage below baseline fails. Skips are visible failures
+# here, not green shrugs — the platform's core paths (PG session/memory,
+# stream redelivery, locks, migration, S3, admin) must execute.
+#
+# Gate inventory: gofmt, go vet, golangci-lint, go mod tidy cleanliness,
+# the full suite under -race, zero skips, total coverage floor, and (on PRs)
+# diff coverage of the changed lines.
+#
+# The vendored wxbizmsgcrypt module (Tencent's official callback crypto
+# library) is out of scope for every gate: it is a separate Go module, so
+# vet/lint/test never cross into it, and the gofmt gate excludes it
+# explicitly. Patching it would diverge from upstream.
+name: test
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16 # same image as docker-compose (vector ext)
+        env:
+          POSTGRES_USER: trpc
+          POSTGRES_PASSWORD: trpc-dev-only
+          POSTGRES_DB: trpc
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trpc -d trpc"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TRPC_TEST_PG_DSN: postgres://trpc:trpc-dev-only@localhost:5432/trpc?sslmode=disable
+      TRPC_TEST_REDIS_ADDR: localhost:6379
+      TRPC_TEST_S3_ENDPOINT: localhost:9000
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the diff-coverage gate diffs against origin/<base_ref>
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: "Gate: gofmt"
+        run: |
+          # wxbizmsgcrypt/ is a vendored module and out of scope (see header).
+          unformatted=$(gofmt -l . | grep -v '^wxbizmsgcrypt/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "::error::files not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.2
+          # goinstall compiles golangci-lint with the workflow's own Go
+          # toolchain: the prebuilt binaries lag the repo's go directive and
+          # then refuse to typecheck it (export data version mismatch).
+          install-mode: goinstall
+
+      - name: "Gate: go mod tidy"
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "::error::go.mod/go.sum are not tidy - run 'go mod tidy'"
+            exit 1
+          fi
+
+      - name: Start MinIO
+        # The minio/minio image has no default start command and GitHub
+        # service containers cannot specify one, so MinIO runs as an explicit
+        # docker step instead of a job service. Readiness is probed from the
+        # runner (the image carries neither mc nor curl).
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=trpc \
+            -e MINIO_ROOT_PASSWORD=trpc-dev-only \
+            minio/minio server /data
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs minio
+          echo "::error::MinIO did not become healthy within 60s"
+          exit 1
+
+      - name: Init DB schema
+        run: |
+          psql "$TRPC_TEST_PG_DSN" -v ON_ERROR_STOP=1 -f deploy/db/init.sql
+          psql "$TRPC_TEST_PG_DSN" -v ON_ERROR_STOP=1 -f deploy/db/seed.sql
+
+      - name: Apply incremental migrations
+        # init.sql is the frozen 000001 baseline and stamps schema_migrations at
+        # version 1; everything after it lives in deploy/db/migrations. Without
+        # this step a new migration would be applied in dev and production while
+        # CI kept testing against the baseline — the suite would go green on a
+        # schema no environment actually runs. Guarded on the directory having
+        # any .up.sql so an empty migrations/ is not an error.
+        run: |
+          if ls deploy/db/migrations/*.up.sql >/dev/null 2>&1; then
+            go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1
+            "$(go env GOPATH)/bin/migrate" -path deploy/db/migrations -database "$TRPC_TEST_PG_DSN" up
+          else
+            echo "no incremental migrations yet; the init.sql baseline is the whole schema"
+          fi
+
+      - name: Test (integration deps live, race detector on)
+        run: |
+          set -o pipefail
+          go test ./... -count=1 -race -v -coverprofile=coverage.out 2>&1 | tee test.log
+          if grep -qE '^FAIL' test.log; then
+            echo "::error::test failure"
+            exit 1
+          fi
+
+      - name: "Gate: zero skips"
+        run: |
+          skips=$(grep -c '^--- SKIP' test.log || true)
+          if [ "$skips" != "0" ]; then
+            grep '^--- SKIP' test.log
+            echo "::error::$skips integration test(s) skipped - the gate is zero"
+            exit 1
+          fi
+
+      - name: "Gate: coverage baseline"
+        # 只升不降 (ratchet): the floor only ever moves up. Measured with the
+        # service containers above live and zero skips, the suite sits at
+        # ~87.5%, so this gate is green today — the floor is headroom, not a
+        # target still being chased.
+        #
+        # Do not read a number off a locally produced coverage.out: without PG,
+        # Redis and MinIO reachable, testenv skips the integration tests and the
+        # same command reports ~55%. That profile also trips the zero-skip gate
+        # above, so it is never a valid measurement of this floor.
+        run: |
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "total coverage: ${total}%"
+          if ! awk -v t="$total" 'BEGIN { exit !(t >= 85) }'; then
+            echo "::error::coverage ${total}% below baseline 85%"
+            exit 1
+          fi
+
+      - name: "Gate: diff coverage >= 85% (PR only)"
+        # push-to-main has no base ref to diff against, so the gate is PR-only.
+        if: github.event_name == 'pull_request'
+        run: |
+          go install github.com/boumenot/gocover-cobertura@v1.4.0
+          "$(go env GOPATH)/bin/gocover-cobertura" < coverage.out > coverage.xml
+          python3 -m pip install --user 'diff-cover==9.7.2'
+          diff-cover coverage.xml \
+            --compare-branch="origin/${{ github.base_ref }}" \
+            --fail-under=85
+
+      - name: Coverage report
+        run: go tool cover -func=coverage.out | tail -1

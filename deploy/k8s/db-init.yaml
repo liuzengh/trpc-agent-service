@@ -1,0 +1,45 @@
+# Database schema initialization (first deployment on an empty database).
+# The SQL itself lives in deploy/db/init.sql (same genesis script the compose
+# stack runs); mount it as a ConfigMap:
+#
+#   kubectl create configmap trpc-db-init --from-file=init.sql=deploy/db/init.sql
+#
+# The Job is idempotent: it skips when the schema is already present, so a
+# rerun or a deleted-and-recreated Job never re-executes DDL against a
+# populated database.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trpc-db-init
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels: {app: trpc-db-init}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: psql
+          image: postgres:16-alpine
+          # The DSN comes from the same Secret the roles use, so the Job never
+          # needs a second copy of the credentials.
+          envFrom:
+            - secretRef: {name: trpc-service-infra}
+          command: ["/bin/sh", "-ecx"]
+          args:
+            - |
+              until pg_isready -d "$TRPC_PG_DSN" -t 3; do sleep 2; done
+              # Guard on a well-known table instead of replaying DDL blindly.
+              if psql "$TRPC_PG_DSN" -tAc "SELECT 1 FROM pg_tables WHERE tablename = 'tenant'" | grep -q 1; then
+                echo "schema already present, skipping init.sql"
+              else
+                psql "$TRPC_PG_DSN" -v ON_ERROR_STOP=1 -f /sql/init.sql
+              fi
+          volumeMounts:
+            - {name: sql, mountPath: /sql, readOnly: true}
+          resources:
+            requests: {cpu: "50m", memory: "32Mi"}
+            limits: {cpu: "200m", memory: "128Mi"}
+      volumes:
+        - name: sql
+          configMap: {name: trpc-db-init}
