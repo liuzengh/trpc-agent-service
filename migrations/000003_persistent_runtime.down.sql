@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS runtime_knowledge_documents;
+DROP TABLE IF EXISTS runtime_artifacts;
+DROP TABLE IF EXISTS runtime_memories;
+DROP TABLE IF EXISTS runtime_user_states;
+DROP TABLE IF EXISTS runtime_app_states;
+DROP TABLE IF EXISTS runtime_session_summaries;
+DROP TABLE IF EXISTS runtime_session_track_events;
+DROP TABLE IF EXISTS runtime_session_events;
+DROP TABLE IF EXISTS runtime_session_states;

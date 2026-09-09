@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: trpc-agent
+resources:
+  - namespace.yaml
+  - service-account.yaml
+  - bootstrap-config.yaml
+  - service.yaml
+  - deployment.yaml
+  - pdb.yaml
+  - hpa.yaml
+  - network-policy.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/part-of: trpc-agent-platform
+    includeSelectors: false
+images:
+  - name: trpc-agent-service
+    newName: trpc-agent-service
+    newTag: replace-me

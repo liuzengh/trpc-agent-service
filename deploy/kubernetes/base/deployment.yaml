@@ -1,0 +1,279 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-gateway
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: gateway
+    spec:
+      serviceAccountName: trpc-agent-service
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: trpc-agent-service
+              app.kubernetes.io/component: gateway
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: trpc-agent-service
+              app.kubernetes.io/component: gateway
+      containers:
+        - name: gateway
+          image: trpc-agent-service
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/trpc-agent/config.yaml", "--listen", "0.0.0.0:8080", "--role", "gateway"]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: TRPC_AGENT_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: TRPC_AGENT_SHUTDOWN_TIMEOUT
+              value: 100s
+            - name: TRPC_AGENT_GATEWAY_RATE_LIMIT
+              value: "100"
+            - name: TRPC_AGENT_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-secrets
+                  key: postgres-dsn
+            - name: TRPC_AGENT_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-secrets
+                  key: redis-url
+            - name: DEEPSEEK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-secrets
+                  key: deepseek-api-key
+            - name: TRPC_AGENT_ADMIN_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-secrets
+                  key: admin-tokens
+            - name: TRPC_AGENT_VAULT_ENDPOINT
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: vault-endpoint, optional: true}
+            - name: TRPC_AGENT_VAULT_TOKEN
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: vault-token, optional: true}
+            - name: TRPC_AGENT_KMS_ENDPOINT
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: kms-endpoint, optional: true}
+            - name: TRPC_AGENT_KMS_TOKEN
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: kms-token, optional: true}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4317
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: grpc
+            - name: TRPC_AGENT_TRACE_SAMPLE_RATIO
+              value: "0.1"
+            - name: TMPDIR
+              value: /tmp
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: bootstrap
+              mountPath: /etc/trpc-agent
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: bootstrap
+          configMap:
+            name: trpc-agent-bootstrap
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-worker
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: worker
+    spec:
+      serviceAccountName: trpc-agent-service
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: trpc-agent-service
+              app.kubernetes.io/component: worker
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: trpc-agent-service
+              app.kubernetes.io/component: worker
+      containers:
+        - name: worker
+          image: trpc-agent-service
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/trpc-agent/config.yaml", "--role", "worker"]
+          env:
+            - name: TRPC_AGENT_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: TRPC_AGENT_WORKER_CONCURRENCY
+              value: "8"
+            - name: TRPC_AGENT_SHUTDOWN_TIMEOUT
+              value: 100s
+            - name: TRPC_AGENT_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-secrets
+                  key: postgres-dsn
+            - name: TRPC_AGENT_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-secrets
+                  key: redis-url
+            - name: DEEPSEEK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-secrets
+                  key: deepseek-api-key
+            - name: TRPC_AGENT_VAULT_ENDPOINT
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: vault-endpoint, optional: true}
+            - name: TRPC_AGENT_VAULT_TOKEN
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: vault-token, optional: true}
+            - name: TRPC_AGENT_KMS_ENDPOINT
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: kms-endpoint, optional: true}
+            - name: TRPC_AGENT_KMS_TOKEN
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-secrets, key: kms-token, optional: true}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4317
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: grpc
+            - name: TRPC_AGENT_TRACE_SAMPLE_RATIO
+              value: "0.1"
+            - name: TMPDIR
+              value: /tmp
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: bootstrap
+              mountPath: /etc/trpc-agent
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: bootstrap
+          configMap:
+            name: trpc-agent-bootstrap
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi

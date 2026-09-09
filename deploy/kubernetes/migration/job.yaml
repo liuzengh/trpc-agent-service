@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trpc-agent-migrate
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-migrate
+        app.kubernetes.io/part-of: trpc-agent-platform
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: migrate
+          image: trpc-agent-service
+          imagePullPolicy: IfNotPresent
+          args: ["--migrate-only"]
+          env:
+            - name: TRPC_AGENT_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-secrets
+                  key: postgres-dsn
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

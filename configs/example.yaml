@@ -1,0 +1,153 @@
+schema_version: 1
+tenants:
+  - tenant_id: demo
+    name: Demo Tenant
+    enabled: true
+    config_version: 1
+    audit:
+      enabled: true
+      # Regulated tenants can set true: Inbox completion then waits for the
+      # idempotent audit append and retries if the sink is unavailable.
+      fail_closed: false
+      retention_days: 30
+      store_content: false
+      redact_fields:
+        - authorization
+        - api_key
+    runtime:
+      # Shared across every Worker node. A new published version changes
+      # admission for new runs without interrupting active requests.
+      max_concurrent_runs: 8
+    apps:
+      - app_id: assistant
+        name: Demo Assistant
+        enabled: true
+        config:
+          instruction: You are a helpful assistant for the demo tenant.
+        # Omit workflow (or set type: llm) for one LLMAgent. A composed
+        # application can publish, for example:
+        # workflow:
+        #   type: chain
+        #   nodes:
+        #     - {id: research, instruction: Gather the relevant facts.}
+        #     - {id: answer, instruction: Produce the final concise answer.}
+        # Other validated types are parallel (requires aggregator), cycle
+        # (requires max_iterations 1..32), and graph (entry/finish/edges).
+        model:
+          provider: deepseek
+          name: deepseek-v4-flash
+          base_url: https://api.deepseek.com
+          api_key:
+            provider: env
+            key: DEEPSEEK_API_KEY
+          temperature: 0
+          max_tokens: 2048
+          pricing:
+            # 示例值；上线前必须按供应商合同替换并更新版本。
+            version: example-price-v1
+            input_micros_per_million: 1000000
+            output_micros_per_million: 2000000
+          # 仅当所选模型真实支持图片输入时启用。
+          multimodal: false
+        tools:
+          allow:
+            - calculator
+          deny:
+            - shell
+          require_approval: []
+          request_token_budget: 10000
+          monthly_cost_budget_cents: 10000
+        # MCP/业务工具默认不启用，避免示例环境启动时访问外部服务。
+        # 启用后还必须把暴露名加入 tools.allow；完整示例见 docs/mcp-tools.md。
+        # mcp_servers:
+        #   - server_id: crm
+        #     endpoint: https://mcp.example.com/mcp
+        #     credential: {provider: env, key: CRM_MCP_TOKEN}
+        #     allowed_tools: [lookup_customer]
+        #     idempotent: true
+        #     timeout_seconds: 10
+        #     enabled: true
+        # business_tools:
+        #   - name: create_ticket
+        #     description: Create a support ticket through the approved service.
+        #     endpoint: https://tools.example.com/v1/tickets
+        #     credential: {provider: env, key: TICKET_API_TOKEN}
+        #     timeout_seconds: 10
+        #     enabled: true
+        # Knowledge/RAG 默认关闭。启用时还需把 knowledge_search 加入
+        # tools.allow，并配置 embedding SecretRef；完整示例见 docs/knowledge.md。
+        knowledge:
+          enabled: false
+        channels:
+          - binding_id: demo-http
+            type: http
+            provider_account_id: local-development
+            enabled: true
+          - binding_id: demo-wecom
+            type: wecom
+            provider_account_id: replace-with-wecom-corp-id
+            provider_app_id: "1000002"
+            # 留空表示兼容现有绑定、允许全部；配置 allowed_chats 后直聊默认拒绝，
+            # 除非发送者同时出现在 allowed_users。
+            allowed_users: []
+            allowed_chats: []
+            webhook_url: https://example.invalid/channels/wecom/demo-wecom
+            token:
+              provider: env
+              key: WECOM_CALLBACK_TOKEN
+            secret:
+              provider: env
+              key: WECOM_APP_SECRET
+            encryption_key:
+              provider: env
+              key: WECOM_ENCODING_AES_KEY
+            enabled: false
+          # 飞书 Adapter 与 Sender 已接入；此处默认 disabled，填入真实
+          # App ID 并通过 Admin API 发布新版本即可启用，无需重启。
+          - binding_id: demo-feishu
+            type: feishu
+            provider_account_id: replace-with-feishu-app-id
+            allowed_users: []
+            allowed_chats: []
+            token:
+              provider: env
+              key: FEISHU_VERIFICATION_TOKEN
+            secret:
+              provider: env
+              key: FEISHU_APP_SECRET
+            encryption_key:
+              provider: env
+              key: FEISHU_ENCRYPT_KEY
+            # text（默认）或 card（基础交互卡片）。
+            reply_format: text
+            enabled: false
+        storage:
+          session:
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent
+            namespace: demo-assistant
+            # During a controlled storage migration, publish a new config version
+            # with migration_target on both session and summary. The credential
+            # SecretRef resolves to a complete target DSN; never put it inline.
+            # migration_target:
+            #   type: postgres
+            #   endpoint: postgres://target-postgres:5432/trpc_agent
+            #   credential: {provider: env, key: TRPC_AGENT_STORAGE_TARGET_DSN}
+          memory:
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent
+          summary:
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent
+            namespace: demo-assistant
+          artifact:
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent
+            # PostgreSQL -> S3 可使用 migration_target 安全双写/backfill；
+            # endpoint、bucket(namespace) 与 credential 都来自发布配置。
+          knowledge:
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent
+          audit:
+            type: postgres
+            endpoint: postgres://postgres:5432/trpc_agent

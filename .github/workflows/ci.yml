@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - run: go mod download
+      - run: ./check.sh
+      - run: ./scripts/kubernetes_validate.sh
+      - run: ./demo.sh
+      - run: ./scripts/dual_im_contract_acceptance.sh
+      - run: ./scripts/coverage_acceptance.sh
+      - run: ./scripts/kubernetes_acceptance.sh --validate
+      - run: docker build -t trpc-agent-service:ci .
+      - run: ./scripts/postgres_migrations_test.sh
+      - run: ./scripts/redis_integration_test.sh

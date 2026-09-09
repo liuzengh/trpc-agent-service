@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-model-nginx
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      location /v1/chat/completions {
+        default_type text/event-stream;
+        add_header Cache-Control no-cache;
+        return 200 'data: {"id":"kubernetes-demo","object":"chat.completion.chunk","created":1,"model":"demo-model","choices":[{"index":0,"delta":{"role":"assistant","content":"OK"},"finish_reason":null}]}\n\ndata: {"id":"kubernetes-demo","object":"chat.completion.chunk","created":1,"model":"demo-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+      }
+      location /healthz { return 200 'ok'; }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-model
+spec:
+  selector: {app.kubernetes.io/name: demo-model}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-model
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: demo-model}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: demo-model}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: nginx
+          image: nginxinc/nginx-unprivileged:1.27-alpine
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 3}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 200m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/nginx/conf.d, readOnly: true}
+            - {name: cache, mountPath: /var/cache/nginx}
+            - {name: run, mountPath: /var/run}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: config, configMap: {name: demo-model-nginx}}
+        - {name: cache, emptyDir: {}}
+        - {name: run, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}

@@ -1,0 +1,223 @@
+x-agent-environment: &agent-environment
+  TRPC_AGENT_POSTGRES_DSN: postgres://trpc_agent:${POSTGRES_PASSWORD:-local-postgres-password}@postgres:5432/trpc_agent?sslmode=disable
+  TRPC_AGENT_REDIS_URL: redis://redis:6379/0
+  TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP: ${TRPC_AGENT_GATEWAY_TOKEN_DEMO_HTTP:-local-secret}
+  TRPC_AGENT_GATEWAY_RATE_LIMIT: ${TRPC_AGENT_GATEWAY_RATE_LIMIT:-100}
+  TRPC_AGENT_ADMIN_TOKENS: ${TRPC_AGENT_ADMIN_TOKENS:-}
+  TRPC_AGENT_VAULT_ENDPOINT: ${TRPC_AGENT_VAULT_ENDPOINT:-}
+  TRPC_AGENT_VAULT_TOKEN: ${TRPC_AGENT_VAULT_TOKEN:-}
+  TRPC_AGENT_KMS_ENDPOINT: ${TRPC_AGENT_KMS_ENDPOINT:-}
+  TRPC_AGENT_KMS_TOKEN: ${TRPC_AGENT_KMS_TOKEN:-}
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
+  WECOM_CALLBACK_TOKEN: ${WECOM_CALLBACK_TOKEN:-}
+  WECOM_APP_SECRET: ${WECOM_APP_SECRET:-}
+  WECOM_ENCODING_AES_KEY: ${WECOM_ENCODING_AES_KEY:-}
+  FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
+  FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+  FEISHU_ENCRYPT_KEY: ${FEISHU_ENCRYPT_KEY:-}
+  EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+  QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+  S3_CREDENTIAL_JSON: ${S3_CREDENTIAL_JSON:-}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+  TRPC_AGENT_TRACE_SAMPLE_RATIO: ${TRPC_AGENT_TRACE_SAMPLE_RATIO:-0.1}
+
+x-agent-dependencies: &agent-dependencies
+  migrate:
+    condition: service_completed_successfully
+  redis:
+    condition: service_healthy
+  otel-collector:
+    condition: service_started
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: trpc_agent
+      POSTGRES_USER: trpc_agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-postgres-password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trpc_agent -d trpc_agent"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - redis-data:/data
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.153.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./deploy/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      tempo:
+        condition: service_started
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.10.7
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - "127.0.0.1:3200:3200"
+    volumes:
+      - ./deploy/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+      - --enable-feature=exemplar-storage
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus-alerts.yml:/etc/prometheus/prometheus-alerts.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.1.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - tempo
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    command: ["--migrate-only"]
+    environment:
+      TRPC_AGENT_POSTGRES_DSN: postgres://trpc_agent:${POSTGRES_PASSWORD:-local-postgres-password}@postgres:5432/trpc_agent?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  service:
+    build: .
+    command: ["--config", "/etc/trpc-agent/config.yaml", "--listen", "0.0.0.0:8080", "--role", "all"]
+    environment: *agent-environment
+    depends_on: *agent-dependencies
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${TRPC_CONFIG_FILE:-./configs/example.yaml}:/etc/trpc-agent/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Multi-node acceptance topology. It is opt-in so the legacy `service` all-mode
+  # remains unchanged. All three processes share the same PostgreSQL/Redis
+  # services and named volumes; no host affinity or sticky session is used.
+  gateway:
+    profiles: ["multinode"]
+    build: .
+    command: ["--config", "/etc/trpc-agent/config.yaml", "--listen", "0.0.0.0:8080", "--role", "gateway"]
+    environment:
+      <<: *agent-environment
+      TRPC_AGENT_NODE_ID: gateway-1
+    depends_on: *agent-dependencies
+    ports:
+      - "127.0.0.1:${TRPC_AGENT_MULTINODE_PORT:-18080}:8080"
+    volumes:
+      - ${TRPC_CONFIG_FILE:-./configs/example.yaml}:/etc/trpc-agent/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  worker-a:
+    profiles: ["multinode"]
+    build: .
+    command: ["--config", "/etc/trpc-agent/config.yaml", "--role", "worker"]
+    environment:
+      <<: *agent-environment
+      TRPC_AGENT_NODE_ID: worker-a
+    depends_on: *agent-dependencies
+    volumes:
+      - ${TRPC_CONFIG_FILE:-./configs/example.yaml}:/etc/trpc-agent/config.yaml:ro
+    restart: unless-stopped
+
+  worker-b:
+    profiles: ["multinode"]
+    build: .
+    command: ["--config", "/etc/trpc-agent/config.yaml", "--role", "worker"]
+    environment:
+      <<: *agent-environment
+      TRPC_AGENT_NODE_ID: worker-b
+    depends_on: *agent-dependencies
+    volumes:
+      - ${TRPC_CONFIG_FILE:-./configs/example.yaml}:/etc/trpc-agent/config.yaml:ro
+    restart: unless-stopped
+
+  integration-test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: build
+    entrypoint: ["go", "test"]
+    command:
+      - "-p=1"
+      - "./trpcservice/cluster"
+      - "./trpcservice/audit"
+      - "./cmd/trpc-service"
+      - "./trpcservice/channels/wecom"
+      - "./trpcservice/channels/feishu"
+      - "./trpcservice/gateway/openclaw"
+      - "./trpcservice/idempotency"
+      - "./trpcservice/delivery"
+      - "./trpcservice/worker"
+      - "./trpcservice/sessioncoord"
+      - "./trpcservice/runtime"
+      - "./trpcservice/tenant"
+      - "./trpcservice/repository"
+      - "./trpcservice/storagemigration"
+    environment:
+      TRPC_AGENT_POSTGRES_TEST_DSN: postgres://trpc_agent:${POSTGRES_PASSWORD:-local-postgres-password}@postgres:5432/trpc_agent?sslmode=disable
+      TRPC_AGENT_REDIS_TEST_URL: redis://redis:6379/0
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+  tempo-data:

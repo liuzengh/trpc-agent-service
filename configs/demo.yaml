@@ -1,0 +1,40 @@
+schema_version: 1
+tenants:
+  - tenant_id: demo
+    name: Offline Demo Tenant
+    enabled: true
+    config_version: 1
+    audit:
+      enabled: true
+      retention_days: 7
+      store_content: false
+      redact_fields: [authorization, api_key]
+    runtime:
+      max_concurrent_runs: 2
+    apps:
+      - app_id: assistant
+        name: Offline Demo Assistant
+        enabled: true
+        config:
+          instruction: Answer the synthetic demo request.
+        model:
+          provider: mock
+          name: offline-mock
+        tools:
+          allow: [calculator]
+          deny: []
+          require_approval: []
+          request_token_budget: 1000
+        channels:
+          - binding_id: demo-http
+            type: http
+            provider_account_id: offline-demo
+            allowed_users: [demo-user]
+            enabled: true
+        storage:
+          session: {type: inmemory}
+          memory: {type: inmemory}
+          summary: {type: inmemory}
+          artifact: {type: inmemory}
+          knowledge: {type: inmemory}
+          audit: {type: inmemory}

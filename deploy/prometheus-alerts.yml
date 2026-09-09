@@ -1,0 +1,63 @@
+groups:
+  - name: trpc-agent-service
+    rules:
+      - alert: AgentHighErrorRate
+        expr: |
+          sum(rate(agent_requests_total{status=~"failed|error"}[5m]))
+          /
+          clamp_min(sum(rate(agent_requests_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent operation error rate exceeds 5%
+          description: Inspect operation/status metrics and correlated Tempo traces; alert labels contain no request or message data.
+
+      - alert: AgentDLQNotEmpty
+        expr: sum(agent_queue_depth{status="dlq"}) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Agent durable dead-letter queue is not empty
+          description: Use the tenant-scoped recovery API; do not include payloads in alert notifications.
+
+      - alert: AgentQueueBacklogGrowing
+        expr: |
+          sum by (queue) (agent_queue_depth{status=~"pending|processing|claimed|retry|sending"}) > 100
+          and
+          delta((sum by (queue) (agent_queue_depth{status=~"pending|processing|claimed|retry|sending"}))[15m:]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent durable queue backlog is high and growing
+          description: Scale Workers or investigate downstream latency using aggregate queue labels only.
+
+      - alert: AgentNoLiveWorker
+        expr: max(agent_worker_live) < 1 or absent(agent_worker_live)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: No live Agent Worker is registered
+          description: Check Worker readiness, heartbeat, Redis, and PostgreSQL without attaching credentials or payloads.
+
+      - alert: AgentPostgreSQLUnavailable
+        expr: max(agent_storage_health{domain="platform",backend="postgres",operation="ping"}) < 1 or absent(agent_storage_health{domain="platform",backend="postgres",operation="ping"})
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Agent platform PostgreSQL health check is failing
+          description: Check the database service and connection pool; never place DSNs or passwords in alert annotations.
+
+      - alert: AgentModelUsageMissing
+        expr: sum(rate(agent_model_usage_missing_total[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Model responses are missing token usage
+          description: Cost remains conservatively reserved; inspect the provider integration without attaching prompts, responses, or credentials.

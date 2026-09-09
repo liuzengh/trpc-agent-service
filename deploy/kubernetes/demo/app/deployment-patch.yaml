@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-gateway
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: GATEWAY_TOKEN
+              valueFrom: {secretKeyRef: {name: trpc-agent-secrets, key: gateway-token}}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://demo-otel-collector.trpc-agent.svc.cluster.local:4317
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          env:
+            - name: GATEWAY_TOKEN
+              valueFrom: {secretKeyRef: {name: trpc-agent-secrets, key: gateway-token}}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://demo-otel-collector.trpc-agent.svc.cluster.local:4317

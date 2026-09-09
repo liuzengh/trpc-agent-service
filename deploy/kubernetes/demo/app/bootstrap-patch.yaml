@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trpc-agent-bootstrap
+data:
+  config.yaml: |
+    schema_version: 1
+    tenants:
+      - tenant_id: demo
+        name: Kubernetes Demo Tenant
+        enabled: true
+        config_version: 1
+        audit: {enabled: true, retention_days: 7, store_content: false}
+        runtime: {max_concurrent_runs: 8}
+        apps:
+          - app_id: assistant
+            name: Kubernetes Demo Assistant
+            enabled: true
+            config: {instruction: Reply briefly.}
+            model:
+              provider: openai-compatible
+              name: demo-model
+              base_url: http://demo-model.trpc-agent.svc.cluster.local:8080/v1
+              api_key: {provider: env, key: DEEPSEEK_API_KEY}
+              temperature: 0
+              max_tokens: 64
+              pricing:
+                version: demo-price-v1
+                input_micros_per_million: 1000000
+                output_micros_per_million: 2000000
+            tools:
+              allow: [calculator]
+              deny: [shell]
+              require_approval: []
+              request_token_budget: 1000
+              monthly_cost_budget_cents: 100
+            knowledge: {enabled: false}
+            channels:
+              - binding_id: demo-http
+                type: http
+                provider_account_id: kubernetes-demo
+                token: {provider: env, key: GATEWAY_TOKEN}
+                enabled: true
+            storage:
+              session: {type: postgres}
+              memory: {type: postgres}
+              summary: {type: postgres}
+              artifact: {type: postgres}
+              knowledge: {type: postgres}
+              audit: {type: postgres}

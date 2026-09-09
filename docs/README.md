@@ -1,8 +1,24 @@
 # 文档目录
 
-在此放置架构设计、时序图、数据模型和运维方案。建议至少包含：
-
-- 系统架构图：Gateway、Worker、Channel Adapter、Storage Adapter、Plugin / Guardrail、Telemetry
-- 核心时序图：IM 消息 → Runner 执行 → Tool 调用 → Session / Memory 写入 → IM 回复
-- 数据模型与多后端适配说明
-- 风险清单
+- [总体架构设计](architecture.md)：系统拓扑、核心时序、租户隔离、多后端和验收目标。
+- [需求验收矩阵](acceptance-matrix.md)：逐项关联题目要求、实现代码和验证证据。
+- [双 IM 可复现契约验收](../scripts/dual_im_contract_acceptance.sh)：无真实凭据的加密回调到平台回复闭环。
+- [生产风险清单](risks.md)：18 项生产风险、缓解措施和演练方法。
+- [数据模型](data-model.md)：PostgreSQL 表、配置版本和迁移约束。
+- [数据库 Schema 迁移](database-migrations.md)：逐个 SQL 的职责、执行模型、升级规则和验证证据。
+- [多节点消息运行时](message-runtime.md)：Inbox、fencing、提交顺序和 Outbox。
+- [消息故障恢复](message-recovery.md)：DLQ 查询/重放、uncertain 人工裁决、并发保护和审计。
+- [租户 Runner 并发配额](tenant-concurrency.md)：Redis 跨节点准入、动态配额、续租与崩溃恢复。
+- [Runtime Bundle](runtime.md)：tRPC-Agent-Go Runner 的构建、版本和生命周期。
+- [治理、审计与可观测性](governance.md)：权限、预算、审批、脱敏和 tracing。
+- [生产可观测性](observability.md)：OTLP、Tempo、Collector、Prometheus/Grafana、告警、指标基数和审计保留。
+- [容量测试与估算](capacity.md)：有界负载探针、完整执行容量模型与准入指标。
+- [故障演练手册](fault-drills.md)：单 Pod、共享后端、模型、Sender 与 Collector 故障场景。
+- [生产验收](production-acceptance.md)：离线 Demo、Compose 多节点、Kubernetes Demo、真实 IM 与发布硬门禁。
+- [生产验收报告模板](production-acceptance-template.md) / [可观测性验收模板](observability-acceptance-template.md)：只记录脱敏证据，不保存凭据或正文。
+- [企业微信 Adapter](wecom.md)：回调协议、身份映射、媒体和主动发送。
+- [飞书 Adapter](feishu.md)：回调协议、身份映射、媒体和交互卡片。
+- [IM 媒体与卡片](media.md)：安全下载、文档提取、多模态输入和 Outbox 策略。
+- [Storage Router 与迁移](storage-migrations.md)：checkpoint、checksum、双写、cutover 和外部后端。
+- [PostgreSQL + Redis 部署](deployment.md)：Compose 启动、验证、密钥和生产拓扑边界。
+- [Kubernetes 部署](../deploy/kubernetes/README.md)：Kustomize、Secret 合约、migration 与滚动发布。

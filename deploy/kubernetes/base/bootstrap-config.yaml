@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trpc-agent-bootstrap
+data:
+  config.yaml: |
+    schema_version: 1
+    tenants:
+      - tenant_id: demo
+        name: Demo Tenant
+        enabled: true
+        config_version: 1
+        audit:
+          enabled: true
+          retention_days: 30
+          store_content: false
+          redact_fields: [authorization, api_key]
+        apps:
+          - app_id: assistant
+            name: Demo Assistant
+            enabled: true
+            config:
+              instruction: You are a helpful assistant for the demo tenant.
+            model:
+              provider: deepseek
+              name: deepseek-chat
+              base_url: https://api.deepseek.com
+              api_key: {provider: env, key: DEEPSEEK_API_KEY}
+              temperature: 0
+              max_tokens: 2048
+              pricing:
+                # 示例值；生产环境按供应商合同更新价格和版本。
+                version: example-price-v1
+                input_micros_per_million: 1000000
+                output_micros_per_million: 2000000
+            tools:
+              allow: [calculator]
+              deny: [shell]
+              require_approval: []
+              request_token_budget: 10000
+              monthly_cost_budget_cents: 10000
+            knowledge: {enabled: false}
+            channels:
+              - binding_id: demo-http
+                type: http
+                provider_account_id: kubernetes
+                enabled: false
+            storage:
+              session: {type: postgres, endpoint: "postgres://shared/trpc_agent", namespace: demo-assistant}
+              memory: {type: postgres, endpoint: "postgres://shared/trpc_agent"}
+              summary: {type: postgres, endpoint: "postgres://shared/trpc_agent", namespace: demo-assistant}
+              artifact: {type: postgres, endpoint: "postgres://shared/trpc_agent"}
+              knowledge: {type: postgres, endpoint: "postgres://shared/trpc_agent"}
+              audit: {type: postgres, endpoint: "postgres://shared/trpc_agent"}

@@ -1,6 +1,9 @@
 .idea
 .vscode
 .DS_Store
+.env
+.env.*
+!.env.example
 *.log
 *.swp
 
@@ -15,3 +18,5 @@ vendor/
 
 data/*
 !data/README.md
+
+configs/local.yaml

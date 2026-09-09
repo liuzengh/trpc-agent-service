@@ -1,0 +1,14 @@
+DROP TABLE IF EXISTS storage_migration_items;
+DROP INDEX IF EXISTS idx_migration_jobs_claim;
+DROP INDEX IF EXISTS idx_migration_jobs_config_domain;
+ALTER TABLE migration_jobs DROP COLUMN IF EXISTS completed_at;
+ALTER TABLE migration_jobs DROP COLUMN IF EXISTS started_at;
+ALTER TABLE migration_jobs DROP COLUMN IF EXISTS created_by;
+ALTER TABLE migration_jobs DROP COLUMN IF EXISTS last_error_type;
+ALTER TABLE migration_jobs DROP COLUMN IF EXISTS retry_at;
+ALTER TABLE migration_jobs DROP COLUMN IF EXISTS claim_token;
+ALTER TABLE migration_jobs DROP COLUMN IF EXISTS attempts;
+ALTER TABLE migration_jobs DROP COLUMN IF EXISTS copied_rows;
+ALTER TABLE migration_jobs DROP COLUMN IF EXISTS source_rows;
+ALTER TABLE migration_jobs DROP COLUMN IF EXISTS source_route_hash;
+ALTER TABLE migration_jobs DROP COLUMN IF EXISTS config_version;

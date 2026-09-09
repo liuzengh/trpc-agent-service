@@ -1,0 +1,50 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "targets": [{"expr": "sum by (tenant_id, operation, status) (rate(agent_requests_total[5m]))", "legendFormat": "{{tenant_id}} {{operation}} {{status}}"}],
+      "title": "Request rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ms"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, tenant_id, operation) (rate(agent_operation_duration_milliseconds_bucket[5m])))", "legendFormat": "{{tenant_id}} {{operation}}"}],
+      "title": "Operation p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "targets": [{"expr": "sum by (tenant_id, queue, status) (agent_queue_depth)", "legendFormat": "{{tenant_id}} {{queue}} {{status}}"}],
+      "title": "Inbox / Outbox / DLQ depth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "targets": [
+        {"expr": "sum by (tenant_id) (rate(agent_tokens_total[5m]))", "legendFormat": "tokens {{tenant_id}}"},
+        {"expr": "sum by (tenant_id) (rate(agent_cost_micros_total[5m]))", "legendFormat": "cost {{tenant_id}}"}
+      ],
+      "title": "Tenant tokens and cost",
+      "type": "timeseries"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["trpc-agent", "multi-tenant"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "tRPC Agent Service",
+  "uid": "trpc-agent-service",
+  "version": 1
+}
