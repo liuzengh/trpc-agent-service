@@ -153,6 +153,7 @@ docker compose --profile observability up -d
 - 队列持续错误：检查依赖、所有权和退避，不清队列强行恢复。
 - unknown/attempting：先核对供应商或工具业务事实，不自动重发，也不直接手改成成功。
 - MCP 接收卡住：用 Admin 的 channel-rejections/checkpoints 查询和带版本 recover 接口；不能清空 seen 记录跳过历史缺口。
+- 企业微信消息 MCP 停机后可能仍在补读历史：对比检查点 `through_at` 与当前时间，不能只看绑定为 active。当前默认每 10 秒处理一个约 1 分钟的历史窗口，长时间停机会产生明显追赶延迟。若业务允许跳过旧消息，必须明确取得跳过时段的授权，先禁用对应绑定并等在途读取结束，再以当前绑定/检查点版本调用 recover（`action=resume`、明确 `from`、`acknowledge_gap=true`），核对恢复审计后重新启用；不得静默跳到当前时间。群消息还必须满足该绑定的 `mention_prefix`，应在 IM 中选择并 @ 对应机器人。
 
 `./clean.sh` 默认预览；`--apply` 仅归档已知构建产物，运行 PID 存在时拒绝。私有快照和临时个人工具不属于交付仓库，数据卷也不能仅因停止或显示 reclaimable 就删除。
 
