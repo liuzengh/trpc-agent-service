@@ -1,0 +1,101 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: trpc
+      POSTGRES_PASSWORD: trpc
+      POSTGRES_DB: trpc_agent
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trpc -d trpc_agent"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  control-migrate:
+    build: .
+    entrypoint: ["control-migrate"]
+    environment:
+      TRPC_CONTROL_PLANE_POSTGRES_DSN: postgres://trpc:trpc@postgres:5432/trpc_agent?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+  worker:
+    build: .
+    environment:
+      TRPC_SERVICE_ROLE: worker
+      TRPC_SERVICE_ADDR: :8081
+      TRPC_WORKER_TOKEN: stage7-worker-token
+      TRPC_EXECUTION_MANIFEST_KEYS: '{"current":"stage7-current-manifest-secret","previous":"stage7-previous-manifest-secret"}'
+      TRPC_EXECUTION_MANIFEST_ACTIVE_KEY_ID: current
+      TRPC_GOVERNANCE_URL: http://gateway-a:8080
+      TRPC_GOVERNANCE_TOKEN: stage7-governance-token
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  gateway-a: &gateway
+    build: .
+    environment: &gateway-environment
+      TRPC_SERVICE_ROLE: gateway
+      TRPC_GATEWAY_ID: gateway-a
+      TRPC_WORKER_URL: http://worker:8081
+      TRPC_WORKER_TOKEN: stage7-worker-token
+      TRPC_EXECUTION_MANIFEST_KEYS: '{"current":"stage7-current-manifest-secret","previous":"stage7-previous-manifest-secret"}'
+      TRPC_EXECUTION_MANIFEST_ACTIVE_KEY_ID: current
+      TRPC_GOVERNANCE_TOKEN: stage7-governance-token
+      TRPC_REDIS_ADDR: redis:6379
+      TRPC_POSTGRES_DSN: postgres://trpc:trpc@postgres:5432/trpc_agent?sslmode=disable
+      TRPC_CONTROL_PLANE_POSTGRES_DSN: postgres://trpc:trpc@postgres:5432/trpc_agent?sslmode=disable
+      TRPC_AUDIT_POSTGRES_DSN: postgres://trpc:trpc@postgres:5432/trpc_agent?sslmode=disable
+      TRPC_SESSION_LEASE_TTL: 3s
+      TRPC_SESSION_LEASE_RENEW_INTERVAL: 1s
+      TRPC_FAULT_INJECTION: "1"
+      TRPC_GOVERNANCE_PATH: /data/governance-a.json
+    volumes:
+      - stage7-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+      control-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  gateway-b:
+    <<: *gateway
+    environment:
+      <<: *gateway-environment
+      TRPC_GATEWAY_ID: gateway-b
+      TRPC_GOVERNANCE_PATH: /data/governance-b.json
+  gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./deploy/stage7-nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      gateway-a:
+        condition: service_healthy
+      gateway-b:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  stage7-data:

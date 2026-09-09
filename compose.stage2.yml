@@ -1,0 +1,23 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 20
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: trpc
+      POSTGRES_PASSWORD: trpc
+      POSTGRES_DB: trpc_agent
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trpc -d trpc_agent"]
+      interval: 1s
+      timeout: 2s
+      retries: 30

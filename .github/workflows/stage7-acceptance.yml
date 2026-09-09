@@ -1,0 +1,28 @@
+name: stage7-acceptance
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm --prefix frontend ci
+      - run: npx --prefix frontend playwright install --with-deps chromium
+      - run: ./scripts/stage7-acceptance.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage7-evidence-${{ github.sha }}
+          path: .scratch/evidence/stage7-${{ github.sha }}-schema-*.json
+          if-no-files-found: error

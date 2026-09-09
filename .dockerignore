@@ -1,0 +1,9 @@
+.git
+.idea
+.scratch
+bin
+data
+frontend/node_modules
+frontend/test-results
+frontend/tsconfig.app.tsbuildinfo
+**/.DS_Store

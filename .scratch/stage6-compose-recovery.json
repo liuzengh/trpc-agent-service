@@ -1,0 +1,55 @@
+{
+  "generated_at": "2026-09-04T02:41:42Z",
+  "environment": "docker-compose",
+  "scenarios": [
+    {
+      "scenario": "worker-restart",
+      "expected": "bounded failure followed by recovery",
+      "observed": "503 -> 200",
+      "code": "worker_unavailable",
+      "evidence": "request_worker_outage,request_worker_recovered"
+    },
+    {
+      "scenario": "dependency-restart",
+      "expected": "bounded failure followed by recovery",
+      "observed": "503 -> 202",
+      "code": "storage_unavailable",
+      "evidence": "dependency-outage"
+    },
+    {
+      "scenario": "runtime-fault",
+      "expected": "bounded failure followed by recovery",
+      "observed": "run.failed -> run.completed",
+      "code": "tool_error",
+      "evidence": "runtime-fault,runtime-recovered"
+    },
+    {
+      "scenario": "im-retry-duplicate",
+      "expected": "bounded failure followed by recovery",
+      "observed": "202 -> 202",
+      "code": "channel_retry_exhausted",
+      "evidence": "recovery-message,input_count=1"
+    },
+    {
+      "scenario": "rollout-rollback",
+      "expected": "bounded failure followed by recovery",
+      "observed": "200 -> 200 -> 200",
+      "code": "",
+      "evidence": "rollout-recovery"
+    },
+    {
+      "scenario": "capacity-smoke",
+      "expected": "bounded failure followed by recovery",
+      "observed": "202 -> completed",
+      "code": "",
+      "evidence": "capacity-request-66c5b0947e18aced3e3611e5"
+    },
+    {
+      "scenario": "graceful-drain",
+      "expected": "bounded failure followed by recovery",
+      "observed": "202 -> closed",
+      "code": "",
+      "evidence": "operations-drain"
+    }
+  ]
+}

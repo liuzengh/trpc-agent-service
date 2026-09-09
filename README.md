@@ -137,6 +137,42 @@
     `-- workspace          # 工作目录，包含本地、容器等沙箱环境
 ```
 
+## 真实模型与 IM 凭据配置
+
+需要联调真实模型、Telegram Bot 或企业微信智能机器人时，先从仓库模板创建本地配置：
+
+```bash
+cp .env.example .env.local
+```
+
+编辑 `.env.local`，填写以下七个环境变量：
+
+```bash
+# Telegram Bot
+TRPC_TELEGRAM_BOT_USERNAME=
+TRPC_TELEGRAM_BOT_TOKEN=
+
+# 企业微信 API 模式智能机器人
+TRPC_WECOM_BOT_ID=
+TRPC_WECOM_BOT_SECRET=
+
+# OpenAI-compatible model
+OPENAI_BASE_URL=
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-5.6-luna
+```
+
+Telegram 的 username 和 token 从 [BotFather](https://t.me/BotFather) 创建的 Bot 获取，username 不包含开头的 `@`。企业微信使用 API 模式智能机器人的 BotID 和长连接 Secret，不使用自建应用的 CorpID、AgentID、应用 Secret、Access Token、EncodingAESKey 或 HTTP 回调配置。模型配置支持 OpenAI-compatible 服务；`OPENAI_MODEL` 应填写该服务实际提供的模型名，运行 `stage7-live-model-smoke.sh` 时必须为 `gpt-5.6-luna`。
+
+`./start.sh` 会自动加载根目录 `.env.local`。该文件包含真实密钥，已被 `.gitignore` 忽略，任何情况下都不得提交；可提交的 `.env.example` 只能保留空值和说明。
+
+最短真实消息验收流程：
+
+1. 准备外部 subject：Telegram 私聊使用数字 `chat_id`（也可用 sender user ID 回退），企业微信单聊使用成员 `userid`。
+2. 执行 `./build.sh && ./start.sh`，打开 `http://127.0.0.1:8080/`；先创建并激活一个真实模型 Deployment，再在“IM 通道”中把外部 subject 绑定到目标 Tenant 和 Agent App，确认对应 Provider 为 `connected`。
+3. 从 Telegram 或企业微信真人客户端向 Bot 发送一条唯一测试文本，确认客户端收到 Agent 回复，并在“IM 通道”中看到 `delivered`，在 Session/Audit 中看到同一 `request_id` 对应的 `channel.reply` 和 `run.completed`。
+4. 验收结束后执行 `./stop.sh`。本项目 2026-09-09 的非敏感实测证据见 [真实 IM 消息 Smoke 记录](docs/acceptance/live-im-smoke-2026-09-09.md)，更详细的 Provider 配置与路由说明见 [Stage 4 IM Providers](docs/stages/stage-4-im.md)。
+
 ## 快速开始
 
 ```bash
@@ -146,6 +182,72 @@ cd trpc-agent-service
 ./build.sh
 ./start.sh
 ```
+
+服务启动后打开 `http://127.0.0.1:8080/` 使用 Management Console。Stage 1 默认启用仅供本地开发与自动化验收使用的 Development Identity；它不是生产认证方案。
+
+前端开发模式：
+
+```bash
+# 终端 1
+go run ./cmd/control-migrate
+go run ./cmd/trpc-service
+
+# 终端 2，/api 会代理到 127.0.0.1:8080
+cd frontend
+npm ci
+npm run dev
+```
+
+## 当前实现能力
+
+当前代码已覆盖 Stage 7 最终可运行验收范围：
+
+- **多租户管理**：Development Identity、租户切换、Agent 应用、部署版本与状态流转、Gateway/Worker 状态。
+- **存储与数据管理**：租户级 Backend Profile 可分别路由 Session/Summary、Memory、Knowledge 和 Artifact，支持 InMemory/Redis/SQLite/PostgreSQL、Qdrant Knowledge 索引、S3 Artifact 内容、外部 Memory、事件回放、迁移与数据检查页面。
+- **Chat Workspace**：在 Management Console 中创建/打开租户隔离 Session、读取后端历史、发送消息、取消运行、失败重试和刷新恢复；浏览器仅保存最近打开的 Session ID，不保存会话历史。
+- **Mock IM 通道**：提供租户/Session 绑定、HMAC 回调验签、用户与会话映射、消息去重、provider sequence 乱序拒绝、回复投递和可配置故障注入。
+- **真实 IM Provider**：Telegram Bot 使用 long polling/`sendMessage`，企微 API 模式智能机器人使用 WebSocket `aibot_subscribe`/`aibot_msg_callback`/`aibot_respond_msg`；两者通过持久化 Bot Tenant Allowlist 进行租户与 Agent App 路由。
+- **SSE 契约**：`event_id`、`request_id`、`session_id`、单调 `sequence`、`type`、`data` 稳定 envelope，覆盖 `run.started`、`message.delta`、`message.completed`、`run.failed`、`run.cancelled`、`run.completed`。
+- **生产身份与授权**：显式 production 模式验证 HS256 JWT 的签名、issuer、audience、expiry 和 subject，并只接受服务端 Identity Directory 中的 Tenant/Role 分配；Management Console 使用短期 HttpOnly Session。
+- **治理与安全**：Tenant/Agent App 策略覆盖 Tool/MCP allowlist、输入输出 Guardrail、危险 Tool 二次确认、外部 IM 用户/会话授权、脱敏、预算和 Tenant 限流，并在 Runner 执行前生效；拒绝直接终结请求，Worker 在 Tool 执行中断连会记录 `outcome_unknown` 且禁止自动重放。
+- **审计与可观测性**：提供持久化 Audit Event 查询、Tenant 指标与成本、以及按 `request_id`/`trace_id` 检索的完整平台链路视图；管理界面提供策略、确认、审计和指标/Trace 工作流。
+- **Gateway/Worker 部署**：`TRPC_SERVICE_ROLE` 支持独立 Gateway/Worker 进程；Worker 内部接口同时校验 Bearer Token、短期 HS256 Execution Manifest、不可变 Version、fencing token 和 W3C `traceparent`。
+- **持久控制面与多 Gateway**：开发使用迁移后的 SQLite，Compose/生产使用 PostgreSQL；两 Gateway 共享 Tenant/App/Deployment/Version/Channel Binding、Backend Selection、Governance Policy 和配置幂等状态，并通过 PostgreSQL Session Lease 与 fencing token 串行化同一 Session。
+- **真实模型与数据上下文**：Deployment Version 引用服务端 `default-openai` Profile；兼容 Chat Completions，并为 `gpt-5.6-*` 使用 Responses 流式 API；Memory/Knowledge 进入后续 Agent 输入，执行结果产生带 request/trace 关联的 Artifact 元数据。
+- **故障恢复与运维**：优雅排水、组件与依赖健康、服务端运行超时、存储超时/不可用/关闭分类、Worker/依赖重启恢复、事件排水和终端事件唯一性。
+- **灰度与容量**：Deployment 灰度状态、确定性请求路由、回滚预览/确认，以及覆盖每节点 Session、平均 Token、Redis/SQL QPS、IM 回调峰值与安全余量的有界容量评估；高风险操作均要求角色、确认和 Audit Event。
+- **Compose 恢复证据**：一键从零启动双 Gateway/Worker/Redis/PostgreSQL，并复现强制 lease loss/fencing、危险 Tool 批准与拒绝、Governance outage、Worker 执行中断连与 `outcome_unknown`、PostgreSQL 中断恢复、模型超时、Tool 故障、IM 重试与重复回调。
+
+企微不使用自建应用，不接受 CorpID、AgentID、应用 Secret、Access Token、EncodingAESKey 或传统 HTTP 回调配置。真实凭据仅从被忽略的 `.env.local` 读取；自动化验收使用本地协议 fixture，不消费真实消息。
+
+最终中文交付物已按验收项拆分，统一入口见 [`docs/README.md`](docs/README.md)：
+
+1. [架构设计文档](docs/architecture.md)
+2. [系统架构图](docs/system-architecture-diagram.md)
+3. [企业微信核心时序图](docs/core-sequence-diagram.md)
+   - [IM Channel Adapter 设计与实现边界](docs/im-channel-adapter.md)
+4. [数据模型设计](docs/data-model.md)
+5. [数据同步与幂等策略](docs/data-sync-idempotency.md)
+6. [多后端适配方案](docs/backend-adapters.md)
+7. [生产风险清单](docs/production-risks.md)
+8. [GitHub 实现代码详解](docs/implementation-details.md)
+
+阶段记录、验收材料和调研资料已归入 `docs/` 子目录，仅用于追溯，不作为最终交付物的替代。
+
+最终验收命令：
+
+```bash
+./scripts/stage7-acceptance.sh
+```
+
+单独运行双 Gateway Compose 或真实模型 smoke：
+
+```bash
+./scripts/stage7-compose-acceptance.sh
+./scripts/stage7-live-model-smoke.sh
+```
+
+`build.sh` 要求已安装 Node.js、npm 和前端依赖，依次构建 React 前端和 Go 二进制。生产前端资源会嵌入 `bin/trpc-service`，不需要单独部署静态站点。
 
 停止服务：
 

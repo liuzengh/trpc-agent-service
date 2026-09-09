@@ -3,9 +3,16 @@
 .DS_Store
 *.log
 *.swp
+.env.local
 
 bin/
 dist/
+frontend/node_modules/
+frontend/test-results/
+frontend/playwright-report/
+frontend/*.tsbuildinfo
+!trpcservice/web/dist/
+!trpcservice/web/dist/**
 coverage.out
 coverage.html
 *.test
@@ -15,3 +22,4 @@ vendor/
 
 data/*
 !data/README.md
+.scratch/evidence/
