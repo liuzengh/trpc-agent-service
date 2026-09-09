@@ -104,3 +104,11 @@ curl localhost:8080/healthz                     # 就绪
 - 有 `started adapter` 但无 outbound：worker 未消费（Redis/MySQL 未配）、
   agent 未发布（approval 拦）、或回复被限流/白名单拦截（看日志 Warn）；
 - trace 断链：确认 telemetry.otlp_endpoint 已配（compose 默认指向 otel-collector）。
+
+## 真实联调实测结论（2026-09）
+
+- 企微 / 飞书**真实账号收发已实测通过**：binding 驱动建连（日志见
+  `channels: started adapter` + SDK authenticated）、双向消息收发正常、
+  回复经 `stream:outbound` 投递成功（audit `Decision=executed` 佐证）。
+- 保留给后续的观察项：企微流式占位/原位替换、飞书逐字流式与卡片的最终展示
+  效果（功能代码已就绪，视账号/群场景按需再验）。
