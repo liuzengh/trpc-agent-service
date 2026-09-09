@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent 工作台</title>
+  <style>
+    :root {
+      --ink: #14231f;
+      --ink-soft: #4d5c57;
+      --paper: #f4efe4;
+      --panel: #10241f;
+      --panel-2: #18332c;
+      --gold: #d7b26a;
+      --gold-2: #f0d7a0;
+      --line: rgba(255,255,255,.08);
+      --card: #fffdf8;
+      --shadow: 0 18px 40px rgba(16, 36, 31, .18);
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 500px at 10% -10%, #2a5648 0%, transparent 55%),
+        linear-gradient(180deg, #0d1c19 0%, #10241f 42%, #1a322b 100%);
+    }
+    .shell {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      height: 100%;
+    }
+    aside {
+      color: #e9efe9;
+      padding: 28px 22px;
+      border-right: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .brand {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    .mark {
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--gold), #9c7840);
+      color: var(--panel);
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+    }
+    .brand h1 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: .04em;
+    }
+    .brand p {
+      margin: 2px 0 0;
+      color: #b7c6bf;
+      font-size: 12px;
+    }
+    .howto, .picker, .hint {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px;
+    }
+    .howto h2, .picker label {
+      margin: 0 0 8px;
+      font-size: 12px;
+      color: var(--gold-2);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .howto ol {
+      margin: 0;
+      padding-left: 18px;
+      color: #d5e0da;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .picker {
+      display: grid;
+      gap: 8px;
+    }
+    select, button, textarea {
+      font: inherit;
+    }
+    select {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(215,178,106,.35);
+      background: #0e1f1b;
+      color: #f7f3ea;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+    }
+    .ghost, .send {
+      border: 0;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+    .ghost {
+      flex: 0 0 auto;
+      padding: 10px 12px;
+      background: transparent;
+      color: var(--gold-2);
+      border: 1px solid rgba(215,178,106,.4);
+    }
+    .hint {
+      color: #b7c6bf;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .hint strong { color: var(--gold-2); font-weight: 600; }
+    .meta {
+      margin-top: auto;
+      font-size: 12px;
+      color: #8ea198;
+    }
+    main {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-width: 0;
+      background:
+        linear-gradient(180deg, rgba(244,239,228,.96), #f4efe4 24%);
+    }
+    header.chat-bar {
+      padding: 18px 28px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 16px;
+    }
+    header.chat-bar h2 {
+      margin: 0;
+      font-size: 22px;
+    }
+    header.chat-bar span {
+      color: var(--ink-soft);
+      font-size: 13px;
+    }
+    .status {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #fff;
+      color: var(--ink-soft);
+      font-size: 12px;
+      box-shadow: var(--shadow);
+    }
+    #messages {
+      margin: 0 28px 12px;
+      padding: 8px 4px 16px;
+      overflow: auto;
+    }
+    .empty {
+      height: 100%;
+      display: grid;
+      place-items: center;
+      color: var(--ink-soft);
+      text-align: center;
+      line-height: 1.6;
+    }
+    .bubble {
+      max-width: min(72%, 640px);
+      margin: 10px 0;
+      padding: 12px 14px;
+      border-radius: 16px;
+      white-space: pre-wrap;
+      box-shadow: var(--shadow);
+    }
+    .user {
+      margin-left: auto;
+      background: var(--ink);
+      color: #f7f3ea;
+      border-bottom-right-radius: 4px;
+    }
+    .agent {
+      background: var(--card);
+      border-bottom-left-radius: 4px;
+    }
+    .who { display: block; font-size: 11px; opacity: .7; margin-bottom: 4px; }
+    .error { background: #fde8e6; color: #9f2d2d; }
+    .tool { background: #efe6d2; color: #5a4a28; }
+    form.composer {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      padding: 16px 28px 22px;
+    }
+    textarea {
+      resize: none;
+      min-height: 56px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid #ddd4c4;
+      background: #fffdf8;
+    }
+    .send {
+      padding: 0 18px;
+      background: var(--ink);
+      color: var(--gold-2);
+      font-weight: 600;
+    }
+    .send:disabled, select:disabled, textarea:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+    @media (max-width: 860px) {
+      .shell { grid-template-columns: 1fr; }
+      aside { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand">
+        <div class="mark">A</div>
+        <div>
+          <h1>Agent 工作台</h1>
+          <p>多租户对话通道 · WebUI</p>
+        </div>
+      </div>
+      <section class="howto">
+        <h2>怎么用</h2>
+        <ol>
+          <li>先启动平台（Compose 或本机服务）</li>
+          <li>跑完 demo 或创建 WebUI binding</li>
+          <li>在下方下拉框选择租户 Agent</li>
+          <li>右侧发消息，回复走流式 SSE</li>
+        </ol>
+      </section>
+      <section class="picker">
+        <label for="binding">选择 Agent</label>
+        <div class="row">
+          <select id="binding" aria-label="选择 Agent">
+            <option value="">加载中…</option>
+          </select>
+          <button class="ghost" id="refresh" type="button">刷新</button>
+        </div>
+      </section>
+      <p class="hint">
+        Binding 不是随便填的 ID，而是租户绑定的 <strong>WebUI 通道</strong>。
+        demo 会创建 <strong>binding-a</strong>（Tenant A / Redis）和
+        <strong>binding-b</strong>（Tenant B / MySQL）。换一个等于换租户，会话互相隔离。
+      </p>
+      <p class="meta">企业微信验收走智能机器人 wecombot，不走本页。</p>
+    </aside>
+    <main>
+      <header class="chat-bar">
+        <div>
+          <h2 id="title">选择一个 Agent 开始对话</h2>
+          <span id="subtitle">通道加载后会出现在左侧下拉框</span>
+        </div>
+        <div class="status" id="status">未选择</div>
+      </header>
+      <div id="messages" aria-live="polite">
+        <div class="empty" id="placeholder">
+          还没有对话。<br>
+          若下拉框是空的，先运行 <code>scripts/demo.ps1</code> 再点刷新。
+        </div>
+      </div>
+      <form class="composer" id="chat">
+        <textarea id="text" placeholder="输入消息，Enter 发送，Shift+Enter 换行" required></textarea>
+        <button class="send" type="submit">发送</button>
+      </form>
+    </main>
+  </div>
+  <script>
+    const messages = document.querySelector("#messages");
+    const form = document.querySelector("#chat");
+    const input = document.querySelector("#text");
+    const binding = document.querySelector("#binding");
+    const refresh = document.querySelector("#refresh");
+    const title = document.querySelector("#title");
+    const subtitle = document.querySelector("#subtitle");
+    const status = document.querySelector("#status");
+    const send = form.querySelector(".send");
+    let desks = [];
+    let source;
+    let agentLine;
+
+    function currentDesk() {
+      return desks.find(desk => desk.route_key === binding.value);
+    }
+
+    function setStatus(text) {
+      status.textContent = text;
+    }
+
+    function describe(desk) {
+      if (!desk) return "";
+      const backends = [desk.session_backend, desk.memory_backend].filter(Boolean).join(" + ");
+      return backends ? `${desk.tenant_name} · ${desk.app_name} · ${backends}` : `${desk.tenant_name} · ${desk.app_name}`;
+    }
+
+    function renderSelection() {
+      const desk = currentDesk();
+      const canChat = Boolean(binding.value);
+      input.disabled = !canChat;
+      send.disabled = !canChat;
+      if (!desk) {
+        title.textContent = desks.length ? "选择一个 Agent 开始对话" : "还没有 WebUI 通道";
+        subtitle.textContent = desks.length
+          ? "左侧下拉框里每一项都是一个租户的 WebUI binding"
+          : "先创建 tenant / app / webui binding，或运行 demo 脚本";
+        setStatus("未选择");
+        return;
+      }
+      title.textContent = desk.app_name || desk.route_key;
+      subtitle.textContent = describe(desk);
+      setStatus("已连接 " + desk.route_key);
+    }
+
+    function add(className, text, who) {
+      const placeholder = document.querySelector("#placeholder");
+      if (placeholder) placeholder.remove();
+      const node = document.createElement("div");
+      node.className = "bubble " + className;
+      if (who) {
+        const label = document.createElement("span");
+        label.className = "who";
+        label.textContent = who;
+        node.append(label);
+      }
+      node.append(document.createTextNode(text));
+      messages.append(node);
+      messages.scrollTop = messages.scrollHeight;
+      return node;
+    }
+
+    function resetTranscript() {
+      if (source) {
+        source.close();
+        source = null;
+      }
+      agentLine = null;
+      messages.innerHTML = `<div class="empty" id="placeholder">已切换到新的 Agent。发送一条消息开始会话。</div>`;
+    }
+
+    async function loadDesks() {
+      refresh.disabled = true;
+      try {
+        const response = await fetch("/channels/webui/desks");
+        desks = response.ok ? await response.json() : [];
+      } catch (error) {
+        desks = [];
+        add("error", "无法加载 Agent 列表，确认平台已经启动。");
+      }
+      const previous = new URLSearchParams(location.hash.slice(1)).get("binding") || binding.value;
+      binding.innerHTML = "";
+      if (!desks.length) {
+        const empty = document.createElement("option");
+        empty.value = "";
+        empty.textContent = "暂无可用 Agent";
+        binding.append(empty);
+      } else {
+        for (const desk of desks) {
+          const option = document.createElement("option");
+          option.value = desk.route_key;
+          option.textContent = `${desk.tenant_name} / ${desk.app_name} (${desk.route_key})`;
+          binding.append(option);
+        }
+        binding.value = desks.some(desk => desk.route_key === previous) ? previous : desks[0].route_key;
+      }
+      location.hash = binding.value ? `binding=${encodeURIComponent(binding.value)}` : "";
+      renderSelection();
+      refresh.disabled = false;
+    }
+
+    function connect(sessionID) {
+      if (source) source.close();
+      source = new EventSource(`/channels/webui/${encodeURIComponent(binding.value)}/stream?session=${encodeURIComponent(sessionID)}`);
+      source.addEventListener("text_delta", event => {
+        const payload = JSON.parse(event.data);
+        if (!agentLine) agentLine = add("agent", "", "Agent");
+        agentLine.append(document.createTextNode(payload.text || ""));
+        messages.scrollTop = messages.scrollHeight;
+      });
+      source.addEventListener("tool_call", event => {
+        const payload = JSON.parse(event.data);
+        add("tool", `调用工具：${payload.tool_name || ""}`);
+      });
+      source.addEventListener("error", event => {
+        if (!event.data) return;
+        const payload = JSON.parse(event.data);
+        add("error", payload.error || "执行失败");
+        setStatus("出错");
+      });
+      source.addEventListener("done", () => {
+        agentLine = null;
+        source.close();
+        setStatus("已连接 " + binding.value);
+      });
+    }
+
+    binding.addEventListener("change", () => {
+      location.hash = binding.value ? `binding=${encodeURIComponent(binding.value)}` : "";
+      resetTranscript();
+      renderSelection();
+    });
+    refresh.addEventListener("click", loadDesks);
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      const text = input.value.trim();
+      if (!text || !binding.value) return;
+      input.value = "";
+      add("user", text, "你");
+      agentLine = null;
+      setStatus("正在回复…");
+      send.disabled = true;
+      try {
+        const response = await fetch(`/channels/webui/${encodeURIComponent(binding.value)}/messages`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({id: crypto.randomUUID(), text})
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          add("error", result.error || "发送失败。若提示未绑定，先跑 demo 或创建 webui binding。");
+          setStatus("发送失败");
+          return;
+        }
+        if (result.session_id) connect(result.session_id);
+      } catch (error) {
+        add("error", "网络错误，确认 http://localhost:8080 平台已启动。");
+        setStatus("发送失败");
+      } finally {
+        send.disabled = !binding.value;
+      }
+    });
+
+    input.addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    loadDesks();
+  </script>
+</body>
+</html>

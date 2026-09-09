@@ -3,6 +3,9 @@
 .DS_Store
 *.log
 *.swp
+.env
+.env.*
+!.env.example
 
 bin/
 dist/
@@ -15,3 +18,8 @@ vendor/
 
 data/*
 !data/README.md
+
+# local design notes stay private; ship the architecture deliverable only
+docs/*
+!docs/方案文档.md
+spec/

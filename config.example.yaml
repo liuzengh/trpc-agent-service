@@ -1,0 +1,22 @@
+listen_addr: ":8080"
+redis_addr: "127.0.0.1:6379"
+mysql_dsn: ""
+pgvector_dsn: ""
+mem0_base_url: ""
+otel_endpoint: ""
+embedding_model: "text-embedding-3-small"
+embedding_api_key_ref: "env:TRPC_SERVICE_EMBEDDING_API_KEY"
+embedding_base_url: ""
+embedding_dimensions: 1536
+ilink_route_keys: []
+# In-scope WeCom channel is wecombot (智能机器人长连接), not self-built
+# app callbacks. Pair with a wecombot binding; see docs/验收操作.md.
+wecombot_route_keys: []
+wecombot_ws_url: ""
+admin_username: "admin"
+admin_password_ref: "env:TRPC_SERVICE_ADMIN_PASSWORD"
+debounce_ms: 1500
+config_cache_ttl: "30s"
+lock_ttl: "30s"
+dedup_inflight_ttl: "90s"
+dedup_done_ttl: "24h"

@@ -1,0 +1,12 @@
+.git
+.gitignore
+.idea
+.vscode
+bin
+data
+docs
+spec
+coverage.out
+coverage.html
+*.log
+*.test
