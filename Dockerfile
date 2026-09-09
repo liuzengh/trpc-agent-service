@@ -1,4 +1,11 @@
 # syntax=docker/dockerfile:1.7
+FROM node:24-alpine AS console
+WORKDIR /console
+COPY trpcservice/web/console/package.json trpcservice/web/console/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY trpcservice/web/console/ ./
+RUN npm run build
+
 FROM golang:1.25-alpine AS build
 
 ARG GOPROXY=https://proxy.golang.org,direct
@@ -10,6 +17,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+COPY --from=console /admin/ui/dist ./trpcservice/admin/ui/dist
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
     -o /out/trpc-service ./cmd/trpc-service && \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \

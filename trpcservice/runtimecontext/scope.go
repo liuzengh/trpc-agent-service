@@ -3,11 +3,22 @@
 package runtimecontext
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 )
+
+type debugExecutionKey struct{}
+
+func WithDebugExecution(ctx context.Context) context.Context {
+	return context.WithValue(ctx, debugExecutionKey{}, true)
+}
+func IsDebugExecution(ctx context.Context) bool {
+	value, _ := ctx.Value(debugExecutionKey{}).(bool)
+	return value
+}
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 

@@ -355,7 +355,7 @@ func (t *runTool) Call(ctx context.Context, args []byte) (any, error) {
 }
 func (s *Service) run(ctx context.Context, in runInput) (workspace.Result, error) {
 	if s.Executor == nil {
-		return workspace.Result{}, errors.New("sandbox execution is disabled")
+		return workspace.Result{}, &workspace.Failure{Kind: "disabled"}
 	}
 	inv, ok := agentcore.InvocationFromContext(ctx)
 	if !ok || inv == nil || inv.Session == nil {

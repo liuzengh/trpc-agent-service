@@ -431,7 +431,7 @@ func (j *PostgresJournal) CompleteRun(
 UPDATE agent_run
 SET status = 'completed', fencing_token = $2, agent_name = $3,
     prompt_tokens = $4, completion_tokens = $5, cost = $6, trace_id = NULLIF($7, ''),
-    completed_at = now(), error_type = NULL, error_message = NULL
+    completed_at = now(), error_type = NULLIF($9,''), error_message = NULL
 WHERE request_id = $1 AND fencing_token <= $2 AND status <> 'dead' AND ($8='' OR worker_id=$8 OR status='completed')`,
 		task.RequestID,
 		result.FencingToken,
@@ -441,6 +441,7 @@ WHERE request_id = $1 AND fencing_token <= $2 AND status <> 'dead' AND ($8='' OR
 		result.Cost,
 		result.TraceID,
 		result.WorkerID,
+		result.ErrorType,
 	)
 	if err != nil {
 		return fmt.Errorf("complete Agent run: %w", err)

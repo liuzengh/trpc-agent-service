@@ -14,6 +14,9 @@ unset TEST_POSTGRES_URL TEST_REDIS_URL TEST_S3_ENDPOINT TEST_QDRANT_HOST TEST_QD
 unset TEST_TRACE_OTLP_ENDPOINT TEST_PERMISSIONS_DOCKER TEST_RECOVERY_DOCKER
 unset TEST_SANDBOX_DOCKER TEST_ADMIN_UI_BROWSER
 
+npm --prefix trpcservice/web/console ci --ignore-scripts --no-audit --no-fund
+npm --prefix trpcservice/web/console run build
+
 go test -race ./...
 ./lint.sh
 go build ./...

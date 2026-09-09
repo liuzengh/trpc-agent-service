@@ -29,6 +29,16 @@ func (w *MemoryWriter) Query(ctx context.Context, query Query) ([]Event, error) 
 	}
 	result := make([]Event, 0, limit)
 	for _, event := range w.events {
+		appID, _ := event.Details["app_id"].(string)
+		if query.AppID != "" && appID != query.AppID || query.RequestID != "" && event.RequestID != query.RequestID {
+			continue
+		}
+		if query.ReleaseOnly && event.Decision != "admin_revision_published" && event.Decision != "admin_draft_published" && event.Decision != "admin_rollout_policy_updated" {
+			continue
+		}
+		if !query.BeforeTime.IsZero() && (event.OccurredAt.After(query.BeforeTime) || event.OccurredAt.Equal(query.BeforeTime) && event.ID >= query.BeforeID) {
+			continue
+		}
 		if event.TenantID != query.TenantID ||
 			(query.Decision != "" && event.Decision != query.Decision) ||
 			(query.TraceID != "" && event.TraceID != query.TraceID) {
@@ -37,7 +47,12 @@ func (w *MemoryWriter) Query(ctx context.Context, query Query) ([]Event, error) 
 		event.Details = redactMap(event.Details)
 		result = append(result, event)
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].OccurredAt.After(result[j].OccurredAt) })
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].OccurredAt.Equal(result[j].OccurredAt) {
+			return result[i].ID > result[j].ID
+		}
+		return result[i].OccurredAt.After(result[j].OccurredAt)
+	})
 	if len(result) > limit {
 		result = result[:limit]
 	}

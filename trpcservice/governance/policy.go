@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +32,9 @@ type ToolPolicy struct {
 // Arguments are intentionally excluded so secrets from tool payloads do not
 // leak into the audit trail.
 type ToolDecision struct {
+	Code          string
+	CallsUsed     int64
+	CallLimit     int
 	ToolName      string
 	ToolCallID    string
 	ArgumentsHash string
@@ -102,6 +106,21 @@ func RunOptionsForCaller(policy ToolPolicy, caller Caller, approvedTools []strin
 	for _, call := range approvedCalls {
 		approvedHashes[call.ToolName+"\x00"+call.ArgumentsHash] = struct{}{}
 	}
+	var approvalMu sync.Mutex
+	consumeApproval := func(request *agenttool.PermissionRequest) bool {
+		approvalMu.Lock()
+		defer approvalMu.Unlock()
+		if contains(approved, request.ToolName) {
+			delete(approved, request.ToolName)
+			return true
+		}
+		if approvedToolCall(approvedHashes, request) {
+			digest := sha256.Sum256(request.Arguments)
+			delete(approvedHashes, request.ToolName+"\x00"+hex.EncodeToString(digest[:]))
+			return true
+		}
+		return false
+	}
 	options := []agentcore.RunOption{
 		agentcore.WithToolFilter(func(_ context.Context, item agenttool.Tool) bool {
 			return item != nil && item.Declaration() != nil &&
@@ -112,6 +131,10 @@ func RunOptionsForCaller(policy ToolPolicy, caller Caller, approvedTools []strin
 	options = append(options, agentcore.WithToolPermissionPolicyFunc(
 		func(ctx context.Context, request *agenttool.PermissionRequest) (agenttool.PermissionDecision, error) {
 			var decision agenttool.PermissionDecision
+			var used int64
+			if request != nil && !contains(deniedUsers, userID) && contains(allowed, request.ToolName) {
+				used = calls.Add(1)
+			}
 			if request == nil {
 				decision = agenttool.DenyPermission("invalid tool permission request")
 			} else {
@@ -120,21 +143,25 @@ func RunOptionsForCaller(policy ToolPolicy, caller Caller, approvedTools []strin
 					decision = agenttool.DenyPermission("user is not allowed to call tools")
 				case !contains(allowed, request.ToolName):
 					decision = agenttool.DenyPermission("tool is not allowed by the Agent revision")
-				case policy.MaxToolCalls > 0 && calls.Add(1) > int64(policy.MaxToolCalls):
+				case policy.MaxToolCalls > 0 && used > int64(policy.MaxToolCalls):
 					decision = agenttool.DenyPermission("tool call budget exceeded")
 				case contains(dangerous, request.ToolName) &&
-					!contains(approved, request.ToolName) &&
-					!approvedToolCall(approvedHashes, request):
+					!consumeApproval(request):
 					decision = agenttool.AskPermission("explicit user approval is required")
 				default:
 					decision = agenttool.AllowPermission()
 				}
+			}
+			code := permissionCode(decision.Reason)
+			if request != nil {
+				recordFeedback(ctx, ToolDecision{Code: code, ToolName: request.ToolName, CallsUsed: used, CallLimit: policy.MaxToolCalls})
 			}
 			for _, recorder := range recorders {
 				if recorder == nil {
 					continue
 				}
 				toolDecision := ToolDecision{
+					Code: code, CallsUsed: used, CallLimit: policy.MaxToolCalls,
 					Action: string(decision.Action),
 					Reason: decision.Reason,
 				}

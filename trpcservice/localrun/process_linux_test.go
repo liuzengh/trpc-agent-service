@@ -25,7 +25,11 @@ func TestProcessFixture(t *testing.T) {
 	if os.Getenv("LOCAL_PROCESS_IGNORE") == "1" {
 		signal.Ignore(syscall.SIGTERM)
 		_ = os.WriteFile("ready", nil, 0600)
-		select {}
+		// A bare select lets the Go runtime terminate this fixture as a
+		// deadlock before the parent can exercise the stop timeout.
+		for {
+			time.Sleep(time.Second)
+		}
 	}
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGTERM)

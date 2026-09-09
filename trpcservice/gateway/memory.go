@@ -32,12 +32,17 @@ type memoryQueueOutbox struct {
 }
 
 type memoryRun struct {
-	tenantID string
-	appID    string
-	status   string
-	workerID string
-	result   RunResult
-	errType  string
+	createdAt           time.Time
+	startedAt           time.Time
+	completedAt         time.Time
+	bindingID           string
+	revisionID, channel string
+	tenantID            string
+	appID               string
+	status              string
+	workerID            string
+	result              RunResult
+	errType             string
 }
 
 type memoryOutbound struct {
@@ -155,7 +160,8 @@ func (j *MemoryJournal) Accept(
 	}
 	if request.DirectReply != "" {
 		j.inbound[inboundKey] = memoryInbound{result: result, payloadHash: payloadHash}
-		j.runs[result.RequestID] = &memoryRun{tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "completed", result: RunResult{
+		now := time.Now().UTC()
+		j.runs[result.RequestID] = &memoryRun{createdAt: now, startedAt: now, completedAt: now, bindingID: scope.ChannelBindingID, revisionID: scope.RevisionID, channel: scope.ChannelType, tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "completed", result: RunResult{
 			Reply: request.DirectReply, AgentName: "platform-control", TraceParent: traceParent, TraceID: audit.TraceID(ctx),
 		}}
 		outboundID := stableID("out_", result.RequestID)
@@ -175,7 +181,7 @@ func (j *MemoryJournal) Accept(
 		nextAttempt: time.Now(),
 	}
 	j.inbound[inboundKey] = memoryInbound{result: result, payloadHash: payloadHash}
-	j.runs[result.RequestID] = &memoryRun{tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "queued"}
+	j.runs[result.RequestID] = &memoryRun{createdAt: time.Now().UTC(), bindingID: scope.ChannelBindingID, revisionID: scope.RevisionID, channel: scope.ChannelType, tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "queued"}
 	return result, nil
 }
 
@@ -280,6 +286,10 @@ func (j *MemoryJournal) MarkRunRunning(
 		return ErrRunTerminal
 	}
 	run.status = "running"
+	if run.startedAt.IsZero() {
+		run.startedAt = time.Now().UTC()
+	}
+	run.completedAt = time.Time{}
 	run.workerID = workerID
 	return nil
 }
@@ -305,7 +315,9 @@ func (j *MemoryJournal) CompleteRun(
 		return fmt.Errorf("stale Agent run fencing token")
 	}
 	run.status = "completed"
+	run.completedAt = time.Now().UTC()
 	run.result = result
+	run.errType = result.ErrorType
 	outboundID := stableID("out_", task.RequestID)
 	if j.outbound[outboundID] == nil {
 		j.outbound[outboundID] = &memoryOutbound{
@@ -343,6 +355,7 @@ func (j *MemoryJournal) FailRun(
 			return ErrRunSuperseded
 		}
 		run.status = "failed"
+		run.completedAt = time.Now().UTC()
 		run.errType = errorType
 	}
 	return nil
@@ -374,6 +387,7 @@ func (j *MemoryJournal) TerminalFailRun(ctx context.Context, task workqueue.Agen
 		return false, ErrRunSuperseded
 	}
 	run.status, run.errType = "dead", "retry_exhausted"
+	run.completedAt = time.Now().UTC()
 	id := stableID("out_", task.RequestID)
 	if j.outbound[id] == nil {
 		j.outbound[id] = &memoryOutbound{item: OutboundItem{ID: id, RequestID: task.RequestID, TenantID: task.Scope.TenantID,

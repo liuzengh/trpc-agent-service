@@ -2,14 +2,16 @@ package admin
 
 import (
 	"embed"
+	"io/fs"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
-// Only the static login shell is public. All data still requires Admin Bearer
-// authorization; tokens stay in browser memory, not cookies or local storage.
+// Only built static assets are public. All API data requires a scoped session
+// (HttpOnly Cookie + CSRF) or the existing Admin Bearer credentials.
 //
-//go:embed ui/index.html ui/app.js ui/style.css
+//go:embed ui
 var uiFiles embed.FS
 
 func sameOrigin(r *http.Request) bool {
@@ -25,11 +27,6 @@ func sameOrigin(r *http.Request) bool {
 }
 
 func (h *Handler) serveUI(w http.ResponseWriter, r *http.Request) bool {
-	files := map[string]struct{ name, contentType string }{
-		"/admin/ui/":          {"ui/index.html", "text/html; charset=utf-8"},
-		"/admin/ui/app.js":    {"ui/app.js", "application/javascript; charset=utf-8"},
-		"/admin/ui/style.css": {"ui/style.css", "text/css; charset=utf-8"},
-	}
 	if r.URL.Path == "/admin/ui" {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -38,24 +35,58 @@ func (h *Handler) serveUI(w http.ResponseWriter, r *http.Request) bool {
 		}
 		return true
 	}
-	file, ok := files[r.URL.Path]
-	if !ok {
+	if !strings.HasPrefix(r.URL.Path, "/admin/ui/") {
 		return false
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return true
 	}
-	raw, err := uiFiles.ReadFile(file.name)
+	path := strings.TrimPrefix(r.URL.Path, "/admin/ui/")
+	name, contentType := "", ""
+	switch {
+	case path == "":
+		name = "ui/dist/index.html"
+		contentType = "text/html; charset=utf-8"
+	case strings.HasPrefix(path, "assets/") && fs.ValidPath(path):
+		name = "ui/dist/" + path
+		switch {
+		case strings.HasSuffix(path, ".js"):
+			contentType = "application/javascript; charset=utf-8"
+		case strings.HasSuffix(path, ".css"):
+			contentType = "text/css; charset=utf-8"
+		case strings.HasSuffix(path, ".svg"):
+			contentType = "image/svg+xml"
+		case strings.HasSuffix(path, ".woff2"):
+			contentType = "font/woff2"
+		}
+	}
+	if name == "" || contentType == "" {
+		http.NotFound(w, r)
+		return true
+	}
+	nonce, err := randomCredential()
 	if err != nil {
 		http.Error(w, "asset unavailable", 500)
 		return true
 	}
-	w.Header().Set("Content-Type", file.contentType)
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'nonce-"+nonce+"'; style-src-attr 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+	raw, err := uiFiles.ReadFile(name)
+	if err != nil {
+		if path == "" {
+			http.Error(w, "Console assets are not built. Run ./build.sh before starting the service.", http.StatusServiceUnavailable)
+		} else {
+			http.NotFound(w, r)
+		}
+		return true
+	}
+	if path == "" {
+		raw = []byte(strings.ReplaceAll(string(raw), "__CSP_NONCE__", nonce))
+	}
+	w.Header().Set("Content-Type", contentType)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(raw)
 	}

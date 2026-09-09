@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/database"
 	"time"
 )
 
@@ -86,6 +87,9 @@ type sqlExecutor interface {
 }
 
 func (r *PostgresRepository) dbFor(ctx context.Context) sqlExecutor {
+	if tx := database.Transaction(ctx, r.db); tx != nil {
+		return tx
+	}
 	if scoped, ok := ctx.Value(knowledgeConnectionKey{}).(scopedKnowledgeConnection); ok && scoped.database == r.db {
 		return scoped.connection
 	}

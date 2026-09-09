@@ -25,6 +25,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/console"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/docsmcp"
@@ -46,8 +47,10 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workspace"
 	"golang.org/x/sync/errgroup"
+	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	agentrunner "trpc.group/trpc-go/trpc-agent-go/runner"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
 func main() {
@@ -369,17 +372,31 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("build attachments: %w", err)
 	}
-	skillsService := &platformskill.Service{Registry: skillRegistry, Repository: controlPlaneRepository, Journal: toolExecutionJournal, Executor: sandbox}
+	consoleStore := console.NewStore(controlPlaneRepository)
+	if roles.Worker || adminConfig.Enabled {
+		startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
+		err = consoleStore.Ready(startupCtx)
+		cancelStartup()
+		if err != nil {
+			return fmt.Errorf("check console schema and role access: %w", err)
+		}
+	}
+	debugTools := &console.ToolJournal{Store: consoleStore}
+	debugApprovals := &console.Approvals{Store: consoleStore}
+	runtimeRepository := &console.RuntimeRepository{Repository: controlPlaneRepository, Store: consoleStore}
+	runtimeJournal := console.RoutedJournal{Journal: toolExecutionJournal, Debug: debugTools}
+	runtimeApprovals := console.RoutedApprovals{Repository: approvalRepository, Debug: debugApprovals}
+	skillsService := &platformskill.Service{Registry: skillRegistry, Repository: runtimeRepository, Journal: runtimeJournal, Executor: sandbox}
 	toolCatalog := platformtool.DefaultCatalog(platformtool.NewWorkItemTool(operations), attachmentService.ReadTool(), skillsService.RunTool())
 	revisionCompiler, err := agentservice.NewRevisionCompiler(
-		controlPlaneRepository,
+		runtimeRepository,
 		selectedModel,
 		modelConfig.Stream,
 		agentservice.WithToolCatalog(toolCatalog),
 		agentservice.WithAuditWriter(auditWriter),
-		agentservice.WithApprovalRepository(approvalRepository),
+		agentservice.WithApprovalRepository(runtimeApprovals),
 		agentservice.WithKnowledgeProvider(knowledgeRouter),
-		agentservice.WithToolExecutionJournal(toolExecutionJournal),
+		agentservice.WithToolExecutionJournal(runtimeJournal),
 		agentservice.WithSecretStore(secretStore),
 		agentservice.WithModelBudget(quotaGuard),
 		agentservice.WithSkills(skillRegistry),
@@ -423,6 +440,58 @@ func run() error {
 	if nodeID == "" {
 		hostname, _ := os.Hostname()
 		nodeID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	}
+	debugEngine := &console.Engine{Store: consoleStore, Runtime: runtime, Approvals: debugApprovals, Tools: debugTools, Audit: auditWriter, Quota: quotaGuard, WorkerID: "console-" + console.Hash(nodeID + time.Now().UTC().Format(time.RFC3339Nano))[:24], ModelName: selectedModel.Info().Name, SandboxEnabled: sandbox != nil}
+	debugEngine.Repository = controlPlaneRepository
+	debugEngine.Probe = func(ctx context.Context) []console.Observation {
+		observed := []console.Observation{}
+		for _, item := range []struct {
+			name  string
+			check func(context.Context) error
+		}{
+			{"session", sessionRouter.Ready}, {"queue", agentQueue.Ready}, {"quota", quotaGuard.Ready},
+		} {
+			limited, cancel := context.WithTimeout(ctx, time.Second)
+			err := item.check(limited)
+			cancel()
+			state := "ready"
+			if err != nil {
+				state = "unavailable"
+			}
+			observed = append(observed, console.Observation{Component: item.name, State: state, ObservedAt: time.Now().UTC()})
+		}
+		sandboxState := "unavailable"
+		if sandbox != nil {
+			sandboxState = "unknown"
+			if probe, ok := sandbox.(interface{ Ready(context.Context) error }); ok {
+				sandboxState = "unavailable"
+				if probe.Ready(ctx) == nil {
+					sandboxState = "ready"
+				}
+			}
+		}
+		observed = append(observed, console.Observation{Component: "sandbox", State: sandboxState, ObservedAt: time.Now().UTC()})
+		for _, entry := range sessionRouter.ObserveInitialized(ctx) {
+			observed = append(observed, console.Observation{Component: "session_binding", TenantID: entry.TenantID, BindingID: entry.BindingID, ConfigHash: entry.ConfigHash, State: entry.State, ObservedAt: entry.ObservedAt})
+		}
+		return observed
+	}
+	debugEngine.Cleanup = func(ctx context.Context, tenantID, appID, userID, sessionID string) error {
+		scope := "t/" + tenantID + "/a/" + appID
+		bindings, err := controlPlaneRepository.ListBackendBindings(ctx, tenantID, appID)
+		if err != nil {
+			return err
+		}
+		hasMemory := false
+		for _, binding := range bindings {
+			hasMemory = hasMemory || binding.ResourceType == "memory" && binding.MigrationState == "active"
+		}
+		if hasMemory {
+			if err := memoryRouter.ClearMemories(ctx, memory.UserKey{AppName: scope, UserID: userID}); err != nil {
+				return err
+			}
+		}
+		return sessionRouter.DeleteSession(ctx, session.Key{AppName: scope, UserID: userID, SessionID: sessionID})
 	}
 	backgroundProcessor, err := background.NewProcessor(
 		backgroundJobs,
@@ -566,8 +635,28 @@ func run() error {
 		}
 		adminService.WithAuditWriter(auditWriter)
 		adminService.WithSkills(skillRegistry)
+		adminService.WithConsoleStore(consoleStore)
+		checks := map[string]func(context.Context) error{}
+		if roles.Worker {
+			checks["session"] = sessionRouter.Ready
+			checks["queue"] = agentQueue.Ready
+			checks["quota"] = quotaGuard.Ready
+		}
+		adminService.WithSystemInfo(roleName, os.Getenv("TRPC_AGENT_PUBLIC_BASE_URL"), checks)
+		adminService.WithStartupModelName(selectedModel.Info().Name)
+		adminService.WithDependencyObservations(func() []adminservice.DependencyCheck {
+			// Configuration can prove that this Worker's sandbox is disabled.
+			// A constructed executor does not prove live Docker/model readiness.
+			if roles.Worker && sandbox == nil {
+				return []adminservice.DependencyCheck{{Component: "sandbox", State: "unavailable", Source: "local_worker", ObservedAt: time.Now().UTC()}}
+			}
+			return nil
+		})
 		adminService.WithChannelState(wecomMCPState)
 		adminService.WithOutboundParts(inboundJournal)
+		if reader, ok := inboundJournal.(gateway.RunReader); ok {
+			adminService.WithRunReader(reader)
+		}
 		adminService.WithKnowledgeRouter(knowledgeRouter)
 		adminService.WithBackgroundJobs(backgroundJobs)
 		adminService.WithToolOperations(operations, toolExecutionJournal)
@@ -819,6 +908,7 @@ func run() error {
 	}
 	if roles.Worker {
 		group.Go(func() error { return ignoreCancellation(agentWorker.Run(groupCtx)) })
+		group.Go(func() error { return ignoreCancellation(debugEngine.Run(groupCtx)) })
 	}
 	if roles.Sender {
 		group.Go(func() error { return ignoreCancellation(replySender.Run(groupCtx)) })

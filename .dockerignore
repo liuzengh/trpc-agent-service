@@ -8,3 +8,6 @@ data
 coverage.out
 coverage.html
 *.log
+**/node_modules
+**/dist
+**/*.tsbuildinfo

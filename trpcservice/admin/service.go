@@ -12,15 +12,16 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/console"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
@@ -34,17 +35,24 @@ var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var ErrInvalid = errors.New("invalid Admin request")
 
 type Service struct {
-	outboundParts gateway.PartJournal
-	repository    controlplane.MutableRepository
-	tools         *platformtool.Catalog
-	audit         audit.Writer
-	knowledge     *platformstorage.KnowledgeRouter
-	jobs          background.Repository
-	secrets       secret.Authorizer
-	operations    *toolexec.Operations
-	toolJournal   toolexec.Journal
-	channelState  wecommcp.Store
-	skills        *platformskill.Registry
+	system                 *systemInfo
+	draftMu                sync.Mutex
+	debugMu                sync.Mutex
+	startupModelName       string
+	consoleStore           *console.Store
+	dependencyObservations func() []DependencyCheck
+	outboundParts          gateway.PartJournal
+	runReader              gateway.RunReader
+	repository             controlplane.MutableRepository
+	tools                  *platformtool.Catalog
+	audit                  audit.Writer
+	knowledge              *platformstorage.KnowledgeRouter
+	jobs                   background.Repository
+	secrets                secret.Authorizer
+	operations             *toolexec.Operations
+	toolJournal            toolexec.Journal
+	channelState           wecommcp.Store
+	skills                 *platformskill.Registry
 }
 
 func (s *Service) WithSkills(registry *platformskill.Registry) *Service {
@@ -70,6 +78,8 @@ func (s *Service) WithKnowledgeRouter(router *platformstorage.KnowledgeRouter) *
 	}
 	return s
 }
+
+func (s *Service) WithRunReader(reader gateway.RunReader) *Service { s.runReader = reader; return s }
 
 type KnowledgeDocumentInput struct {
 	TenantID    string         `json:"tenant_id"`
@@ -308,8 +318,12 @@ func New(repository controlplane.Repository, catalogs ...*platformtool.Catalog) 
 	if len(catalogs) > 0 && catalogs[0] != nil {
 		catalog = catalogs[0]
 	}
-	return &Service{repository: mutable, tools: catalog}, nil
+	return &Service{repository: mutable, tools: catalog, consoleStore: console.NewStore(repository)}, nil
 }
+
+func (s *Service) WithConsoleStore(store *console.Store) *Service { s.consoleStore = store; return s }
+
+func (s *Service) WithStartupModelName(name string) *Service { s.startupModelName = name; return s }
 
 // WithAuditWriter enables fail-closed audit recording for successful control
 // plane mutations. The writer is owned by the process, not by Service.
@@ -392,6 +406,7 @@ func (s *Service) CreateRevision(
 		revision.ID = "rev-" + uuid.NewString()
 	}
 	if !identifierPattern.MatchString(revision.ID) ||
+		strings.HasPrefix(revision.ID, "preview-") ||
 		!identifierPattern.MatchString(revision.TenantID) ||
 		!identifierPattern.MatchString(revision.AppID) || revision.RevisionNo <= 0 {
 		return controlplane.AgentRevision{}, invalidf("Agent revision identity is invalid")
@@ -411,37 +426,8 @@ func (s *Service) CreateRevision(
 			return controlplane.AgentRevision{}, invalidf("%s: %v", name, err)
 		}
 	}
-	if err := s.authorizeRevisionSecrets(ctx, revision); err != nil {
+	if err := s.requireValidRevision(ctx, revision); err != nil {
 		return controlplane.AgentRevision{}, err
-	}
-	if err := governance.ValidateMemoryPolicy(revision.AgentConfig, revision.MemoryConfig); err != nil {
-		return controlplane.AgentRevision{}, invalidf("memory_config: %v", err)
-	}
-	toolPolicy, err := governance.ParseToolPolicy(revision.ToolPolicy)
-	if err != nil {
-		return controlplane.AgentRevision{}, invalidf("tool_policy: %v", err)
-	}
-	servers, err := platformtool.ParseMCPServers(revision.AgentConfig)
-	if err != nil {
-		return controlplane.AgentRevision{}, invalidf("invalid MCP configuration")
-	}
-	for _, server := range servers {
-		if err := s.authorizeSecret(ctx, revision.TenantID, secret.MCPServer, server.CredentialRef); err != nil {
-			return controlplane.AgentRevision{}, err
-		}
-	}
-	refs, err := s.skills.Validate(revision.TenantID, revision.AgentConfig, toolPolicy.AllowedTools)
-	if err != nil {
-		return controlplane.AgentRevision{}, invalidf("skills are invalid or not granted")
-	}
-	if _, err := s.tools.Resolve(platformskill.LocalTools(refs, platformtool.MCPLocalTools(servers, toolPolicy.AllowedTools))); err != nil {
-		return controlplane.AgentRevision{}, invalidf("tool_policy: %v", err)
-	}
-	if err := platformstorage.ValidateRevisionKnowledgeConfig(revision.KnowledgeConfig); err != nil {
-		return controlplane.AgentRevision{}, invalidf("knowledge_config: %v", err)
-	}
-	if _, err := governance.BuildModelCallbacks(revision.GuardrailConfig); err != nil {
-		return controlplane.AgentRevision{}, invalidf("guardrail_config: %v", err)
 	}
 	revision.Checksum = controlplane.RevisionChecksum(revision)
 	revision.CreatedAt = time.Now().UTC()
@@ -471,31 +457,32 @@ func (s *Service) PublishRevision(
 	if err != nil {
 		return controlplane.AgentApp{}, err
 	}
-	if err := s.validateSkillRevision(revision); err != nil {
+	if revision.AppID != appID {
+		return controlplane.AgentApp{}, invalidf("revision does not belong to app")
+	}
+	if err := s.requireValidRevision(ctx, revision); err != nil {
 		return controlplane.AgentApp{}, err
 	}
-	app, err := s.repository.PublishRevision(ctx, tenantID, appID, revisionID, expectedVersion)
-	if err != nil {
-		return controlplane.AgentApp{}, err
-	}
-	if err := s.record(ctx, tenantID, "admin_revision_published", map[string]any{
-		"app_id": appID, "revision_id": revisionID,
-		"previous_version": expectedVersion, "version": app.Version,
-	}); err != nil {
-		return controlplane.AgentApp{}, err
-	}
-	return app, nil
-}
-
-func (s *Service) validateSkillRevision(revision controlplane.AgentRevision) error {
-	policy, err := governance.ParseToolPolicy(revision.ToolPolicy)
-	if err != nil {
-		return invalidf("invalid revision tool policy")
-	}
-	if _, err := s.skills.Validate(revision.TenantID, revision.AgentConfig, policy.AllowedTools); err != nil {
-		return invalidf("skill version is unavailable or no longer granted")
-	}
-	return nil
+	return s.releaseChange(ctx, tenantID, appID, expectedVersion, func(ctx context.Context, previous controlplane.AgentApp) (controlplane.AgentApp, error) {
+		action := "publish"
+		if previous.StableRevisionID == revisionID {
+			action = "republish"
+		} else if previous.StableRevisionID != "" {
+			old, err := s.repository.GetRevision(ctx, tenantID, previous.StableRevisionID)
+			if err != nil {
+				return controlplane.AgentApp{}, err
+			}
+			if revision.RevisionNo < old.RevisionNo {
+				action = "rollback"
+			}
+		}
+		app, err := s.repository.PublishRevision(ctx, tenantID, appID, revisionID, expectedVersion)
+		if err != nil {
+			return app, err
+		}
+		err = s.record(ctx, tenantID, "admin_revision_published", map[string]any{"app_id": appID, "action": action, "revision_id": revisionID, "previous_revision_id": previous.StableRevisionID, "previous_version": expectedVersion, "version": app.Version})
+		return app, err
+	})
 }
 
 func (s *Service) UpdateRolloutPolicy(
@@ -532,26 +519,23 @@ func (s *Service) UpdateRolloutPolicy(
 		if err != nil {
 			return controlplane.AgentApp{}, err
 		}
-		if err := s.validateSkillRevision(revision); err != nil {
-			return controlplane.AgentApp{}, err
-		}
 		if revision.AppID != appID {
 			return controlplane.AgentApp{}, invalidf("canary revision does not belong to app")
 		}
+		if err := s.requireValidRevision(ctx, revision); err != nil {
+			return controlplane.AgentApp{}, err
+		}
 	}
-	app, err := s.repository.UpdateRolloutPolicy(
-		ctx, tenantID, appID, policy, expectedVersion,
-	)
-	if err != nil {
-		return controlplane.AgentApp{}, err
-	}
-	if err := s.record(ctx, tenantID, "admin_rollout_policy_updated", map[string]any{
-		"app_id": appID, "canary_revision_id": config.CanaryRevisionID,
-		"canary_percent": config.CanaryPercent, "version": app.Version,
-	}); err != nil {
-		return controlplane.AgentApp{}, err
-	}
-	return app, nil
+	return s.releaseChange(ctx, tenantID, appID, expectedVersion, func(ctx context.Context, previous controlplane.AgentApp) (controlplane.AgentApp, error) {
+		app, err := s.repository.UpdateRolloutPolicy(ctx, tenantID, appID, policy, expectedVersion)
+		if err != nil {
+			return app, err
+		}
+		var previousPolicy map[string]any
+		_ = json.Unmarshal(previous.RolloutPolicy, &previousPolicy)
+		err = s.record(ctx, tenantID, "admin_rollout_policy_updated", map[string]any{"app_id": appID, "action": "rollout", "canary_revision_id": config.CanaryRevisionID, "canary_percent": config.CanaryPercent, "version": app.Version, "previous_policy": previousPolicy})
+		return app, err
+	})
 }
 
 func (s *Service) CreateChannelBinding(

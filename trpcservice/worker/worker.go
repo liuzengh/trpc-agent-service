@@ -182,6 +182,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		result.Reply = appendApprovalInstructions(result.Reply, pending)
 	}
 	if err := w.journal.CompleteRun(ctx, task, gateway.RunResult{
+		ErrorType:        result.PlatformCode,
 		WorkerID:         w.opts.WorkerID,
 		Reply:            result.Reply,
 		AgentName:        result.AgentName,
@@ -201,7 +202,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		PromptTokens: result.PromptTokens, CompletionTokens: result.CompletionTokens,
 		Cost: result.Cost, TraceID: audit.TraceID(ctx),
 		TraceParent: background.TraceParent(ctx),
-	}, "run_completed", "", started); err != nil {
+	}, "run_completed", result.PlatformCode, started); err != nil {
 		return true, w.retryOrAck(ctx, delivery, task, err)
 	}
 	if w.opts.Quota != nil && !w.opts.ModelUsageManaged && task.Media == nil {
@@ -245,13 +246,14 @@ func (w *Worker) enqueueSessionJobs(ctx context.Context, task workqueue.AgentTas
 	dedupeKey := task.ConversationID + ":" + fmt.Sprint(task.TurnSeq)
 	for _, jobType := range []string{background.JobSummary, background.JobMemoryExtract} {
 		if _, err := w.opts.Jobs.Enqueue(ctx, background.EnqueueRequest{
-			TenantID:    task.Scope.TenantID,
-			AppID:       task.Scope.AppID,
-			RevisionID:  task.Scope.RevisionID,
-			Type:        jobType,
-			DedupeKey:   dedupeKey,
-			Payload:     payload,
-			TraceParent: background.TraceParent(ctx),
+			SourceRequestID: task.RequestID,
+			TenantID:        task.Scope.TenantID,
+			AppID:           task.Scope.AppID,
+			RevisionID:      task.Scope.RevisionID,
+			Type:            jobType,
+			DedupeKey:       dedupeKey,
+			Payload:         payload,
+			TraceParent:     background.TraceParent(ctx),
 		}); err != nil {
 			return fmt.Errorf("enqueue %s job: %w", jobType, err)
 		}

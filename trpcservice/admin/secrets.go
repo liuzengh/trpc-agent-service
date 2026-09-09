@@ -3,7 +3,6 @@ package admin
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
@@ -21,42 +20,6 @@ func (s *Service) authorizeSecret(ctx context.Context, tenantID, purpose, ref st
 		return secret.ErrForbidden
 	}
 	return s.secrets.Authorize(ctx, tenantID, purpose, ref)
-}
-
-func (s *Service) authorizeRevisionSecrets(ctx context.Context, revision controlplane.AgentRevision) error {
-	var cfg struct {
-		Source string `json:"source"`
-		Env    string `json:"api_key_env"`
-		Ref    string `json:"api_key_ref"`
-	}
-	if err := json.Unmarshal(revision.ModelConfig, &cfg); err != nil {
-		return invalidf("invalid model config")
-	}
-	cfg.Source = strings.ToLower(strings.TrimSpace(cfg.Source))
-	if cfg.Source == "revision" || cfg.Env != "" || cfg.Ref != "" {
-		if cfg.Env != "" {
-			if cfg.Ref != "" {
-				return invalidf("use only one model credential reference")
-			}
-			cfg.Ref = "env://" + cfg.Env
-		}
-		if err := s.authorizeSecret(ctx, revision.TenantID, secret.Model, cfg.Ref); err != nil {
-			return err
-		}
-	}
-	var knowledge struct {
-		Embedding struct {
-			Provider string `json:"provider"`
-			Ref      string `json:"secret_ref"`
-		} `json:"embedding"`
-	}
-	if err := json.Unmarshal(revision.KnowledgeConfig, &knowledge); err != nil {
-		return invalidf("invalid knowledge config")
-	}
-	if strings.EqualFold(strings.TrimSpace(knowledge.Embedding.Provider), "openai") || knowledge.Embedding.Ref != "" {
-		return s.authorizeSecret(ctx, revision.TenantID, secret.Embedding, knowledge.Embedding.Ref)
-	}
-	return nil
 }
 
 func (s *Service) authorizeChannelSecrets(ctx context.Context, binding controlplane.ChannelBinding) error {

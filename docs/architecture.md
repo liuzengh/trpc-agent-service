@@ -33,7 +33,7 @@ flowchart LR
     end
 
     subgraph Control[控制面]
-        UI[管理页面]
+        UI[管理工作台<br/>配置 / 调试 / 发布]
         ADMIN[Admin API]
         CONFIG[(Control DB)]
         SECRET[EnvStore / Secret 引用<br/>KMS 扩展]
@@ -44,6 +44,8 @@ flowchart LR
         INBOX[(Inbound / Outbox)]
         MQ[[Redis Streams 工作队列]]
         WORKER[Agent Worker]
+        DEBUGQ[(独立调试队列 / 快照)]
+        DEBUGWORKER[Console Worker]
         SKILLS[Skill 快照与租户授权]
         SANDBOX[Docker 隔离执行]
         LEASE[Session Coordinator<br/>Lease + Fencing Token]
@@ -96,6 +98,9 @@ flowchart LR
     RS --> TG
 
     UI --> ADMIN
+    ADMIN --> DEBUGQ
+    DEBUGQ --> DEBUGWORKER
+    DEBUGWORKER --> RUNNER
     POLICY --> SKILLS
     SKILLS --> SANDBOX
     SANDBOX --> RUNNER
@@ -230,7 +235,11 @@ tRPC-Agent-Go 的 Runner 在构造时接收 Session、Memory 和 Artifact Servic
 | Admin API | `admin`、`controlplane` | admin / all |
 | Telemetry Collector | `telemetry`、`metrics`、`audit` 与 `deploy/compose` 配置 | 应用埋点及独立 Collector |
 
-管理页面内嵌在 `admin/ui`，由启用的 Admin/all 角色提供，真实数据仍走租户授权 API。`skill` 使用 tRPC 的正文加载和渐进注入，执行由平台固定入口 `skill_run` 连接 `workspace` Docker 沙箱；明确关闭框架的宿主机执行器自动回退。每次调用使用独立 tmpfs，不挂载宿主目录、不继承宿主密钥；Local 临时目录仅存 Docker CLI 状态，不作为安全隔离或执行回退。README 原文保持不变，边界见[验收范围](acceptance.md)。
+管理工作台源码位于 `trpcservice/web/console`，构建资源内嵌到 `admin/ui/dist`，由 Admin/all 角色提供；运行时不需要 Node 服务。草稿与不可变发布版本分开保存，发布事务同时检查草稿/App 版本、分配新序号并切换稳定版本。草稿修改不影响线上会话。
+
+Console Worker 消费独立的 PostgreSQL 调试任务（开发模式可用 InMemory），通过内部上下文和仓储适配复用同一个 Runtime/Runner。调试审批与 Journal 独立存储，原 IM 外键不变；调试内容只有发起者能查看，元数据按租户/RBAC 查询。状态流来自持久记录，浏览器断线不重跑 Agent，节点中断时保守标记未知结果。
+
+`skill` 使用 tRPC 的正文加载和渐进注入，执行由平台固定入口 `skill_run` 连接 `workspace` Docker 沙箱；明确关闭框架的宿主机执行器自动回退。每次调用使用独立 tmpfs，不挂载宿主目录、不继承宿主密钥；Local 临时目录仅存 Docker CLI 状态，不作为安全隔离或执行回退。README 原文保持不变，边界见[验收范围](acceptance.md)。
 
 ## 10. 部署形态
 

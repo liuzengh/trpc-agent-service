@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -76,6 +77,16 @@ func NewCallbacks(
 		status, errorType := StatusSucceeded, ""
 		if args.Error != nil {
 			status, errorType = StatusUnknown, "tool_outcome_unknown"
+			var coded interface{ ErrorCode() string }
+			if errors.As(args.Error, &coded) {
+				switch coded.ErrorCode() {
+				case governance.CodeSandboxUnavailable:
+					status, errorType = StatusFailed, governance.CodeSandboxUnavailable
+					governance.RecordToolFailure(ctx, args.ToolName, errorType)
+				case "sandbox_execution_failed":
+					errorType = "sandbox_execution_failed"
+				}
+			}
 			if errors.Is(args.Error, ErrOperationRejected) || errors.Is(args.Error, ErrOperationConflict) {
 				status, errorType = StatusFailed, "tool_rejected"
 			}

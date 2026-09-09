@@ -16,6 +16,8 @@ coverage.html
 *.exe
 
 vendor/
+node_modules/
+*.tsbuildinfo
 
 data/*
 !data/README.md

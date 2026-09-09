@@ -213,6 +213,11 @@ func (c *RevisionCompiler) Compile(
 	if revision.AppID != scope.AppID || revision.TenantID != scope.TenantID {
 		return nil, fmt.Errorf("agent revision scope mismatch")
 	}
+	if runtimecontext.IsDebugExecution(ctx) {
+		// Preview IDs are short-lived and user-created. Do not retain their
+		// prompt/model objects forever in the published-revision cache.
+		return c.compileRevision(ctx, scope, revision)
+	}
 	cacheKey := scope.TenantID + "\x00" + revision.ID + "\x00" + revision.Checksum
 	c.mu.RLock()
 	cached := c.cache[cacheKey]
@@ -291,24 +296,9 @@ func (c *RevisionCompiler) compileRevision(
 	if err := governance.ValidateMemoryPolicy(revision.AgentConfig, revision.MemoryConfig); err != nil {
 		return nil, err
 	}
-	if revision.AgentType != "llm" {
-		return nil, fmt.Errorf("unsupported Agent type %q", revision.AgentType)
-	}
-	var agentConfig revisionAgentConfig
-	if err := decodeStrictJSON(revision.AgentConfig, &agentConfig); err != nil {
-		return nil, fmt.Errorf("decode Agent config: %w", err)
-	}
-	agentConfig.Name = strings.TrimSpace(agentConfig.Name)
-	agentConfig.Description = strings.TrimSpace(agentConfig.Description)
-	agentConfig.Instruction = strings.TrimSpace(agentConfig.Instruction)
-	if agentConfig.Name == "" || agentConfig.Instruction == "" {
-		return nil, fmt.Errorf("agent revision requires name and instruction")
-	}
-	if agentConfig.PreloadMemory < 0 {
-		return nil, fmt.Errorf("agent revision preload_memory must not be negative")
-	}
-	if agentConfig.SummaryEveryTurns < 0 {
-		return nil, fmt.Errorf("agent revision summary_every_turns must not be negative")
+	agentConfig, err := parseRevisionAgentConfig(revision)
+	if err != nil {
+		return nil, err
 	}
 	selectedModel, err := c.ModelForRevision(ctx, revision, "chat")
 	if err != nil {
@@ -329,6 +319,12 @@ func (c *RevisionCompiler) compileRevision(
 	servers, err := platformtool.ParseMCPServers(revision.AgentConfig)
 	if err != nil {
 		return nil, err
+	}
+	if runtimecontext.IsDebugExecution(ctx) {
+		policy, err = c.debugPolicy(ctx, scope.TenantID, policy, servers)
+		if err != nil {
+			return nil, err
+		}
 	}
 	var tools []agenttool.Tool
 	if len(policy.AllowedTools) > 0 {
@@ -426,6 +422,12 @@ func (c *RevisionCompiler) RunPolicyOptions(
 		return nil, err
 	}
 	policy.DangerousTools = append(policy.DangerousTools, dangerous...)
+	if runtimecontext.IsDebugExecution(ctx) {
+		policy, err = c.debugPolicy(ctx, input.Scope.TenantID, policy, servers)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, name := range policy.AllowedTools {
 		if c.toolCatalog.RequiresApproval(name) {
 			policy.DangerousTools = append(policy.DangerousTools, name)
@@ -472,6 +474,9 @@ func (c *RevisionCompiler) RunPolicyOptions(
 				ToolName:         decision.ToolName,
 				Decision:         "tool_" + decision.Action,
 				Details: map[string]any{
+					"code":           decision.Code,
+					"calls_used":     decision.CallsUsed,
+					"call_limit":     decision.CallLimit,
 					"tool_call_id":   decision.ToolCallID,
 					"reason":         decision.Reason,
 					"arguments_hash": decision.ArgumentsHash,
@@ -520,6 +525,9 @@ func (c *RevisionCompiler) UsagePricing(
 }
 
 func (c *RevisionCompiler) buildRevisionModel(ctx context.Context, tenantID string, raw json.RawMessage) (model.Model, error) {
+	if err := ValidateRevisionModelConfig(raw); err != nil {
+		return nil, err
+	}
 	modelConfig, err := parseRevisionModelConfig(raw)
 	if err != nil {
 		return nil, err

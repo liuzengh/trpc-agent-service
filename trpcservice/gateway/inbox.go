@@ -56,6 +56,7 @@ type QueueOutboxItem struct {
 
 // RunResult is the durable outcome written by an Agent Worker.
 type RunResult struct {
+	ErrorType        string
 	WorkerID         string
 	Reply            string
 	AgentName        string

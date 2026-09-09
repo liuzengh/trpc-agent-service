@@ -55,7 +55,17 @@ func TestAdminCatalogRBACAndUIShell(t *testing.T) {
 	if w := call("/admin/me", `{}`, scopedToken, ""); strings.Contains(w.Body.String(), scopedToken) {
 		t.Fatal("identity endpoint returned token")
 	}
-	for _, path := range []string{"/admin/ui/", "/admin/ui/app.js", "/admin/ui/style.css"} {
+	paths := []string{"/admin/ui/"}
+	assets, err := uiFiles.ReadDir("ui/dist/assets")
+	if err != nil {
+		t.Fatal("build console assets before running the suite", err)
+	}
+	for _, asset := range assets {
+		if strings.HasSuffix(asset.Name(), ".js") || strings.HasSuffix(asset.Name(), ".css") {
+			paths = append(paths, "/admin/ui/assets/"+asset.Name())
+		}
+	}
+	for _, path := range paths {
 		r := httptest.NewRequest(http.MethodGet, path, nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)

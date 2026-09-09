@@ -46,6 +46,8 @@ Admin 是独立入口和 Principal RBAC，支持 superadmin、租户管理及只
 
 真实值在对应环境变量或部署 Secret 中。用途还包括 session、memory、artifact、knowledge、embedding、wecom_callback/aes/app、wecom_mcp_read/send、mcp_server。知识库 Key 和 Embedding Key 分开授权，S3/Embedding 不隐式回退到进程默认凭据。
 
+`POST /admin/resources/list` 使用 `kind=credentials` 和精确 `purpose` 分页查询当前租户的授权引用。此接口不调用 Resolve、不检查变量存在性，也不返回其他租户或其他用途的引用。网页模型与 Embedding 表单使用该清单；配置保存、发布和实际执行仍重复校验授权。
+
 Gateway 获得入站密钥，Sender 获得 IM 出站密钥，Worker/Jobs 获得执行模型与后端密钥；Relay 不解析模型或 IM 凭据。all 是本地组合权限，不代表进程级隔离。上游企业微信 MCP URL 可能同时具备读写权限，平台用途分离不等于上游签发了独立 Token。
 
 分角色策略生成命令只输出配置，不连接数据库或执行授权：
@@ -116,6 +118,8 @@ Model Callbacks 支持 max_input_chars、blocked_input_patterns 和 redact_outpu
 
 每条审计至少关联 tenant_id、channel、user_id、session_id、agent_name、tool_name、decision、latency、error_type、cost、trace_id，以及 request_id、资源版本和必要的结果哈希。不记录模型/IM/数据库凭据或原始业务参数。
 
+`/admin/releases/list` 按租户/应用与时间游标返回真实发布、回滚、灰度审计，不用版本创建时间代替操作时间。`/admin/jobs/list` 和运行详情按应用及源请求关联后台任务；元数据查询不会读取任务中的文档内容或触发重试。无 trace 时仍可通过 request_id 查询对应决策。
+
 ```json
 {"level":"basic","retention_days":0,"failure_mode":"fail_closed"}
 ```
@@ -143,7 +147,25 @@ Prometheus 规则、测试和 Grafana 配置见 [deploy/compose](../deploy/compo
 
 ## 8. 管理页面与 Skill 沙箱
 
-管理页面位于 `/admin/ui/`，只提供静态登录壳，不带任何租户配置。所有数据与写入继续要求 Admin Bearer/RBAC。Token 仅保留在浏览器内存，不用 Cookie/localStorage；页面使用同源 CSP、文本 DOM 渲染和跨源请求检查。租户列表在服务器按 Principal 过滤，后端也检查 tenant_id，不能靠隐藏按钮当授权。
+管理工作台位于 `/admin/ui/`，静态资源不带租户配置。浏览器首次使用已有 Admin Token 登录，之后使用最长 8 小时的 HttpOnly/SameSite Cookie；服务端只保存随机会话凭据摘要，长期 Token 不进入 localStorage。修改请求同时检查 CSRF 与 Origin，注销、到期或 Principal/Token 配置变化后旧会话失效。远程登录要求 HTTPS，本机回环 HTTP 仅用于开发。已有 Bearer API 保留，不通过伪造 Cookie 绕过其鉴权。租户、角色和资源归属都在服务器再次检查。
+
+页面使用 React/TypeScript 与同源 CSP，不渲染不可信 HTML。Ant Design 动态样式通过当前页面 nonce 授权，样式属性用于组件布局；没有开放内联脚本或 eval。长期登录凭据、模型 Key、数据库密码、回调密钥均不通过工作台 API 返回。
+
+版本编辑页面提供“检查配置”，对应 `POST /admin/revisions/validate`，请求体为 AgentRevision 配置（预检不要求生成版本 ID/序号）。接口要求当前租户的写权限，只读取控制面元数据和部署者授权，不保存版本、不解析密钥值、不连接模型/MCP/数据后端，也不启动沙箱。
+
+返回 `check_id`、`valid`、`issues`、`runtime_status`、`dependencies`；每个问题包含 `code`、`field`、`severity`、`message`、`suggestion`。创建、发布和灰度使用同一校验服务。写入被阻止时保留 HTTP 400/403 的兼容语义，并返回 `code=configuration_invalid` 和完整 `validation`，不回显含敏感输入的底层解析错误。
+
+启用 skill_run 后，skill_load 必须在白名单中；“加载后执行”至少需要两次工具调用，正数 `max_tool_calls` 小于 2 时禁止新建/发布该执行配置。`0` 保持不限次数的含义，并返回警告；平台不会自动把 1 改为 4。只加载说明、不启用 skill_run 的只读配置不要求沙箱或两次额度。旧版本不被原地修改。
+
+`valid=true` 不等于真实模型联调成功。依赖只接受执行节点提供的有时效观测；过期、未来时间或非 Worker 来源按 `unknown` 处理。目前内置启动装配仅能明确报告本地 Worker 沙箱未启用，远端 Worker、模型和后端连通性未观测时保持未知，不能把 Admin 节点自身可用当作所有 Worker 就绪。主动模型检查仍需显式运行模型检查命令。
+
+权限审计详情新增 `code`、`calls_used` 和 `call_limit`。运行中耗尽工具次数时，Runtime 使用固定平台反馈替换误导性的模型解释，包含 `tool_budget_exceeded` 和 request_id；缓存回复保证重复投递不重做。沙箱未启用的已批准调用记录为 `failed / sandbox_unavailable`（明确未开始执行）；其他沙箱失败仍保留未知结果边界，不因为错误分类就允许重放。审批的结构化类别为 `approval_required`，批准与执行成功继续分开。
+
+网页调试使用独立快照、队列、审批和 Journal 表，不创建虚假的 IM 绑定或可发布版本，也不放宽原 IM 表的外键。只有 Engine 注入的内部调试上下文才能解析快照和选择调试仓储；请求中的 tenant/user/session 不能直接成为可信身份。浏览器只能操作自己发起的调试会话，审计员不能因能看元数据就执行模型或读取调试正文。
+
+调试仍经过同一 Runtime/Runner、配额、工具白名单、审批参数哈希及沙箱。批准只消费一次对应授权；同批请求全部批准后才创建一次继续任务，拒绝不会创建继续任务。MCP 只读资格来自部署者的凭据配置，不相信上游 annotation；其他外部写工具在网页调试中关闭。模型输出不能替代工具 Journal 的执行事实。
+
+调试数据使用服务端生成的独立 UserID/SessionID，保留所属 tenant/app 的存储路由但不读取业务用户的 Session/Memory。自动记忆和摘要任务不在调试中运行。7 天保留期后先删除对应原生 Session/Memory，再清理控制台记录；失败保留目标等待重试。状态流重连只读取持久状态，不重发消息；节点中断后的未知结果不会自动重放。
 
 Skill 由部署者在 skills root 的 catalog.json 注册 name/version/directory；每个目录加载 SKILL.md 与 run.sh。框架负责 Markdown 解析和 skill_load，平台冻结正文与脚本快照，并校验租户 grant 和 Revision 中的 name/version/checksum。部署目录变化不会偷偷改变已编译代码；新内容要发布新引用，旧版本应保留以支持回滚。
 

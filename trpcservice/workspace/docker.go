@@ -63,6 +63,15 @@ type Failure struct{ Kind string }
 
 func (e *Failure) Error() string { return "sandbox " + e.Kind }
 
+// ErrorCode never includes command output or host details. Only disabled is
+// known to precede execution; other failures may have an unknown outcome.
+func (e *Failure) ErrorCode() string {
+	if e.Kind == "disabled" {
+		return "sandbox_unavailable"
+	}
+	return "sandbox_execution_failed"
+}
+
 // Docker runs fresh, unprivileged, networkless containers using a pinned image ID.
 type Docker struct {
 	config          Config
@@ -121,6 +130,26 @@ func (d *Docker) command(ctx context.Context, dir string, args ...string) *exec.
 	cmd.Dir = dir
 	cmd.WaitDelay = time.Second
 	return cmd
+}
+
+// Ready inspects the daemon and the already pinned local image. It never
+// creates a container, executes a Skill or pulls an image.
+func (d *Docker) Ready(ctx context.Context) error {
+	if d == nil {
+		return &Failure{"disabled"}
+	}
+	dir, err := os.MkdirTemp("", "trpc-sandbox-health-")
+	if err != nil {
+		return &Failure{"local state unavailable"}
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	raw, err := d.command(probe, dir, "image", "inspect", "--format", "{{.Id}}", d.imageID).Output()
+	if err != nil || strings.TrimSpace(string(raw)) != d.imageID {
+		return &Failure{"daemon or pinned image unavailable"}
+	}
+	return nil
 }
 
 func payload(r Request) ([]byte, error) {

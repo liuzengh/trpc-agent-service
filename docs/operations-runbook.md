@@ -4,7 +4,7 @@
 
 ## 1. 环境与配置
 
-Go 版本以 [go.mod](../go.mod) 为准。手动启停需要 Linux、flock 和支持 pidfd 的内核；其他系统可直接以前台二进制或容器运行。持久化/多进程部署还需要 Docker Compose 或自行准备 PostgreSQL、Redis，以及按需使用的 MinIO/Qdrant。
+Go 版本以 [go.mod](../go.mod) 为准。从源码构建控制台还需要 Node.js 22.12+（推荐 24 LTS）与 npm；运行构建好的 Go 二进制不需要 Node。`build.sh` 按锁文件安装前端依赖、检查类型并构建页面，再编译 Go。手动启停需要 Linux、flock 和支持 pidfd 的内核；其他系统可直接以前台二进制或容器运行。持久化/多进程部署还需要 Docker Compose 或自行准备 PostgreSQL、Redis，以及按需使用的 MinIO/Qdrant。
 
 ```bash
 test -f .env || cp .env.example .env
@@ -125,14 +125,16 @@ docker compose --profile observability up -d
 
 1. 备份配置、当前二进制和数据库，先核对未完成工具及 unknown/attempting 发送事实。
 2. 停止旧 Worker/Jobs/Sender，不能混跑不兼容的队列、权限或分段发送协议。
-3. 构建，使用迁移身份应用缺失 migrations；当前控制面 schema 为 23，不能修改已应用 SQL 文件。
+3. 构建，使用迁移身份应用缺失 migrations；当前控制面 schema 为 24，不能修改已应用 SQL 文件。024 只新增控制台/调试表，不重建业务会话。更新 Admin/Worker 的新增表权限后再启动新版本；不要以运行账号自动执行 DDL。
 4. 核对新增表/函数/Redis 命令权限，再启动候选实例，检查就绪和受控请求。
 5. Agent 行为通过不可变 Revision、stable/canary 和 conversation pin 灰度；切回稳定 revision 不会自动迁移已 pin 的会话。
 6. 数据迁移按[迁移协议](data-consistency.md)执行。回滚配置不会撤销已提交的工作项或已发送消息，不得恢复旧备份后盲目重放。
 
+`0.3.0-rc.1` 的升级检查已在独立 PostgreSQL 上验证：基线 `0ce285f`（`0.2.0-rc.10`）可在保留 schema 24 新增表时启动、查询 Admin 并完成 HTTP Agent 执行。回退仍须先停止新版本、处理或保留在途调试任务，不混跑新旧实例；旧版不提供新工作台，也不会消费独立调试队列。此结论不代表任意历史版本、所有供应商或生产容灾均已验证。
+
 ## 6. 容量与恢复
 
-所需活跃并发约为“峰值 turn/s × 平均执行秒数”。当前每 Worker 的异步执行并发为 1，节点数量还需考虑模型供应商配额、SQL 连接池和故障余量；不能用同步 `/chat` 的并发推断异步队列容量。
+所需活跃并发约为“峰值 turn/s × 平均执行秒数”。当前每 Worker 的业务队列执行并发为 1，另有独立的网页调试执行并发 1，两者共享租户并发与预算限制。节点数量还需考虑模型供应商配额、SQL 连接池和故障余量；不能用同步 `/chat` 的并发推断异步队列容量。
 
 `trpc-loadgen` 测量 `/inbound` ACK 吞吐和分位延迟；完整容量还要测队列排空时间、最终完成/送达数、token、成本、SQL/Redis QPS、GC、取消时延和失败率。真实模型压测必须先设预算与供应商限额，不使用生产 IM 群压测。
 
@@ -156,13 +158,24 @@ docker compose --profile observability up -d
 
 源码在本地提交干净后执行 `./build.sh --package`，只导出已提交文件至 `dist` 并生成 SHA-256；不会 push。不要直接压缩整个工作目录，私有 `.env`、`data` 和数据库卷不能交付。
 
-## 8. 管理页面与可执行 Skill
+## 8. 管理工作台、网页调试与可执行 Skill
 
-管理页面随 Agent 二进制内嵌，无需 Node/npm，也不需要额外启动脚本。配置 `TRPC_AGENT_ADMIN_ENABLED=true` 和已有的 Admin Token/Principals，在 admin/all 角色启动后访问 `http://127.0.0.1:8080/admin/ui/`，输入 **Admin Token**，不是模型或 IM Key。
+管理工作台随 Agent 二进制内嵌，运行时不需要 Node/npm 或额外前端服务。配置 `TRPC_AGENT_ADMIN_ENABLED=true` 和已有的 Admin Token/Principals，在 admin/all 角色启动后访问 `http://127.0.0.1:8080/admin/ui/`，输入 **Admin Token**，不是模型或 IM Key。登录换取最长 8 小时的 HttpOnly 会话，刷新后恢复；长期 Token 不进入浏览器本地存储。远程浏览器登录要求 HTTPS，本机回环 HTTP 仅用于开发。
 
-该能力从 rc.10 提供，数据库 schema 仍为 23，无新增迁移。先升级相关 Admin/Worker 再发布带 skills 字段的新版本，不要混跑无法识别新字段的旧 Worker；本轮代码开发不自动修改现有 `.env` 或重启实例。
+新版工作台从 `0.3.0-rc.1` 提供，需要 schema 24。先升级 Admin/Worker，再开放工作台。网页调试使用独立 SQL 调试队列，不会被旧版 IM Worker 误领；旧版本的管理页不支持新的登录会话。升级不会自动发布 Agent 版本或迁移已有 IM 会话。
 
-页面支持创建/查询租户和应用、修改租户策略、创建不可变版本、发布/回滚、灰度策略、通道注册/更新、后端注册、Skill 选择和审计查询。基础字段或后端不提供随意覆盖；已有后端变更仍走迁移流程。只读角色只能查询，刷新页面会清除登录凭据。
+页面以 Agent 为中心组织操作：
+
+- 在“Agent 应用”创建应用并进入工作台；展示名称、说明和接入状态在“应用设置”修改。新应用优先继承租户会话后端，没有默认绑定时注册部署者的 startup_config 会话后端。
+- 在配置页编辑模型、提示词、工具、Skill、知识/Embedding、记忆和输入输出规则。模型与 Embedding 凭据从当前租户、当前用途的授权引用清单选择，不返回密钥值，也不检查环境变量是否存在。保存草稿不会修改线上版本；并发保存冲突会展示两份配置，按配置组选择合并，合并后仍需再次保存。MCP 等复杂字段保留高级 JSON 入口。
+- 在右侧发送消息进行调试。首次发送会保存有写权限用户的草稿并创建不可变快照；新修改需显式开始新调试，不影响正在运行的请求。
+- 调试使用独立身份，不发送 IM；外部写工具关闭，MCP 仅开放部署者授权的只读工具。Skill 仍需批准。审批、运行状态和工具记录来自后端，不以模型文字判断成功。
+- 发布弹窗展示配置检查、具体差异和同配置的隔离调试记录。版本 ID/序号由后端生成；不可变版本列表支持继续翻页，发布历史另从审计事实展示操作人、操作时间、版本变化、回滚和灰度调整。旧记录缺少的字段不补造；审计保留期之外的操作不会显示。旧业务会话保持原版本。
+- 在“运行记录”按应用、来源、时间和状态查看请求、耗时、Token/成本、工具与投递。成本使用部署者配置的计费单位，未配置价格时为 0，不表示供应商免费。通道详情只查询已有的接收/投递记录；企业微信 MCP 另展示消费进度和拒绝原因，不主动读取新消息。
+- 请求详情关联带源 request_id 的后台任务，应用的“后台任务”页可分页查看摘要、记忆、知识同步与迁移状态。只展示任务元数据，不返回文档正文或原始供应商错误；旧任务没有关联编号时不推测归属，不自动重试。
+- 在“系统状态”查看 Worker 心跳、默认 Session/队列/配额和 Docker 固定镜像的实际检查结果。Worker 每 15 秒做有界只读检查，每 5 秒上报；专用 Session 每轮最多轮询 32 个已初始化实例，不因检查创建后端表。Admin 只读取共享观测，超过 30 秒、尚未初始化或本轮未观测时显示未知。发布预检按应用后端和配置指纹匹配，保守汇总活跃 Worker；模型仍需显式调试，不自动生成。公网探测只访问部署者配置的 `TRPC_AGENT_PUBLIC_BASE_URL/healthz`，必须点击触发，不会自动启动 Tunnel。
+
+网页调试每个会话最多 50 轮，有工具时要求明确的 1～32 次工具调用上限；执行最长 2 分钟，显示输出最多 64 KiB。数据保留 7 天，Worker 清理对应独立用户的原生 Session/Memory 后再清理控制台记录；后端不可用时保留清理目标重试。InMemory 仅适合单进程开发，多节点需 PostgreSQL 和共享 Session 后端。节点中断产生未知结果时不会盲目重跑。
 
 启用内置示例 Skill（替换为实际授权租户，不覆盖其他 grants）：
 
@@ -176,10 +189,12 @@ TRPC_AGENT_SANDBOX_SOCKET=/var/run/docker.sock
 
 Worker 所在主机需已安装 Docker CLI，并且所指定 daemon 已有该镜像；服务不会自动 pull 或修改 daemon。镜像必须提供 /bin/sh 和 /bin/busybox，启动时解析并固定 image ID。默认容器部署模板不授予 Docker socket 权限；容器化 Worker 启用沙箱前须单独准备可信 Docker CLI、只读 Skill 挂载和专用 daemon 访问，不应把生产主机 root socket 直接共享给所有应用。
 
-在页面选择租户 → 版本与发布 → 创建或复制版本 → 勾选已授权 Skill。页面会写入完整 name/version/checksum，并加入 skill_load、skill_run 工具白名单；原有权限和配置应保留。保存后显式发布。已 pin 的会话不会自动换版本，测试应使用新会话或受控迁移。
+在页面选择租户 → Agent 应用 → 工作台 → 勾选已授权 Skill。页面写入完整 name/version/checksum，并加入 skill_load、skill_run 工具白名单；原有权限和配置保留。保存草稿后可以直接在网页调试，不需要 Tunnel 或新建 Telegram Topic。验证配置后再显式发布到业务使用；已 pin 的 IM 会话不会自动换版本。
+
+保存前点击“检查配置”。可执行 Skill 的 `tool_policy.max_tool_calls` 至少为 2，初次测试可明确设为 4；1 只够加载说明，不能完成接下来的执行。平台会阻止这种配置，不自动提高限额。0 表示不限次数而不是禁用工具。检查结果会区分错误、警告与运行依赖未知；静态配置检查不会消耗模型额度，也不证明真实调用已经通过。详细接口见[治理说明](governance-operations.md)。
 
 json-digest 示例计算输入 JSON 文件字节数和 SHA-256，是真正的脚本执行，不调用模型生成假结果。Agent 先用 skill_load 读取说明，再请求 skill_run；首次返回审批指令，用户批准后执行固定 run.sh，脚本从 /workspace/input.json 读取输入，stdout/stderr 作为有界工具结果返回。不能通过模型的一句“已执行”判断成功，应同时核对执行 Journal。
 
 自定义 Skill 在 root 的 catalog.json 增加注册，提供新的目录和版本；不要原地覆写已发布版本。目录只加载 SKILL.md/run.sh，其他文件不自动挂载。授权、镜像和 root 均为部署者配置，租户只能选择获授权的固定版本，页面不提供未审核脚本上传。
 
-验证：`TRPC_AGENT_VERIFY_ISOLATED=1 ./scripts/regression.sh` 包含真实沙箱和 Skill Runner；浏览器 E2E 的可选依赖与命令见[验收说明](acceptance.md)。所有测试使用合成输入和独立环境，不读取现有会话或发送真实 IM。
+现有回归入口为 `./scripts/regression.sh`，会先构建控制台；隔离后端检查仍可使用 `TRPC_AGENT_VERIFY_ISOLATED=1`。不把代码编译、页面调试或隔离环境检查扩大为真实 IM/生产上线验收，边界见[验收说明](acceptance.md)。

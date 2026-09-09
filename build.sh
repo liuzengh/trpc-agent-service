@@ -14,7 +14,7 @@ package_source() {
   while IFS= read -r -d '' package_path; do
     case "$package_path" in
       .env.example|data/README.md) ;;
-      .env|.env.*|*/.env|*/.env.*|*.env|bin/*|dist/*|data/*|*.log|coverage.out|coverage.html)
+      .env|.env.*|*/.env|*/.env.*|*.env|bin/*|dist/*|data/*|*/node_modules/*|*/ui/dist/*|*.log|coverage.out|coverage.html)
         echo "private/generated path is tracked; packaging refused" >&2; exit 1 ;;
     esac
     [[ ! -L "$package_path" ]] || { echo "tracked symlink requires manual review before packaging" >&2; exit 1; }
@@ -51,6 +51,10 @@ fi
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
+
+command -v npm >/dev/null || { echo "Node.js/npm are required to build the console; use Node 22.12+ or 24 LTS." >&2; exit 1; }
+npm --prefix "$ROOT/trpcservice/web/console" ci --ignore-scripts --no-audit --no-fund
+npm --prefix "$ROOT/trpcservice/web/console" run build
 
 mkdir -p "$ROOT/bin"
 COMMANDS=(trpc-service trpc-local trpc-migrate trpc-loadgen trpc-modelcheck trpc-embeddingcheck trpc-tracecheck trpc-wecomcheck trpc-wecomsample trpc-wecomsetup trpc-permissions)

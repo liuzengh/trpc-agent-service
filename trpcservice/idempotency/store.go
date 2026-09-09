@@ -52,6 +52,7 @@ func (k Key) Validate() error {
 
 // Result is the transport-neutral value cached after a successful Agent turn.
 type Result struct {
+	PlatformCode     string  `json:"platform_code,omitempty"`
 	Reply            string  `json:"reply"`
 	RequestID        string  `json:"request_id"`
 	EventCount       int     `json:"event_count"`

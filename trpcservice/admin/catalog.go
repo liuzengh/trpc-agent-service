@@ -85,7 +85,7 @@ func redactCatalog(value any) any {
 				secret = secret || strings.Contains(lower, word)
 			}
 			secret = secret || lower == "token" || strings.HasSuffix(lower, "_token")
-			if secret && !strings.HasSuffix(lower, "_ref") && lower != "secret_namespace" {
+			if secret && !strings.HasSuffix(lower, "_ref") && lower != "api_key_env" && lower != "secret_namespace" {
 				v[k] = "[REDACTED]"
 			} else {
 				v[k] = redactCatalog(item)

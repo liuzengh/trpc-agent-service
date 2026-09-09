@@ -40,10 +40,15 @@ type Writer interface {
 }
 
 type Query struct {
-	TenantID string
-	Decision string
-	TraceID  string
-	Limit    int
+	AppID       string
+	RequestID   string
+	ReleaseOnly bool
+	BeforeTime  time.Time
+	BeforeID    string
+	TenantID    string
+	Decision    string
+	TraceID     string
+	Limit       int
 }
 
 type Reader interface {

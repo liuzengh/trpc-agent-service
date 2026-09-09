@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/database"
 	"time"
 )
 
@@ -26,7 +27,11 @@ func (w *PostgresWriter) Record(ctx context.Context, event Event) error {
 		return fmt.Errorf("marshal audit details: %w", err)
 	}
 	var accepted bool
-	err = w.db.QueryRowContext(ctx, "SELECT platform_audit_append($1::jsonb)", string(payload)).Scan(&accepted)
+	if tx := database.Transaction(ctx, w.db); tx != nil {
+		err = tx.QueryRowContext(ctx, "SELECT platform_audit_append($1::jsonb)", string(payload)).Scan(&accepted)
+	} else {
+		err = w.db.QueryRowContext(ctx, "SELECT platform_audit_append($1::jsonb)", string(payload)).Scan(&accepted)
+	}
 	if err != nil {
 		return fmt.Errorf("audit persistence unavailable")
 	}
@@ -57,6 +62,10 @@ func (w *PostgresWriter) Query(ctx context.Context, query Query) ([]Event, error
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
+	var before any
+	if !query.BeforeTime.IsZero() {
+		before = query.BeforeTime
+	}
 	rows, err := w.db.QueryContext(ctx, `
 SELECT audit_id,occurred_at,tenant_id,COALESCE(channel,''),COALESCE(channel_binding_id,''),
        COALESCE(user_id,''),COALESCE(session_id,''),COALESCE(message_id,''),
@@ -65,7 +74,10 @@ SELECT audit_id,occurred_at,tenant_id,COALESCE(channel,''),COALESCE(channel_bind
        COALESCE(error_type,''),cost,details
 FROM audit_log
 WHERE tenant_id=$1 AND ($2='' OR decision=$2) AND ($3='' OR trace_id=$3)
-ORDER BY occurred_at DESC LIMIT $4`, query.TenantID, query.Decision, query.TraceID, limit)
+AND ($5='' OR details->>'app_id'=$5) AND ($6='' OR request_id=$6)
+AND (NOT $7 OR decision IN ('admin_revision_published','admin_draft_published','admin_rollout_policy_updated'))
+AND ($8::timestamptz IS NULL OR (occurred_at,audit_id)<($8,$9))
+ORDER BY occurred_at DESC,audit_id DESC LIMIT $4`, query.TenantID, query.Decision, query.TraceID, limit, query.AppID, query.RequestID, query.ReleaseOnly, before, query.BeforeID)
 	if err != nil {
 		return nil, fmt.Errorf("query audit events: %w", err)
 	}

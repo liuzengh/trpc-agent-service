@@ -1,21 +1,26 @@
 package admin
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net/http"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/console"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/toolexec"
 )
 
 type Handler struct {
+	loginLimit loginLimiter
 	service    *Service
 	principals []Principal
 }
@@ -37,11 +42,21 @@ func NewHandlerWithPrincipals(service *Service, principals []Principal) (*Handle
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if h.serveUI(w, r) {
 		return
 	}
-	principal, authorized := authenticate(h.principals, r.Header.Get("Authorization"))
-	if !authorized {
+	if r.URL.Path == "/admin/login" {
+		h.login(w, r)
+		return
+	}
+	principal, csrf, authErr := h.authenticateRequest(r)
+	if authErr != nil {
+		if !errors.Is(authErr, errLogin) {
+			h.writeResult(w, 0, nil, authErr)
+			return
+		}
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		adminJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
@@ -51,12 +66,44 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		adminJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin admin request rejected"})
 		return
 	}
+	if r.URL.Path == "/admin/session" && r.Method == http.MethodGet {
+		adminJSON(w, 200, publicIdentity(principal, csrf))
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		adminJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
+	if csrf != "" && (r.Header.Get("Origin") == "" || subtle.ConstantTimeCompare([]byte(csrf), []byte(r.Header.Get("X-CSRF-Token"))) != 1) {
+		adminJSON(w, 403, map[string]string{"error": "CSRF validation failed"})
+		return
+	}
 	switch r.URL.Path {
+	case "/admin/releases/list":
+		h.handleReleases(w, r)
+	case "/admin/jobs/list":
+		h.handleJobsList(w, r)
+	case "/admin/channel-bindings/diagnostics":
+		h.handleChannelDiagnostics(w, r)
+	case "/admin/apps/settings":
+		h.handleAppSettings(w, r)
+	case "/admin/resources/list":
+		h.handleResources(w, r)
+	case "/admin/system/status", "/admin/system/probe":
+		h.handleSystem(w, r)
+	case "/admin/runs/list", "/admin/runs/get":
+		h.handleRuns(w, r)
+	case "/admin/apps/onboard":
+		h.onboardApp(w, r)
+	case "/admin/debug/sessions", "/admin/debug/latest", "/admin/debug/send", "/admin/debug/get", "/admin/debug/decision", "/admin/debug/cancel", "/admin/debug/events", "/admin/debug/live":
+		h.handleDebug(w, r)
+	case "/admin/workspace":
+		h.handleWorkspace(w, r)
+	case "/admin/drafts/get", "/admin/drafts/save", "/admin/drafts/reset", "/admin/drafts/publish", "/admin/drafts/readiness":
+		h.handleDrafts(w, r)
+	case "/admin/logout":
+		h.logout(w, r)
 	case "/admin/me":
 		adminJSON(w, http.StatusOK, map[string]any{"name": principal.Name, "role": principal.Role, "tenant_ids": principal.TenantIDs})
 	case "/admin/catalog/list":
@@ -151,6 +198,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		value, err := h.service.CreateAgentApp(r.Context(), input)
 		h.writeResult(w, http.StatusCreated, value, err)
+	case "/admin/revisions/validate":
+		var input controlplane.AgentRevision
+		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionWrite) {
+			return
+		}
+		value, err := h.service.ValidateRevision(r.Context(), input)
+		h.writeResult(w, http.StatusOK, value, err)
 	case "/admin/revisions":
 		var input controlplane.AgentRevision
 		if !decodeAdmin(w, r, &input) {
@@ -438,8 +492,34 @@ func (h *Handler) writeResult(w http.ResponseWriter, success int, value any, err
 		adminJSON(w, success, value)
 		return
 	}
+	var validation *ValidationError
+	if errors.As(err, &validation) {
+		status := http.StatusBadRequest
+		if errors.Is(err, secret.ErrForbidden) {
+			status = http.StatusForbidden
+		}
+		adminJSON(w, status, map[string]any{"error": "Agent 配置检查未通过", "code": "configuration_invalid", "validation": validation.Report})
+		return
+	}
 	var status int
 	switch {
+	case errors.Is(err, gateway.ErrRunMissing):
+		status = http.StatusNotFound
+	case errors.Is(err, approval.ErrForbidden):
+		status = http.StatusForbidden
+	case errors.Is(err, approval.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, approval.ErrConflict):
+		status = http.StatusConflict
+	case errors.Is(err, approval.ErrExpired):
+		status = http.StatusGone
+	case errors.Is(err, console.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, console.ErrConflict):
+		status = http.StatusConflict
+	case errors.Is(err, console.ErrUnavailable):
+		adminJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "控制台存储尚未就绪，请检查数据库迁移与角色权限", "code": "console_unavailable"})
+		return
 	case errors.Is(err, secret.ErrForbidden):
 		status = http.StatusForbidden
 	case errors.Is(err, toolexec.ErrNotFound):

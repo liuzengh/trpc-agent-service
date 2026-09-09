@@ -31,6 +31,7 @@ type SessionRouter struct {
 	mu         sync.RWMutex
 	closed     bool
 	services   map[string]session.Service
+	probeAfter string
 	group      singleflight.Group
 }
 

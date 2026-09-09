@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
@@ -69,8 +70,14 @@ func (x *countExecutor) Execute(ctx context.Context, r workspace.Request) (works
 	return workspace.Result{Stdout: "skill-ok"}, nil
 }
 
-func testSkillRuntime(t *testing.T, executor workspace.Executor) {
+type skillRuntimeScenario struct{ BudgetOne, DisabledSandbox bool }
+
+func testSkillRuntime(t *testing.T, executor workspace.Executor, scenarios ...skillRuntimeScenario) {
 	t.Helper()
+	var scenario skillRuntimeScenario
+	if len(scenarios) > 0 {
+		scenario = scenarios[0]
+	}
 	ctx := context.Background()
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "sample"), 0700); err != nil {
@@ -91,6 +98,9 @@ func testSkillRuntime(t *testing.T, executor workspace.Executor) {
 	agentConfig["skills"] = []platformskill.Ref{registry.List("tutorial-tenant")[0].Ref}
 	data.Revisions[0].AgentConfig, _ = json.Marshal(agentConfig)
 	data.Revisions[0].ToolPolicy = json.RawMessage(`{"allowed_tools":["skill_load","skill_run"]}`)
+	if scenario.BudgetOne {
+		data.Revisions[0].ToolPolicy = json.RawMessage(`{"allowed_tools":["skill_load","skill_run"],"max_tool_calls":1}`)
+	}
 	repo := controlplane.NewMemoryRepository(data)
 	defer func() { _ = repo.Close() }()
 	journal := toolexec.NewMemoryJournal()
@@ -99,8 +109,13 @@ func testSkillRuntime(t *testing.T, executor workspace.Executor) {
 	defer func() { _ = approvals.Close() }()
 	counter := &countExecutor{next: executor}
 	service := &platformskill.Service{Registry: registry, Repository: repo, Journal: journal, Executor: counter}
+	if scenario.DisabledSandbox {
+		service.Executor = nil
+	}
 	selected := &skillModel{}
-	compiler, err := NewRevisionCompiler(repo, selected, false, WithSkills(registry), WithToolCatalog(platformtool.DefaultCatalog(service.RunTool())), WithApprovalRepository(approvals), WithToolExecutionJournal(journal))
+	auditLog := audit.NewMemoryWriter()
+	defer func() { _ = auditLog.Close() }()
+	compiler, err := NewRevisionCompiler(repo, selected, false, WithSkills(registry), WithToolCatalog(platformtool.DefaultCatalog(service.RunTool())), WithApprovalRepository(approvals), WithToolExecutionJournal(journal), WithAuditWriter(auditLog))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,16 +132,50 @@ func testSkillRuntime(t *testing.T, executor workspace.Executor) {
 		t.Fatal("skill setup enabled a host executor")
 	}
 	input := ChatInput{Scope: runtimecontext.TutorialScope(), UserID: "alice", SessionID: "skill-test", MessageID: "ask", RequestID: "ask", Text: "use skill", ChatType: "direct"}
-	if _, err = runtime.ChatWithScope(ctx, input); err != nil {
+	first, err := runtime.ChatWithScope(ctx, input)
+	if err != nil {
 		t.Fatal(err)
 	}
 	pending, err := approvals.ListPendingByRequest(ctx, input.Scope.TenantID, "ask")
+	if scenario.BudgetOne {
+		if err != nil || len(pending) != 0 || counter.calls.Load() != 0 || !strings.Contains(first.Reply, governance.CodeToolBudgetExceeded) || !strings.Contains(first.Reply, "不会通过等待自动恢复") {
+			t.Fatalf("budget feedback: %+v %v", first, err)
+		}
+		entries, err := journal.ListByRequest(ctx, input.Scope.TenantID, input.RequestID)
+		if err != nil || len(entries) != 1 || entries[0].ToolName != "skill_load" || entries[0].Status != toolexec.StatusSucceeded {
+			t.Fatal("denied script appeared in execution journal", entries, err)
+		}
+		found := false
+		for _, event := range auditLog.Events() {
+			if event.Decision == "tool_deny" && event.ToolName == "skill_run" && event.Details["code"] == governance.CodeToolBudgetExceeded {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("structured permission error not persisted")
+		}
+		again, err := runtime.ChatWithScope(ctx, input)
+		if err != nil || !again.Replayed || again.Reply != first.Reply || counter.calls.Load() != 0 {
+			t.Fatal("replay lost platform feedback", again, err)
+		}
+		return
+	}
 	if err != nil || len(pending) != 1 || pending[0].ToolName != "skill_run" || counter.calls.Load() != 0 {
 		t.Fatalf("approval boundary: pending=%v calls=%d err=%v", pending, counter.calls.Load(), err)
 	}
 	input.RequestID, input.MessageID = "approved", "approved"
 	input.ApprovedToolCalls = []governance.ApprovedToolCall{{ToolName: "skill_run", ArgumentsHash: pending[0].ArgumentsHash}}
 	result, err := runtime.ChatWithScope(ctx, input)
+	if scenario.DisabledSandbox {
+		if err != nil || !strings.Contains(result.Reply, governance.CodeSandboxUnavailable) || counter.calls.Load() != 0 {
+			t.Fatal("disabled sandbox feedback missing", result, err)
+		}
+		entries, err := journal.ListByRequest(ctx, input.Scope.TenantID, input.RequestID)
+		if err != nil || len(entries) != 1 || entries[0].Status != toolexec.StatusFailed || entries[0].ErrorType != governance.CodeSandboxUnavailable {
+			t.Fatal("known non-execution was not recorded correctly", entries, err)
+		}
+		return
+	}
 	if err != nil || !strings.Contains(result.Reply, "skill-ok") || counter.calls.Load() != 1 || !selected.sawBody.Load() {
 		t.Fatalf("native skill/runtime/sandbox: reply=%s calls=%d body=%v err=%v", result.Reply, counter.calls.Load(), selected.sawBody.Load(), err)
 	}
@@ -140,6 +189,12 @@ func testSkillRuntime(t *testing.T, executor workspace.Executor) {
 	}
 }
 func TestNativeSkillLoadingAndApprovedExecution(t *testing.T) { testSkillRuntime(t, nil) }
+func TestNativeSkillBudgetFeedbackAndReplay(t *testing.T) {
+	testSkillRuntime(t, nil, skillRuntimeScenario{BudgetOne: true})
+}
+func TestNativeSkillDisabledSandboxFeedback(t *testing.T) {
+	testSkillRuntime(t, nil, skillRuntimeScenario{DisabledSandbox: true})
+}
 func TestSkillRunnerDockerIntegration(t *testing.T) {
 	if os.Getenv("TEST_SANDBOX_DOCKER") != "1" {
 		t.Skip("isolated Docker sandbox suite disabled")

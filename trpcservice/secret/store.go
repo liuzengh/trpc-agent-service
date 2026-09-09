@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -41,6 +42,29 @@ type Grant struct {
 
 type Authorizer interface {
 	Authorize(ctx context.Context, tenantID, purpose, reference string) error
+}
+
+// ReferenceCatalog exposes deployment-owned grant metadata, never values or
+// environment-variable presence. It does not grant additional access.
+type ReferenceCatalog interface {
+	References(context.Context, string, string) ([]string, error)
+}
+
+func (s EnvStore) References(ctx context.Context, tenantID, purpose string) ([]string, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if !tenantPattern.MatchString(tenantID) || !ValidPurpose(purpose) {
+		return nil, ErrForbidden
+	}
+	refs := []string{}
+	for grant := range s.grants {
+		if grant.TenantID == tenantID && grant.Purpose == purpose {
+			refs = append(refs, grant.Reference)
+		}
+	}
+	sort.Strings(refs)
+	return refs, nil
 }
 
 type Store interface {

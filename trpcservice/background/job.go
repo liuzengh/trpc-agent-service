@@ -33,14 +33,15 @@ var (
 )
 
 type EnqueueRequest struct {
-	TenantID    string
-	AppID       string
-	RevisionID  string
-	Type        string
-	DedupeKey   string
-	Payload     json.RawMessage
-	MaxAttempts int
-	TraceParent string
+	SourceRequestID string
+	TenantID        string
+	AppID           string
+	RevisionID      string
+	Type            string
+	DedupeKey       string
+	Payload         json.RawMessage
+	MaxAttempts     int
+	TraceParent     string
 }
 
 type Job struct {
@@ -93,6 +94,14 @@ func validateEnqueue(request *EnqueueRequest) error {
 	if request.TenantID == "" || request.AppID == "" || request.RevisionID == "" ||
 		request.Type == "" || request.DedupeKey == "" || !json.Valid(request.Payload) {
 		return fmt.Errorf("background job identity and JSON payload are required")
+	}
+	if request.SourceRequestID != "" {
+		var payload map[string]json.RawMessage
+		if len(request.SourceRequestID) > 128 || json.Unmarshal(request.Payload, &payload) != nil || payload == nil {
+			return fmt.Errorf("invalid background request correlation")
+		}
+		payload["source_request_id"], _ = json.Marshal(request.SourceRequestID)
+		request.Payload, _ = json.Marshal(payload)
 	}
 	if request.MaxAttempts <= 0 {
 		request.MaxAttempts = 5

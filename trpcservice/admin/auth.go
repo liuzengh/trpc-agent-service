@@ -28,6 +28,7 @@ const (
 	PermissionWrite        Permission = "write"
 	PermissionOperate      Permission = "operate"
 	PermissionRead         Permission = "read"
+	PermissionDebug        Permission = "debug_execute"
 )
 
 func (p Principal) Allows(permission Permission, tenantID string) bool {
@@ -40,9 +41,9 @@ func (p Principal) Allows(permission Permission, tenantID string) bool {
 	switch p.Role {
 	case RoleTenantAdmin:
 		return permission == PermissionWrite || permission == PermissionOperate ||
-			permission == PermissionRead
+			permission == PermissionRead || permission == PermissionDebug
 	case RoleOperator:
-		return permission == PermissionOperate || permission == PermissionRead
+		return permission == PermissionOperate || permission == PermissionRead || permission == PermissionDebug
 	case RoleAuditor:
 		return permission == PermissionRead
 	default:

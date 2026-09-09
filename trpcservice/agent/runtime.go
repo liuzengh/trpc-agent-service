@@ -34,6 +34,7 @@ const (
 
 // ChatResult is the transport-neutral result of one tutorial chat turn.
 type ChatResult struct {
+	PlatformCode     string
 	Reply            string
 	RequestID        string
 	EventCount       int
@@ -356,31 +357,34 @@ func (r *Runtime) executeIdempotentChat(
 	attempt idempotency.Attempt,
 	input ChatInput,
 ) (ChatResult, error) {
-	compiledAgent, runErr := r.compiler.Compile(attempt.Context(), input.Scope)
+	runCtx, feedback := governance.WithFeedback(attempt.Context())
+	compiledAgent, runErr := r.compiler.Compile(runCtx, input.Scope)
 	var policyOptions []agentcore.RunOption
 	var usagePricing UsagePricing
 	if runErr == nil {
 		if provider, ok := r.compiler.(RunPolicyProvider); ok {
 			policyOptions, runErr = provider.RunPolicyOptions(
-				attempt.Context(), input,
+				runCtx, input,
 			)
 		}
 	}
 	if runErr == nil {
 		if provider, ok := r.compiler.(UsagePricingProvider); ok {
-			usagePricing, runErr = provider.UsagePricing(attempt.Context(), input.Scope)
+			usagePricing, runErr = provider.UsagePricing(runCtx, input.Scope)
 		}
 	}
 	var result ChatResult
 	if runErr == nil {
 		result, runErr = r.runChatTurn(
-			attempt.Context(),
+			runCtx,
 			input,
 			compiledAgent,
 			policyOptions,
 		)
 		result.AgentName = compiledAgent.Info().Name
 		result.Cost = usagePricing.Cost(result.PromptTokens, result.CompletionTokens)
+		result.Reply = feedback.Reply(result.Reply, result.RequestID)
+		result.PlatformCode = feedback.Code()
 	}
 	finalizeCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(requestCtx),
@@ -398,6 +402,7 @@ func (r *Runtime) executeIdempotentChat(
 		return ChatResult{}, runErr
 	}
 	cached := idempotency.Result{
+		PlatformCode:     result.PlatformCode,
 		Reply:            result.Reply,
 		RequestID:        result.RequestID,
 		EventCount:       result.EventCount,
@@ -484,6 +489,7 @@ func chatResultFromIdempotency(
 	replayed bool,
 ) ChatResult {
 	return ChatResult{
+		PlatformCode:     result.PlatformCode,
 		Reply:            result.Reply,
 		RequestID:        result.RequestID,
 		EventCount:       result.EventCount,

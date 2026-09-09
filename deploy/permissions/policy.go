@@ -72,6 +72,11 @@ func roleGrants(role string) map[string][]string {
 		add("SELECT,INSERT", "queue_outbox", "outbound_message", "channel_poll_seen")
 		add("SELECT,INSERT", "channel_message_rejection")
 	case "worker":
+		add("SELECT", "schema_migration")
+		add("SELECT,DELETE", "debug_snapshot", "debug_session", "debug_approval_decision")
+		add("SELECT,UPDATE,DELETE", "debug_run")
+		add("SELECT,INSERT,UPDATE,DELETE", "debug_tool_execution", "debug_tool_approval", "debug_event")
+		add("SELECT,INSERT,UPDATE,DELETE", "console_worker")
 		add("SELECT", control...)
 		add("SELECT,INSERT,UPDATE", "resource_sync")
 		add("SELECT", "conversation")
@@ -94,6 +99,8 @@ func roleGrants(role string) map[string][]string {
 		add("UPDATE", "backend_binding", "backend_migration")
 		add("SELECT,INSERT,UPDATE", "background_job")
 	case "admin":
+		add("SELECT", "schema_migration", "agent_run", "conversation", "outbound_message", "console_worker")
+		add("SELECT,INSERT,UPDATE,DELETE", "admin_session", "agent_draft", "debug_snapshot", "debug_session", "debug_run", "debug_event", "debug_tool_execution", "debug_tool_approval", "debug_approval_decision")
 		add("SELECT", "outbound_part")
 		add("SELECT", "resource_sync")
 		add("SELECT", "knowledge_sync")
