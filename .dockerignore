@@ -1,0 +1,21 @@
+# Keep the build context to release inputs only. Secrets, reports, logs and
+# local artifacts must never enter the image.
+.git
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+.env*
+.env.example
+docs/
+scripts/
+deploy/
+internal/
+**/*_test.go
+**/*.orig
+**/*.rej
+NUL
+trpc-service
+*.log
+*.md
+!migrations/README.md

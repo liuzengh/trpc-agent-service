@@ -1,0 +1,50 @@
+---
+name: ci
+
+"on":
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+      - name: Verify Go toolchain
+        run: |
+          go version
+          go env GOVERSION
+          go env GOTOOLCHAIN
+      - name: Install static checker
+        env:
+          GOBIN: ${{ runner.temp }}/bin
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          echo "$GOBIN" >> "$GITHUB_PATH"
+          "$GOBIN/golangci-lint" version
+      - name: Download pinned modules
+        run: |
+          go mod download
+          go mod verify
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Quality checks
+        run: ./lint.sh
+      - name: Test
+        run: go test ./...
+      - name: Race test tenant boundaries
+        run: >-
+          go test ./trpcservice/tenant
+          ./trpcservice/config
+          ./trpcservice/platform
+          -race

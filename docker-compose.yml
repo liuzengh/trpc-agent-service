@@ -1,0 +1,436 @@
+# P1-09 reproducible local Docker/Compose deployment boundary.
+#
+# Scope: local verification only. This file never connects to Production
+# Milvus, real Model/Embedding providers or real Telegram/Lark channels, and
+# it is not a production deployment or HA proof.
+#
+# Profiles:
+#   default (no profile): postgres + redis + migrate + app (core boundary).
+#   telemetry:            adds a local OTel collector. The application keeps
+#                         P1-07 no-export semantics unless P109_TELEMETRY_*
+#                         variables are provided explicitly.
+#   There is deliberately no vector profile: vector/retrieval/rebuild stay
+#   disabled (P1-06 production rollout remains BLOCKED), and no Milvus
+#   service is defined so no profile can accidentally activate one.
+#
+# Ownership: every resource carries owner=p109, run_id, component and
+# created_by labels; names embed the run id. Published ports bind to
+# 127.0.0.1 only. The PostgreSQL password is supplied through a Docker
+# secret file (0600) and never through compose environment values.
+name: p109-deploy-${P109_RUN_ID:-local}
+
+x-owner-labels: &owner-labels
+  owner: p109
+  run_id: ${P109_RUN_ID:-local}
+  component: deployment
+  created_by: pi
+
+x-app-env: &app-env
+  DATABASE_SCHEMA: public
+  HTTP_ADDR: 0.0.0.0:8080
+  DEFAULT_TENANT: p109-local
+  DEFAULT_AGENT_APP_ID: p109-local-agent
+  # runner + closed loopback endpoint keeps the production responder shape
+  # while guaranteeing zero external provider requests for the local gate.
+  MODEL_PROVIDER: runner
+  MODEL_BASE_URL: http://127.0.0.1:9
+  MODEL_NAME: local-gate-model
+  MODEL_API_KEY: local-gate-placeholder-not-a-secret
+  MODEL_CONFIG_VERSION: "1"
+  ASYNC_OWNER_ID: p109-local-owner
+  BOOTSTRAP_OBJECT_BACKEND: none
+  BOOTSTRAP_TENANT_ID: p109-local
+  BOOTSTRAP_TENANT_NAME: p109-local
+  BOOTSTRAP_AGENT_APP_ID: p109-local-agent
+  BOOTSTRAP_AGENT_NAME: p109-local-agent
+  BOOTSTRAP_AGENT_VERSION: "1"
+  BOOTSTRAP_LARK_BINDING_ID: p109-lark
+  BOOTSTRAP_TELEGRAM_BINDING_ID: p109-tg
+  BOOTSTRAP_LARK_EXTERNAL_APP_ID: p109-lark-ext
+  BOOTSTRAP_TELEGRAM_EXTERNAL_APP_ID: p109-tg-ext
+  BOOTSTRAP_LARK_APP_ID: p109-lark-app
+  BOOTSTRAP_LARK_APP_SECRET_REF: env:local-placeholder
+  BOOTSTRAP_TELEGRAM_BOT_TOKEN_REF: env:local-placeholder
+  BOOTSTRAP_TELEGRAM_WEBHOOK_SECRET_REF: env:local-placeholder
+  BOOTSTRAP_LARK_VERIFY_TOKEN_REF: env:local-placeholder
+  BOOTSTRAP_LARK_ENCRYPT_KEY_REF: env:local-placeholder
+  BOOTSTRAP_LARK_RECEIVER_ID_TYPE: open_id
+  # Telemetry stays in P1-07 no-export mode unless the local telemetry
+  # profile is explicitly selected with non-empty variables.
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${P109_TELEMETRY_ENDPOINT:-}
+  TELEMETRY_MODE: ${P109_TELEMETRY_MODE:-}
+  TELEMETRY_INSECURE_LOCAL: ${P109_TELEMETRY_INSECURE_LOCAL:-}
+  # P2-03 capacity protection: the core deployment wires the three-dimensional
+  # Redis rate limiter and the process-local admission budget with safe
+  # defaults. Invalid values fail closed at startup.
+  RATE_LIMIT_REDIS_URL: redis://redis:6379/3
+  RATE_LIMIT_WINDOW: 1m
+  RATE_LIMIT_TENANT_LIMIT: "600"
+  RATE_LIMIT_BINDING_LIMIT: "300"
+  RATE_LIMIT_CHAT_LIMIT: "120"
+  INGRESS_MAX_INFLIGHT: "64"
+  INGRESS_MAX_INFLIGHT_PER_TENANT: "32"
+  INGRESS_MAX_INFLIGHT_PER_BINDING: "16"
+  WORKER_CONCURRENCY: "4"
+  DISPATCHER_CONCURRENCY: "1"
+  DISPATCHER_CLAIM_BATCH_SIZE: "100"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    labels: *owner-labels
+    environment:
+      POSTGRES_USER: trpc_app
+      POSTGRES_DB: trpc_agent
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trpc_app -d trpc_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+    ports:
+      - "127.0.0.1:${P109_PG_PORT:-15432}:5432"
+    networks:
+      - p109
+
+  redis:
+    image: redis:7-alpine
+    labels: *owner-labels
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 5s
+    ports:
+      - "127.0.0.1:${P109_REDIS_PORT:-16379}:6379"
+    networks:
+      - p109
+
+  migrate:
+    image: ${P109_APP_IMAGE:-p109-deploy-app:local}
+    labels: *owner-labels
+    # The wrapper starts as root only to read the 0600 Docker secret and
+    # immediately drops to the non-root app user via su-exec before exec.
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        export DATABASE_URL="postgres://trpc_app:$(cat /run/secrets/pg_password)@postgres:5432/trpc_agent?sslmode=disable"
+        export RUNTIME_ROLE=trpc_runtime
+        export RUNTIME_PASSWORD="$(cat /run/secrets/pg_runtime_password)"
+        exec su-exec app /usr/local/bin/trpc-migrate
+    secrets:
+      - pg_password
+      - pg_runtime_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - p109
+
+  app:
+    image: ${P109_APP_IMAGE:-p109-deploy-app:local}
+    labels: *owner-labels
+    # Same root-wrapper + su-exec drop pattern as the migrate service: the
+    # serving process itself runs as the non-root app user (verified in the
+    # lifecycle test via /proc/1 Uid).
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        export DATABASE_URL="postgres://trpc_app:$(cat /run/secrets/pg_password)@postgres:5432/trpc_agent?sslmode=disable"
+        export DATABASE_RUNTIME_URL="postgres://trpc_runtime:$(cat /run/secrets/pg_runtime_password)@postgres:5432/trpc_agent?sslmode=disable"
+        exec su-exec app /usr/local/bin/trpc-service
+    secrets:
+      - pg_password
+      - pg_runtime_password
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${P109_APP_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 15s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      - p109
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    labels: *owner-labels
+    profiles:
+      - telemetry
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "127.0.0.1:${P109_OTEL_PORT:-14317}:4317"
+    networks:
+      - p109
+
+  # ---------------------------------------------------------------------------
+  # P2-02 recovery profile (default OFF).
+  #
+  # Local backup/restore/replay drill only. It never participates in the core
+  # deployment, readiness or app startup path: nothing in this profile starts
+  # without `--profile recovery`. The recovery tool is an explicit
+  # high-privilege OFFLINE operator entrypoint; it never serves traffic.
+  # Client and server images are tag+digest pinned. All published ports bind
+  # to loopback only, credentials flow through Docker secrets only, and the
+  # source/target/redis resources carry owner labels for bounded cleanup.
+  # ---------------------------------------------------------------------------
+  recovery-source:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    labels:
+      owner: p202
+      run_id: ${P202_RUN_ID:-local}
+      component: recovery-source
+      created_by: pi
+    environment:
+      POSTGRES_USER: trpc_app
+      POSTGRES_DB: trpc_agent
+      POSTGRES_PASSWORD_FILE: /run/secrets/p202_pg_password
+    secrets:
+      - p202_pg_password
+    volumes:
+      - recovery-source-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trpc_app -d trpc_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+    networks:
+      - p202
+    profiles:
+      - recovery
+
+
+  recovery-target:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    labels:
+      owner: p202
+      run_id: ${P202_RUN_ID:-local}
+      component: recovery-target
+      created_by: pi
+    environment:
+      POSTGRES_USER: trpc_app
+      POSTGRES_DB: trpc_agent
+      POSTGRES_PASSWORD_FILE: /run/secrets/p202_pg_password
+    secrets:
+      - p202_pg_password
+    volumes:
+      - recovery-target-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trpc_app -d trpc_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+    networks:
+      - p202
+    profiles:
+      - recovery
+
+
+  recovery-redis:
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    labels:
+      owner: p202
+      run_id: ${P202_RUN_ID:-local}
+      component: recovery-redis
+      created_by: pi
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 5s
+    networks:
+      - p202
+    profiles:
+      - recovery
+
+
+  recovery-migrate:
+    image: ${P202_TOOL_IMAGE:-p202-recovery-tool:local}
+    labels:
+      owner: p202
+      run_id: ${P202_RUN_ID:-local}
+      component: recovery-migrate
+      created_by: pi
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/p202-wrapper"]
+    command: ["migrate"]
+    secrets:
+      - p202_pg_password
+      - p202_pg_runtime_password
+    depends_on:
+      recovery-target:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - p202
+    profiles:
+      - recovery
+
+  recovery-tool:
+    image: ${P202_TOOL_IMAGE:-p202-recovery-tool:local}
+    labels:
+      owner: p202
+      run_id: ${P202_RUN_ID:-local}
+      component: recovery-tool
+      created_by: pi
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/p202-wrapper"]
+    secrets:
+      - p202_pg_password
+      - p202_pg_runtime_password
+    volumes:
+      - recovery-backups:/backups
+    depends_on:
+      recovery-source:
+        condition: service_healthy
+      recovery-target:
+        condition: service_healthy
+    profiles:
+      - recovery
+    networks:
+      - p202
+
+  recovery-app:
+    image: ${P109_APP_IMAGE:-p109-deploy-app:local}
+    labels:
+      owner: p202
+      run_id: ${P202_RUN_ID:-local}
+      component: recovery-app
+      created_by: pi
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        export DATABASE_URL="postgres://trpc_app:$(cat /run/secrets/p202_pg_password)@recovery-target:5432/trpc_agent?sslmode=disable"
+        export DATABASE_RUNTIME_URL="postgres://trpc_runtime:$(cat /run/secrets/p202_pg_runtime_password)@recovery-target:5432/trpc_agent?sslmode=disable"
+        exec su-exec app /usr/local/bin/trpc-service
+    secrets:
+      - p202_pg_password
+      - p202_pg_runtime_password
+    environment:
+      DATABASE_SCHEMA: public
+      HTTP_ADDR: 0.0.0.0:8080
+      DEFAULT_TENANT: p202-local
+      DEFAULT_AGENT_APP_ID: p202-local-agent
+      # Runner responder + closed loopback endpoint keeps every provider
+      # request count at zero for the recovery gate.
+      MODEL_PROVIDER: runner
+      MODEL_BASE_URL: http://127.0.0.1:9
+      MODEL_NAME: local-gate-model
+      MODEL_API_KEY: local-gate-placeholder-not-a-secret
+      MODEL_CONFIG_VERSION: "1"
+      ASYNC_OWNER_ID: p202-local-owner
+      BOOTSTRAP_OBJECT_BACKEND: none
+      BOOTSTRAP_TENANT_ID: p202-local
+      BOOTSTRAP_TENANT_NAME: p202-local
+      BOOTSTRAP_AGENT_APP_ID: p202-local-agent
+      BOOTSTRAP_AGENT_NAME: p202-local-agent
+      BOOTSTRAP_AGENT_VERSION: "1"
+      BOOTSTRAP_LARK_BINDING_ID: p202-lark
+      BOOTSTRAP_TELEGRAM_BINDING_ID: p202-tg
+      BOOTSTRAP_LARK_EXTERNAL_APP_ID: p202-lark-ext
+      BOOTSTRAP_TELEGRAM_EXTERNAL_APP_ID: p202-tg-ext
+      BOOTSTRAP_LARK_APP_ID: p202-lark-app
+      BOOTSTRAP_LARK_APP_SECRET_REF: env:local-placeholder
+      BOOTSTRAP_TELEGRAM_BOT_TOKEN_REF: env:local-placeholder
+      BOOTSTRAP_TELEGRAM_WEBHOOK_SECRET_REF: env:local-placeholder
+      BOOTSTRAP_LARK_VERIFY_TOKEN_REF: env:local-placeholder
+      BOOTSTRAP_LARK_ENCRYPT_KEY_REF: env:local-placeholder
+      BOOTSTRAP_LARK_RECEIVER_ID_TYPE: open_id
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      TELEMETRY_MODE: ""
+      TELEMETRY_INSECURE_LOCAL: ""
+    depends_on:
+      recovery-target:
+        condition: service_healthy
+      recovery-redis:
+        condition: service_healthy
+      recovery-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${P202_APP_PORT:-18082}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 15s
+    restart: "no"
+    stop_grace_period: 30s
+    profiles:
+      - recovery
+    networks:
+      - p202
+
+
+secrets:
+  pg_password:
+    file: ${P109_SECRET_DIR:?set P109_SECRET_DIR to a 0700 directory containing 0600 pg_password and pg_runtime_password files}/pg_password
+  pg_runtime_password:
+    file: ${P109_SECRET_DIR:?set P109_SECRET_DIR to a 0700 directory containing 0600 pg_password and pg_runtime_password files}/pg_runtime_password
+  # Interpolation keeps a safe placeholder default so the core profile never
+  # requires recovery variables; the recovery profile fails fast at start if
+  # the operator has not provided the 0700 secret directory.
+  p202_pg_password:
+    file: ${P202_SECRET_DIR:-.p202-secrets-not-configured}/p202_pg_password
+  p202_pg_runtime_password:
+    file: ${P202_SECRET_DIR:-.p202-secrets-not-configured}/p202_pg_runtime_password
+
+volumes:
+  pgdata:
+    name: p109-deploy-${P109_RUN_ID:-local}-pgdata
+    labels: *owner-labels
+  recovery-source-data:
+    name: p202-recovery-${P202_RUN_ID:-local}-source-data
+    labels:
+      owner: p202
+      run_id: ${P202_RUN_ID:-local}
+      created_by: pi
+  recovery-target-data:
+    name: p202-recovery-${P202_RUN_ID:-local}-target-data
+    labels:
+      owner: p202
+      run_id: ${P202_RUN_ID:-local}
+      created_by: pi
+  recovery-backups:
+    name: p202-recovery-${P202_RUN_ID:-local}-backups
+    labels:
+      owner: p202
+      run_id: ${P202_RUN_ID:-local}
+      created_by: pi
+
+networks:
+  p109:
+    name: p109-deploy-${P109_RUN_ID:-local}-net
+  p202:
+    name: p202-recovery-${P202_RUN_ID:-local}-net
