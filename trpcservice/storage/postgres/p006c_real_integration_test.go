@@ -299,7 +299,28 @@ func runReadyService(t *testing.T, ctx context.Context, binary, url, schema, mig
 	}
 	process.cmd.Dir = repoRoot(t)
 	runtimeURL := ensureP006RuntimeRole(t, url, schema)
-	process.cmd.Env = append(os.Environ(), "DATABASE_URL="+url, "DATABASE_RUNTIME_URL="+runtimeURL, "DATABASE_SCHEMA="+schema, "MIGRATIONS_DIR="+migrations, "HTTP_ADDR="+addr)
+	process.cmd.Env = append(os.Environ(),
+		"DATABASE_URL="+url, "DATABASE_RUNTIME_URL="+runtimeURL, "DATABASE_SCHEMA="+schema, "MIGRATIONS_DIR="+migrations, "HTTP_ADDR="+addr,
+		// The service fails closed before serving unless the full production
+		// bootstrap family is present. Channels stay disabled, so the secret
+		// references only need to be well-formed and no network is dialed.
+		"DEFAULT_TENANT=p006-command", "DEFAULT_AGENT_APP_ID=p006-agent",
+		"MODEL_PROVIDER=runner", "MODEL=openai",
+		"MODEL_BASE_URL=http://127.0.0.1:1", "MODEL_NAME=p006-model", "MODEL_API_KEY=p006-key", "MODEL_CONFIG_VERSION=1",
+		"BOOTSTRAP_AGENT_VERSION=1",
+		"BOOTSTRAP_TENANT_ID=p006-command", "BOOTSTRAP_TENANT_NAME=p006-command",
+		"BOOTSTRAP_AGENT_APP_ID=p006-agent", "BOOTSTRAP_AGENT_NAME=p006-agent",
+		"BOOTSTRAP_LARK_BINDING_ID=p006-lark", "BOOTSTRAP_LARK_EXTERNAL_APP_ID=p006-lark-app",
+		"BOOTSTRAP_LARK_APP_ID=p006-lark-app-id", "BOOTSTRAP_LARK_RECEIVER_ID_TYPE=chat_id",
+		"BOOTSTRAP_LARK_APP_SECRET_REF=env://P006_LARK_APP_SECRET",
+		"BOOTSTRAP_LARK_VERIFY_TOKEN_REF=env://P006_LARK_VERIFY_TOKEN",
+		"BOOTSTRAP_LARK_ENCRYPT_KEY_REF=env://P006_LARK_ENCRYPT_KEY",
+		"BOOTSTRAP_TELEGRAM_BINDING_ID=p006-telegram", "BOOTSTRAP_TELEGRAM_EXTERNAL_APP_ID=p006-telegram-bot",
+		"BOOTSTRAP_TELEGRAM_BOT_TOKEN_REF=env://P006_TELEGRAM_TOKEN",
+		"BOOTSTRAP_TELEGRAM_WEBHOOK_SECRET_REF=env://P006_TELEGRAM_HOOK",
+		"ASYNC_OWNER_ID=p006-owner",
+		"BOOTSTRAP_OBJECT_BACKEND=none",
+	)
 	process.cmd.Stdout = &process.stdout
 	process.cmd.Stderr = &process.stderr
 	if err := process.start(); err != nil {
