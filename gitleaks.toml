@@ -1,0 +1,15 @@
+# Keep the scanner on the upstream default rules. Any exception must be narrow,
+# documented in docs/docs/security-scanning.md, and carry an owner and expiry.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Repository-wide allowlist for intentional non-secret examples"
+# Historical deterministic test fixtures in these commits are not credentials.
+# Owner: @XnLemon | Issue: #100 | Reason: historical test fixtures | allowlist-expiry: 2026-12-31
+commits = [
+  "42ce4de5d613150528e376149387561cf91fc8dc",
+  "1c120da2ccc77bb3a2be49fec7aea48055f5019a",
+  # Owner: @XnLemon | Issue: #103 | Reason: historical README placeholder is not a credential and has been replaced by an environment-backed example | allowlist-expiry: 2026-12-31
+  "78677540eaf0be14a102de32b3e24f546cb89a41",
+]

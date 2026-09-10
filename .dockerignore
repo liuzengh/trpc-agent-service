@@ -1,0 +1,25 @@
+.git
+.github
+.idea
+.vscode
+.DS_Store
+*.log
+*.swp
+
+bin/
+data/
+dist/
+coverage.out
+coverage.html
+*.test
+*.exe
+vendor/
+docs/site/
+**/__pycache__/
+
+# Never send populated deployment credentials to the Docker build context.
+deploy/service.env
+deploy/*.env
+
+**/node_modules/
+trpcservice/web/dist/

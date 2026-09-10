@@ -15,3 +15,11 @@ vendor/
 
 data/*
 !data/README.md
+
+# Local deployment credentials; keep the example files tracked.
+deploy/service.env
+deploy/*.env
+!deploy/example.env
+
+# MkDocs build output
+docs/site/

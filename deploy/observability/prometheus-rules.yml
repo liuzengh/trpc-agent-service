@@ -1,0 +1,35 @@
+groups:
+  - name: trpcservice-runtime
+    rules:
+      - record: trpcservice:request_error_rate5m
+        expr: sum(rate(trpcservice_requests_total{component="http",operation="http.request",status=~"error|failure|canceled|timeout"}[5m])) / clamp_min(sum(rate(trpcservice_requests_total{component="http",operation="http.request",status=~"complete|success|error|failure|canceled|timeout"}[5m])), 1e-9)
+      - record: trpcservice:delivery_failure_rate5m
+        expr: sum(rate(trpcservice_channel_deliveries_total{status=~"retry|failure|dead_letter"}[5m])) / clamp_min(sum(rate(trpcservice_channel_deliveries_total{status=~"success|retry|failure|dead_letter"}[5m])), 1e-9)
+      - alert: TRPCServiceHighErrorRate
+        expr: trpcservice:request_error_rate5m > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: trpcservice HTTP request error rate is above five percent
+      - alert: TRPCServiceHighGatewayLatency
+        expr: histogram_quantile(0.95, sum by (le, operation) (rate(trpcservice_operation_duration_ms_bucket{operation=~"gateway.dispatch|runner.execution"}[5m]))) > 2000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: trpcservice gateway or runner p95 latency is above two seconds
+      - alert: TRPCServiceBackendLatency
+        expr: histogram_quantile(0.95, sum by (le, provider) (rate(trpcservice_backend_operation_duration_ms_bucket[5m]))) > 500
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: trpcservice backend p95 latency is above 500 milliseconds
+      - alert: TRPCServiceChannelDeliveryFailures
+        expr: trpcservice:delivery_failure_rate5m > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: trpcservice channel delivery failures are present

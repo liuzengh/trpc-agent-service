@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+:root { font-family: "Avenir Next", "Segoe UI", sans-serif; color: #18202a; background: #f6f7f9; font-synthesis: none; text-rendering: optimizeLegibility; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+button, input, textarea { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .48; }
+.brand-mark { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; border-radius: 9px; background: #1d5fd2; color: white; font-size: 18px; font-weight: 700; letter-spacing: -.06em; }
+.step-dot { display: inline-flex; width: 24px; height: 24px; align-items: center; justify-content: center; border: 1px solid #d9dee5; border-radius: 999px; color: #9aa3ae; font-size: 11px; font-weight: 700; background: #f6f7f9; }
+.step-dot-active { border-color: #1d5fd2; background: #1d5fd2; color: #fff; }
+.button-primary, .button-secondary { display: inline-flex; min-height: 40px; align-items: center; justify-content: center; gap: 8px; border-radius: 9px; padding: 0 14px; font-size: 13px; font-weight: 650; transition: transform .18s ease, background .18s ease, border-color .18s ease; }
+.button-primary { border: 1px solid #1d5fd2; background: #1d5fd2; color: #fff; box-shadow: 0 5px 12px rgba(29,95,210,.18); }
+.button-primary:hover { background: #174fac; }
+.button-primary:active, .button-secondary:active, .channel-card:active, .tenant-row:active { transform: translateY(1px); }
+.button-secondary { border: 1px solid #dce1e7; background: #fff; color: #46515e; }
+.button-secondary:hover { border-color: #b8c3d0; background: #fafbfc; }
+.back-button { border: 0; background: transparent; padding: 0; color: #6e7986; font-size: 13px; }
+.back-button:hover { color: #1d5fd2; }
+.tenant-row { display: flex; width: 100%; align-items: center; gap: 13px; border: 1px solid #e7eaee; border-radius: 12px; background: #fff; padding: 12px 13px; text-align: left; transition: border-color .18s ease, background .18s ease, transform .18s ease; }
+.tenant-row:hover { border-color: #b9cdf0; background: #fbfdff; }
+.tenant-avatar { display: inline-flex; width: 38px; height: 38px; align-items: center; justify-content: center; border-radius: 11px; background: #eaf0fb; color: #2c63bd; font-size: 12px; font-weight: 700; }
+.channel-card { min-height: 208px; border: 1px solid #e3e7ec; border-radius: 13px; background: #fff; padding: 18px; transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
+.channel-card:hover { border-color: #b9cdf0; box-shadow: 0 9px 22px rgba(39,64,101,.08); transform: translateY(-2px); }
+.channel-icon { display: inline-flex; width: 43px; height: 43px; align-items: center; justify-content: center; border-radius: 12px; }
+.channel-icon.telegram { background: #e4f4ff; color: #1296dc; }
+.channel-icon.wecom { background: #e8f8ed; color: #2da65c; }
+.field-label { display: flex; flex-direction: column; gap: 8px; color: #52606e; font-size: 13px; font-weight: 600; }
+.field-input { width: 100%; height: 44px; border: 1px solid #dfe4ea; border-radius: 9px; background: #fff; padding: 0 12px; color: #273340; outline: 0; font-size: 14px; transition: border-color .18s ease, box-shadow .18s ease; }
+.field-input::placeholder { color: #a4adb8; }
+.field-input:focus { border-color: #6f9ce3; box-shadow: 0 0 0 3px rgba(29,95,210,.12); }
+.field-textarea { min-height: 108px; resize: vertical; padding-top: 11px; padding-bottom: 11px; line-height: 1.55; }
+.field-help { color: #818c99; font-size: 11px; font-weight: 500; line-height: 1.5; }
+.agent-summary { display: grid; grid-template-columns: minmax(0, 1fr); border: 1px solid #e6e9ed; border-radius: 12px; background: #fbfcfd; overflow: hidden; }
+.agent-summary > div { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 12px; padding: 13px 15px; }
+.agent-summary > div + div { border-top: 1px solid #e8ebef; }
+.agent-summary span { color: #8a95a2; font-size: 12px; }
+.agent-summary strong { color: #394551; font-size: 13px; font-weight: 600; line-height: 1.5; }
+.icon-button { display: inline-flex; width: 32px; height: 32px; align-items: center; justify-content: center; border: 0; border-radius: 7px; background: transparent; color: #788491; }
+.icon-button:hover { background: #eef2f7; color: #33404d; }
+.animate-in { animation: rise-in .35s cubic-bezier(.16,1,.3,1) both; }
+@keyframes rise-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }

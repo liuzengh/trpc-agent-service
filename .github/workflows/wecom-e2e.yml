@@ -1,0 +1,46 @@
+name: WeCom Deterministic E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: wecom-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  wecom-e2e:
+    name: WeCom deterministic callback E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: trpc_agent_wecom_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d trpc_agent_wecom_e2e"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      POSTGRES_MIGRATION_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5432/trpc_agent_wecom_e2e?sslmode=disable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run deterministic WeCom callback E2E
+        run: go test ./examples/wecom-e2e -run TestWeComCallbackOutboxE2E -count=1 -v

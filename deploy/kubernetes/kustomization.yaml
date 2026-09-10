@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: true
+    pairs:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/part-of: trpc-agent-platform
+
+resources:
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+
+# Keep the base reproducible. Production overlays should replace this release
+# tag with the promoted tag or an image digest before applying the resources.
+images:
+  - name: ghcr.io/xnlemon/trpc-agent-service
+    newTag: 0.1.1

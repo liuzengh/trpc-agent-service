@@ -1,0 +1,85 @@
+site_name: tRPC-Agent-Service
+site_description: 基于 tRPC-Agent-Go 的多租户节点化 Agent 部署平台
+site_url: https://xnlemon.github.io/trpc-agent-service/
+repo_url: https://github.com/XnLemon/trpc-agent-service
+repo_name: XnLemon/trpc-agent-service
+edit_uri: edit/main/docs/docs/
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: 切换到深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: 切换到浅色模式
+
+nav:
+  - 首页: index.md
+  - 项目说明: project-brief.md
+  - 项目架构:
+      - 生产架构设计: architecture.md
+      - app、agent 与 runtime 包边界: package-boundaries.md
+      - 数据模型: data-model.md
+      - Tenant 运行时边界: tenant-runtime-boundary.md
+      - Channel Binding: channel-binding.md
+  - 开发文档:
+      - Agent App 模型: agent-app-model.md
+      - Backend Profile 模型: backend-profile.md
+      - Model Profile 与 Runner 链路: model-profile.md
+      - "Issue #71 Provider Registries": issue-71-provider-registries.md
+      - "Issue #69 Multi-tenant Bootstrap": issue-69-multi-tenant-bootstrap.md
+      - "Issue #72 Cache Invalidation": issue-72-cache-invalidation.md
+      - "Issue #82 Agent App Registry and Tenant Canary": issue-82-agent-app-registry.md
+      - Gateway、Execution Plan 与 HTTP/SSE: gateway.md
+      - Telegram 长轮询 Adapter: telegram.md
+      - 多租户多 Agent Telegram / WeCom 验收链路: multitenant-telegram-acceptance.md
+      - 企业微信自建应用 Channel Adapter: wecom.md
+      - 企业微信 AI Bot 长连接: wecom-aibot.md
+      - "Issue #77 Channel Capabilities": issue-77-channel-capabilities.md
+      - "Issue #98 Native Media": issue-98-native-media.md
+      - "Issue #111 Tool-driven Media Reply": issue-111-tool-driven-media.md
+      - Tenant 运行时持久化: runtime-storage.md
+      - Runtime Capabilities (#75): runtime-capabilities.md
+      - "Issue #76 Stateless Worker and Migration": issue-76-stateless-worker.md
+      - PostgreSQL 控制面与启动装配: postgresql-control-plane.md
+      - "Issue #81 MySQL 控制面 Repository": issue-81-mysql-control-plane.md
+      - 可重启控制面与 Admin API: issue-41-runtime-bootstrap-admin-api.md
+      - 首次运行初始化: issue-67-first-run-init.md
+      - "Issue #50 Reliable Reply Delivery": issue-50-reliable-delivery.md
+      - 租户审计与用量成本: audit-usage.md
+      - 运行时可观测性契约: observability.md
+      - "Issue #79 生产可观测性": issue-79-observability.md
+      - "Issue #88 Prometheus 可观测性": issue-88-prometheus.md
+      - "Issue #91 Outbox Trace Context": issue-91-trace-context.md
+      - CI 密钥扫描: security-scanning.md
+      - "Issue #99 Fault Injection": issue-99-fault-injection.md
+  - 运维与验证:
+      - 运维方案: ops.md
+      - 部署、配置与快速开始: deployment.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mermaid@10.9.4/dist/mermaid.min.js
+  - javascripts/mermaid-init.js

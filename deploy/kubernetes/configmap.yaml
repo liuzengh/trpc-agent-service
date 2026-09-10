@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trpc-agent-service-config
+data:
+  TRPC_CONTROL_PLANE_DRIVER: postgres
+  TRPC_SESSION_BACKEND: postgres
+  TRPC_S3_SECRET_REF: env/trpc-s3-credentials
+  OTEL_SERVICE_NAME: trpc-agent-service

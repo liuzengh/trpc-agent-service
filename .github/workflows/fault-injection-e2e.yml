@@ -1,0 +1,35 @@
+name: Fault-injection E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: fault-injection-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-fault-injection:
+    name: Deterministic fault-injection E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run deterministic fault-injection E2E
+        run: go test ./examples/fault-injection-e2e -count=1 -v
+
+      - name: Run race-enabled fault-injection E2E
+        run: go test -race ./examples/fault-injection-e2e -count=1 -v

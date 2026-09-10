@@ -1,0 +1,68 @@
+name: Telegram Live E2E
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      delete_webhook:
+        description: Delete an existing webhook before polling
+        required: true
+        type: boolean
+        default: false
+      drop_pending_updates:
+        description: Drop queued updates when deleting the webhook
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: telegram-live-e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  telegram-e2e:
+    name: Telegram live long-polling E2E
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: telegram-e2e
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Validate live E2E secrets
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_SENDER_BOT_TOKEN: ${{ secrets.TELEGRAM_SENDER_BOT_TOKEN }}
+        run: |
+          test -n "$TELEGRAM_BOT_TOKEN" || { echo "::error::telegram-e2e Environment is missing TELEGRAM_BOT_TOKEN"; exit 1; }
+          test -n "$TELEGRAM_SENDER_BOT_TOKEN" || { echo "::error::telegram-e2e Environment is missing TELEGRAM_SENDER_BOT_TOKEN"; exit 1; }
+
+      - name: Run live Telegram E2E
+        run: go run ./examples/telegram-e2e
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_SENDER_BOT_TOKEN: ${{ secrets.TELEGRAM_SENDER_BOT_TOKEN }}
+          TELEGRAM_DELETE_WEBHOOK: ${{ inputs.delete_webhook }}
+          TELEGRAM_DROP_PENDING_UPDATES: ${{ inputs.drop_pending_updates }}
+          TELEGRAM_TEST_MESSAGE: telegram-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          TELEGRAM_TIMEOUT: 90s
+          TELEGRAM_POLL_TIMEOUT: 5s
+
+      - name: Run durable outbox Telegram E2E
+        run: go test ./examples/telegram-e2e -run TestTelegramProviderOutboxRunnerE2E -count=1
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_SENDER_BOT_TOKEN: ${{ secrets.TELEGRAM_SENDER_BOT_TOKEN }}

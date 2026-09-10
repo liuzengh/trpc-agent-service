@@ -1,0 +1,106 @@
+name: trpc-agent-service
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trpc_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-trpc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trpc-local-password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    profiles: ["s3"]
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${TRPC_S3_ACCESS_KEY_ID:-minio-local-access}
+      MINIO_ROOT_PASSWORD: ${TRPC_S3_SECRET_KEY:-minio-local-secret}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "${TRPC_MINIO_PORT:-9000}:9000"
+      - "${TRPC_MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ${TRPC_SERVICE_IMAGE:-trpc-agent-service:local}
+    command: ["-addr", "0.0.0.0:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TRPC_POSTGRES_DSN: "${TRPC_POSTGRES_DSN:-postgres://${POSTGRES_USER:-trpc}:${POSTGRES_PASSWORD:-trpc-local-password}@postgres:5432/${POSTGRES_DB:-trpc_agent}?sslmode=disable}"
+      TRPC_API_TOKEN: ${TRPC_API_TOKEN:-local-api-token}
+      TRPC_TENANT_ID: ${TRPC_TENANT_ID:-t_01ARZ3NDEKTSV4RRFFQ69G5FAV}
+      TRPC_APP_ID: ${TRPC_APP_ID:-app_01ARZ3NDEKTSV4RRFFQ69G5FAV}
+      TRPC_INIT_TENANT_KEY: ${TRPC_INIT_TENANT_KEY:-local}
+      TRPC_INIT_TENANT_NAME: ${TRPC_INIT_TENANT_NAME:-Local Tenant}
+      TRPC_INIT_APP_KEY: ${TRPC_INIT_APP_KEY:-assistant}
+      TRPC_INIT_APP_NAME: ${TRPC_INIT_APP_NAME:-Local Assistant}
+      TRPC_INIT_APP_DESCRIPTION: ${TRPC_INIT_APP_DESCRIPTION:-Local assistant for frontend channel testing}
+      TRPC_ADMIN_TOKEN: ${TRPC_ADMIN_TOKEN:-local-admin-token}
+      TRPC_ADMIN_TENANTS: ${TRPC_ADMIN_TENANTS:-*}
+      TRPC_ADMIN_USERNAME: ${TRPC_ADMIN_USERNAME:-admin}
+      TRPC_ADMIN_PASSWORD: ${TRPC_ADMIN_PASSWORD:-change-me-local}
+      TRPC_MODEL_API_KEY: ${TRPC_MODEL_API_KEY:-local-development-key}
+      TRPC_SESSION_BACKEND: ${TRPC_SESSION_BACKEND:-postgres}
+      TRPC_REDIS_ADDR: ${TRPC_REDIS_ADDR:-redis:6379}
+      TRPC_REDIS_PASSWORD: ${TRPC_REDIS_PASSWORD:-}
+      TRPC_REDIS_DB: ${TRPC_REDIS_DB:-0}
+      TRPC_REDIS_KEY_PREFIX: ${TRPC_REDIS_KEY_PREFIX:-trpc:runtime:v1}
+      TRPC_REDIS_SECRET_REF: ${TRPC_REDIS_SECRET_REF:-env/trpc-redis-password}
+      TRPC_S3_ACCESS_KEY_ID: ${TRPC_S3_ACCESS_KEY_ID:-}
+      TRPC_S3_SECRET_KEY: ${TRPC_S3_SECRET_KEY:-}
+      TRPC_S3_SECRET_REF: ${TRPC_S3_SECRET_REF:-env/trpc-s3-credentials}
+      TRPC_MODEL_PROVIDER: ${TRPC_MODEL_PROVIDER:-openai}
+      TRPC_MODEL_NAMES: ${TRPC_MODEL_NAMES:-gpt-4o-mini}
+      TRPC_MODEL_ENDPOINT_HOSTS: ${TRPC_MODEL_ENDPOINT_HOSTS:-api.openai.com}
+      TRPC_MODEL_SECRET_REF: ${TRPC_MODEL_SECRET_REF:-env/trpc-model-api-key}
+      TRPC_DEMO_MODE: ${TRPC_DEMO_MODE:-false}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-trpc-agent-service}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_EXPORTER_OTLP_INSECURE: ${OTEL_EXPORTER_OTLP_INSECURE:-false}
+    ports:
+      - "${TRPC_HTTP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/app/trpc-healthcheck", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:

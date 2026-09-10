@@ -1,0 +1,18 @@
+{
+  "title": "tRPC-Agent-Service platform runtime",
+  "schemaVersion": 39,
+  "version": 1,
+  "description": "Platform-only process dashboard. It is a fixed-resource example and is not a tenant authorization boundary; tenant views must render only adapter-authorized AuditEvent usage aggregates and never accept raw PromQL or tenant labels.",
+  "templating": {"list": []},
+  "panels": [
+    {"type": "timeseries", "title": "HTTP request rate (terminal)", "targets": [{"expr": "sum(rate(trpcservice_requests_total{component=\"http\",operation=\"http.request\",status=~\"complete|success|error|failure|canceled|timeout\"}[5m]))"}]},
+    {"type": "timeseries", "title": "HTTP request error rate", "targets": [{"expr": "trpcservice:request_error_rate5m"}]},
+    {"type": "timeseries", "title": "Operation p95 (ms)", "targets": [{"expr": "histogram_quantile(0.95, sum by (le, operation) (rate(trpcservice_operation_duration_ms_bucket[5m])))"}]},
+    {"type": "timeseries", "title": "Runner active executions", "targets": [{"expr": "sum(trpcservice_active_executions{component=\"runner\"})"}]},
+    {"type": "timeseries", "title": "Runner leases", "targets": [{"expr": "sum by (status) (trpcservice_runner_leases{component=\"runner\"})"}]},
+    {"type": "timeseries", "title": "Operation retries", "targets": [{"expr": "sum(rate(trpcservice_operation_retries_total[5m]))"}]},
+    {"type": "timeseries", "title": "Channel delivery failure ratio", "targets": [{"expr": "trpcservice:delivery_failure_rate5m"}]},
+    {"type": "timeseries", "title": "Token and cost by currency", "targets": [{"expr": "sum by (provider, model_family) (rate(trpcservice_tokens_total[5m]))"}, {"expr": "sum by (provider, model_family, currency) (rate(trpcservice_cost_minor_total[5m]))"}]},
+    {"type": "timeseries", "title": "Backend p95 (ms)", "targets": [{"expr": "histogram_quantile(0.95, sum by (le, provider) (rate(trpcservice_backend_operation_duration_ms_bucket[5m])))"}]}
+  ]
+}

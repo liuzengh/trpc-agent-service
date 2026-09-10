@@ -1,0 +1,449 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Format & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Format check
+        run: ./scripts/format.sh --check
+
+      - name: Install golangci-lint
+        run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.1.6
+
+      - name: Lint
+        run: ./scripts/lint.sh
+
+  secret-scan:
+    name: Commit Secret Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Gitleaks
+        shell: bash
+        env:
+          GITLEAKS_VERSION: 8.24.3
+          GITLEAKS_SHA256: 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            --output "$archive"
+          echo "$GITLEAKS_SHA256  $archive" | sha256sum --check --strict
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP" gitleaks
+          chmod +x "$RUNNER_TEMP/gitleaks"
+          "$RUNNER_TEMP/gitleaks" version
+
+      - name: Validate security allowlist expiry
+        run: ./scripts/validate-security-allowlist.sh
+
+      - name: Verify allowlist validation fixtures
+        run: ./scripts/security-allowlist-fixture.sh
+
+      - name: Verify scanner pass/fail fixtures
+        env:
+          GITLEAKS_BIN: ${{ runner.temp }}/gitleaks
+        run: ./scripts/security-secret-fixture.sh
+
+      - name: Run commit secret scan
+        id: gitleaks
+        shell: bash
+        env:
+          GITLEAKS_BIN: ${{ runner.temp }}/gitleaks
+          GITLEAKS_REPORT: ${{ runner.temp }}/gitleaks-results.sarif
+        run: |
+          set -o pipefail
+          set +e
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+            "$GITLEAKS_BIN" git --redact --no-banner --config gitleaks.toml \
+              --log-opts="$range" --report-format sarif --report-path "$GITLEAKS_REPORT" \
+              2>&1 | tee "$RUNNER_TEMP/gitleaks-results.txt"
+          else
+            "$GITLEAKS_BIN" git --redact --no-banner --config gitleaks.toml \
+              --log-opts="--all" --report-format sarif --report-path "$GITLEAKS_REPORT" \
+              2>&1 | tee "$RUNNER_TEMP/gitleaks-results.txt"
+          fi
+          status=${PIPESTATUS[0]}
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            0)
+              echo "findings=false" >> "$GITHUB_OUTPUT"
+              ;;
+            1)
+              # Gitleaks uses exit code 1 for a completed scan with findings.
+              # Findings are reported below; they are not a scanner failure.
+              echo "findings=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "findings=false" >> "$GITHUB_OUTPUT"
+              echo "::error::Gitleaks failed to complete (exit code $status)"
+              exit "$status"
+              ;;
+          esac
+
+      - name: Upload secret scan reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: secret-scan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gitleaks-results.*
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload secret SARIF
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@0fa1882f994fbd81a47ab0804f93354f5ea40147
+        with:
+          sarif_file: ${{ runner.temp }}/gitleaks-results.sarif
+          category: commit-secret
+
+      - name: Add PR annotations for findings
+        if: ${{ success() && steps.gitleaks.outputs.findings == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/github-script@v7
+        env:
+          GITLEAKS_REPORT: ${{ runner.temp }}/gitleaks-results.sarif
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync(process.env.GITLEAKS_REPORT, 'utf8'));
+            const results = (report.runs || []).flatMap((run) => run.results || []);
+            const { owner, repo } = context.repo;
+            const pullNumber = context.payload.pull_request.number;
+            const headSha = context.payload.pull_request.head.sha;
+            const existing = await github.paginate(github.rest.pulls.listReviewComments, {
+              owner,
+              repo,
+              pull_number: pullNumber,
+              per_page: 100,
+            });
+            const seen = new Set();
+            for (const comment of existing) {
+              const marker = comment.body?.match(/<!-- gitleaks:([^ ]+) -->/)?.[1];
+              if (marker) seen.add(marker);
+            }
+            let posted = 0;
+            for (const result of results) {
+              const location = result.locations?.[0]?.physicalLocation;
+              const uri = location?.artifactLocation?.uri;
+              const line = location?.region?.startLine;
+              if (!uri || !line) {
+                core.warning(`Skipping a finding without a reviewable file location (${result.ruleId || 'unknown rule'})`);
+                continue;
+              }
+              const path = uri.replace(/^file:\/\//, '').replace(/^\.\//, '');
+              const marker = `${result.ruleId || 'unknown'}:${path}:${line}`;
+              if (seen.has(marker)) continue;
+              const body = [
+                'Gitleaks found a potential secret pattern in this changed file. Review the value and rotate it if it is a real credential.',
+                `Rule: ${result.ruleId || 'unknown'}`,
+                `<!-- gitleaks:${marker} -->`,
+              ].join('\n\n');
+              try {
+                await github.rest.pulls.createReviewComment({
+                  owner,
+                  repo,
+                  pull_number: pullNumber,
+                  body,
+                  commit_id: headSha,
+                  path,
+                  line,
+                  side: 'RIGHT',
+                });
+                posted++;
+              } catch (error) {
+                core.warning(`Could not add an inline comment for ${path}:${line}: ${error.message}`);
+              }
+            }
+            core.summary
+              .addHeading('Commit secret scan')
+              .addRaw(`Completed with ${results.length} finding(s); ${posted} inline comment(s) added. Findings do not fail CI.`)
+              .write();
+
+      - name: Report clean secret scan
+        if: ${{ success() && steps.gitleaks.outputs.findings == 'false' }}
+        run: echo "Gitleaks completed successfully with no findings"
+
+  deployment:
+    name: Deployment Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TRPC_SERVICE_IMAGE: trpc-agent-service:ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate deployment manifests
+        run: ./scripts/validate-deployment.sh
+
+      - name: Build container image
+        run: docker build --tag "$TRPC_SERVICE_IMAGE" .
+
+      - name: Run Compose golden path
+        run: ./scripts/quickstart.sh --demo deploy/example.env
+
+      - name: Stop Compose services
+        if: always()
+        run: |
+          docker compose \
+            --env-file deploy/example.env \
+            -f deploy/docker-compose.yml \
+            down -v --remove-orphans || true
+
+  build-test:
+    name: Build, Test & Coverage
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: trpc_agent_migration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d trpc_agent_migration_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres-repository:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: trpc_agent_repository_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d trpc_agent_repository_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres-init:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: trpc_agent_init_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d trpc_agent_init_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: trpc_agent_mysql_migration_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      mysql-repository:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: trpc_agent_mysql_repository_test
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_MIGRATION_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5432/trpc_agent_migration_test?sslmode=disable
+      POSTGRES_REPOSITORY_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
+      POSTGRES_INIT_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5434/trpc_agent_init_test?sslmode=disable
+      MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN: trpc_migration:mysql@tcp(127.0.0.1:3306)/trpc_agent_mysql_migration_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN: trpc_migration:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_TEST_DSN: trpc_app:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Provision MySQL migration and application accounts
+        run: |
+          mysql --protocol=tcp -h 127.0.0.1 -P 3306 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_migration_test.* TO 'trpc_migration'@'%';
+            FLUSH PRIVILEGES;"
+          mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_repository_test.* TO 'trpc_migration'@'%';
+            FLUSH PRIVILEGES;"
+      - name: Prepare MySQL schemas and application grants
+        run: |
+          MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN="$MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN" \
+            go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
+          MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN="$MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN" \
+            go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
+          for table in tenant model_profile agent_app agent_app_revision agent_app_revision_tool backend_profile backend_profile_binding channel_binding tenant_status_change_outbox model_profile_change_outbox backend_profile_change_outbox agent_app_change_outbox channel_binding_change_outbox tenant_configuration_outbox; do
+            mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "GRANT SELECT, INSERT, UPDATE, DELETE ON trpc_agent_mysql_repository_test.${table} TO 'trpc_app'@'%';"
+          done
+
+      - name: Build
+        run: ./scripts/build.sh
+
+      - name: Coverage
+        run: ./scripts/coverage.sh
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+
+      - name: Clean
+        run: ./scripts/clean.sh
+
+  race:
+    name: Race Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: trpc_agent_migration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d trpc_agent_migration_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres-repository:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: trpc_agent_repository_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d trpc_agent_repository_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres-init:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: trpc_agent_init_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d trpc_agent_init_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: trpc_agent_mysql_migration_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      mysql-repository:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: trpc_agent_mysql_repository_test
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_MIGRATION_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5432/trpc_agent_migration_test?sslmode=disable
+      POSTGRES_REPOSITORY_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
+      POSTGRES_INIT_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5434/trpc_agent_init_test?sslmode=disable
+      MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN: trpc_migration:mysql@tcp(127.0.0.1:3306)/trpc_agent_mysql_migration_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN: trpc_migration:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_TEST_DSN: trpc_app:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Provision MySQL migration and application accounts
+        run: |
+          mysql --protocol=tcp -h 127.0.0.1 -P 3306 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_migration_test.* TO 'trpc_migration'@'%';
+            FLUSH PRIVILEGES;"
+          mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_repository_test.* TO 'trpc_migration'@'%';
+            FLUSH PRIVILEGES;"
+      - name: Prepare MySQL schemas and application grants
+        run: |
+          MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN="$MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN" \
+            go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
+          MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN="$MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN" \
+            go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
+          for table in tenant model_profile agent_app agent_app_revision agent_app_revision_tool backend_profile backend_profile_binding channel_binding tenant_status_change_outbox model_profile_change_outbox backend_profile_change_outbox agent_app_change_outbox channel_binding_change_outbox tenant_configuration_outbox; do
+            mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "GRANT SELECT, INSERT, UPDATE, DELETE ON trpc_agent_mysql_repository_test.${table} TO 'trpc_app'@'%';"
+          done
+
+      - name: Race test
+        run: ./scripts/race.sh

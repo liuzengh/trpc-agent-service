@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/XnLemon/trpc-agent-service/tree/main/docs
+    about: Read the project documentation before opening an issue.
+  - name: Upstream trpc-agent-go
+    url: https://github.com/trpc-group/trpc-agent-go
+    about: Check upstream framework behavior and examples.
