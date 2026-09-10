@@ -1,2 +1,0 @@
-HTTP/1.1 204 No Content
-Date: Mon, 07 Sep 2026 11:54:19 GMT

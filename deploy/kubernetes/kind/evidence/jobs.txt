@@ -1,3 +1,0 @@
-NAME                         STATUS     COMPLETIONS   DURATION   AGE   CONTAINERS   IMAGES                                  SELECTOR
-minio-bucket-init            Complete   1/1           3s         45s   mc           minio/mc:RELEASE.2025-04-16T18-13-26Z   batch.kubernetes.io/controller-uid=691724bf-a6aa-49f3-893a-cd5558c27f78
-trpc-agent-service-migrate   Complete   1/1           3s         42s   migrate      trpc-agent-service:kind                 batch.kubernetes.io/controller-uid=3e13f2a6-910a-43eb-b4b2-13b59413f0fa

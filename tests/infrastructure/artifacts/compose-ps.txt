@@ -1,5 +1,0 @@
-NAME                                       IMAGE                                      COMMAND                  SERVICE    CREATED         STATUS                   PORTS
-trpc-agent-service-acceptance-minio-1      minio/minio:RELEASE.2025-04-22T22-12-26Z   "/usr/bin/docker-ent…"   minio      5 seconds ago   Up 4 seconds (healthy)   127.0.0.1:19000->9000/tcp, 127.0.0.1:19001->9001/tcp
-trpc-agent-service-acceptance-postgres-1   pgvector/pgvector:pg16                     "docker-entrypoint.s…"   postgres   5 seconds ago   Up 4 seconds (healthy)   127.0.0.1:15432->5432/tcp
-trpc-agent-service-acceptance-redis-1      redis:7.4-alpine                           "docker-entrypoint.s…"   redis      5 seconds ago   Up 4 seconds (healthy)   127.0.0.1:16379->6379/tcp
-trpc-agent-service-acceptance-redpanda-1   redpandadata/redpanda:v24.1.7              "/entrypoint.sh redp…"   redpanda   5 seconds ago   Up 4 seconds (healthy)   127.0.0.1:29092->29092/tcp

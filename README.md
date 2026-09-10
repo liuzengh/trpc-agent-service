@@ -140,6 +140,8 @@ npm run build    # 产物输出到 webui/dist；./build.sh 会自动执行
 
 `./build.sh` 会在 Go 编译前自动构建前端（`webui/src` 有更新时），因此日常只需 `./build.sh && ./start.sh`。
 
+> **关于 `webui/dist` 入库**：`webui/embed.go` 通过 `//go:embed dist` 在编译期把前端产物嵌入二进制，因此 `webui/dist/` 作为**确定性构建产物**随仓库一并维护（`.gitignore` 用 `!webui/dist/` 显式放行），保证新克隆者无需 Node 工具链即可直接 `go build`。改动前端后请同步提交 `webui/dist/` 的更新，二者保持一致。
+
 可观测性按需启用，不配置外部出口时不会阻塞本地开发：
 
 ```bash
