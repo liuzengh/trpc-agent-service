@@ -1,0 +1,46 @@
+# Build-context exclusions for the multi-stage Dockerfile.
+#
+# Two of these are correctness requirements, not just context-size savings:
+#
+#   config.yaml  — gitignored precisely because it holds real API keys. If it
+#                  reaches the build context, `COPY . .` bakes it into a builder
+#                  layer, and anyone who gets the image can read the keys back
+#                  out of it. The image must never contain a config file: it is
+#                  mounted at runtime (see deploy/README.md).
+#   .git         — the full history can hold the same secrets, and it is usually
+#                  the single largest thing in the context.
+#
+# vendor/ is deliberately NOT excluded: with a vendor directory present Go builds
+# offline via -mod=vendor, which is the escape hatch for a network-less build
+# (spec-deployment-fault-drill.md fact #2).
+
+# --- secrets & VCS ---
+config.yaml
+.git
+.gitignore
+.gitattributes
+
+# --- local scratch: throwaway binaries, configs, audit trails, drill logs ---
+.smoke/
+bin/
+dist/
+data/
+coverage.out
+coverage.html
+*.log
+*.test
+*.exe
+
+# --- editor / tooling caches (the repowiki tree alone is larger than the source) ---
+.qoder/
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# --- not needed to build the two binaries ---
+docs/
+*.md
+deploy/
+docker-compose.yml
+Dockerfile

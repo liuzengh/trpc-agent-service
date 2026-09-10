@@ -1,0 +1,36 @@
+# PodDisruptionBudget. Not verified in a cluster (fact #3).
+#
+# THE TRADE-OFF, STATED UP FRONT
+# With replicas: 1, minAvailable: 1 means the eviction API rejects every
+# voluntary disruption: `kubectl drain` on the node hosting this Pod will wait
+# indefinitely, and a cluster-autoscaler scale-down or a managed node upgrade
+# stalls on it. That is not a bug in the budget, it is exactly what "never let
+# capacity reach zero" means when capacity is one.
+#
+# So this file encodes a choice, and the choice should be made deliberately:
+#
+#   keep it     — the service is never voluntarily taken to zero, and node
+#                 maintenance needs an explicit override:
+#                   kubectl drain <node> --ignore-daemonsets --disable-eviction
+#                 (--disable-eviction deletes the Pod instead of evicting it,
+#                 which bypasses the budget and is the accepted escape hatch)
+#   remove it   — drains are frictionless, and a node upgrade can leave the
+#                 service with no Pod until the Deployment reschedules.
+#
+# Once replicas can go above 1 (see 40-hpa.yaml for the two things that have to
+# be true first), minAvailable: 1 stops being a drain blocker and starts being
+# what a PDB is for: one Pod down for a rollout or a node drain, one still
+# serving. That is the state this manifest is written for.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: trpc-agent-service
+  labels:
+    app: trpc-agent-service
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: gateway
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: trpc-agent-service

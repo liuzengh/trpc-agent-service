@@ -1,6 +1,7 @@
 // Package audit writes the append-only governance trail (proposal doc 3.5):
-// every inbound message, guardrail decision, model call, reply, and admin
-// mutation lands here with the tenant context and trace id attached.
+// every inbound message, admission throttle, guardrail decision, model call,
+// reply, and admin mutation lands here with the tenant context and trace id
+// attached.
 package audit
 
 import (
@@ -17,6 +18,7 @@ import (
 const (
 	EventInbound        = "inbound"
 	EventGuardrailBlock = "guardrail_block"
+	EventThrottled      = "throttled" // rejected by the tenant concurrency quota
 	EventModelCall      = "model_call"
 	EventReply          = "reply"
 	EventAdmin          = "admin"
@@ -45,8 +47,8 @@ type Record struct {
 	AgentName string    `json:"agent_name,omitempty"`
 	ToolName  string    `json:"tool_name,omitempty"`
 	Decision  string    `json:"decision,omitempty"`
-	Stage     string    `json:"stage,omitempty"` // guardrail stage: input|output
-	Rule      string    `json:"rule,omitempty"`  // guardrail rule: length|keyword
+	Stage     string    `json:"stage,omitempty"` // admission|input|output
+	Rule      string    `json:"rule,omitempty"`  // concurrency|length|keyword
 	LatencyMS int64     `json:"latency_ms,omitempty"`
 	// PromptTokens/CompletionTokens carry the cost dimension of the trail.
 	PromptTokens     int    `json:"prompt_tokens,omitempty"`
@@ -56,8 +58,16 @@ type Record struct {
 }
 
 // Logger appends JSONL records to the configured file and echoes them
-// through the structured log. A nil *Logger is a valid no-op, so callers
-// never need nil checks at the call sites.
+// through the structured log.
+//
+// There are two distinct "no file" states, and conflating them is what broke
+// log-only auditing once already:
+//
+//	nil *Logger      — true no-op. Valid, so callers that hand-build a
+//	                   Governance{} or a Service without an auditor never need
+//	                   nil checks at the call sites.
+//	&Logger{w: nil}  — log-only. Records still reach slog, which is what
+//	                   New("") returns.
 type Logger struct {
 	mu sync.Mutex
 	f  *os.File
@@ -65,9 +75,18 @@ type Logger struct {
 }
 
 // New opens the audit trail at path; an empty path yields a log-only logger.
+//
+// Log-only is a real deployment shape, not a degraded one: in a container the
+// filesystem is ephemeral and often read-only, while stdout is picked up by the
+// cluster's log pipeline and is durable. Returning nil for an empty path — what
+// this used to do — silently disabled the entire governance trail, because a
+// nil *Logger is a no-op by design. The promise in this comment, in Logger's,
+// in admin.NewService's and in config.example.yaml all said "log-only"; only
+// the code disagreed, and the test covering it asserted no more than that err
+// was nil.
 func New(path string) (*Logger, error) {
 	if path == "" {
-		return nil, nil
+		return &Logger{}, nil
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {

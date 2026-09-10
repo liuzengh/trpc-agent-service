@@ -1,0 +1,71 @@
+# kustomization for deploy/k8s.
+#
+#   kubectl apply -k deploy/k8s/
+#
+# This file exists for two reasons, and the second is the one that matters
+# here:
+#
+#  1. `kubectl apply -f deploy/k8s/` works too, but -k is the idiomatic way to
+#     apply a directory of manifests and it gives one place to add a namespace,
+#     a common label, or an image override later.
+#  2. `kubectl kustomize deploy/k8s/` is a REAL offline check, and
+#     `kubectl apply --dry-run=client --validate=false` is not. The latter still
+#     performs API discovery to map kind to resource, so on a machine with no
+#     cluster it fails with
+#       unable to recognize "...": the server could not find the requested resource
+#     for every file regardless of whether the file is correct. kustomize is
+#     purely local: it parses every resource and refuses to build if one is
+#     malformed. That is the only executable validation available here, and it
+#     is what spec fact #3 should have named.
+#
+# What kustomize still does NOT check is whether the pieces refer to each other.
+# A Deployment whose configMap volume names something the generator never
+# produced builds cleanly and then fails in the cluster with a mount error;
+# scripts/check_deploy.sh section C walks those references (ConfigMap, Secret,
+# Service selector, HPA target, PDB selector, Ingress backend) against the
+# rendered output. Whether the config file itself survives the application's own
+# validator is a Go test, trpcservice/config/deploy_test.go.
+#
+# Apply with -k, not -f. `kubectl apply -f deploy/k8s/` cannot work here: the
+# ConfigMap is generated (below) rather than checked in as a manifest, so -f
+# would create a Deployment whose configMap volume points at a name that does
+# not exist.
+resources:
+  - 10-secret.example.yaml
+  - 20-deployment.yaml
+  - 30-service.yaml
+  - 40-hpa.yaml
+  - 50-pdb.yaml
+  - 60-ingress.yaml
+
+# The config is generated from a plain file rather than written inline in a
+# ConfigMap, for two reasons. It becomes checkable: trpcservice/config/
+# deploy_test.go hands this exact path to the real loader, which is the only way
+# to find out offline whether Validate() accepts it. And it becomes
+# self-rolling: the generated name carries a hash of the file's contents,
+# kustomize rewrites the reference inside 20-deployment.yaml, so editing the
+# config changes the Pod template and triggers a rollout with no annotation to
+# remember.
+#
+# The key inside the ConfigMap is the file's basename, config.yaml — which is
+# what the initContainer in 20-deployment.yaml copies out of /config-src.
+configMapGenerator:
+  - name: trpc-agent-config
+    files:
+      - config/config.yaml
+
+generatorOptions:
+  # Keep the generated ConfigMap findable by the same label the hand-written
+  # manifests use, so `kubectl get configmap -l app=trpc-agent-service` works
+  # even though the name now carries a hash.
+  labels:
+    app: trpc-agent-service
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: config
+
+# Single place to retag the image once it is pushed somewhere the cluster can
+# reach it (20-deployment.yaml carries the locally-built tag by default):
+# images:
+#   - name: trpc-agent-service
+#     newName: registry.example.com/trpc-agent-service
+#     newTag: 0.1.0

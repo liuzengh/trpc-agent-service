@@ -31,9 +31,19 @@ const AgentName = "assistant"
 // session service (memory or redis, selected platform-wide via trpcservice/
 // storage). All tenants share one session.Service instance; isolation comes
 // from the {tenant}:{channel}:{user} session ids.
-func NewRunner(t *tenant.Context, sess session.Service) (runner.Runner, error) {
+//
+// maxLLMCalls is the per-message ceiling on model calls. It is a parameter
+// rather than an llmagent default because the framework treats a
+// non-positive value as "no limit", and a non-positive value reaching here
+// would silently reopen the unbounded-call hole the cap exists to close
+// (docs/spec-deployment-fault-drill.md §4.5), so it is corrected instead of
+// trusted.
+func NewRunner(t *tenant.Context, sess session.Service, maxLLMCalls int) (runner.Runner, error) {
 	if t.Model.APIKey == "" {
 		return nil, fmt.Errorf("tenant %s: model api key is required", t.ID)
+	}
+	if maxLLMCalls <= 0 {
+		maxLLMCalls = config.DefaultMaxLLMCalls
 	}
 
 	modelName := t.Model.Name
@@ -50,6 +60,7 @@ func NewRunner(t *tenant.Context, sess session.Service) (runner.Runner, error) {
 		llmagent.WithModel(llm),
 		llmagent.WithInstruction("You are a helpful assistant."),
 		llmagent.WithGenerationConfig(model.GenerationConfig{Stream: true}),
+		llmagent.WithMaxLLMCalls(maxLLMCalls),
 	)
 
 	return runner.NewRunner(appName, a,
@@ -80,7 +91,7 @@ func NewRegistry(cfg *config.Config, sess session.Service) (*Registry, error) {
 		sess:    sess,
 	}
 	for id, t := range cfg.Tenants {
-		rr, err := NewRunner(t, sess)
+		rr, err := NewRunner(t, sess, cfg.Agent.MaxLLMCalls)
 		if err != nil {
 			return nil, err
 		}
@@ -95,7 +106,7 @@ func NewRegistry(cfg *config.Config, sess session.Service) (*Registry, error) {
 func (r *Registry) Apply(cfg *config.Config) error {
 	runners := make(map[string]runner.Runner, len(cfg.Tenants))
 	for id, t := range cfg.Tenants {
-		rr, err := NewRunner(t, r.sess)
+		rr, err := NewRunner(t, r.sess, cfg.Agent.MaxLLMCalls)
 		if err != nil {
 			return err
 		}

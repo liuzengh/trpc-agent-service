@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
@@ -55,6 +56,9 @@ func setupService(t *testing.T, aud ...*audit.Logger) (*Service, string, *agent.
 	t.Setenv("MODEL_BASE_URL", "")
 	t.Setenv("STORAGE_SESSION_BACKEND", "")
 	t.Setenv("STORAGE_SESSION_REDIS_URL", "")
+	t.Setenv("AGENT_MESSAGE_TIMEOUT", "")
+	t.Setenv("AGENT_MAX_CONCURRENCY_PER_TENANT", "")
+	t.Setenv("AGENT_MAX_LLM_CALLS", "")
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(initialYAML), 0o600); err != nil {
@@ -390,6 +394,214 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// TestAgentDefaults covers the fixture that ships without an agent block: the
+// gateway reads the documented defaults (bounded message timeout, unlimited
+// per-tenant concurrency) rather than a zero envelope that would reject every
+// message instantly.
+func TestAgentDefaults(t *testing.T) {
+	s, _, _ := setupService(t)
+	got := s.Agent()
+	if got.MessageTimeout != config.DefaultMessageTimeout || got.MaxConcurrencyPerTenant != 0 ||
+		got.MaxLLMCalls != config.DefaultMaxLLMCalls {
+		t.Fatalf("Agent() = %+v, want the defaults", got)
+	}
+}
+
+// TestAgentSurvivesTenantMutations pins the wiring the gateway depends on.
+// Agent() resolves the envelope per dispatch, and every tenant mutation commits
+// a cloneConfig copy: if that clone dropped Agent, the commit would fail
+// outright today (a zero MessageTimeout is invalid) and would silently reset a
+// running gateway's timeout the moment validation relaxed. Both the in-memory
+// accessor and the persisted file must keep the operator's values.
+func TestAgentSurvivesTenantMutations(t *testing.T) {
+	t.Setenv("MODEL_API_KEY", "")
+	t.Setenv("STORAGE_SESSION_BACKEND", "")
+	t.Setenv("STORAGE_SESSION_REDIS_URL", "")
+	t.Setenv("AGENT_MESSAGE_TIMEOUT", "")
+	t.Setenv("AGENT_MAX_CONCURRENCY_PER_TENANT", "")
+	t.Setenv("AGENT_MAX_LLM_CALLS", "")
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "agent:\n  message_timeout: 3s\n  max_concurrency_per_tenant: 2\n  max_llm_calls: 5\n" + initialYAML
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	reg, err := agent.NewRegistry(cfg, inmemory.NewSessionService())
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	s := NewService(path, cfg, reg, nil)
+
+	want := config.AgentConfig{MessageTimeout: 3 * time.Second, MaxConcurrencyPerTenant: 2, MaxLLMCalls: 5}
+	if got := s.Agent(); got != want {
+		t.Fatalf("Agent() = %+v, want %+v", got, want)
+	}
+
+	rw := do(t, s.Handler(), http.MethodPut, "/admin/tenants/demo",
+		`{"name":"Demo2","model":{"name":"m","api_key":""}}`)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("tenant update = %d: %s", rw.Code, rw.Body.String())
+	}
+	if got := s.Agent(); got != want {
+		t.Fatalf("Agent() after a tenant update = %+v, want %+v", got, want)
+	}
+	if disk := reload(t, path).Agent; disk != want {
+		t.Fatalf("envelope reloaded from disk = %+v, want %+v", disk, want)
+	}
+	if raw := readFile(t, path); !strings.Contains(raw, "message_timeout: 3s") ||
+		!strings.Contains(raw, "max_concurrency_per_tenant: 2") ||
+		!strings.Contains(raw, "max_llm_calls: 5") {
+		t.Fatalf("agent block lost from the config file:\n%s", raw)
+	}
+}
+
+// TestSettingsHotUpdate covers the envelope's write side end to end: GET
+// renders the effective values so a client can round-trip them, PUT retunes a
+// running process (the accessor the gateway reads per dispatch sees it at once,
+// and the change is persisted), and a rejected value leaves everything as it
+// was. Rejections that never reach the commit — a duration that does not parse
+// — are not audited, matching the tenant DTO checks; a failed commit is.
+//
+// max_llm_calls carries one extra rule the other two fields do not: 0 selects
+// the default instead of meaning "unlimited", because the cap is the only bound
+// on how many upstream calls one message can cause (§4.5). The API can raise it
+// but cannot remove it.
+func TestSettingsHotUpdate(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	aud, err := audit.New(auditPath)
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	s, path, _ := setupService(t, aud)
+
+	// GET shows the defaults the shipped config resolves to.
+	rw := do(t, s.Handler(), http.MethodGet, "/admin/settings", "")
+	if rw.Code != http.StatusOK {
+		t.Fatalf("get = %d: %s", rw.Code, rw.Body.String())
+	}
+	if got := strings.TrimSpace(rw.Body.String()); got != `{"message_timeout":"2m0s","max_concurrency_per_tenant":0,"max_llm_calls":8}` {
+		t.Fatalf("get body = %s", got)
+	}
+
+	// PUT retunes; no restart, no rewiring.
+	rw = do(t, s.Handler(), http.MethodPut, "/admin/settings",
+		`{"message_timeout":"3s","max_concurrency_per_tenant":2,"max_llm_calls":5}`)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("put = %d: %s", rw.Code, rw.Body.String())
+	}
+	want := config.AgentConfig{
+		MessageTimeout: 3 * time.Second, MaxConcurrencyPerTenant: 2, MaxLLMCalls: 5,
+	}
+	if got := s.Agent(); got != want {
+		t.Fatalf("Agent() after PUT = %+v, want %+v", got, want)
+	}
+	if disk := reload(t, path).Agent; disk != want {
+		t.Fatalf("envelope on disk = %+v, want %+v", disk, want)
+	}
+	if raw := readFile(t, path); !strings.Contains(raw, "message_timeout: 3s") ||
+		!strings.Contains(raw, "max_llm_calls: 5") {
+		t.Fatalf("agent block not persisted:\n%s", raw)
+	}
+
+	// The GET response PUTs back unchanged (the round-trip contract).
+	rw = do(t, s.Handler(), http.MethodGet, "/admin/settings", "")
+	body := strings.TrimSpace(rw.Body.String())
+	if body != `{"message_timeout":"3s","max_concurrency_per_tenant":2,"max_llm_calls":5}` {
+		t.Fatalf("get after put = %s", body)
+	}
+	if rw := do(t, s.Handler(), http.MethodPut, "/admin/settings", body); rw.Code != http.StatusOK {
+		t.Fatalf("round-trip put = %d: %s", rw.Code, rw.Body.String())
+	}
+	if got := s.Agent(); got != want {
+		t.Fatalf("Agent() after round trip = %+v, want %+v", got, want)
+	}
+
+	// Rejected values: a duration that does not parse, and two that parse but
+	// fail validation. None of them may move the live envelope.
+	if rw := do(t, s.Handler(), http.MethodPut, "/admin/settings",
+		`{"message_timeout":"soon"}`); rw.Code != http.StatusBadRequest {
+		t.Fatalf("unparsable timeout = %d, want 400", rw.Code)
+	}
+	if rw := do(t, s.Handler(), http.MethodPut, "/admin/settings",
+		`{"message_timeout":"-1s"}`); rw.Code != http.StatusBadRequest {
+		t.Fatalf("negative timeout = %d, want 400: %s", rw.Code, rw.Body.String())
+	}
+	if rw := do(t, s.Handler(), http.MethodPut, "/admin/settings",
+		`{"message_timeout":"3s","max_concurrency_per_tenant":-1}`); rw.Code != http.StatusBadRequest {
+		t.Fatalf("negative quota = %d, want 400: %s", rw.Code, rw.Body.String())
+	}
+	if rw := do(t, s.Handler(), http.MethodPut, "/admin/settings",
+		`{"max_llm_calls":-1}`); rw.Code != http.StatusBadRequest {
+		t.Fatalf("negative call cap = %d, want 400: %s", rw.Code, rw.Body.String())
+	}
+	if got := s.Agent(); got != want {
+		t.Fatalf("rejected settings must not move the envelope, got %+v", got)
+	}
+	if disk := reload(t, path).Agent; disk != want {
+		t.Fatalf("rejected settings must not touch the file, got %+v", disk)
+	}
+
+	// A zero cap is accepted and substituted, not forwarded: the framework reads
+	// 0 as "no limit", which is the hole this field exists to close. The trail
+	// records the value that took effect, so an operator can see the difference
+	// between "raised the cap" and "tried to remove it".
+	rw = do(t, s.Handler(), http.MethodPut, "/admin/settings",
+		`{"message_timeout":"3s","max_concurrency_per_tenant":2,"max_llm_calls":0}`)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("zero cap = %d: %s", rw.Code, rw.Body.String())
+	}
+	substituted := config.AgentConfig{
+		MessageTimeout: 3 * time.Second, MaxConcurrencyPerTenant: 2,
+		MaxLLMCalls: config.DefaultMaxLLMCalls,
+	}
+	if got := s.Agent(); got != substituted {
+		t.Fatalf("Agent() after a zero cap = %+v, want %+v", got, substituted)
+	}
+
+	// An empty body resets to the documented defaults: that is what omitting the
+	// agent block in the config file means, so the two must not diverge.
+	rw = do(t, s.Handler(), http.MethodPut, "/admin/settings", `{}`)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("reset = %d: %s", rw.Code, rw.Body.String())
+	}
+	if got := s.Agent(); got.MessageTimeout != config.DefaultMessageTimeout ||
+		got.MaxConcurrencyPerTenant != 0 || got.MaxLLMCalls != config.DefaultMaxLLMCalls {
+		t.Fatalf("Agent() after reset = %+v, want the defaults", got)
+	}
+	if raw := readFile(t, path); strings.Contains(raw, "agent:") {
+		t.Fatalf("a pure-default envelope must be omitted from the file:\n%s", raw)
+	}
+
+	if rw := do(t, s.Handler(), http.MethodPost, "/admin/settings", `{}`); rw.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("post = %d, want 405", rw.Code)
+	}
+
+	aud.Close()
+	trail := readFile(t, auditPath)
+	if lines := strings.Count(trail, `"event":"admin"`); lines != 7 { // 4 ok + 3 failed commits
+		t.Fatalf("audit trail has %d admin records, want 7:\n%s", lines, trail)
+	}
+	if n := strings.Count(trail, `"error_type":"commit"`); n != 3 {
+		t.Fatalf("trail has %d commit failures, want 3:\n%s", n, trail)
+	}
+	if !strings.Contains(trail, `"tenant_id":"*"`) {
+		t.Fatalf("settings records must be marked as not tenant-scoped:\n%s", trail)
+	}
+	if !strings.Contains(trail, `settings message_timeout=3s max_concurrency_per_tenant=2 max_llm_calls=5`) {
+		t.Fatalf("trail must record the envelope as it became:\n%s", trail)
+	}
+	if !strings.Contains(trail, `max_llm_calls=8`) {
+		t.Fatalf("trail must record the substituted cap, not the 0 that was asked for:\n%s", trail)
+	}
+	if strings.Contains(trail, `"soon"`) {
+		t.Fatalf("an unparsable duration must not reach the trail:\n%s", trail)
+	}
 }
 
 // TestAdminAuditCarriesTraceID proves the admin.request span reaches the

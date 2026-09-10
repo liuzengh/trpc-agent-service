@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,29 @@ const (
 	envStorageRedisURL = "STORAGE_SESSION_REDIS_URL"
 )
 
+// Agent runtime envelope defaults (proposal doc 2.3). The AGENT_* variables
+// let a container or K8s deployment retune the timeout and the per-tenant
+// concurrency quota without rewriting the mounted config file.
+const (
+	// DefaultMessageTimeout caps one inbound message end to end: the model
+	// call plus draining the reply stream. It is the only backstop once the
+	// dispatch context is detached from the IM request deadline.
+	DefaultMessageTimeout = 2 * time.Minute
+
+	// DefaultMaxLLMCalls bounds how many model calls one inbound message may
+	// cause. A tool-free question needs exactly one, so the rest is headroom
+	// for tool loops. The framework reads a non-positive cap as "no limit",
+	// and an upstream that answers 200 with an empty stream never satisfies
+	// the flow's exit condition: measured at ~8.3k upstream calls per second
+	// for as long as the message budget lasts (spec-deployment-fault-drill
+	// §4.5). This cap is what turns that into a bounded, reported error.
+	DefaultMaxLLMCalls = 8
+
+	envAgentMessageTimeout = "AGENT_MESSAGE_TIMEOUT"
+	envAgentMaxConcurrency = "AGENT_MAX_CONCURRENCY_PER_TENANT"
+	envAgentMaxLLMCalls    = "AGENT_MAX_LLM_CALLS"
+)
+
 // Observability defaults (proposal doc 3.5). Exporters are off unless the
 // config asks for stdout (local debugging) or otlp (collector deployment).
 const (
@@ -56,6 +80,7 @@ const (
 type fileYAML struct {
 	DefaultTenant string           `yaml:"default_tenant,omitempty"`
 	Storage       *storageYAML     `yaml:"storage,omitempty"`
+	Agent         *agentYAML       `yaml:"agent,omitempty"`
 	Log           *logYAML         `yaml:"log,omitempty"`
 	Audit         *auditYAML       `yaml:"audit,omitempty"`
 	Telemetry     *telemetryYAML   `yaml:"telemetry,omitempty"`
@@ -85,6 +110,23 @@ type SessionStorage struct {
 // is second-phase Storage Adapter work and intentionally absent here.
 type Storage struct {
 	Session SessionStorage
+}
+
+// AgentConfig is the validated runtime envelope the gateway applies to every
+// inbound message (proposal doc 2.3): how long one message may take, and how
+// many messages of one tenant may be in flight at once.
+type AgentConfig struct {
+	// MessageTimeout caps one message end to end; defaults to
+	// DefaultMessageTimeout and must stay positive.
+	MessageTimeout time.Duration
+	// MaxConcurrencyPerTenant caps in-flight messages per tenant. 0 means
+	// unlimited (the default), so a config without an agent section behaves
+	// exactly like the platform did before quotas existed.
+	MaxConcurrencyPerTenant int
+	// MaxLLMCalls caps the model calls one message may cause. Unlike the
+	// quota above, 0 does not mean unlimited: it selects DefaultMaxLLMCalls,
+	// because "unlimited" is exactly the hole this field closes.
+	MaxLLMCalls int
 }
 
 // LogConfig selects the structured log level and encoding.
@@ -124,6 +166,7 @@ type TelemetryConfig struct {
 type Config struct {
 	DefaultTenant string
 	Storage       Storage
+	Agent         AgentConfig
 	Log           LogConfig
 	Audit         AuditConfig
 	Telemetry     TelemetryConfig
@@ -165,6 +208,9 @@ func Load(path string) (*Config, error) {
 	if cfg.Storage, err = parseStorage(f.Storage); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
+	if cfg.Agent, err = parseAgent(f.Agent); err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
+	}
 	if cfg.Log, cfg.Audit, cfg.Telemetry, err = parseObservability(f.Log, f.Audit, f.Telemetry); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
@@ -203,6 +249,9 @@ func (c *Config) Validate() error {
 	if err := c.validateStorage(); err != nil {
 		return err
 	}
+	if err := c.validateAgent(); err != nil {
+		return err
+	}
 	if err := c.validateObservability(); err != nil {
 		return err
 	}
@@ -228,6 +277,7 @@ func Save(path string, cfg *Config) error {
 	f := fileYAML{
 		DefaultTenant: cfg.DefaultTenant,
 		Storage:       storageToYAML(cfg.Storage),
+		Agent:         agentToYAML(cfg.Agent),
 		Log:           logToYAML(cfg.Log),
 		Audit:         auditToYAML(cfg.Audit),
 		Telemetry:     telemetryToYAML(cfg.Telemetry),
@@ -322,6 +372,110 @@ func storageToYAML(s Storage) *storageYAML {
 		y.SessionTTL = ss.SessionTTL.String()
 	}
 	return &storageYAML{Session: y}
+}
+
+// agentYAML is the on-disk agent section; everything optional so an absent
+// section keeps the pure defaults.
+type agentYAML struct {
+	MessageTimeout          string `yaml:"message_timeout,omitempty"`
+	MaxConcurrencyPerTenant int    `yaml:"max_concurrency_per_tenant,omitempty"`
+	MaxLLMCalls             int    `yaml:"max_llm_calls,omitempty"`
+}
+
+// parseAgent normalizes the agent section: it fills defaults, parses
+// message_timeout, and applies the AGENT_* overrides so the result is ready
+// for validateAgent. Environment values are parsed here rather than in
+// Validate so a bad AGENT_MESSAGE_TIMEOUT is reported with its variable name.
+func parseAgent(y *agentYAML) (AgentConfig, error) {
+	a := AgentConfig{MessageTimeout: DefaultMessageTimeout, MaxLLMCalls: DefaultMaxLLMCalls}
+	if y != nil {
+		if y.MessageTimeout != "" {
+			d, err := time.ParseDuration(y.MessageTimeout)
+			if err != nil {
+				return AgentConfig{}, fmt.Errorf("agent.message_timeout %q: %w", y.MessageTimeout, err)
+			}
+			a.MessageTimeout = d
+		}
+		a.MaxConcurrencyPerTenant = y.MaxConcurrencyPerTenant
+		// 0 keeps the default rather than meaning "no cap"; a negative value
+		// is passed through for validateAgent to name.
+		if y.MaxLLMCalls != 0 {
+			a.MaxLLMCalls = y.MaxLLMCalls
+		}
+	}
+	if err := applyAgentEnv(&a); err != nil {
+		return AgentConfig{}, err
+	}
+	return a, nil
+}
+
+func applyAgentEnv(a *AgentConfig) error {
+	if v := os.Getenv(envAgentMessageTimeout); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("%s %q: %w", envAgentMessageTimeout, v, err)
+		}
+		a.MessageTimeout = d
+	}
+	if v := os.Getenv(envAgentMaxConcurrency); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("%s %q: %w", envAgentMaxConcurrency, v, err)
+		}
+		a.MaxConcurrencyPerTenant = n
+	}
+	if v := os.Getenv(envAgentMaxLLMCalls); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("%s %q: %w", envAgentMaxLLMCalls, v, err)
+		}
+		if n == 0 {
+			n = DefaultMaxLLMCalls
+		}
+		a.MaxLLMCalls = n
+	}
+	return nil
+}
+
+// validateAgent rejects an envelope the gateway could not honour: a
+// non-positive timeout would cancel every message immediately, and a
+// negative quota would reject everything instead of limiting it.
+func (c *Config) validateAgent() error {
+	if c.Agent.MessageTimeout <= 0 {
+		return fmt.Errorf("agent.message_timeout must be positive")
+	}
+	if c.Agent.MaxConcurrencyPerTenant < 0 {
+		return fmt.Errorf("agent.max_concurrency_per_tenant must not be negative (0 means unlimited)")
+	}
+	// Reached only by a hand-built Config, since both parse paths substitute
+	// the default for 0 — which makes this the guard that names a regression
+	// where a copied config loses the field and silently reopens the
+	// unbounded-call hole.
+	if c.Agent.MaxLLMCalls <= 0 {
+		return fmt.Errorf("agent.max_llm_calls must be positive")
+	}
+	return nil
+}
+
+// agentToYAML serializes the agent section, omitting it entirely when it is
+// the pure default so Save output stays diff-clean, mirroring storageToYAML.
+func agentToYAML(a AgentConfig) *agentYAML {
+	timeoutDefault := a.MessageTimeout <= 0 || a.MessageTimeout == DefaultMessageTimeout
+	callsDefault := a.MaxLLMCalls <= 0 || a.MaxLLMCalls == DefaultMaxLLMCalls
+	if timeoutDefault && a.MaxConcurrencyPerTenant == 0 && callsDefault {
+		return nil
+	}
+	y := &agentYAML{}
+	if !timeoutDefault {
+		y.MessageTimeout = a.MessageTimeout.String()
+	}
+	if a.MaxConcurrencyPerTenant != 0 {
+		y.MaxConcurrencyPerTenant = a.MaxConcurrencyPerTenant
+	}
+	if !callsDefault {
+		y.MaxLLMCalls = a.MaxLLMCalls
+	}
+	return y
 }
 
 // logYAML / auditYAML / telemetryYAML are the on-disk observability shape;
@@ -549,6 +703,10 @@ func fromEnv(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	ag, err := parseAgent(nil)
+	if err != nil {
+		return nil, err
+	}
 	lc, ac, tc, err := parseObservability(nil, nil, nil)
 	if err != nil {
 		return nil, err
@@ -556,6 +714,7 @@ func fromEnv(path string) (*Config, error) {
 	return &Config{
 		DefaultTenant: t.ID,
 		Storage:       st,
+		Agent:         ag,
 		Log:           lc,
 		Audit:         ac,
 		Telemetry:     tc,

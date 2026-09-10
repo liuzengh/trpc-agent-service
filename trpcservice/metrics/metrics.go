@@ -124,7 +124,12 @@ type Recorder struct {
 }
 
 // NewRecorder builds the instruments on meter. Names follow the
-// trpcservice.* namespace; every instrument carries tenant_id.
+// trpcservice.* namespace; every instrument carries a "tenant" attribute.
+// The key is "tenant", not the audit trail's "tenant_id", and that split is
+// deliberate: the JSONL record is a schema (audit.go) while this is a metric
+// attribute, and the structured log already spells it "tenant". Renaming it to
+// match the audit field would not fail anything loudly — it would silently zero
+// every per-tenant series that queries or drills filter on (fault_drill.sh).
 func NewRecorder(meter metric.Meter) (*Recorder, error) {
 	r := &Recorder{}
 	var err error

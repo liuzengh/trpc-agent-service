@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -72,6 +73,15 @@ func (s *Service) Guardrails(tenantID string) tenant.Guardrails {
 	return tenant.Guardrails{}
 }
 
+// Agent resolves the current runtime envelope for the gateway, under the same
+// lock as Guardrails and re-read per dispatch, so a PUT to /admin/settings
+// lands on the next message with no restart and no rewiring.
+func (s *Service) Agent() config.AgentConfig {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.Agent
+}
+
 // WeComBinding resolves a tenant's current binding for channel adapters,
 // so hot-updated bindings take effect without rewiring the gateway.
 func (s *Service) WeComBinding(tenantID string) (*tenant.WeComBinding, bool) {
@@ -88,12 +98,14 @@ func (s *Service) WeChatKfBinding(tenantID string) (*tenant.WeChatKfBinding, boo
 	return s.cfg.WeChatKfBinding(tenantID)
 }
 
-// Handler mounts /admin/tenants and /admin/tenants/{id}. Every request runs
-// inside an admin.request span so mutations carry a trace id end to end.
+// Handler mounts /admin/tenants, /admin/tenants/{id} and /admin/settings.
+// Every request runs inside an admin.request span so mutations carry a trace
+// id end to end.
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/admin/tenants", s.handleCollection)
 	mux.HandleFunc("/admin/tenants/", s.handleItem)
+	mux.HandleFunc("/admin/settings", s.handleSettings)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer(metrics.ServiceName).Start(r.Context(), "admin.request",
 			trace.WithAttributes(
@@ -153,6 +165,32 @@ type listResponse struct {
 	Tenants       []tenantDTO `json:"tenants"`
 }
 
+// settingsDTO is the runtime envelope of one message (proposal doc 2.3, and
+// docs/spec-deployment-fault-drill.md §2.3). GET renders the effective values,
+// so a client can round-trip the response unchanged; PUT replaces the envelope
+// whole, with the same zero semantics the config file uses — an omitted
+// message_timeout or max_llm_calls means the documented default, and 0
+// concurrency means unlimited. max_llm_calls deliberately has no "unlimited":
+// the cap is the only thing bounding how many upstream calls one message can
+// cause, so it can be raised but not removed.
+type settingsDTO struct {
+	MessageTimeout          string `json:"message_timeout"`
+	MaxConcurrencyPerTenant int    `json:"max_concurrency_per_tenant"`
+	MaxLLMCalls             int    `json:"max_llm_calls"`
+}
+
+// settingsScope is the trail's stand-in for a mutation that is not
+// tenant-scoped: the envelope binds every tenant at once.
+const settingsScope = "*"
+
+func toSettingsDTO(a config.AgentConfig) settingsDTO {
+	return settingsDTO{
+		MessageTimeout:          a.MessageTimeout.String(),
+		MaxConcurrencyPerTenant: a.MaxConcurrencyPerTenant,
+		MaxLLMCalls:             a.MaxLLMCalls,
+	}
+}
+
 func (s *Service) handleCollection(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -180,6 +218,68 @@ func (s *Service) handleItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// handleSettings serves the process-wide runtime envelope. It shares the
+// tenant commit path, so a settings change is validated and persisted exactly
+// like a tenant change: a rejected value leaves the running config untouched.
+func (s *Service) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.Lock()
+		writeJSON(w, http.StatusOK, toSettingsDTO(s.cfg.Agent))
+		s.mu.Unlock()
+	case http.MethodPut:
+		s.putSettings(w, r)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Service) putSettings(w http.ResponseWriter, r *http.Request) {
+	var p settingsDTO
+	if err := decode(r, &p); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Parsed before the lock: a malformed duration is a client error, and the
+	// non-positive case is left to Validate so the wording stays in one place.
+	timeout := config.DefaultMessageTimeout
+	if p.MessageTimeout != "" {
+		d, err := time.ParseDuration(p.MessageTimeout)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("message_timeout: %v", err))
+			return
+		}
+		timeout = d
+	}
+	// Same substitution the config parser makes: an omitted cap means the
+	// documented default, never "no cap". A negative one falls through to
+	// Validate, which rejects it and leaves the live envelope untouched.
+	calls := p.MaxLLMCalls
+	if calls == 0 {
+		calls = config.DefaultMaxLLMCalls
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := cloneConfig(s.cfg)
+	next.Agent = config.AgentConfig{
+		MessageTimeout:          timeout,
+		MaxConcurrencyPerTenant: p.MaxConcurrencyPerTenant,
+		MaxLLMCalls:             calls,
+	}
+	// The trail records the envelope as it became, not just that someone
+	// touched it: this is the line an operator correlates a throttle wave with.
+	op := fmt.Sprintf("settings message_timeout=%s max_concurrency_per_tenant=%d max_llm_calls=%d",
+		next.Agent.MessageTimeout, next.Agent.MaxConcurrencyPerTenant, next.Agent.MaxLLMCalls)
+	if err := s.commit(next); err != nil {
+		s.auditAdmin(r.Context(), settingsScope, op, err)
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.auditAdmin(r.Context(), settingsScope, op, nil)
+	writeJSON(w, http.StatusOK, toSettingsDTO(next.Agent))
 }
 
 func (s *Service) list(w http.ResponseWriter) {
@@ -477,9 +577,10 @@ func cloneConfig(c *config.Config) *config.Config {
 	n := &config.Config{
 		DefaultTenant: c.DefaultTenant,
 		Storage:       c.Storage,   // plain value: backend is not tenant-editable
-		Log:           c.Log,       // plain values: observability is not
-		Audit:         c.Audit,     // tenant-editable either, but Save
-		Telemetry:     c.Telemetry, // validates them, so they must survive
+		Agent:         c.Agent,     // plain value: Save validates the envelope,
+		Log:           c.Log,       // so it must survive a tenant-only mutation
+		Audit:         c.Audit,     // plain values: observability is not
+		Telemetry:     c.Telemetry, // tenant-editable either, but Save
 		Tenants:       make(map[string]*tenant.Context, len(c.Tenants)),
 	}
 	for id, t := range c.Tenants {

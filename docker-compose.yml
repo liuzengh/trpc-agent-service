@@ -1,0 +1,180 @@
+# Local full stack: platform + Redis + the fault-injecting fake model.
+#
+#   docker compose build          # once, or use `up --build`
+#   docker compose up -d
+#   curl localhost:8080/readyz
+#
+# Everything here runs offline: redis:7-alpine and golang:1.24 are already on
+# this machine, the runtime stage is scratch, and no other image is referenced
+# (docs/spec-deployment-fault-drill.md fact #1).
+#
+# Two deliberate departures from a "normal" compose file, both forced by facts:
+#
+#   fake-model is in the DEFAULT stack, not behind a demo profile. The repo
+#       ships no API keys (config.yaml is gitignored precisely because it holds
+#       them), so a stack that pointed at a real provider could not answer a
+#       single message out of the box — and then scripts/e2e.sh and the D1..D7
+#       drills would have nothing to assert against. The fake model is the only
+#       upstream that is both reachable and controllable. Point the app at a
+#       real provider by mounting your own file over /config/config.yaml.
+#   redis publishes NO port. The host already runs redis on 6379 (fact #9);
+#       publishing another one there is a coin flip the drills should not depend
+#       on. The app reaches it over the compose network as `redis:6379`.
+#
+# fake-model DOES publish a port, and the reason is easy to miss: the runtime
+# image is scratch, so there is no shell and `docker compose exec` cannot run
+# anything. Every drill has to reach both processes over plain HTTP.
+
+name: trpc-agent-service
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: tas-redis
+    # D4 stops and starts this service mid-flight, and D5 asserts the app exits
+    # when it is missing. A restart policy on either side would paper over the
+    # very thing being measured.
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks: [tas]
+
+  fake-model:
+    image: ${IMAGE:-trpc-agent-service:local}
+    container_name: tas-model
+    restart: "no"
+    # Same image as the app, different entrypoint: both binaries are static and
+    # built in one pass (fact #11 — no python image is reachable here).
+    entrypoint: ["/fake-model"]
+    # 0.0.0.0, not the binary's 127.0.0.1 default: inside a container a
+    # loopback bind is invisible to everyone else on the network.
+    command: ["-addr", "0.0.0.0:9009", "-mode", "ok"]
+    # MUST be disabled, and the reason is a Docker behaviour that is easy to
+    # miss: overriding `entrypoint` does NOT override the image's HEALTHCHECK.
+    # This container inherits `/trpc-service -addr :8080 -healthcheck`, probes
+    # its own port 8080 where nothing listens, and settles into `unhealthy`
+    # after the retries — measured, five consecutive
+    #   dial tcp 127.0.0.1:8080: connect: refused
+    # An unhealthy container misleads every operator and every dashboard that
+    # reads compose state, and it would break any future
+    # `depends_on: service_healthy` pointed at this service.
+    #
+    # Replacing it with a real probe is not available here: scratch has no
+    # shell, curl or wget, and cmd/fake-model has no `-healthcheck` self-probe
+    # flag. The scripts gate on GET /healthz (published on ${MODEL_PORT}) from
+    # the host instead, which is a stronger check anyway — it proves the port
+    # mapping works, not just that the process answers on loopback.
+    healthcheck:
+      disable: true
+    ports:
+      - "${MODEL_PORT:-9009}:9009"
+    networks: [tas]
+
+  app:
+    image: ${IMAGE:-trpc-agent-service:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tas-app
+    restart: "no"
+    depends_on:
+      redis:
+        # The app probes the session backend at boot and exits if it is down
+        # (D5), so "started" is not enough — that would race the probe.
+        condition: service_healthy
+      fake-model:
+        # service_started, not service_healthy, and the gap is deliberate:
+        # scratch ships no curl or wget, so a Compose-level probe would have to
+        # be a new `-healthcheck` flag on cmd/fake-model. The scripts gate on
+        # GET /healthz themselves instead — they have to anyway, since the same
+        # discipline is what caught a silently-unset fault mode in the dep7 run
+        # (scripts/e2e.sh header, rule 1). The app does not call the model at
+        # boot, so nothing here races.
+        condition: service_started
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      # A DIRECTORY, not the single file, and it must be writable. Both halves
+      # were measured, not guessed (fact #19):
+      #   ./config.yaml:/config/config.yaml     -> 400 permission denied
+      #   ./config:/config                      -> 200, persisted, no tmp left
+      #   ./config:/config:ro                   -> 400 read-only file system
+      # config.Save writes <path>.tmp and renames it into place, and Docker
+      # creates /config owned by root, so a single-file mount leaves the process
+      # (UID 65534) unable to create the temporary at all. Every live admin
+      # write — PUT /admin/tenants/{id}, PUT /admin/settings — would come back
+      # as error_type=commit, which looks like a governance bug and is a mount.
+      #
+      # Note what a successful write does: Save re-marshals the whole file, so
+      # the explanatory comments in the mounted config are gone afterwards.
+      # That is why the scripts point CONFIG_DIR at a disposable copy under
+      # .smoke/ instead of at the committed one; `git checkout` restores it.
+      #
+      # On a Linux host the bind-mounted directory must also be writable by
+      # UID 65534 (macOS Docker Desktop maps this away, Linux does not). Either
+      # chown the copy or set `user:` on the service. Not verified on Linux
+      # here — this machine is macOS.
+      - ${CONFIG_DIR:-./deploy/compose/config}:/config
+      # audit.New appends to /data/audit.jsonl. A named volume keeps the trail
+      # across `up`/`down` so a drill can be inspected after the stack is torn
+      # down, and it is the only other writable path in the container.
+      - audit:/data
+    environment:
+      # Empty means "do not override": every env hook in config is guarded by
+      # `!= ""`, so an unset host variable leaves the mounted file in charge.
+      # This is how scripts/fault_drill.sh retunes the envelope for one run
+      # without editing a file.
+      AGENT_MESSAGE_TIMEOUT: ${AGENT_MESSAGE_TIMEOUT:-}
+      AGENT_MAX_CONCURRENCY_PER_TENANT: ${AGENT_MAX_CONCURRENCY_PER_TENANT:-}
+      AGENT_MAX_LLM_CALLS: ${AGENT_MAX_LLM_CALLS:-}
+      STORAGE_SESSION_BACKEND: ${STORAGE_SESSION_BACKEND:-}
+      STORAGE_SESSION_REDIS_URL: ${STORAGE_SESSION_REDIS_URL:-}
+    # 10s, and no more: srv.Shutdown gets a 5s budget and then main returns —
+    # it does not wait for in-flight dispatch goroutines, which hold a
+    # WithoutCancel context (fact #8). A grace period above message_timeout
+    # therefore buys nothing; the messages are cut off either way. Draining them
+    # properly is a known gap, not something a bigger number here fixes.
+    stop_grace_period: 10s
+    # Pinned to 1 on purpose. The msg_id dedup table and the per-session
+    # serializer are both in-process (fact #7), so a second replica would
+    # silently break idempotency and let two nodes run one session at once.
+    # D3 asserts dedup; it only means something while this is 1. Consistent-hash
+    # routing is the second-phase fix.
+    deploy:
+      replicas: 1
+    networks: [tas]
+
+  # Not started by default, and it cannot be: the collector image has to come
+  # from Docker Hub, which is unreachable here (fact #1). Enable with
+  #   CONFIG_DIR=./deploy/compose/config-observability \
+  #       docker compose --profile observability up -d
+  # The other config directory is needed because the exporters are read from
+  # the config file and have no env hook, so "turn telemetry on" means "mount a
+  # config that says otlp". CONFIG_DIR interpolation already does that; a
+  # compose override file would not, because compose merges `volumes` by
+  # appending and two mounts on /config is a conflict.
+  #
+  # What IS verifiable offline is telemetry.traces.exporter: stdout, which needs
+  # no collector at all — set it in the mounted config to watch spans in
+  # `docker compose logs app`.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.109.0
+    container_name: tas-collector
+    profiles: [observability]
+    restart: "no"
+    command: ["--config", "/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4318:4318" # OTLP/HTTP, what telemetry.*.endpoint speaks
+    networks: [tas]
+
+networks:
+  tas:
+    driver: bridge
+
+volumes:
+  audit:

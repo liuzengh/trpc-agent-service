@@ -1,8 +1,33 @@
 # 文档目录
 
-在此放置架构设计、时序图、数据模型和运维方案。建议至少包含：
+设计意图在 [`方案文档.md`](方案文档.md)，落地证据在四份切片 spec。其中**三份**
+（storage-redis / governance-observability / deployment-fault-drill）用同一个四段结构：
+**事实核查 → 设计 → 测试策略 → 实测/验收**，实测段里的数字都是真跑出来的（含变异证伪）；
+`spec-im-channels.md` 是更早的接入 spec，结构不同（结论与范围 → 接口契约 → 实现要点 →
+验证矩阵 → 验收映射）。**没验过的地方在每份文档里都如实标注**（部署侧那份集中清单在
+[`../deploy/README.md`](../deploy/README.md) §「验证：什么验过，什么没验过」），不拿“应该可以”冒充“已经可以”。
 
-- 系统架构图：Gateway、Worker、Channel Adapter、Storage Adapter、Plugin / Guardrail、Telemetry
-- 核心时序图：IM 消息 → Runner 执行 → Tool 调用 → Session / Memory 写入 → IM 回复
-- 数据模型与多后端适配说明
-- 风险清单
+## 交付物对照（题目建议的四项各在哪）
+
+| 建议项 | 位置 |
+| --- | --- |
+| 系统架构图（Gateway / Worker / Channel Adapter / Storage Adapter / Guardrail / Telemetry） | 方案文档 §2 总体架构 |
+| 核心时序图（IM 消息 → Runner 执行 → Session/Memory 写入 → IM 回复） | 方案文档 §4（验收要求项） |
+| 数据模型与多后端适配 | 方案文档 §5 概念设计 + [`spec-storage-redis.md`](spec-storage-redis.md)（Redis Session 落地）；**多后端 ≥3 类的现状与缺口**记在 [`spec-deployment-fault-drill.md`](spec-deployment-fault-drill.md) §5「与方案文档的差异」 |
+| 风险清单（≥8 项） | 方案文档 §8（**10 项**）；演练中**新识别**的 2 项（无上限调用风暴、客户端重试放大 3 倍）记在 spec-deployment-fault-drill §1 事实 #16/#17 |
+
+## 切片 spec（按时间）
+
+| 文档 | 时间 | 范围 |
+| --- | --- | --- |
+| [`spec-storage-redis.md`](spec-storage-redis.md) | 9/4–9/5 | 数据层：把会话存储从进程内 `session/inmemory` 换成 Redis 共享后端（第三方依赖**第 3 批**引入点） |
+| [`spec-im-channels.md`](spec-im-channels.md) | 8/21 导师答复落地 | IM 通道接入与本地验证：企微 / 微信客服两类差异、统一适配抽象、网页版 IM 做本地验证 |
+| [`spec-governance-observability.md`](spec-governance-observability.md) | 9/7–9/9 | 治理与观测：输入/输出 Guardrail、带 `trace_id` 的审计行、租户维度指标（**第 4 批**，冻结前最后一批） |
+| [`spec-deployment-fault-drill.md`](spec-deployment-fault-drill.md) | 9/9–9/10 | 部署与韧性：go.mod 冻结、Dockerfile/Compose/K8s 清单、端到端联调（44 条）、故障演练 D1–D7（143 条） |
+| [`deps-baseline.txt`](deps-baseline.txt) | 9/9 | go.mod 冻结基线（13 项直接依赖），由 `scripts/check_deps.sh` 当门禁读 |
+
+## 部署与运维
+
+[`../deploy/README.md`](../deploy/README.md)：构建、Compose、指向真实模型、可观测变体、Kubernetes，
+末尾带一份「验过什么 / 没验过什么」的清单。想直接上手看仓库根的 [`../README.md`](../README.md) 「快速开始」。
+

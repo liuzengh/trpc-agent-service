@@ -165,18 +165,18 @@ traces 与 metrics 各自独立选择。
 3. **E2E 冒烟**：`scripts/fake_model.py` 假 OpenAI 流式模型 +
    webchat 通道，验收见 §4。
 
-## 4. 冒烟验收（9/7 实测 ✅，无需模型 key、无需 Docker）
+## 4. 冒烟验收（9/7 实测 ✅，产物清理后复跑一致；无需模型 key、无需 Docker）
 
-复现（仓库根目录）：
+复现（仓库根目录；临时产物统一放 `.smoke/`，已进 .gitignore，验完 `rm -rf .smoke` 即可）：
 
 ```bash
 # 1) 假模型（脚本化回复，故意让「内部资料」跨 chunk）
 python3 scripts/fake_model.py --port 9009 &
 
 # 2) 平台：审计落盘 + traces/metrics 走 stdout
-mkdir -p data/smoke && cat > data/smoke/config.yaml <<'YAML'
+mkdir -p .smoke && cat > .smoke/config.yaml <<'YAML'
 default_tenant: demo
-audit: {file: data/smoke/audit.jsonl}
+audit: {file: .smoke/audit.jsonl}
 telemetry:
   traces:  {exporter: stdout}
   metrics: {exporter: stdout, interval: 3s}
@@ -185,10 +185,11 @@ tenants:
     model: {name: fake-model, api_key: sk-fake, base_url: http://127.0.0.1:9009}
     guardrails: {blocked_keywords: ["forbidden"], output_blocked_keywords: ["内部资料"]}
 YAML
-go run ./cmd/trpc-service -config data/smoke/config.yaml -addr :18080 &
+go build -o .smoke/trpc-service ./cmd/trpc-service   # go run 会多一层子进程，不好 pkill
+.smoke/trpc-service -config .smoke/config.yaml -addr :18080 > .smoke/server.log 2>&1 &
 
 # 3) 开一个 SSE 听回复，然后发消息
-curl -N "localhost:18080/webchat/stream?tenant=demo&user=smoke" &
+curl -N "localhost:18080/webchat/stream?tenant=demo&user=smoke" > .smoke/sse.log &
 curl -X POST localhost:18080/callback/webchat/demo -d '{"user":"smoke","text":"say forbidden"}'
 curl -X POST localhost:18080/callback/webchat/demo -d '{"user":"smoke","text":"tell me something"}'
 ```
@@ -259,6 +260,12 @@ admin.request     trace=b68328e1 span=1694faad parent=ROOT
 - **假模型脚本踩坑**：HTTP/1.1 下必须用 `Transfer-Encoding: chunked` 收尾，
   否则 Go 客户端等不到 EOF，事件通道永不关闭，dispatch 一直挂到 2 分钟超时
   （首轮冒烟时输出 tripwire 已正确截断，但收尾审计与 Done 回复迟迟不来，根因在脚本）；
+- **两个 stdout exporter 的 JSON 排版不一致**：`stdoutmetric` 是单行紧凑 JSON，
+  `stdouttrace` 是**多行 pretty JSON** —— 按行 `json.loads` 会在 span 上报
+  `Extra data`，得按 `{`…`}` 块切分再解析；
+- **输入拦截场景不产生 `model.call` span**：复跑实测该 trace 只有
+  `im.callback → gateway.dispatch` 两层，可与「假模型零请求」互为第二个断言，
+  证明拦截确实发生在模型调用之前；
 - 一期限制（二期项）：tool 级 Guardrail / 工具白名单 / 预算限流 / 审批走框架 Callbacks；
   审计文件无轮转（追加式，运维侧 logrotate）；msg_id 去重仍是进程内表，
   Redis SETNX 随 Storage Adapter 落地；Guardrail 目前是关键词 + 长度规则，

@@ -1,0 +1,55 @@
+# HorizontalPodAutoscaler — shipped inert on purpose, maxReplicas: 1.
+#
+# Not verified in a cluster (fact #3).
+#
+# WHY IT DOES NOT SCALE
+# Raising maxReplicas above 1 is unsafe today for the same reason the
+# Deployment is pinned to replicas: 1 and uses strategy: Recreate. The msg_id
+# dedup table and the per-session serializer are in-process (fact #7), so two
+# Pods means a duplicate IM delivery can be executed twice and one session can
+# be driven concurrently from two nodes. An autoscaler that does this under load
+# — precisely when duplicates and retries are most likely — is worse than none.
+#
+# WHAT HAS TO BE TRUE FIRST
+#   1. dedup moves to Redis SETNX with a TTL, and
+#   2. sessions are routed by consistent hashing on the session key (or the
+#      serializer moves into Redis too).
+# Then set maxReplicas, and 50-pdb.yaml starts earning its keep.
+#
+# WHY CPU, AND WHY THAT IS ALSO NOT THE RIGHT SIGNAL
+# The proposal doc asked for scaling on concurrent sessions. That needs a custom
+# or external metrics adapter (prometheus-adapter and friends), which is a
+# cluster dependency these manifests cannot assume. CPU is the honest
+# lowest-common-denominator fallback, so it is what is written here — but it is
+# a poor signal for this workload: the gateway is I/O bound, spending nearly all
+# of its wall-clock time waiting on model APIs, so CPU stays low while the thing
+# that is actually saturating (in-flight messages per tenant) is already being
+# refused. The metric that matches the failure mode is already emitted —
+# trpcservice.messages{result="throttled"} — and scaling on its rate is the
+# second-phase target once an adapter is available. Recorded as a deviation in
+# spec §5.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: trpc-agent-service
+  labels:
+    app: trpc-agent-service
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: gateway
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: trpc-agent-service
+  minReplicas: 1
+  maxReplicas: 1 # see above: inert until dedup and session routing leave the process
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # Utilization is relative to requests.cpu (250m), not to limits.cpu,
+          # so this fires at 175m of actual usage. That is the intended reading
+          # and the usual source of surprise.
+          averageUtilization: 70

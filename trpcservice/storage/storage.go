@@ -31,6 +31,17 @@ type SessionConfig struct {
 // the boot quickly instead of hanging it.
 const probeTimeout = 5 * time.Second
 
+// pingTimeout bounds one readiness probe. It is shorter than probeTimeout
+// because readiness fires every few seconds and must not stack up when the
+// backend is slow: a probe that outlives the interval turns a degraded Redis
+// into a probe backlog.
+const pingTimeout = 2 * time.Second
+
+// pingAppName is the fixed target of the readiness probe. Nothing ever writes
+// app state under it, so the lookup exercises the read path against a key that
+// is expected to be absent.
+const pingAppName = "readyz"
+
 // NewSessionService builds the configured session backend and probes it once
 // (create → append → read back → delete) through the public session.Service
 // interface, so a misconfigured or unreachable Redis fails startup instead
@@ -58,6 +69,33 @@ func NewSessionService(sc SessionConfig) (session.Service, error) {
 		return nil, fmt.Errorf("storage: session backend %q probe: %w", sc.Backend, err)
 	}
 	return svc, nil
+}
+
+// Ping reports whether the session backend can serve reads right now. It is
+// the readiness probe behind /readyz (proposal doc 3.6): unlike the startup
+// probe it is strictly read-only, because readiness fires every few seconds
+// and must not leave a pair of garbage keys in a shared backend on each beat.
+// An absent app state counts as healthy — the point is that the backend
+// answered, not that the key exists. A nil svc is unhealthy: it means the
+// platform was assembled without a session backend at all.
+//
+// It reads app state instead of calling GetSession on a probe key on purpose.
+// The framework's redis GetSession only logs a warning when its
+// checkSessionExists round trip cannot reach Redis, then reports the session as
+// absent and returns (nil, nil) — so a GetSession-based probe answers
+// "healthy" while the backend is down, which is the exact opposite of what a
+// readiness gate is for. ListAppStates maps straight onto HGETALL, returns the
+// connection error verbatim, and still writes nothing.
+func Ping(ctx context.Context, svc session.Service) error {
+	if svc == nil {
+		return fmt.Errorf("storage: no session service")
+	}
+	ctx, cancel := context.WithTimeout(ctx, pingTimeout)
+	defer cancel()
+	if _, err := svc.ListAppStates(ctx, pingAppName); err != nil {
+		return fmt.Errorf("storage: session backend read: %w", err)
+	}
+	return nil
 }
 
 // probe exercises the same write/read path the runner uses (AppendEvent is

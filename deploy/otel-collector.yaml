@@ -1,0 +1,67 @@
+# OpenTelemetry Collector config for the `observability` compose profile.
+#
+#   CONFIG_DIR=./deploy/compose/config-observability \
+#       docker compose --profile observability up -d
+#   curl -X POST localhost:8080/callback/webchat/demo -d '...'
+#   docker compose logs -f otel-collector      # spans land here
+#
+# Honest status: this file has NOT been run against a real collector. The image
+# has to come from Docker Hub and Docker Hub is unreachable from this machine
+# (docs/spec-deployment-fault-drill.md fact #1), so per fact #3 the acceptance
+# bar for everything in deploy/ that cannot be executed is "decodes offline and
+# every field matches the upstream schema" — not "observed working". What HAS
+# been verified is the sending side: telemetry.traces/metrics with
+# exporter: otlp is wired through otlptracehttp/otlpmetrichttp with
+# WithEndpointURL, and exporter: stdout produces spans locally with no
+# collector at all.
+#
+# Pinned to otel/opentelemetry-collector-contrib:0.109.0 in docker-compose.yml
+# because `debug` replaced `logging` as the exporter name and an unpinned
+# `:latest` would make this file's validity a moving target.
+
+receivers:
+  otlp:
+    protocols:
+      # What the app speaks: OTLP/HTTP on 4318, the endpoint in the mounted
+      # config. The SDK appends /v1/traces and /v1/metrics to it.
+      http:
+        endpoint: 0.0.0.0:4318
+      # gRPC on 4317 costs nothing to accept and is what a future sidecar or a
+      # Prometheus OTLP write would use.
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  # Batching keeps the debug output readable and would matter for a real
+  # backend. memory_limiter first, per the collector's own guidance: it has to
+  # run before any batching so it can shed load while there is still something
+  # to shed.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    timeout: 2s
+
+exporters:
+  # Prints every span and metric to the collector's stdout, which `docker
+  # compose logs otel-collector` shows. `detailed` includes attributes — that is
+  # where trace_id and tenant_id live, and the whole reason to look.
+  debug:
+    verbosity: detailed
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]

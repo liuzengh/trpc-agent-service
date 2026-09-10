@@ -92,6 +92,84 @@ func TestNewSessionServiceRedisUnreachable(t *testing.T) {
 	}
 }
 
+// TestPingMemory covers the development backend: readiness must never be the
+// reason a local run cannot serve.
+func TestPingMemory(t *testing.T) {
+	svc, err := NewSessionService(SessionConfig{Backend: "memory"})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	defer svc.Close()
+	if err := Ping(context.Background(), svc); err != nil {
+		t.Fatalf("ping memory: %v", err)
+	}
+}
+
+// TestPingRedisIsReadOnlyAndTracksTheBackend covers the three readiness facts
+// that matter in a deployment: a missing probe key is healthy, the probe adds
+// nothing to a shared backend, and a backend that goes away turns into an
+// error instead of a silent success.
+func TestPingRedisIsReadOnlyAndTracksTheBackend(t *testing.T) {
+	mr := miniredis.RunT(t)
+	svc, err := NewSessionService(SessionConfig{
+		Backend: "redis", RedisURL: "redis://" + mr.Addr(), KeyPrefix: "test:",
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	defer svc.Close()
+
+	ctx := context.Background()
+	if err := Ping(ctx, svc); err != nil {
+		t.Fatalf("ping healthy redis: %v", err)
+	}
+
+	// Readiness fires every few seconds forever; a probe that wrote would
+	// litter the shared backend with one garbage key pair per beat.
+	before := mr.Keys()
+	for i := 0; i < 5; i++ {
+		if err := Ping(ctx, svc); err != nil {
+			t.Fatalf("ping %d: %v", i, err)
+		}
+	}
+	if after := mr.Keys(); len(after) != len(before) {
+		t.Fatalf("ping wrote to redis: %d keys before, %d after", len(before), len(after))
+	}
+
+	mr.Close()
+	if err := Ping(ctx, svc); err == nil {
+		t.Fatal("ping must fail once redis is down")
+	} else if !strings.Contains(err.Error(), "session backend read") {
+		t.Fatalf("error should name the read path: %v", err)
+	}
+}
+
+func TestPingNilService(t *testing.T) {
+	if err := Ping(context.Background(), nil); err == nil {
+		t.Fatal("ping without a session service must be unhealthy")
+	}
+}
+
+// TestPingHonoursContextCancellation proves the probe cannot outlive a
+// cancelled readiness check, which is what keeps a hung backend from wedging
+// the orchestrator's probe worker.
+func TestPingHonoursContextCancellation(t *testing.T) {
+	mr := miniredis.RunT(t)
+	svc, err := NewSessionService(SessionConfig{
+		Backend: "redis", RedisURL: "redis://" + mr.Addr(), KeyPrefix: "test:",
+	})
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	defer svc.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := Ping(ctx, svc); err == nil {
+		t.Fatal("ping with a cancelled context must fail")
+	}
+}
+
 func appendTestEvent(t *testing.T, svc session.Service, sess *session.Session, id, content string) {
 	t.Helper()
 	ev := &event.Event{

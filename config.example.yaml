@@ -5,7 +5,10 @@
 # MODEL_API_KEY / MODEL_NAME / MODEL_BASE_URL environment variables, if set,
 # override the default tenant's model settings (dev convenience).
 # STORAGE_SESSION_BACKEND / STORAGE_SESSION_REDIS_URL override the storage
-# section below the same way.
+# section below the same way; AGENT_MESSAGE_TIMEOUT /
+# AGENT_MAX_CONCURRENCY_PER_TENANT / AGENT_MAX_LLM_CALLS override the agent
+# section — which is how a container or a Pod tunes the envelope without editing
+# a mounted file.
 
 default_tenant: demo
 
@@ -36,6 +39,37 @@ default_tenant: demo
 #     exporter: off                          # off | stdout | otlp
 #     endpoint: http://127.0.0.1:4318        # required for otlp (OTLP/HTTP)
 #     interval: 15s                          # push interval, default 15s
+
+# Runtime envelope of one message (docs/spec-deployment-fault-drill.md §2.3).
+# Three writers, in increasing order of convenience:
+#   1. this block (edit + restart),
+#   2. the AGENT_* variables above (restart, but no file edit),
+#   3. PUT /admin/settings (live). GET renders the effective values, so the
+#      response can be edited and PUT back; an omitted message_timeout or
+#      max_llm_calls means the default, and 0 concurrency means unlimited. A
+#      change made over HTTP is persisted here, so it survives the next restart.
+# All three land without a restart, but by different routes: the gateway
+# re-reads the timeout and the quota per message, while the call cap is baked
+# into each tenant's runner, so it applies when the commit rebuilds them.
+# Omit the block for the defaults shown.
+# agent:
+#   message_timeout: 2m              # end-to-end budget: queueing behind the
+#                                    #   same session + model call + stream drain.
+#                                    #   On expiry the user gets a timeout notice
+#                                    #   and the trail records error_type=timeout.
+#   max_concurrency_per_tenant: 0    # in-flight messages per tenant; 0 = unlimited.
+#                                    #   Over the cap a message is refused at once
+#                                    #   (never queued) and audited as throttled.
+#                                    #   The cap is per replica, not per cluster.
+#   max_llm_calls: 8                 # ceiling on model calls one message may cause.
+#                                    #   A tool-free answer needs 1, the rest is
+#                                    #   headroom for tool loops. Unlike the quota,
+#                                    #   0 means this default rather than "no cap":
+#                                    #   the framework calls the model again
+#                                    #   whenever a reply is not final, so an
+#                                    #   upstream that answers 200 with an empty
+#                                    #   stream otherwise costs thousands of calls
+#                                    #   a second until the budget runs out.
 
 tenants:
   - id: demo

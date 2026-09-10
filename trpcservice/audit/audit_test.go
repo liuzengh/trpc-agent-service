@@ -2,9 +2,12 @@ package audit
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -54,9 +57,86 @@ func TestNilLoggerIsNoop(t *testing.T) {
 	if err := l.Close(); err != nil {
 		t.Fatalf("nil close: %v", err)
 	}
-	if _, err := New(""); err != nil {
-		t.Fatalf("empty path must yield nil logger: %v", err)
+}
+
+// An empty path must still produce a trail, on stdout. That is the container
+// shape: the filesystem is ephemeral and usually read-only, while the cluster's
+// log pipeline is the durable sink, so a K8s manifest legitimately leaves
+// audit.file out.
+//
+// This test exists because the old one did not catch the bug it was next to.
+// New("") used to return a nil *Logger — a no-op — and TestNilLoggerIsNoop
+// asserted only that err was nil, so "the whole governance trail silently
+// disappears" passed as green. Asserting non-nil is not enough either: the
+// point is that a record actually reaches the log, which is what the captured
+// handler below checks.
+func TestEmptyPathIsLogOnlyNotSilent(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	l, err := New("")
+	if err != nil {
+		t.Fatalf("new with empty path: %v", err)
 	}
+	if l == nil {
+		t.Fatal("empty path must yield a log-only logger, not nil: a nil *Logger " +
+			"is a no-op by design and would drop every record")
+	}
+	l.Log(Record{Event: EventInbound, TenantID: "demo", Channel: "webchat",
+		Decision: DecisionAllow, TraceID: "abc123"})
+	if err := l.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{
+		`"msg":"audit"`,
+		`"event":"inbound"`,
+		`"tenant":"demo"`,
+		`"trace_id":"abc123"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log-only audit is missing %s; got %q", want, out)
+		}
+	}
+}
+
+// The file-backed logger must ALSO log: that is the documented "echoes them
+// through the structured log" behaviour, and it is the half of Log that keeps
+// working when the file write is skipped. Guarding it here is what stops the
+// two states above from being merged again by a well-meaning simplification.
+func TestFileBackedLoggerEchoesToTheLog(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	l, err := New(path)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	l.Log(Record{Event: EventAdmin, TenantID: "*", Decision: DecisionOK, Detail: "settings"})
+	if err := l.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"msg":"audit"`) {
+		t.Fatalf("file-backed logger stopped echoing to slog; got %q", buf.String())
+	}
+	if n := countLines(mustRead(t, path)); n != 1 {
+		t.Fatalf("file got %d lines, want 1", n)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func TestLoggerAppendMode(t *testing.T) {

@@ -1,0 +1,80 @@
+# Ingress, optional but required in practice: the IM callbacks need a public
+# HTTPS URL (https://<host>/callback/wecom/<tenant id> and
+# /callback/wechat_kf/<tenant id>), and neither WeCom nor WeChat customer
+# service will register an endpoint that is not publicly reachable over TLS.
+# The bundled web chat UI needs it too if anyone is meant to reach it from
+# outside the cluster.
+#
+# Not verified in a cluster (fact #3), and doubly so here: this assumes the
+# ingress-nginx controller, whose annotation vocabulary is its own and not part
+# of the Kubernetes API. If the cluster runs Traefik, Envoy Gateway, Contour or
+# a cloud LB, the `rules` block below carries over and every annotation has to
+# be re-expressed in that controller's terms.
+#
+# Apply only after replacing the host. As written it will not match any real
+# request.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: trpc-agent-service
+  labels:
+    app: trpc-agent-service
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: gateway
+  annotations:
+    # --- Server-sent events, and the annotation that is easy to miss ---------
+    # /webchat/stream is an SSE endpoint: the server writes a chunk, flushes,
+    # and then goes quiet until the next one. nginx buffers proxied responses by
+    # default, so without this the browser sees nothing until the stream closes
+    # and the whole point of streaming is lost — the reply still arrives, just
+    # all at once, which reads as "the platform is slow" rather than "the
+    # ingress is buffering".
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # SSE connections are idle between chunks. The controller's default
+    # proxy-read-timeout is 60s, so a stream with a minute of silence gets
+    # closed from underneath the client. 3600s is longer than any message
+    # budget (agent.message_timeout defaults to 2m) and leaves the connection
+    # open for the UI to keep using it.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # 1m, matching the platform's own cap: admin.go wraps request bodies in
+    # http.MaxBytesReader(1<<20). Keeping the two equal means an oversized
+    # payload is rejected by the application with a JSON 400 naming the field,
+    # rather than by the ingress with a bare 413 HTML page that says nothing
+    # about which limit was hit.
+    nginx.ingress.kubernetes.io/proxy-body-size: 1m
+spec:
+  ingressClassName: nginx
+  # TLS is commented out because it needs a certificate and a hostname that
+  # exist in the target cluster. Both IM platforms require HTTPS in practice,
+  # so this is not optional for a real deployment — it is only optional here,
+  # where the file cannot be applied against a real cluster anyway.
+  #
+  # tls:
+  #   - hosts:
+  #       - agent.example.com
+  #     secretName: trpc-agent-service-tls
+  rules:
+    - host: agent.example.com # REPLACE
+      http:
+        paths:
+          # One path for everything. Splitting /callback, /webchat and /admin
+          # into separate rules buys nothing here — the annotations above are
+          # per-Ingress, not per-path, so three rules would still share one set
+          # of timeouts. If the callback path needs a short timeout while the
+          # SSE path needs a long one, that is two Ingress resources, not two
+          # paths.
+          #
+          # /admin is exposed here for convenience and that is a decision to
+          # revisit: it is the surface that mutates tenants and the runtime
+          # envelope, and it has no authentication of its own. Put it behind an
+          # authenticating proxy, restrict it with a source-range annotation, or
+          # drop it from the Ingress entirely and reach it with
+          # `kubectl port-forward`.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: trpc-agent-service
+                port:
+                  name: http

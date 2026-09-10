@@ -143,8 +143,8 @@ func TestDispatchInputGuardrail(t *testing.T) {
 		}
 		lines = append(lines, m)
 	}
-	if len(lines) != 2 {
-		t.Fatalf("audit lines = %d, want 2 (inbound + block): %s", len(lines), raw)
+	if len(lines) != 3 {
+		t.Fatalf("audit lines = %d, want 3 (inbound + block + the reply that carried it): %s", len(lines), raw)
 	}
 	if lines[0]["event"] != audit.EventInbound || lines[0]["decision"] != audit.DecisionAllow {
 		t.Fatalf("first audit line = %v", lines[0])
@@ -163,6 +163,18 @@ func TestDispatchInputGuardrail(t *testing.T) {
 	}
 	if tid, _ := blk["trace_id"].(string); len(tid) != 32 {
 		t.Fatalf("trace_id = %q, want a 32 hex char id", tid)
+	}
+	// A rejection is a reply like any other: the user was told something, so the
+	// trail has to say what. This row did not exist on any guarded path before
+	// reply() became the single recording point, which is why the drill counts
+	// came back inbound > reply.
+	rp := lines[2]
+	if rp["event"] != audit.EventReply || rp["decision"] != audit.DecisionBlock ||
+		rp["trace_id"] != blk["trace_id"] || rp["session_id"] != "demo:webchat:u1" {
+		t.Fatalf("reply audit line = %v, want the block decision on the same trace", rp)
+	}
+	if _, ok := rp["error_type"]; ok {
+		t.Fatalf("a delivered rejection carries error_type %v, want none: the send worked", rp["error_type"])
 	}
 
 	sums := sumPoints(t, reader)

@@ -1,0 +1,292 @@
+# Deployment. Not verified in a cluster (fact #3): no kind/minikube/k3d/helm
+# here, so this is offline-decoded with `kubectl kustomize` and cross-checked by
+# scripts/check_deploy.sh. The behaviour it encodes — fail-fast boot, /readyz
+# flipping on Redis loss, hot admin writes — was measured under docker compose
+# instead.
+#
+# Apply with `kubectl apply -k deploy/k8s/`. Not -f: the ConfigMap this
+# Deployment mounts is generated from deploy/k8s/config/config.yaml, so applying
+# the directory as raw files leaves the volume pointing at a name that does not
+# exist.
+#
+# The image is built locally by `docker build` / `docker compose build`. A real
+# cluster needs it in a registry it can reach; retag and push, then set the
+# `images:` block in kustomization.yaml. There is no registry to push to from
+# this machine.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-service
+  labels:
+    app: trpc-agent-service
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: gateway
+spec:
+  # Pinned to 1. The msg_id dedup table and the per-session serializer are both
+  # in-process (fact #7), so a second replica silently breaks idempotency and
+  # lets two nodes drive one session at once. Raising this number is the LAST
+  # step of the second-phase work (Redis SETNX dedup + consistent-hash session
+  # routing), not the first.
+  replicas: 1
+
+  # Recreate, not RollingUpdate, and this follows from the same fact. A rolling
+  # update with replicas: 1 computes maxUnavailable = 25% -> 0, so the new Pod
+  # comes up BEFORE the old one goes down: for the whole readiness window there
+  # are two processes, each with its own dedup table and its own session locks,
+  # both able to accept the same msg_id or run the same session concurrently.
+  # The duplicate-delivery guarantee D3 asserts would be false during every
+  # deploy. Recreate trades a few seconds of downtime for not violating it.
+  strategy:
+    type: Recreate
+
+  # Keep the selector minimal: it is immutable after creation, and every label
+  # added here is a label that can never be removed.
+  selector:
+    matchLabels:
+      app: trpc-agent-service
+
+  # 10s, and no more. On SIGTERM the signal handler gives srv.Shutdown a 5s
+  # budget and then main returns — it does NOT wait for in-flight dispatch
+  # goroutines, which hold a WithoutCancel context (fact #8). A grace period
+  # above message_timeout therefore buys nothing; those messages are cut off
+  # either way. Setting 135s here to "cover the 2m default" is the intuitive
+  # mistake, and it only makes rollouts slow.
+  terminationGracePeriodSeconds: 10
+
+  template:
+    metadata:
+      labels:
+        app: trpc-agent-service
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: gateway
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # 65534 (nobody). The image already sets USER 65534:65534; repeating it
+        # here is what lets the admission check enforce it, rather than trusting
+        # a Dockerfile line that a future edit could drop.
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+
+      initContainers:
+        # Copies the config into a writable emptyDir. This exists because a
+        # ConfigMap volume is read-only and config.Save needs to write
+        # <path>.tmp next to the file it replaces: mounted directly at /config,
+        # every PUT /admin/settings and PUT /admin/tenants/{id} returns
+        #   400 write /config/config.yaml.tmp: ... read-only file system
+        # (measured, fact #19), and because the commit path persists before
+        # swapping the live config, the change is rejected — not merely lost on
+        # restart.
+        #
+        # Cost, stated plainly: the copy lives in an emptyDir, so a hot change
+        # survives a container restart but not a reschedule. The ConfigMap stays
+        # the durable source of truth. Durable live config needs a real store
+        # (Redis or a PVC), which is second-phase work.
+        #
+        # busybox is the only image referenced here that is not already local;
+        # swap it for any image with `cp` if your cluster vendors one. It runs
+        # once, as the same non-root UID, and only reads a ConfigMap.
+        - name: copy-config
+          image: busybox:1.36
+          command: ["sh", "-c", "cp /config-src/config.yaml /config/config.yaml"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config-src
+              mountPath: /config-src
+              readOnly: true
+            - name: config
+              mountPath: /config
+          resources:
+            requests:
+              cpu: 10m
+              memory: 8Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+
+      containers:
+        - name: app
+          image: trpc-agent-service:0.1.0
+          # Built locally, no registry involved, so do not go looking for one.
+          imagePullPolicy: IfNotPresent
+          # The image ENTRYPOINT is /trpc-service; only the arguments go here.
+          # -config points at the emptyDir copy, not at the ConfigMap.
+          #
+          # 0.0.0.0:8080, NOT ":8080", and the reason is a YAML dialect
+          # collision that cost a debugging session to find (fact #21). Written
+          # as ":8080" and quoted, `kubectl kustomize` re-emits it WITHOUT the
+          # quotes — it decides no quoting is needed. Ruby's Psych then reads an
+          # unquoted scalar starting with `:` as a Symbol, and a Symbol
+          # serialises to JSON as "8080": the colon is simply gone. Go's YAML
+          # parser, which is what kube-apiserver and kubectl use, has no symbol
+          # type and reads the same bytes as the string ":8080". One rendered
+          # file, two meanings, depending on who parses it.
+          #
+          # An explicit any-interface bind is unambiguous in every dialect, and
+          # it is what the container wants anyway — the compose fake-model
+          # command spells it the same way for the same reason. The self-probe
+          # still works: probeHost("0.0.0.0:8080") returns 127.0.0.1:8080, which
+          # cmd/trpc-service/main_test.go pins.
+          args: ["-addr", "0.0.0.0:8080", "-config", "/config/config.yaml"]
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: trpc-agent-model
+          env:
+            # The Go runtime sizes its thread pool from the NODE's CPU count, not
+            # from limits.cpu, and this repo does not vendor automaxprocs. On a
+            # 16-core node with limits.cpu: 2 the process would run 16 threads
+            # into a 2-CPU quota and spend its time being CFS-throttled — which
+            # looks exactly like a model latency regression in the metrics.
+            # Keep this equal to limits.cpu.
+            - name: GOMAXPROCS
+              value: "2"
+            # Soft heap ceiling below the hard memory limit, so the GC works
+            # harder instead of the kernel OOM-killing the Pod. ~12% headroom for
+            # stacks and runtime structures that GOMEMLIMIT does not account for.
+            - name: GOMEMLIMIT
+              value: "448MiB"
+            # AGENT_MESSAGE_TIMEOUT / AGENT_MAX_CONCURRENCY_PER_TENANT /
+            # AGENT_MAX_LLM_CALLS are intentionally not set: an empty value is a
+            # no-op (every env hook in config is guarded by `!= ""`), and leaving
+            # them out keeps the mounted file authoritative. Set them here only
+            # to retune one Pod without a ConfigMap edit.
+
+          # Liveness on /healthz: it touches no dependency, so a Redis outage
+          # cannot cause a restart loop. Restarting the process has never once
+          # fixed a backend being down.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            # The handler answers from memory, so 3s is generous.
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # Readiness on /readyz: 200 needs tenants > 0 AND storage.Ping to
+          # succeed.
+          #
+          # timeoutSeconds 4, and the bound that sets it is NOT the obvious one.
+          # storage.Ping carries a 2s budget (storage.go pingTimeout), but the
+          # handler wraps the whole evaluation in its own 3s backstop (web.go
+          # readyTimeout) so a slow dependency cannot hold the orchestrator's
+          # probe worker hostage. 3s is therefore how long /readyz may
+          # legitimately take, and a 3s probe timeout is a TIE.
+          #
+          # What the extra second buys is NOT the 503 reason body. kubelet
+          # discards it: DoHTTPProbe composes the event text from the status code
+          # alone -- "HTTP probe failed with statuscode: 503" -- because a body
+          # may carry secrets (k8s issue 99425). Read the reasons with
+          # `kubectl port-forward` + curl, or from the app's own log.
+          #
+          # What it does buy is telling the two failures apart. At a tie, an
+          # answer and a deadline that land together make the event read
+          # "context deadline exceeded (Client.Timeout...)", which is the
+          # signature of a wedged process. 4s keeps a slow-but-answering Pod
+          # reporting statuscode 503 -- "I am up, a dependency is not". That is
+          # the D4/D5 split, and since the body is gone the status code IS the
+          # whole diagnostic content of the event.
+          #
+          # failureThreshold 2 at 5s removes the Pod from the Service ~10s into
+          # a Redis outage and puts it back within 5s of recovery, with no
+          # restart (that is D4). The usual failureThreshold x periodSeconds
+          # formula holds here, and it was checked against the kubelet source
+          # (v1.30.2) rather than assumed, because two hidden multipliers would
+          # have turned 10s into 24s: the worker is a serial loop (doProbe, then
+          # wait for the next tick) so probes never overlap, and httpGet probes
+          # are never retried -- maxProbeRetries=3 fires only on a non-nil error
+          # and DoHTTPProbe converts both transport errors and timeouts into
+          # (probe.Failure, nil).
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 2
+            successThreshold: 1
+
+          # Covers the boot path, which probes the session backend before it
+          # listens and exits if that fails (D5). Without this, readinessProbe
+          # would be running its 2-failure budget against a process that has not
+          # bound a port yet.
+          #
+          # The budget is 30 x max(periodSeconds, one attempt), NOT the
+          # 30 x 2s = 60s a first read suggests. The worker being serial means an
+          # attempt longer than the period does not overlap the next one -- it
+          # drops that tick, stretching the interval to the attempt's own length.
+          # A failing /readyz costs whatever storage.Ping costs (<=2s) under a
+          # 3s web.readyTimeout cap, so the budget is 60s when Redis answers
+          # fast-and-no and up to 90s when the handler runs to its backstop.
+          #
+          # timeoutSeconds 4 > periodSeconds 2 is therefore deliberate and
+          # harmless: it can only lengthen the interval, never overlap probes.
+          # Same 4s as readiness, for the same reason -- this also hits /readyz,
+          # so it is also bounded by web.readyTimeout rather than by how fast a
+          # boot probe ought to be.
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 4
+            failureThreshold: 30
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              cpu: "2" # keep GOMAXPROCS in step with this
+              memory: 512Mi # keep GOMEMLIMIT in step with this
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            # Writable, and the only writable path in the container. See the
+            # initContainer for why a direct ConfigMap mount does not work.
+            - name: config
+              mountPath: /config
+            # No /data mount: audit.file is absent from the ConfigMap, so the
+            # trail goes to stdout and the cluster's log pipeline. If you set
+            # audit.file, you must also give it a volume — audit.New creates the
+            # file with O_CREATE but never mkdirs its parent, and with a
+            # read-only root that is a boot failure, not a warning.
+
+      volumes:
+        - name: config-src
+          configMap:
+            # The name written here is the generator's base name. `kubectl
+            # apply -k` rewrites it to the content-hashed name
+            # (trpc-agent-config-<hash>) and rewrites this reference to match,
+            # so editing config/config.yaml changes the Pod template and rolls
+            # the Deployment on its own — no checksum annotation to remember.
+            # Verified: `kubectl kustomize deploy/k8s/` emits the same hashed
+            # name in both places.
+            #
+            # Consequence for operators: `kubectl get configmap
+            # trpc-agent-config` finds nothing. Use the label
+            # (app=trpc-agent-service) or list them.
+            name: trpc-agent-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+        - name: config
+          emptyDir: {}
