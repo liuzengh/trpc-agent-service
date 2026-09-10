@@ -23,6 +23,8 @@ Redis、MySQL 和 PostgreSQL Session 适配器可以保证单次 `AppendEvent` �
 
 schema 26 的 Worker 在运行记录行锁内检查更早 `turn_seq` 是否仍处于 queued/running/failed/waiting；后续请求通过现有 Outbox 延迟调度，不占住执行槽等待前文。恢复任务携带调度代数，旧 Redis 投递不能覆盖新一代任务。近期与积压各用一个现有 Redis Streams 队列，共享原租约/ACK/重领实现，按 4:1 的调度机会消费，空队列允许另一边借用；这不是耗时或成本的严格比例。
 
+schema 27 将 completed Run/最终 Outbound 作为恢复真相：Worker 在检查执行次数、权限、配额和调用 Runtime 前先读取持久结果；并在准入竞态处再次拦截 completed。恢复不重做模型、附件导入、工具或审批文案，只补未完成的审计/用量/后台任务提交，并写 finalized_at。恢复收尾可以继续重试，不受原模型执行次数上限截断；后台 Job 使用原稳定去重键。收尾全部成功后再 ACK，Redis 完成缓存到期不改变持久完成态。收尾尝试的审计允许保留多条尝试记录，不能将其 cost 简单累加当作实际模型账单。
+
 模型不可用的长延迟恢复只适用于尚未产生模型输出、没有工具执行记录的请求。已执行/未知工具结果继续按原 Journal 处理。tRPC-Agent-Go 仍负责 Runner/LLMAgent/模型 HTTP 与 Event；平台通过官方模型回调和 OpenAI middleware 扩展识别暂时故障，关闭 SDK 的叠加即时重试，延迟调度复用 PostgreSQL Outbox。Session Service 的薄适配在既有 Session 租约内按 RequestID 去重用户入站事件，其余存储行为仍委托框架后端。只有能够确认请求未发出的 dial 失败才释放模型预留，超时或未知计费结果保留保守结算。
 
 Redis 租约示例：

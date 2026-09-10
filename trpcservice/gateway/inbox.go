@@ -18,6 +18,7 @@ var (
 	ErrJournalClosed   = errors.New("inbound journal is closed")
 	ErrRunTerminal     = errors.New("agent run has exhausted automatic retries")
 	ErrRunSuperseded   = errors.New("agent run is owned by another worker")
+	ErrRunCompleted    = errors.New("agent run already completed; restore durable result")
 )
 
 // InboundRequest is the normalized message accepted by the durable Gateway.
@@ -58,6 +59,7 @@ type QueueOutboxItem struct {
 
 // RunResult is the durable outcome written by an Agent Worker.
 type RunResult struct {
+	Finalized        bool
 	ErrorType        string
 	WorkerID         string
 	Reply            string
@@ -103,6 +105,8 @@ type Journal interface {
 	) error
 	MarkRunRunning(ctx context.Context, requestID string, workerID string) error
 	CompleteRun(ctx context.Context, task workqueue.AgentTask, result RunResult) error
+	LoadCompletedRun(ctx context.Context, task workqueue.AgentTask) (RunResult, bool, error)
+	MarkRunFinalized(ctx context.Context, task workqueue.AgentTask) (bool, error)
 	FailRun(ctx context.Context, requestID string, errorType string, cause error, expectedWorker ...string) error
 	TerminalFailRun(ctx context.Context, task workqueue.AgentTask, result RunResult) (bool, error)
 	ClaimOutbound(

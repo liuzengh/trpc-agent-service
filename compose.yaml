@@ -53,11 +53,19 @@ services:
     image: minio/mc:RELEASE.2025-07-21T05-28-08Z
     depends_on:
       minio:
-        condition: service_started
+        condition: service_healthy
     entrypoint:
       - /bin/sh
       - -c
-      - until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done; mc mb --ignore-existing local/trpc-agent-artifacts
+      - |
+        for attempt in $$(seq 1 30); do
+          if mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null 2>&1; then
+            exec mc mb --ignore-existing local/trpc-agent-artifacts
+          fi
+          sleep 1
+        done
+        echo "MinIO initialization failed; check endpoint and credentials" >&2
+        exit 1
 
   qdrant:
     image: qdrant/qdrant:v1.15.4

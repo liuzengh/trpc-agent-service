@@ -15,7 +15,7 @@ sequenceDiagram
     participant Q as Relay / Redis Streams
     participant W as Agent Worker
     participant L as Session Coordinator
-    participant R as Runner / LLMAgent
+    participant R as Runtime / Runner / LLMAgent
     participant S as Session 后端
     participant M as Model
     participant P as Guardrail / Permission
@@ -27,6 +27,7 @@ sequenceDiagram
     C->>IM: 读取已授权群的完整分页窗口
     IM-->>C: 源消息
     C->>C: 群/成员/@校验、指纹去重、身份映射
+    Note over C,DB: 近期接收与历史补读使用独立游标，共享 Inbox 去重
     C->>G: 可信 Inbound + trace context
     G->>DB: 原子保存 Inbox / Run / Queue Outbox
     DB-->>G: 已提交的 request_id
@@ -34,9 +35,15 @@ sequenceDiagram
     C->>DB: seen / 检查点版本更新
     Q->>DB: Claim Queue Outbox
     Q->>W: 发布并投递任务 / traceparent
-    W->>L: 获取会话租约与 fencing token
-    W->>DB: Claim Run / 校验所有权
+    W->>DB: 查询已完成结果 / 调度代数
+    alt 已有 completed 结果
+        DB-->>W: 持久化结果与 finalized_at
+        W->>DB: 仅补未完成收尾 / 记录 finalized_at
+        W->>Q: ACK，不调用 Runner、模型或工具
+    else 需要执行
+    W->>DB: Run 准入 / 会话前序任务检查
     W->>R: Run(ctx, user, session, Message)
+    R->>L: 获取会话租约与 fencing token
     R->>S: 读取历史并持久化用户 Event
     R->>P: 输入/预算检查
     P-->>R: 允许（拒绝时终止，不调用模型）
@@ -68,11 +75,15 @@ sequenceDiagram
     end
 
     R->>S: 完整 Agent Event / StateDelta
-    R-->>W: Event channel 关闭
+    Note over R,L: 持续消费 Event channel 到关闭
+    R->>L: 释放会话租约
+    R-->>W: 返回收集好的结果
     W->>DB: 完成 Run / 创建 Outbound
     W->>DB: 持久化 Summary / 自动 Memory 等后台任务
-    W->>L: 释放租约
+    W->>DB: 记录收尾完成 finalized_at
     W->>Q: 核对队列所有权后 ACK
+    end
+    Note over DB,D: Sender 独立消费已提交的 Outbound，不等待 Worker 收尾
     D->>DB: Claim Outbound / 创建发送尝试
     D->>IM: message_aibot_send（文本或审批提示）
     IM-->>D: 发送结果
@@ -101,6 +112,8 @@ span 只记录必要类型、耗时、状态和关联 ID，不记录完整输入
 ## 4. 取消、故障和并发
 
 服务根 Context 随 SIGINT/SIGTERM 取消，各角色循环可取消等待并由 errgroup 回收。Runner 的 Event channel 持续消费到关闭，错误事件不应导致消费者直接退出而让发送方永久阻塞。
+
+completed 表示结果及回复已持久保存，finalized_at 表示审计、用量和后台任务提交的收尾已完成。节点在二者之间退出时，重投只恢复已保存结果并补收尾；二者均完成时直接 ACK。Redis 完成缓存过期不会使已持久化的 completed Run 再次进入模型或工具。只有同步诊断接口 `/chat` 的去重仍受其 Redis 缓存期限约束；可靠接入使用 IM 或 `/inbound`。
 
 会话租约和队列所有权丢失会取消执行；旧 Worker 即使恢复也不能提交新 owner 的结果。相同会话的执行由 Coordinator 保护，不依赖 Redis Streams 按会话分区。不同 Worker 可并行处理不同会话。
 

@@ -26,6 +26,8 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
+	redis "github.com/redis/go-redis/v9"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
 )
 
@@ -52,6 +54,7 @@ func TestIsolatedTwoTenantTwoWorkerWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var held atomic.Int32
+	var modelCalls atomic.Int64
 	blocked := make(chan struct{}, 1)
 	stopModel := make(chan struct{})
 	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +85,7 @@ func TestIsolatedTwoTenantTwoWorkerWorkflow(t *testing.T) {
 		}
 		decode := func(raw json.RawMessage) string { var s string; _ = json.Unmarshal(raw, &s); return s }
 		last := request.Messages[len(request.Messages)-1]
+		modelCalls.Add(1)
 		text := decode(last.Content)
 		message := map[string]any{"role": "assistant", "content": text}
 		finish := "stop"
@@ -211,6 +215,8 @@ func TestIsolatedTwoTenantTwoWorkerWorkflow(t *testing.T) {
 		baseEnv = append(baseEnv, strings.TrimPrefix(key, "env://")+"="+value)
 	}
 	var principals []any
+	// Keep the pool layout explicit; exercise expiry of the result cache too.
+	baseEnv = append(baseEnv, "TRPC_AGENT_WORKER_CONCURRENCY=4", "TRPC_AGENT_IDEMPOTENCY_COMPLETED_TTL=1s")
 	tokens := map[string]string{}
 	for _, id := range []string{"a", "b"} {
 		tokens[id] = "joint-token-" + strings.Repeat(id, 32)
@@ -321,7 +327,7 @@ func TestIsolatedTwoTenantTwoWorkerWorkflow(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT worker_id FROM agent_run WHERE request_id=$1`, heldRequest).Scan(&owner); err != nil {
 		t.Fatal(err)
 	}
-	dead := workers[owner]
+	dead := jointOwner(workers, owner)
 	if dead == nil {
 		t.Fatal("claim owner does not belong to test")
 	}
@@ -330,7 +336,7 @@ func TestIsolatedTwoTenantTwoWorkerWorkflow(t *testing.T) {
 		t.Fatal("surviving worker did not finish pending request")
 	}
 	var finalOwner string
-	if err := db.QueryRowContext(ctx, `SELECT worker_id FROM agent_run WHERE request_id=$1`, heldRequest).Scan(&finalOwner); err != nil || finalOwner == owner {
+	if err := db.QueryRowContext(ctx, `SELECT worker_id FROM agent_run WHERE request_id=$1`, heldRequest).Scan(&finalOwner); err != nil || jointOwner(workers, finalOwner) == nil || jointOwner(workers, finalOwner) == dead {
 		t.Fatal("request not taken over by another Worker")
 	}
 	duplicate, wasDuplicate, status := post("a", "a", "hold-a", "hold")
@@ -343,7 +349,51 @@ func TestIsolatedTwoTenantTwoWorkerWorkflow(t *testing.T) {
 	if !strings.Contains(call("b", "after-crash-b", "recall"), "ONLY_B_SESSION") {
 		t.Fatal("other tenant session lost after crash")
 	}
-	t.Log("two tenant model keys, shared Redis Session, PostgreSQL Memory, shared Qdrant scopes, tool denial, live Worker SIGKILL takeover and callback deduplication passed; no live env/model/IM used")
+	// Redelivery after the cache TTL must restore PostgreSQL facts, not call
+	// the model again. The synthetic queue is entirely owned by this fixture.
+	time.Sleep(1100 * time.Millisecond)
+	before := modelCalls.Load()
+	var payload []byte
+	if err := db.QueryRowContext(ctx, `SELECT payload FROM queue_outbox WHERE payload->>'request_id'=$1 ORDER BY created_at DESC LIMIT 1`, heldRequest).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var task workqueue.AgentTask
+	if err := json.Unmarshal(payload, &task); err != nil {
+		t.Fatal(err)
+	}
+	queue, err := workqueue.NewRedisQueue(ctx, workqueue.RedisOptions{URL: "redis://" + redisAddr, KeyPrefix: "joint", Stream: "agent-runs", Group: "agent-workers", Consumer: "probe", BlockTimeout: time.Second, ClaimMinIdle: time.Second, MaxLen: 10000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = queue.Close() }()
+	if err = queue.Publish(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	rc := redis.NewClient(&redis.Options{Addr: redisAddr})
+	defer func() { _ = rc.Close() }()
+	jointEventually(t, ctx, func() bool {
+		groups, e := rc.XInfoGroups(ctx, "joint:stream:agent-runs").Result()
+		return e == nil && len(groups) == 1 && groups[0].Lag == 0 && groups[0].Pending == 0
+	})
+	if modelCalls.Load() != before {
+		t.Fatal("completed redelivery executed model after cache expiry")
+	}
+	t.Log("two tenants, two pooled Workers, SIGKILL takeover, callback deduplication and completed redelivery after cache expiry passed; no live env/model/IM used")
+}
+
+func jointOwner(workers map[string]*jointProcess, owner string) *jointProcess {
+	for id, process := range workers {
+		if owner == id {
+			return process
+		}
+		if lane, ok := strings.CutPrefix(owner, id+"-"); ok {
+			n, err := strconv.Atoi(lane)
+			if err == nil && n >= 0 && n < 4 {
+				return process
+			}
+		}
+	}
+	return nil
 }
 
 func jointJSON(value any) json.RawMessage {

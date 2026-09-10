@@ -42,7 +42,7 @@ flowchart LR
 
     subgraph Runtime[运行面]
         INBOX[(Inbound / Outbox)]
-        MQ[[Redis Streams 工作队列]]
+        MQ[[Redis Streams<br/>近期 / 积压队列]]
         WORKER[Agent Worker]
         DEBUGQ[(独立调试队列 / 快照)]
         DEBUGWORKER[Console Worker]
@@ -161,9 +161,9 @@ Reply Sender 与 Agent Worker 分离。Worker 写标准化回复到 outbound out
 tenant_id | app_id | runtime_user_id | session_id
 ```
 
-当前 Redis Streams 消费组不保证按会话分区，正确性依赖 Coordinator。在重投和网络分区时可能短暂出现双消费者，因此 Worker 调用 Runner 前必须取得会话租约和单调递增 fencing token；关键提交核对所有权，旧 Worker 恢复后不能覆盖新 Worker 的结果。分区可作为未来降低争用的优化，不能替代这些检查。
+当前 Redis Streams 消费组不保证按会话分区。Worker 先读取持久化完成态，再做 Run 准入与前序 turn 检查，进入 Runtime 后才获取会话租约和 fencing token；关键提交同时核对所有权和调度代数。已完成请求从 Run/Outbound 恢复，finalized_at 区分是否还需补审计和后台任务，不因 Redis 缓存过期重跑 Agent。不同会话按近期/积压队列调度，默认每进程 4 个执行槽，其中一个预留给近期流量；同会话仍串行推进。
 
-平台可以使用一个共享 Runner，并在请求级注入 Agent、模型和治理策略：
+平台复用共享 Runner，当前代码通过 RevisionCompiler 编译模型和 LLMAgent，再在请求中注入 Agent 与治理策略。以下展示框架支持的请求级组合接口，不表示代码同时使用了所有选项：
 
 ```go
 events, err := sharedRunner.Run(

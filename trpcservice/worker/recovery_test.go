@@ -9,10 +9,14 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	agentruntime "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
 type countedModel struct {
@@ -106,6 +110,71 @@ func TestCompletionFailureReplaysCachedModelResult(t *testing.T) {
 }
 
 type cancellationRuntime struct{ started chan struct{} }
+
+type jobSubmissionFault struct {
+	background.Repository
+	calls int
+}
+
+func (j *jobSubmissionFault) Enqueue(ctx context.Context, input background.EnqueueRequest) (background.EnqueueResult, error) {
+	j.calls++
+	if j.calls == 2 {
+		return background.EnqueueResult{}, errors.New("injected second job submission failure")
+	}
+	return j.Repository.Enqueue(ctx, input)
+}
+
+func TestCompletedRedeliveryAfterExpiryOnlyRepairsBookkeeping(t *testing.T) {
+	ctx := context.Background()
+	server := miniredis.RunT(t)
+	dedupe, err := idempotency.NewRedisStore(idempotency.RedisOptions{URL: "redis://" + server.Addr(), KeyPrefix: "expiry", ProcessingTTL: time.Minute, CompletedTTL: 24 * time.Hour, RenewInterval: time.Second, PollInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &countedModel{Model: agentruntime.NewTutorialModel()}
+	r, err := agentruntime.NewRuntimeWithServices(m, inmemory.NewSessionService(), coordination.NewLocalCoordinator(), dedupe, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := gateway.NewMemoryJournal()
+	q := workqueue.NewMemoryQueue(4)
+	jobs := &jobSubmissionFault{Repository: background.NewMemoryRepository()}
+	t.Cleanup(func() { _ = r.Close(); _ = j.Close(); _ = q.Close(); _ = jobs.Close() })
+	task := recoveryTask(t, j)
+	w := newRecoveryWorker(t, q, j, r, "worker")
+	w.opts.MaxAttempts = 1
+	w.opts.Jobs = jobs
+	if err = q.Publish(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.ProcessOne(ctx); err == nil {
+		t.Fatal("job failure not exercised")
+	}
+	stored, found, err := j.LoadCompletedRun(ctx, task)
+	if err != nil || !found || stored.Finalized {
+		t.Fatal("completed outcome lost or unfinished jobs marked final")
+	}
+	server.FastForward(25 * time.Hour)
+	if _, err = w.ProcessOne(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stored, found, err = j.LoadCompletedRun(ctx, task)
+	if err != nil || !found || !stored.Finalized || m.calls.Load() != 1 || jobs.calls != 4 {
+		t.Fatal("expiry caused execution or skipped pending bookkeeping")
+	}
+	// Even attempts beyond the normal execution limit only ACK finalized runs.
+	task.Attempt = 99
+	server.FastForward(25 * time.Hour)
+	if err = q.Publish(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.ProcessOne(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if m.calls.Load() != 1 || jobs.calls != 4 {
+		t.Fatal("finalized run repeated model or job submission")
+	}
+}
 
 func (r cancellationRuntime) ChatWithScope(ctx context.Context, _ agentruntime.ChatInput) (agentruntime.ChatResult, error) {
 	close(r.started)

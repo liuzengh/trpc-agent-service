@@ -423,7 +423,7 @@ WHERE request_id = $1 AND status NOT IN ('completed','dead','expired')`, request
 		return fmt.Errorf("read Agent run status: %w", err)
 	}
 	if status == "completed" {
-		return nil
+		return ErrRunCompleted
 	}
 	if status == "dead" || status == "expired" {
 		return ErrRunTerminal
@@ -441,6 +441,17 @@ func (j *PostgresJournal) CompleteRun(
 		return fmt.Errorf("begin Agent completion transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	var status string
+	var generation int64
+	if err = tx.QueryRowContext(ctx, `SELECT status,schedule_generation FROM agent_run WHERE request_id=$1 AND tenant_id=$2 AND app_id=$3 FOR UPDATE`, task.RequestID, task.Scope.TenantID, task.Scope.AppID).Scan(&status, &generation); err != nil {
+		return err
+	}
+	if generation != task.Generation {
+		return ErrRunSuperseded
+	}
+	if status == "completed" {
+		return tx.Commit()
+	}
 	updated, err := tx.ExecContext(ctx, `
 UPDATE agent_run
 SET status = 'completed', fencing_token = $2, agent_name = $3,
@@ -670,8 +681,8 @@ func (j *PostgresJournal) Ready(ctx context.Context) error {
 		return fmt.Errorf("ping inbound PostgreSQL: %w", err)
 	}
 	var ready bool
-	if err := j.db.QueryRowContext(ctx, `SELECT to_regclass('channel_message_disposition') IS NOT NULL AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('agent_run') AND attname='schedule_generation' AND NOT attisdropped)`).Scan(&ready); err != nil || !ready {
-		return fmt.Errorf("message recovery schema unavailable; apply migration 026")
+	if err := j.db.QueryRowContext(ctx, `SELECT to_regclass('channel_message_disposition') IS NOT NULL AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('agent_run') AND attname='finalized_at' AND NOT attisdropped)`).Scan(&ready); err != nil || !ready {
+		return fmt.Errorf("run finalization schema unavailable; apply migration 027")
 	}
 	return nil
 }

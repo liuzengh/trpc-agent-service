@@ -107,6 +107,9 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		_ = delivery.Ack(ctx)
 		return true, fmt.Errorf("reject invalid task scope: %w", err)
 	}
+	if handled, err := w.resumeCompleted(ctx, delivery, task, started); handled || err != nil {
+		return true, err
+	}
 	if task.Attempt >= w.opts.MaxAttempts {
 		if admission, ok := w.journal.(gateway.RunAdmission); ok {
 			skip, err := admission.SkipDelivery(ctx, task)
@@ -131,6 +134,16 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		admissionErr = w.journal.MarkRunRunning(ctx, task.RequestID, w.opts.WorkerID)
 	}
 	if err := admissionErr; err != nil {
+		if errors.Is(err, gateway.ErrRunCompleted) {
+			handled, e := w.resumeCompleted(ctx, delivery, task, started)
+			if e != nil {
+				return true, e
+			}
+			if !handled {
+				return true, errors.New("completed run changed during recovery")
+			}
+			return true, nil
+		}
 		if errors.Is(err, gateway.ErrEarlierTurn) {
 			return true, w.deferRun(ctx, delivery, task, "session_order", time.Now().Add(2*time.Second))
 		}
@@ -267,29 +280,62 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		TraceID:          audit.TraceID(ctx),
 		TraceParent:      background.TraceParent(ctx),
 	}); err != nil {
-		return true, w.retryOrAck(ctx, delivery, task, err)
+		// Commit acknowledgement may have been lost. Redeliver even at the last
+		// execution attempt so the durable result can repair bookkeeping first.
+		return true, errors.Join(err, w.retryDelivery(ctx, delivery))
 	}
-	if err := w.recordAudit(ctx, task, gateway.RunResult{
-		Reply: result.Reply, AgentName: result.AgentName,
-		FencingToken: result.FencingToken, EventCount: result.EventCount,
-		PromptTokens: result.PromptTokens, CompletionTokens: result.CompletionTokens,
-		Cost: result.Cost, TraceID: audit.TraceID(ctx),
-		TraceParent: background.TraceParent(ctx),
-	}, "run_completed", result.PlatformCode, started); err != nil {
-		return true, w.retryOrAck(ctx, delivery, task, err)
+	handled, err := w.resumeCompleted(ctx, delivery, task, started)
+	if err != nil {
+		return true, err
+	}
+	if !handled {
+		return true, errors.New("completed run result unavailable after commit")
+	}
+	return true, nil
+}
+
+// Recovery consults the journal before cache, authorization, quota or Runtime.
+// A completed task must never become a new Agent turn when a cache expires.
+func (w *Worker) resumeCompleted(ctx context.Context, delivery workqueue.Delivery, task workqueue.AgentTask, started time.Time) (bool, error) {
+	result, found, err := w.journal.LoadCompletedRun(ctx, task)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	if result.Finalized {
+		return true, delivery.Ack(ctx)
+	}
+	if err = w.finalizeRun(ctx, task, result, started); err != nil {
+		return true, errors.Join(err, w.retryDelivery(ctx, delivery))
+	}
+	return true, delivery.Ack(ctx)
+}
+
+func (w *Worker) finalizeRun(ctx context.Context, task workqueue.AgentTask, result gateway.RunResult, started time.Time) error {
+	if err := w.recordAudit(ctx, task, result, "run_completed", result.ErrorType, started); err != nil {
+		return err
 	}
 	if w.opts.Quota != nil && !w.opts.ModelUsageManaged && task.Media == nil {
 		if err := w.opts.Quota.RecordUsage(
 			ctx, task.Scope.TenantID, task.RequestID,
 			result.PromptTokens, result.CompletionTokens, result.Cost,
 		); err != nil {
-			return true, w.retryOrAck(ctx, delivery, task, err)
+			return err
 		}
 	}
 	if task.Media == nil {
 		if err := w.enqueueSessionJobs(ctx, task); err != nil {
-			return true, w.retryOrAck(ctx, delivery, task, err)
+			return err
 		}
+	}
+	first, err := w.journal.MarkRunFinalized(ctx, task)
+	if err != nil {
+		return err
+	}
+	if !first {
+		return nil
 	}
 	w.opts.Metrics.RecordRun(ctx, task.Scope.TenantID, "completed", time.Since(started))
 	if !w.opts.ModelUsageManaged {
@@ -297,10 +343,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 			ctx, task.Scope.TenantID, result.PromptTokens, result.CompletionTokens, result.Cost,
 		)
 	}
-	if err := delivery.Ack(ctx); err != nil {
-		return true, err
-	}
-	return true, nil
+	return nil
 }
 
 func (w *Worker) deferRun(ctx context.Context, delivery workqueue.Delivery, task workqueue.AgentTask, reason string, at time.Time) error {

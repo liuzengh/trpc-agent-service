@@ -292,7 +292,7 @@ func (j *MemoryJournal) MarkRunRunning(
 		return fmt.Errorf("agent run not found")
 	}
 	if run.status == "completed" {
-		return nil
+		return ErrRunCompleted
 	}
 	if run.status == "dead" || run.status == "expired" {
 		return ErrRunTerminal
@@ -327,9 +327,10 @@ func (j *MemoryJournal) CompleteRun(
 		return ErrRunSuperseded
 	}
 	j.cancelWaitingNotice(task.RequestID)
-	if run.status == "completed" && run.result.FencingToken > result.FencingToken {
-		return fmt.Errorf("stale Agent run fencing token")
+	if run.status == "completed" {
+		return nil
 	}
+	result.Finalized = false
 	run.status = "completed"
 	run.completedAt = time.Now().UTC()
 	run.result = result

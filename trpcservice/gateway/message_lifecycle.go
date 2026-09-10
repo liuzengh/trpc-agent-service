@@ -130,6 +130,9 @@ func (j *PostgresJournal) admitRun(ctx context.Context, task workqueue.AgentTask
 		return true, tx.Commit()
 	}
 	if start {
+		if status == "completed" {
+			return false, ErrRunCompleted
+		}
 		if status != "completed" {
 			var pending bool
 			if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_run WHERE conversation_id=$1 AND turn_seq<$2 AND status IN ('queued','running','failed','waiting'))`, task.ConversationID, task.TurnSeq).Scan(&pending); err != nil {
@@ -165,6 +168,9 @@ func (j *MemoryJournal) admitRun(ctx context.Context, task workqueue.AgentTask, 
 		return true, nil
 	}
 	if start {
+		if r.status == "completed" {
+			return false, ErrRunCompleted
+		}
 		if r.status != "completed" {
 			for _, earlier := range j.runs {
 				if earlier.conversationID == task.ConversationID && earlier.turnSeq < task.TurnSeq && pendingRun(earlier.status) {

@@ -184,6 +184,55 @@ env/{tenant_id}/{app_id}/{runtime_user_id}/{session_id}/{artifact_id}/{version}
 
 生产可进一步增加独立元数据分配器、临时对象校验、病毒扫描和过期对象回收，但这些流程不应当作当前已实现的完整附件平台。已实现的 Telegram 限类型导入会检查大小、MIME、图片尺寸和路径，并按原会话授权读取；当前没有完整杀毒、Office/PDF 解析和媒体发送。
 
+### 6.1 本地 MinIO 初始化
+
+先按运行手册执行 `docker compose run --rm minio-init`。以下只适用于仓库默认的本地 Compose；固定 root 凭据仅供初始化，不注入 Agent。已有环境不要重复创建同名用户或覆盖其策略。
+
+在 Bash 终端输入准备给平台使用的**新** Access Key/Secret Key（不是 root 账号），然后只授予示例 bucket 权限：
+
+```bash
+read -rp 'New artifact Access Key: ' MINIO_ARTIFACT_ACCESS_KEY
+read -rsp 'New artifact Secret Key: ' MINIO_ARTIFACT_SECRET_KEY
+export MINIO_ARTIFACT_ACCESS_KEY MINIO_ARTIFACT_SECRET_KEY
+docker compose run --rm \
+  -e MINIO_ARTIFACT_ACCESS_KEY -e MINIO_ARTIFACT_SECRET_KEY \
+  -v "$PWD/deploy/compose/artifact-policy.json:/tmp/artifact-policy.json:ro" \
+  --entrypoint /bin/sh minio-init -ec '
+    mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null
+    mc admin policy create local agent-artifacts /tmp/artifact-policy.json
+    mc admin user add local "$MINIO_ARTIFACT_ACCESS_KEY" "$MINIO_ARTIFACT_SECRET_KEY" >/dev/null
+    mc admin policy attach local agent-artifacts --user "$MINIO_ARTIFACT_ACCESS_KEY"
+  '
+unset MINIO_ARTIFACT_ACCESS_KEY MINIO_ARTIFACT_SECRET_KEY
+```
+
+将两项值保存在私有 `.env`，不要提交：
+
+```dotenv
+MINIO_ARTIFACT_CREDENTIALS='{"access_key_id":"新 Access Key","secret_access_key":"新 Secret Key"}'
+```
+
+下面接续运行手册创建的 `tenant-b / app-b`（新应用尚无 Artifact 绑定）。向既有 `TRPC_AGENT_SECRET_GRANTS_JSON` **追加** `{"tenant_id":"tenant-b","purpose":"artifact","reference":"env://MINIO_ARTIFACT_CREDENTIALS"}`，不要覆盖其他 grant。重启相关 Worker/Admin 后，在管理页创建后端绑定，或调用 `/admin/backend-bindings`：
+
+```json
+{
+  "binding_id": "tenant-b-artifacts",
+  "tenant_id": "tenant-b",
+  "app_id": "app-b",
+  "resource_type": "artifact",
+  "backend_type": "s3",
+  "secret_ref": "env://MINIO_ARTIFACT_CREDENTIALS",
+  "config": {
+    "bucket": "trpc-agent-artifacts",
+    "endpoint": "http://127.0.0.1:9000",
+    "region": "us-east-1",
+    "path_style": true
+  }
+}
+```
+
+此 endpoint 供宿主机运行的 Worker 使用；容器内应改为它能访问的 MinIO 服务地址。若已有活动 artifact 绑定，使用迁移接口，不直接覆盖。绑定成功后再在 Telegram 绑定中启用附件、追加 `telegram_media` grant，文本附件才会进入导入流程。该示例将平台身份限制在一个 bucket；生产可按租户拆 bucket 或细化对象前缀，不能把示例策略当作完整的存储层租户隔离。
+
 ## 7. Audit Log
 
 审计日志推荐先写 PostgreSQL 分区表或具备不可变写入能力的日志服务，再异步同步到 Elasticsearch、ClickHouse 或对象存储。

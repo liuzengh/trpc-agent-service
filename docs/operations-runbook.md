@@ -2,6 +2,85 @@
 
 所有命令在仓库根目录执行。已有配置和数据库的环境不要重新 bootstrap，也不要复制模板覆盖 `.env`。
 
+## 0. 第一次拿到源码：从空环境到可用平台
+
+本节是一条完整的本地交付路径，不依赖作者电脑上的数据库、域名、workbuddy2api 或私有脚本。已有环境跳过本节，按升级章节处理；不要通过删数据卷获得“空环境”。需要 Go（版本见 go.mod）、Node.js 22.12+/24、npm、Docker Compose v2，以及可用的 8080/5432/6379 端口。
+
+### 0.1 构建并准备私有配置
+
+在新 clone 或源码包解压目录执行：
+
+```bash
+test -f .env || cp .env.example .env
+chmod 600 .env
+./build.sh
+openssl rand -hex 24
+openssl rand -hex 24
+```
+
+两次生成的不同值分别填入 `.env` 的 Admin Token 和 HTTP Token；不要提交或截图这些值。将模板中以下同名字段改为下列内容，其余字段保留默认值：
+
+```dotenv
+TRPC_AGENT_ADDR=127.0.0.1:8080
+TRPC_AGENT_ROLE=all
+TRPC_AGENT_CONTROL_PLANE_BACKEND=postgres
+TRPC_AGENT_POSTGRES_URL=postgres://trpc_agent:trpc_agent_dev@127.0.0.1:5432/trpc_agent?sslmode=disable
+TRPC_AGENT_POSTGRES_AUTO_MIGRATE=false
+TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=false
+TRPC_AGENT_SESSION_BACKEND=redis
+TRPC_AGENT_COORDINATOR_BACKEND=redis
+TRPC_AGENT_IDEMPOTENCY_BACKEND=redis
+TRPC_AGENT_QUEUE_BACKEND=redis
+TRPC_AGENT_QUOTA_BACKEND=redis
+REDIS_URL=redis://127.0.0.1:6379/0
+TRPC_AGENT_ADMIN_ENABLED=true
+TRPC_AGENT_ADMIN_TOKEN="第一份随机值"
+TRPC_AGENT_HTTP_API_ENABLED=true
+TRPC_AGENT_HTTP_API_TOKEN="第二份随机值"
+```
+
+这里的 PostgreSQL 开发账号与仓库 Compose 匹配，仅用于本地验证。不要把该账号用于公网或生产。模板默认 Mock 用于离线验证装配；要直接使用真实模型，在启动前同时填写第 1 节的五个模型字段。模型检查用 `./bin/trpc-modelcheck`，无需绑定作者的本地转换服务。
+
+### 0.2 先启动依赖，再迁移和初始化
+
+```bash
+docker compose up -d --wait --wait-timeout 60 postgres redis
+TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL=true ./bin/trpc-migrate
+./start.sh
+curl -fsS http://127.0.0.1:8080/readyz
+```
+
+迁移命令读取 `.env`，仅本次命令显式启用示例初始化；文件中的 bootstrap 仍保持 false。成功后应看到 `database migration completed` 和 `{"status":"ready"}`。数据库中有 `tutorial-tenant`、`tutorial-app`、发布版本和 `tutorial-http` 绑定，Session 使用共享 Redis。不要先在未启动的 PostgreSQL 上执行迁移，也不要仅凭 healthz 判断模型或 IM 已可用。
+
+### 0.3 登录、使用与创建第二个租户
+
+1. 打开 `http://127.0.0.1:8080/admin/ui/`，使用刚设置的 **Admin Token** 登录。
+2. 选择 `tutorial-tenant` → Agent 应用 → `tutorial-app`，在右侧创建独立调试会话。可连续发送“我叫小明”和“我叫什么”查看会话；切到真实模型后回复措辞不要求固定。
+3. 创建第二个租户：例如 ID `tenant-b`、名称“第二租户”、region `local`、secret namespace `tenant-b`，配额/审计配置可先填 `{}`。secret namespace 只是元数据，不会自动授予密钥权限。
+4. 切换至第二租户，在 Agent 应用中新建 ID `app-b`、名称“第二 Agent”。通过页面创建的应用会自动注册/继承 Session 后端；模型先选执行节点默认模型，设置提示词、工具白名单、预算后保存草稿并调试。
+5. 发布后再建立该应用的 IM 或 HTTP 绑定。两个租户使用不同绑定；没有共享授权时，不能相互读取会话、记忆、知识库或使用对方工具。要选择不同模型凭据，先按治理文档增加精确 `model` grant，再重启执行节点；页面只能选择已授权引用。
+
+HTTP 调用用第 3 节示例，使用 **HTTP Token** 而不是 Admin/模型 Token。curl 不会自动读取 `.env`，应在受控终端提供对应 Token，不要 `source .env`。真实 IM 按 [IM 接入](im-channels.md)为自己的账号注册，不要使用作者的域名或测试群。Telegram + 企业微信即可覆盖本项目选择的两类 IM。
+
+### 0.4 启用对象存储、向量库、Skill 等功能
+
+核心平台不要求这些资源全部启用。需要附件/知识库时，再执行：
+
+```bash
+docker compose up -d --wait --wait-timeout 60 minio qdrant
+docker compose run --rm minio-init
+```
+
+第二条命令创建 `trpc-agent-artifacts` bucket，重复执行不会清空已有对象；超时/失败应先处理，不要让应用带着缺失 bucket 继续使用附件。仅启动 MinIO 容器不会创建 bucket。生产使用预先配置的 bucket 和专属身份；本地创建受限身份、填写凭据和 Backend Binding 的完整步骤见 [对象存储初始化](backend-adapters.md#61-本地-minio-初始化)。
+
+- Session 默认 Redis；需要持久 Memory 时，注册 `memory` 后端及对应用途授权，不能把默认 InMemory Memory 当跨节点持久化。
+- Knowledge 需要独立 Embedding 服务/Key、维度一致的 Qdrant 后端、租户授权与已发布知识配置；聊天 API Key 不会自动成为 Embedding Key，具体字段见后端方案第 5 节。
+- Skill/沙箱按本手册第 8 节配置注册目录、租户授权和已安装镜像。未启用时页面应明确不可用，不能暗中回退为宿主机执行。
+
+需要验证多节点时，在上述 all 进程保持运行的同时，在另一个终端执行 `./bin/trpc-service -env-file .env -role worker`。额外 Worker 不监听 8080，自动产生独立消费者身份，共享相同 PostgreSQL/Redis；不需要复制真实数据或启动第二套数据库。完整角色拆分及生产权限见第 4 节与治理文档。
+
+完成上述路径后，交付方应能独立登录、创建应用、调试/发布、配置所选后端及通道。IM 账号开通、模型额度和生产 Secret 是接收方提供的外部条件，不随源码包提供。
+
 ## 1. 环境与配置
 
 Go 版本以 [go.mod](../go.mod) 为准。从源码构建控制台还需要 Node.js 22.12+（推荐 24 LTS）与 npm；运行构建好的 Go 二进制不需要 Node。`build.sh` 按锁文件安装前端依赖、检查类型并构建页面，再编译 Go。手动启停需要 Linux、flock 和支持 pidfd 的内核；其他系统可直接以前台二进制或容器运行。持久化/多进程部署还需要 Docker Compose 或自行准备 PostgreSQL、Redis，以及按需使用的 MinIO/Qdrant。
@@ -125,7 +204,7 @@ docker compose --profile observability up -d
 
 1. 备份配置、当前二进制和数据库，先核对未完成工具及 unknown/attempting 发送事实。
 2. 停止旧 Worker/Jobs/Sender，不能混跑不兼容的队列、权限或分段发送协议。
-3. 构建，使用迁移身份应用缺失 migrations；当前控制面 schema 为 26，不能修改已应用 SQL 文件。026 增加持久化等待、调度代数、独立补读进度和等待提示/最终回复区分，不重建业务会话。Worker 需要 INSERT queue_outbox，Gateway 需要 UPDATE channel_poll_gap；同步更新权限后再启动新版本，不给 Worker 开放修改投递状态的权限。
+3. 构建，使用迁移身份应用缺失 migrations；当前控制面 schema 为 27，不能修改已应用 SQL 文件。026 增加持久化等待、调度代数和独立补读，027 增加 Run 收尾回执，不重建业务会话。Worker 需要 INSERT queue_outbox，Gateway 需要 UPDATE channel_poll_gap；同步更新权限后再启动新版本，不给 Worker 开放修改投递状态的权限。
 4. 核对新增表/函数/Redis 命令权限，再启动候选实例，检查就绪和受控请求。
 5. Agent 行为通过不可变 Revision、stable/canary 和 conversation pin 灰度；切回稳定 revision 不会自动迁移已 pin 的会话。
 6. 数据迁移按[迁移协议](data-consistency.md)执行。回滚配置不会撤销已提交的工作项或已发送消息，不得恢复旧备份后盲目重放。
@@ -165,11 +244,13 @@ docker compose --profile observability up -d
 
 新版工作台从 `0.3.0-rc.1` 提供，需要 schema 24。先升级 Admin/Worker，再开放工作台。网页调试使用独立 SQL 调试队列，不会被旧版 IM Worker 误领；旧版本的管理页不支持新的登录会话。升级不会自动发布 Agent 版本或迁移已有 IM 会话。
 
-当前 `0.3.0-rc.3` 需要 schema 26。“近期优先”的 30～120 秒是接收窗口，不是请求有效期；配置键 `max_age_seconds` 为兼容保留。已接收消息持久保存，模型尚未产生输出且无工具执行时，暂时连接故障进入 waiting，5/10/20/30 秒退避，不消耗普通执行错误的三次尝试。模型恢复后自动继续，管理页展示等待原因与下一次调度时间。每条请求最多一条等待提示；未发出的提示会在最终完成时撤回，已经发送或结果未知的提示不能撤销。
+当前 `0.3.0-rc.4` 需要 schema 27。“近期优先”的 30～120 秒是接收窗口，不是请求有效期；配置键 `max_age_seconds` 为兼容保留。已接收消息持久保存，模型尚未产生输出且无工具执行时，暂时连接故障进入 waiting，5/10/20/30 秒退避，不消耗普通执行错误的三次尝试。模型恢复后自动继续，管理页展示等待原因与下一次调度时间。每条请求最多一条等待提示；未发出的提示会在最终完成时撤回，已经发送或结果未知的提示不能撤销。
+
+已经 completed 的请求从 Run/最终 Outbound 读取结果，不再进入 Agent。finalized_at 为空时只补审计、用量及幂等后台任务提交；有回执时只 ACK 重投。因此去重缓存过期不会重做已持久完成的模型/工具执行，收尾错误也不能被普通模型重试次数上限吞掉。该保证针对 IM 和 `/inbound` 持久入口；同步 `/chat` 是诊断接口，其去重缓存有明确 TTL。
 
 绑定 JSON 示例仍为 `"message_policy":{"mode":"realtime","max_age_seconds":120}`。近期与后台补读分别持有租约、游标，共享 Inbox 去重；只读已授权群、成员及起点后的区间，超过源保留期或恢复下界冲突会 blocked，需管理员核对。补读消息按平台接收顺序进入会话，不倒插历史。启动不会重放旧版 dead/expired/disposition/skipped 记录。执行前重新核对路由和新任务记录的 Binding 版本，接入授权变化时终止并反馈，不自动沿用旧授权。
 
-禁止混跑旧 Worker/Relay/Sender：旧代码不理解调度代数和新的回复唯一约束。Redis ACL 应覆盖原 stream 和同前缀 `-backlog` stream；现有按 queue 前缀授权的模板可复用。schema 24 的回退结论不覆盖本次升级，回退必须先停接收与消费、保留等待任务和出站事实，使用兼容 schema 26 的构建；不能把旧二进制直接指向新 schema。
+禁止混跑旧 Worker/Relay/Sender：旧代码不理解调度代数、收尾回执和新的回复唯一约束。Redis ACL 应覆盖原 stream 和同前缀 `-backlog` stream；现有按 queue 前缀授权的模板可复用。schema 24 的回退结论不覆盖本次升级，回退必须先停接收与消费、保留等待任务和出站事实，使用兼容 schema 27 完成态恢复语义的构建，不能直接恢复仍会重做 completed 任务的旧 Worker。
 
 Docker 多阶段构建在 Node 阶段完成页面编译，运行镜像只包含 Go 程序。构建网络无法访问默认 Go 模块代理时，可传入 `--build-arg GOPROXY=https://goproxy.cn,direct`，按部署环境选择可信代理；不需要关闭 TLS 或校验和验证。
 
