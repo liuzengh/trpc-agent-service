@@ -1,0 +1,123 @@
+name: Deployment Golden Path
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployment-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deployment-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: trpc-agent-service-deployment-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: validate rendered deployment topology
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml config --quiet
+      - name: validate deployment manifests and images
+        run: bash scripts/validate-deployment.sh
+      - name: build and start golden path topology
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml \
+            up -d --build --wait postgres redis qdrant otel-collector jaeger prometheus grafana gateway channel worker-1 worker-2
+          dc() { docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml "$@"; }
+          for service in postgres redis qdrant otel-collector jaeger prometheus grafana gateway channel worker-1 worker-2; do
+            dc ps --status running --services | grep -Fx "$service"
+          done
+          curl -fsS http://127.0.0.1:8080/readyz >/dev/null
+      - name: provision and serve first request
+        env:
+          TRPC_AGENT_SERVICE_GATEWAY_URL: http://127.0.0.1:8080
+          TRPC_AGENT_SERVICE_POSTGRES_DSN: postgres://trpc:development-only-change-me@127.0.0.1:55432/trpc_agent_service?sslmode=disable
+          TRPC_AGENT_SERVICE_ADMIN_TOKEN: development-only-admin-token
+          TRPC_DEPLOYMENT_E2E_REPORT: ${{ github.workspace }}/test-results/deployment-first.json
+        run: |
+          mkdir -p test-results
+          go run ./cmd/deployment-e2e
+      - name: restart one worker and serve second request
+        run: |
+          set -euo pipefail
+          dc() { docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml "$@"; }
+          dc restart worker-2
+          dc up -d --wait worker-2
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/readyz >/dev/null; then
+              break
+            fi
+            if [ "$attempt" = 30 ]; then
+              dc logs --no-color gateway channel worker-1 worker-2
+              exit 1
+            fi
+            sleep 2
+          done
+          test -n "$(dc ps --status running --services | grep -Fx worker-1)"
+          test -n "$(dc ps --status running --services | grep -Fx worker-2)"
+          TRPC_AGENT_SERVICE_GATEWAY_URL=http://127.0.0.1:8080 \
+          TRPC_AGENT_SERVICE_POSTGRES_DSN='postgres://trpc:development-only-change-me@127.0.0.1:55432/trpc_agent_service?sslmode=disable' \
+          TRPC_AGENT_SERVICE_ADMIN_TOKEN=development-only-admin-token \
+          TRPC_DEPLOYMENT_E2E_REPORT="$GITHUB_WORKSPACE/test-results/deployment-after-restart.json" \
+          go run ./cmd/deployment-e2e
+      - name: collect deployment logs
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml \
+            logs --no-color postgres redis qdrant otel-collector jaeger prometheus grafana gateway channel worker-1 worker-2 \
+            > test-results/compose.log 2>&1 || true
+          docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml \
+            ps -a > test-results/compose-ps.txt 2>&1 || true
+      - name: scan deployment evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=0
+          for file in test-results/*; do
+            [ -f "$file" ] || continue
+            if rg -n -i 'app[_-]?secret|password|authorization|bearer|access[_-]?token|refresh[_-]?token|api[_-]?key|prompt|completion|raw[_-]?(request|tool|body)|postgres://[^[:space:]]+:[^@[:space:]]+@' "$file"; then
+              echo "sensitive value found in deployment evidence: $file" >&2
+              rm -f "$file"
+              found=1
+            fi
+          done
+          test "$found" = 0
+      - name: upload deployment summaries
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-e2e-${{ github.run_id }}
+          path: |
+            test-results/deployment-first.json
+            test-results/deployment-after-restart.json
+          if-no-files-found: error
+      - name: upload deployment diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-e2e-diagnostics-${{ github.run_id }}
+          path: test-results
+          if-no-files-found: warn
+      - name: clean shutdown
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          dc() { docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml "$@"; }
+          dc down --volumes --remove-orphans --timeout 60 || true
+          test -z "$(docker ps -aq --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}")"
+          test -z "$(docker network ls -q --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}")"
+          test -z "$(docker volume ls -q --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}")"

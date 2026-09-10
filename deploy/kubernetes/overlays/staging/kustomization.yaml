@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: trpc-agent-service-staging
+resources:
+  - ../../base
+images:
+  # Replace newName/newTag with the staging registry image or digest.
+  - name: trpc-agent-service
+    newName: trpc-agent-service
+    newTag: 0.1.0
+patches:
+  - path: configmap-patch.yaml
+  - target:
+      group: autoscaling
+      version: v2
+      kind: HorizontalPodAutoscaler
+      name: trpc-agent-service-gateway
+    patch: |-
+      - op: replace
+        path: /spec/maxReplicas
+        value: 6
+  - target:
+      group: autoscaling
+      version: v2
+      kind: HorizontalPodAutoscaler
+      name: trpc-agent-service-worker
+    patch: |-
+      - op: replace
+        path: /spec/maxReplicas
+        value: 6

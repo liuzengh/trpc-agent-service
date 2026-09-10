@@ -1,0 +1,16 @@
+services:
+  quickstart:
+    build:
+      context: .
+      dockerfile: Dockerfile.quickstart
+    environment:
+      TRPC_AGENT_SERVICE_GATEWAY_URL: http://gateway:8080
+      TRPC_AGENT_SERVICE_POSTGRES_DSN: ${TRPC_AGENT_SERVICE_POSTGRES_DSN}
+      TRPC_AGENT_SERVICE_ADMIN_TOKEN: ${TRPC_AGENT_SERVICE_ADMIN_TOKEN}
+    depends_on:
+      gateway:
+        condition: service_healthy
+      worker-1:
+        condition: service_healthy
+      worker-2:
+        condition: service_healthy

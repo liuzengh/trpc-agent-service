@@ -1,0 +1,12 @@
+.git
+.gocache
+.env
+*.log
+coverage.out
+data/
+**/node_modules/
+**/dist/
+**/test-results/
+**/.vite/
+**/.cache/
+.npm-cache/

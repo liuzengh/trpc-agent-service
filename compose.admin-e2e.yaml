@@ -1,0 +1,20 @@
+services:
+  worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-worker
+    environment:
+      TRPC_E2E_MODEL_MODE: approval
+      TRPC_AGENT_SERVICE_REDIS_CLAIM_MIN_IDLE: 5s
+      TRPC_AGENT_SERVICE_MODEL_TIMEOUT: 30s
+      TRPC_AGENT_SERVICE_WORKER_CONCURRENCY: 1
+
+  worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-worker
+    environment:
+      TRPC_E2E_MODEL_MODE: approval
+      TRPC_AGENT_SERVICE_REDIS_CLAIM_MIN_IDLE: 5s
+      TRPC_AGENT_SERVICE_MODEL_TIMEOUT: 30s
+      TRPC_AGENT_SERVICE_WORKER_CONCURRENCY: 1

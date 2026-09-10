@@ -1,0 +1,97 @@
+name: Fault E2E
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fault-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fault-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: trpc-agent-service-fault-${{ github.run_id }}
+      TRPC_FAULT_E2E_REPORT: ${{ github.workspace }}/test-results/fault-summary.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: start fault dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env.example up -d --wait postgres redis
+      - name: run authoritative fault E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          dc() { docker compose --env-file .env.example "$@"; }
+          exists="$(dc exec -T postgres psql -U trpc -d trpc_agent_service -tAc \
+            "SELECT 1 FROM pg_database WHERE datname = 'trpc_agent_service_test'")"
+          if [ "${exists//[[:space:]]/}" != "1" ]; then
+            dc exec -T postgres createdb -U trpc trpc_agent_service_test
+          fi
+          go build -o e2e-worker ./cmd/e2e-worker
+          redis_container="$(dc ps -q redis)"
+          postgres_container="$(dc ps -q postgres)"
+          test -n "$redis_container" -a -n "$postgres_container"
+          TRPC_AGENT_SERVICE_E2E_WORKER_BINARY="$GITHUB_WORKSPACE/e2e-worker" \
+          TRPC_AGENT_SERVICE_POSTGRES_TEST_DSN='postgres://trpc:development-only-change-me@127.0.0.1:55432/trpc_agent_service_test?sslmode=disable' \
+          TRPC_AGENT_SERVICE_REDIS_TEST_URL='redis://127.0.0.1:56379/0' \
+          TRPC_FAULT_E2E_REDIS_CONTAINER="$redis_container" \
+          TRPC_FAULT_E2E_POSTGRES_CONTAINER="$postgres_container" \
+          go test -tags='integration,e2e' ./trpcservice/postgres \
+            -run '^Test(FaultWorkerRecoveryAcrossRealProcesses|DeterministicReplyProviderScenarios|DeterministicReplyOutboxFailureScenarios)$' \
+            -count=1 -v 2>&1 | tee test-results/fault-go-test.log
+      - name: collect fault dependency logs
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          mkdir -p test-results
+          docker compose --env-file .env.example logs --no-color postgres redis > test-results/compose.log 2>&1 || true
+          docker compose --env-file .env.example ps -a > test-results/compose-ps.txt 2>&1 || true
+      - name: scan fault evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=0
+          if [ -d test-results ]; then
+            for file in test-results/*; do
+              [ -f "$file" ] || continue
+              if rg -n -i 'authorization:|bearer |postgres://[^[:space:]]+:[^@[:space:]]+@|api[_-]?key|raw[_-]?secret|raw[_-]?payload' "$file"; then
+                echo "sensitive value found in fault evidence: $file" >&2
+                rm -f "$file"
+                found=1
+              fi
+            done
+          fi
+          test "$found" = 0
+      - name: upload fault summary
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fault-e2e-${{ github.run_id }}
+          path: test-results/fault-summary.json
+          if-no-files-found: error
+      - name: upload fault diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fault-e2e-diagnostics-${{ github.run_id }}
+          path: test-results
+          if-no-files-found: warn
+      - name: clean fault dependencies
+        if: ${{ always() }}
+        shell: bash
+        run: docker compose --env-file .env.example down --volumes --remove-orphans || true

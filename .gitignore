@@ -1,13 +1,33 @@
 .idea
 .vscode
 .DS_Store
+.env
+.env.*
+!.env.example
+.env.hardening
+full-test.local.env
+.workbuddy/
 *.log
 *.swp
+*.tmp
+*.temp
+*.bak
+**/secret.yaml
+**/secret.*.yaml
+**/*.secret.yaml
+**/*.secrets.yaml
+!deploy/kubernetes/secret.example.yaml
+
+# Local end-to-end verification artifacts.
+.e2e-*/
+.verify-*/
+.e2e-restart.ps1
 
 bin/
 dist/
 coverage.out
 coverage.html
+test-results/
 *.test
 *.exe
 
@@ -15,3 +35,16 @@ vendor/
 
 data/*
 !data/README.md
+
+# Local build and test caches.
+.gocache/
+**/.gocache/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+**/node_modules/
+**/.npm-cache/
+**/.vite/
+**/.cache/
+**/playwright-report/
+**/test-results/

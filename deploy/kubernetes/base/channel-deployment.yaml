@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-service-channel
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: channel
+spec:
+  # Channel adapters are a single-owner deployment until binding lease or
+  # sharding is implemented. Recreate prevents rollout overlap.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: channel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: channel
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: channel
+          image: trpc-agent-service:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: trpc-agent-service-config
+            - secretRef:
+                name: trpc-agent-service-secrets
+          env:
+            - name: TRPC_AGENT_SERVICE_ROLE
+              value: channel
+            - name: TRPC_AGENT_SERVICE_HTTP_ADDR
+              value: :8080
+            # envFrom must not expose control-plane credentials to channels.
+            - name: TRPC_AGENT_SERVICE_ADMIN_TOKEN
+              value: ""
+            - name: TRPC_AGENT_SERVICE_OPERATOR_TOKEN
+              value: ""
+            - name: TRPC_AGENT_SERVICE_AUDITOR_TOKEN
+              value: ""
+          volumeMounts:
+            - name: platform-secrets
+              mountPath: /var/run/secrets/trpc-agent-service
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: platform-secrets
+          secret:
+            secretName: trpc-agent-service-secrets

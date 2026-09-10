@@ -1,0 +1,77 @@
+name: Integration
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: start integration dependencies
+        run: docker compose --env-file .env.example up -d --wait postgres redis qdrant
+      - name: create dedicated test database
+        shell: bash
+        run: |
+          set -euo pipefail
+          exists="$(docker compose --env-file .env.example exec -T postgres psql -U trpc -d trpc_agent_service -tAc "SELECT 1 FROM pg_database WHERE datname = 'trpc_agent_service_test'")"
+          if [ "${exists//[[:space:]]/}" != "1" ]; then
+            docker compose --env-file .env.example exec -T postgres createdb -U trpc trpc_agent_service_test
+          fi
+      - name: run integration tests
+        env:
+          TRPC_AGENT_SERVICE_POSTGRES_TEST_DSN: postgres://trpc:development-only-change-me@127.0.0.1:55432/trpc_agent_service_test?sslmode=disable
+          TRPC_AGENT_SERVICE_REDIS_TEST_URL: redis://127.0.0.1:56379/0
+          TRPC_AGENT_SERVICE_QDRANT_TEST_HOST: 127.0.0.1
+          TRPC_AGENT_SERVICE_QDRANT_TEST_PORT: "56334"
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          go test -tags integration -p 1 ./... 2>&1 | tee test-results/integration-go-test.log
+      - name: collect integration diagnostics
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          mkdir -p test-results
+          docker compose --env-file .env.example logs --no-color postgres redis qdrant > test-results/compose.log 2>&1 || true
+          docker compose --env-file .env.example ps -a > test-results/compose-ps.txt 2>&1 || true
+      - name: scan integration artifacts
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sensitive='authorization:|bearer |postgres://[^[:space:]]+:[^@[:space:]]+@|api[_-]?key|raw[_-]?secret|raw[_-]?payload'
+          found=0
+          for file in test-results/*; do
+            [ -f "$file" ] || continue
+            if rg -n -i "$sensitive" "$file"; then
+              echo "sensitive value found in integration artifact: $file" >&2
+              rm -f "$file"
+              found=1
+            fi
+          done
+          test "$found" = 0
+      - name: upload integration diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-diagnostics-${{ github.run_id }}
+          path: test-results
+          if-no-files-found: warn
+      - name: stop integration dependencies
+        if: always()
+        run: docker compose --env-file .env.example down -v --remove-orphans

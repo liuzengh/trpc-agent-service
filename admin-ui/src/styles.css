@@ -1,0 +1,28 @@
+:root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1f2937; background: #f3f5f7; font-size: 14px; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 1100px; }
+a { color: #0052d9; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.app-shell { min-height: 100vh; }
+.topbar { position: fixed; inset: 0 0 auto 0; z-index: 10; height: 56px; background: #fff; border-bottom: 1px solid #e5e7eb; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; }
+.brand { font-size: 17px; font-weight: 700; letter-spacing: .1px; }.brand span { color: #0052d9; font-weight: 500; margin-left: 5px; }
+.topbar-actions { display: flex; align-items: center; gap: 16px; }.role-pill { color: #0052d9; background: #eef4ff; padding: 4px 9px; border-radius: 3px; font-size: 12px; }.actor, .muted { color: #6b7280; }
+.sidebar { position: fixed; top: 56px; bottom: 0; left: 0; width: 220px; background: #fff; border-right: 1px solid #e5e7eb; padding: 16px 10px; }.sidebar nav { display: grid; gap: 3px; }.nav-item { text-align: left; border: 0; background: transparent; color: #4b5563; padding: 10px 14px; border-radius: 3px; cursor: pointer; font-size: 14px; }.nav-item:hover { background: #f3f5f7; }.nav-item.active { color: #0052d9; background: #e8f0ff; font-weight: 600; }
+.main-content { margin-left: 220px; padding: 88px 32px 40px; }.page { max-width: 1500px; margin: 0 auto; }.page-heading { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 22px; }.page-heading h1 { margin: 0 0 5px; font-size: 23px; font-weight: 650; }.page-heading p { margin: 0; }.loading-line { padding: 40px; color: #6b7280; text-align: center; }.panel { margin: 18px 0; }
+.summary-grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); border: 1px solid #e5e7eb; background: #fff; }.summary-row { min-height: 74px; padding: 15px 18px; border-right: 1px solid #e5e7eb; border-bottom: 1px solid #e5e7eb; display: flex; flex-direction: column; gap: 9px; }.summary-row span { color: #6b7280; }.summary-row strong { font-size: 21px; font-weight: 600; }
+.status-line, .link-strip, .table-actions, .scope-bar, .inline-form, .filter-row, .pager { display: flex; align-items: center; gap: 12px; }.status-line { flex-wrap: wrap; }.link-strip { margin: 20px 0; padding: 12px 0; border-top: 1px solid #e5e7eb; border-bottom: 1px solid #e5e7eb; }.link-strip a { margin-right: 16px; }.scope-bar { margin: 0 0 18px; padding: 13px 15px; background: #fff; border: 1px solid #e5e7eb; }.scope-bar label, .inline-form label, .filter-row label, .stack-form label { display: flex; flex-direction: column; gap: 5px; color: #4b5563; font-size: 12px; }.scope-bar input, .inline-form input, .filter-row input, .stack-form input, .inline-form select, .filter-row select, .code-editor { border: 1px solid #d1d5db; border-radius: 3px; padding: 7px 9px; min-width: 170px; color: #1f2937; background: #fff; }.inline-form { flex-wrap: wrap; margin-bottom: 15px; }.filter-row { margin: 0 0 15px; }.pager { justify-content: center; padding: 18px; }.progress-cell { min-width: 150px; }.progress-cell span { color: #6b7280; font-size: 12px; }.backend-grid { display: grid; grid-template-columns: repeat(2, minmax(350px, 1fr)); gap: 16px; }.detail-grid { display: grid; grid-template-columns: 170px 1fr; gap: 10px 16px; align-items: center; }.detail-grid > span:nth-child(odd) { color: #6b7280; }.code-editor { width: 100%; min-height: 300px; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }.code-block { max-height: 520px; overflow: auto; background: #f8fafc; border: 1px solid #e5e7eb; padding: 14px; font-size: 12px; }.center-page { min-height: 100vh; display: grid; place-items: center; }.login-page { background: #f3f5f7; }.login-page .t-card { width: 380px; }.stack-form { display: grid; gap: 15px; }
+@media (max-width: 1200px) { .summary-grid { grid-template-columns: repeat(3, minmax(180px, 1fr)); }.backend-grid { grid-template-columns: 1fr; } }
+
+/* Compact display refinements for the dense operations view. */
+.page-heading h1 { line-height: 1.25; }
+.panel { margin: 16px 0; }
+.summary-row { min-height: 72px; padding: 14px 18px; gap: 7px; }
+.summary-row strong { line-height: 1.25; }
+.link-strip { margin: 18px 0; padding: 11px 0; flex-wrap: wrap; }
+.link-strip-label { color: #6b7280; font-size: 12px; font-weight: 600; }
+.filter-row { flex-wrap: wrap; }
+.pager { padding: 16px; }
+.progress-cell { display: grid; gap: 4px; }
+.progress-empty { display: block; min-height: 6px; color: #6b7280; }
+.empty-state { padding: 14px 0; color: #6b7280; text-align: center; }
+.t-table th, .t-table td { padding: 9px 12px; }

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>trpc-agent-service 验收状态</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+    body { margin: 0; padding: 34px; background: #0f172a; color: #e5e7eb; }
+    h1 { margin: 0 0 8px; font-size: 30px; }
+    .sub { color: #94a3b8; margin-bottom: 26px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 18px; }
+    .label { color: #94a3b8; font-size: 14px; }
+    .value { margin-top: 7px; font-size: 25px; font-weight: 700; color: #4ade80; }
+    table { width: 100%; border-collapse: collapse; margin-top: 24px; background: #1e293b; border-radius: 10px; overflow: hidden; }
+    th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid #334155; }
+    th { color: #cbd5e1; background: #263449; }
+    .ok { color: #4ade80; font-weight: 700; }
+    .warn { color: #fbbf24; font-weight: 700; }
+    .note { margin-top: 22px; color: #94a3b8; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>trpc-agent-service 交付验收状态</h1>
+  <div class="sub">本页根据本次本机 Compose、HTTP、Admin API、PostgreSQL、Jaeger、Prometheus 实测结果整理；不包含任何密钥。</div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Compose 核心服务</div><div class="value">11/11 healthy/up</div></div>
+    <div class="card"><div class="label">/readyz</div><div class="value">HTTP 200</div></div>
+    <div class="card"><div class="label">真实 IM 回复</div><div class="value">WeCom 1 · Feishu 2</div></div>
+  </div>
+
+  <table>
+    <tr><th>验收项</th><th>实测结果</th><th>状态</th></tr>
+    <tr><td>Gateway</td><td>1 副本，healthy，127.0.0.1:8080</td><td class="ok">PASS</td></tr>
+    <tr><td>Channel</td><td>1 副本，healthy；WeCom/Feishu binding READY</td><td class="ok">PASS</td></tr>
+    <tr><td>Worker</td><td>worker-1、worker-2，各 1 副本，healthy</td><td class="ok">PASS</td></tr>
+    <tr><td>Postgres / Redis / Qdrant</td><td>healthy；Postgres 使用本机 56000 端口</td><td class="ok">PASS</td></tr>
+    <tr><td>企业微信真实消息</td><td>execution SUCCEEDED；reply_outbox SENT；有 provider receipt</td><td class="ok">PASS</td></tr>
+    <tr><td>飞书真实消息</td><td>execution SUCCEEDED；reply_outbox SENT；有 provider receipt</td><td class="ok">PASS</td></tr>
+    <tr><td>Jaeger Trace</td><td>包含 channel.event、gateway.admit、worker.execute、model.execute、reply.send</td><td class="ok">PASS</td></tr>
+    <tr><td>Prometheus</td><td>otel-collector target UP；IM reply success 指标有值</td><td class="ok">PASS</td></tr>
+    <tr><td>Grafana</td><td>容器 healthy、13000 可访问；面板需登录后查看</td><td class="ok">SERVICE UP</td></tr>
+    <tr><td>Kubernetes Pods / HPA</td><td>当前机器无可用 Kubernetes API/context，未做在线验收</td><td class="warn">CONDITIONAL / NOT VERIFIED</td></tr>
+  </table>
+
+  <div class="note">截图用途：交付验收证据。Grafana 登录页和 K8s 未在线验收不应标记为 PASS。</div>
+</body>
+</html>

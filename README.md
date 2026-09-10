@@ -139,16 +139,30 @@
 
 ## 快速开始
 
+以下脚本使用 Docker Compose 启动 disposable 的最小 Golden Path 环境，并在容器内构建和运行现有 `cmd/deployment-e2e`：PostgreSQL、Redis、Qdrant、HTTP Gateway 和两个 deterministic E2E Worker。不需要本机安装 Go，也不需要真实 OpenAI、企业微信或飞书凭据。该 Quick Start 不启用真实 IM binding，因此也不需要 `im-provider-target-key@v1` 和 `im-external-id-hmac-key@v1`；真实 IM 的内部密钥配置见 [`docs/deployment.md`](docs/deployment.md)。脚本会使用仓库内仅用于本地验收的 `.env.example`，并在结束时清理本次 Compose 项目及卷。
+
 ```bash
 git clone https://github.com/liuzengh/trpc-agent-service.git
 cd trpc-agent-service
 
-./build.sh
-./start.sh
+# Linux / macOS / Git Bash
+./scripts/quickstart.sh
+
+# Windows PowerShell
+.\scripts\quickstart.ps1
 ```
 
-停止服务：
+脚本会自动启动依赖，创建 Tenant/App/Config，签发一次性 API Credential，调用 `/v1/chat/completions`，并校验 durable execution 为 `SUCCEEDED`。成功时输出 `Golden Path PASSED`。完整 Compose 拓扑和生产部署说明见 [`docs/deployment.md`](docs/deployment.md)。
+
+脚本退出时会自动清理 `trpc-agent-service-quickstart` 项目及其 disposable 卷；若需要手动清理中断后的资源：
 
 ```bash
-./stop.sh
+docker compose --project-name trpc-agent-service-quickstart \
+  --env-file .env.example \
+  --file compose.yaml \
+  --file compose.deployment-e2e.yaml \
+  --file compose.quickstart.yaml \
+  down --volumes --remove-orphans
 ```
+
+`./build.sh` 只构建 `bin/trpc-service`；`./start.sh`/`./stop.sh` 只管理一个已配置好外部 PostgreSQL/Redis 和 `TRPC_AGENT_SERVICE_*` 环境变量的原生进程，不替代上述完整 Compose Quick Start。需要清除本地数据库、Redis 和 Qdrant 数据时，再显式使用 `docker compose --env-file .env.example down --volumes`。

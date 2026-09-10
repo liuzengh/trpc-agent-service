@@ -1,0 +1,102 @@
+name: Migration E2E
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migration-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: trpc_agent_service_test
+          POSTGRES_USER: trpc
+          POSTGRES_PASSWORD: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trpc -d trpc_agent_service_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      qdrant:
+        image: qdrant/qdrant:v1.16.0
+        ports:
+          - 6334:6334
+        options: >-
+          --health-cmd "/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build migration worker processes
+        run: |
+          go build -o e2e-worker ./cmd/e2e-worker
+          go build -o trpc-service-worker ./cmd/trpc-service
+      - name: run session migration E2E
+        env:
+          TRPC_AGENT_SERVICE_POSTGRES_TEST_DSN: postgres://trpc:ci@127.0.0.1:5432/trpc_agent_service_test?sslmode=disable
+          TRPC_AGENT_SERVICE_REDIS_TEST_URL: redis://127.0.0.1:6379/0
+          TRPC_AGENT_SERVICE_E2E_WORKER_BINARY: ${{ github.workspace }}/e2e-worker
+          TRPC_AGENT_SERVICE_MIGRATION_WORKER_BINARY: ${{ github.workspace }}/trpc-service-worker
+          TRPC_AGENT_SERVICE_QDRANT_TEST_HOST: 127.0.0.1
+          TRPC_AGENT_SERVICE_QDRANT_TEST_PORT: 6334
+          TRPC_MIGRATION_E2E_REPORT: ${{ github.workspace }}/test-results/migration-crash-resume.json
+          TRPC_MIGRATION_VERIFY_E2E_REPORT: ${{ github.workspace }}/test-results/migration-verify-fail.json
+          TRPC_KNOWLEDGE_MIGRATION_E2E_REPORT: ${{ github.workspace }}/test-results/knowledge-migration-crash-resume.json
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          go test -tags='integration,e2e' ./trpcservice/postgres ./trpcservice/knowledge/qdrant \
+            -run '^(TestSessionMigration(AcrossRealWorkerProcesses|VerifyFailureDoesNotCutover)|TestKnowledgeMigration(AcrossRealWorkerProcesses|CopiesQdrantPointEndToEnd))$' \
+            -count=1 -v 2>&1 | tee test-results/migration-go-test.log
+      - name: scan migration evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if [ -d test-results ] && rg -n -i 'app[_-]?secret|password|authorization|bearer|access[_-]?token|refresh[_-]?token|api[_-]?key|prompt|completion|raw[_-]?(request|tool|body)|postgres://[^[:space:]]+:[^@[:space:]]+@' test-results; then
+            echo "sensitive field found in migration evidence"
+            exit 1
+          fi
+      - name: upload migration summaries
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-e2e-${{ github.run_id }}
+          path: |
+            test-results/migration-crash-resume.json
+            test-results/migration-verify-fail.json
+            test-results/knowledge-migration-crash-resume.json
+          if-no-files-found: error
+      - name: upload migration diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-e2e-diagnostics-${{ github.run_id }}
+          path: test-results
+          if-no-files-found: warn

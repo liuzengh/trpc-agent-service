@@ -1,0 +1,191 @@
+name: Capacity Evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: Concurrent requests
+        required: true
+        default: "4"
+        type: string
+      requests:
+        description: Total requests; use 0 with duration
+        required: true
+        default: "100"
+        type: string
+      duration:
+        description: Optional duration such as 5m
+        required: false
+        default: ""
+        type: string
+      max_error_rate:
+        description: Maximum allowed fraction of failed requests
+        required: true
+        default: "0.05"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capacity-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: trpc-agent-service-capacity-${{ github.run_id }}
+      CAPACITY_CONCURRENCY: ${{ inputs.concurrency }}
+      CAPACITY_REQUESTS: ${{ inputs.requests }}
+      CAPACITY_DURATION: ${{ inputs.duration }}
+      CAPACITY_MAX_ERROR_RATE: ${{ inputs.max_error_rate }}
+      CAPACITY_POSTGRES_DSN: postgres://trpc:development-only-change-me@127.0.0.1:55432/trpc_agent_service?sslmode=disable
+      TRPC_AGENT_SERVICE_REDIS_STREAM: trpc-agent-service:dispatch
+      TRPC_AGENT_SERVICE_REDIS_GROUP: workers
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: validate capacity topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml config --quiet
+      - name: start disposable capacity topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml \
+            up -d --build --wait postgres redis qdrant otel-collector prometheus gateway channel worker-1 worker-2
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/readyz >/dev/null; then
+              exit 0
+            fi
+            if [ "$attempt" = 30 ]; then
+              docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml \
+                logs --no-color gateway channel worker-1 worker-2
+              exit 1
+            fi
+            sleep 2
+          done
+      - name: provision auth and run measured evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          capacity_api_key_file="$RUNNER_TEMP/trpc-agent-service-capacity-api-key"
+          mkdir -p data/capacity
+          umask 077
+          TRPC_AGENT_SERVICE_POSTGRES_DSN="$CAPACITY_POSTGRES_DSN" \
+            TRPC_CAPACITY_API_KEY_FILE="$capacity_api_key_file" go run ./cmd/capacity-prepare
+          test -s "$capacity_api_key_file"
+          export TRPC_AGENT_SERVICE_CAPACITY_API_KEY="$(<"$capacity_api_key_file")"
+          test -n "$TRPC_AGENT_SERVICE_CAPACITY_API_KEY"
+          duration_args=()
+          if [ -n "$CAPACITY_DURATION" ]; then
+            duration_args=(-duration "$CAPACITY_DURATION")
+          fi
+          python3 scripts/capacity-observe.py \
+            --report data/capacity/capacity-${{ github.run_id }}.json \
+            --sample-interval 2 \
+            --workload-type http_chat_completions \
+            --model-type deterministic \
+            -- \
+            go run ./cmd/capacity-evaluate \
+              -endpoint http://127.0.0.1:8080/v1/chat/completions \
+              -require-api-key \
+              -max-error-rate "$CAPACITY_MAX_ERROR_RATE" \
+              -concurrency "$CAPACITY_CONCURRENCY" \
+              -requests "$CAPACITY_REQUESTS" \
+              "${duration_args[@]}"
+          test -s data/capacity/capacity-${{ github.run_id }}.json
+      - name: verify capacity success criteria
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="data/capacity/capacity-${{ github.run_id }}.json"
+          test -s "$report"
+          jq -e '(.total_requests > 0) and (.error_rate <= .max_error_rate) and (.success_criteria_passed == true)' "$report" >/dev/null
+      - name: publish capacity summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="data/capacity/capacity-${{ github.run_id }}.json"
+          {
+            echo "## Capacity"
+            if [ ! -s "$report" ]; then
+              echo "- Result: report unavailable"
+            elif summary="$(jq -r '
+              "- Requests: " + (.total_requests|tostring) + " (success=" + (.success|tostring) + ", failure=" + (.failure|tostring) + ")\n" +
+              "- Error rate: " + (.error_rate|tostring) + " (max=" + (.max_error_rate|tostring) + ")\n" +
+              "- Throughput: " + (.throughput_requests_per_second|tostring) + " req/s\n" +
+              "- Latency ms: p50=" + (.latency_p50_ms|tostring) + ", p95=" + (.latency_p95_ms|tostring) + ", p99=" + (.latency_p99_ms|tostring) + ", max=" + (.latency_max_ms|tostring) + "\n" +
+              "- Run: " + (.environment.github_run_id|tostring) + ", SHA=" + (.environment.git_sha|tostring) + ", workload=" + (.environment.workload_type|tostring) + ", model=" + (.environment.model|tostring) + "\n" +
+              "- Sampling: count=" + (.runtime_metrics.sample_count|tostring) + ", configured=" + (.runtime_metrics.configured_sample_interval_seconds|tostring) + " sec, observed=" + (.runtime_metrics.observed_average_interval_seconds|tostring) + " sec\n" +
+              "- Runtime peak: gateway cpu=" + (.runtime_metrics.gateway.cpu_peak_percent|tostring) + "%, memory=" + (.runtime_metrics.gateway.memory_peak_bytes|tostring) + " bytes; workers cpu=" + (.runtime_metrics.worker_cpu_peak_percent|tostring) + "%, memory=" + (.runtime_metrics.worker_memory_peak_bytes|tostring) + " bytes\n" +
+              "- Redis: pending peak=" + (.redis_metrics.pending_peak|tostring) + ", lag peak=" + (.redis_metrics.lag_peak|tostring) + ", final pending=" + (.redis_metrics.final_pending|tostring) + ", final lag=" + (.redis_metrics.final_lag|tostring) + ", commands=" + (.redis_metrics.total_commands_delta|tostring) + " (" + (.redis_metrics.average_commands_per_second|tostring) + " / sec)\n" +
+              "- PostgreSQL: transactions=" + (.postgres_metrics.transactions_delta|tostring) + ", writes=" + (.postgres_metrics.write_delta|tostring) + ", tx/sec=" + (.postgres_metrics.average_transactions_per_second|tostring) + ", writes/sec=" + (.postgres_metrics.average_write_operations_per_second|tostring) + "\n" +
+              "- Business metrics: tokens/s peak=" + (.business_metrics.peak.token_rate|tostring) + ", cost/s peak=" + (.business_metrics.peak.cost_rate|tostring) + ", model p95 peak=" + (.business_metrics.peak.model_latency_p95_seconds|tostring) + " sec, tool p95 peak=" + (.business_metrics.peak.tool_latency_p95_seconds|tostring) + " sec, queue lag p95 peak=" + (.business_metrics.peak.queue_lag_p95_seconds|tostring) + " sec, callback failure ratio peak=" + (.business_metrics.peak.callback_failure_ratio|tostring) + ", reply failure ratio peak=" + (.business_metrics.peak.reply_failure_ratio|tostring) + "\n" +
+              "- Infrastructure metrics: " + (.infrastructure_metrics_status|tostring) + "\n" +
+              "- Success criteria: " + (.success_criteria_passed|tostring)
+            ' "$report")"; then
+              printf '%s\n' "$summary"
+            else
+              echo "- Result: report is invalid"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: collect capacity diagnostics
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          mkdir -p test-results
+          docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml \
+            logs --no-color gateway channel worker-1 worker-2 postgres redis qdrant > test-results/compose.log 2>&1 || true
+          docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml \
+            ps -a > test-results/compose-ps.txt 2>&1 || true
+      - name: scan capacity artifacts
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sensitive='authorization:|bearer |postgres://[^[:space:]]+:[^@[:space:]]+@|api[_-]?key|raw[_-]?secret|raw[_-]?payload'
+          found=0
+          for root in data/capacity test-results; do
+            [ -d "$root" ] || continue
+            while IFS= read -r -d '' file; do
+              if rg -n -i "$sensitive" "$file"; then
+                echo "sensitive value found in capacity artifact: $file" >&2
+                rm -f "$file"
+                found=1
+              fi
+            done < <(find "$root" -type f -print0)
+          done
+          test "$found" = 0
+      - name: upload measured report
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: capacity-${{ github.run_id }}
+          path: data/capacity/capacity-${{ github.run_id }}.json
+          if-no-files-found: error
+      - name: upload capacity diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: capacity-diagnostics-${{ github.run_id }}
+          path: |
+            data/capacity
+            test-results
+          if-no-files-found: warn
+      - name: clean capacity topology and credential
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/trpc-agent-service-capacity-api-key"
+          docker compose --env-file .env.example -f compose.yaml -f compose.deployment-e2e.yaml \
+            down --volumes --remove-orphans || true

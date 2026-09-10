@@ -1,0 +1,143 @@
+name: IM E2E
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: im-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  feishu-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: trpc_agent_service_test
+          POSTGRES_USER: trpc
+          POSTGRES_PASSWORD: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trpc -d trpc_agent_service_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: run Feishu deterministic E2E
+        env:
+          TRPC_AGENT_SERVICE_POSTGRES_TEST_DSN: postgres://trpc:ci@127.0.0.1:5432/trpc_agent_service_test?sslmode=disable
+          TRPC_AGENT_SERVICE_REDIS_TEST_URL: redis://127.0.0.1:6379/0
+          IM_E2E_REPORT_PATH: ${{ github.workspace }}/test-results/feishu-summary.json
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          go test -tags='integration,e2e' ./trpcservice/postgres -run '^TestDeterministicFeishuE2E$' -count=1 -v \
+            2>&1 | tee test-results/feishu-go-test.log
+      - name: verify Feishu evidence has no sensitive fields
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if [ -d test-results ] && rg -n -i 'app[_-]?secret|bot[_-]?secret|password|authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|prompt|completion|raw[_-]?(request|tool|body)' test-results; then
+            echo "sensitive field found in deterministic evidence"
+            exit 1
+          fi
+      - name: upload Feishu summary
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: im-e2e-feishu-${{ github.run_id }}
+          path: test-results/feishu-summary.json
+          if-no-files-found: error
+      - name: upload Feishu diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: im-e2e-feishu-diagnostics-${{ github.run_id }}
+          path: test-results
+          if-no-files-found: warn
+
+  wecom-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: trpc_agent_service_test
+          POSTGRES_USER: trpc
+          POSTGRES_PASSWORD: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trpc -d trpc_agent_service_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: run WeCom deterministic E2E
+        env:
+          TRPC_AGENT_SERVICE_POSTGRES_TEST_DSN: postgres://trpc:ci@127.0.0.1:5432/trpc_agent_service_test?sslmode=disable
+          TRPC_AGENT_SERVICE_REDIS_TEST_URL: redis://127.0.0.1:6379/0
+          IM_E2E_REPORT_PATH: ${{ github.workspace }}/test-results/wecom-summary.json
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          go test -tags='integration,e2e' ./trpcservice/postgres -run '^TestDeterministicWeComE2E$' -count=1 -v \
+            2>&1 | tee test-results/wecom-go-test.log
+      - name: verify WeCom evidence has no sensitive fields
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if [ -d test-results ] && rg -n -i 'app[_-]?secret|bot[_-]?secret|password|authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|prompt|completion|raw[_-]?(request|tool|body)' test-results; then
+            echo "sensitive field found in deterministic evidence"
+            exit 1
+          fi
+      - name: upload WeCom summary
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: im-e2e-wecom-${{ github.run_id }}
+          path: test-results/wecom-summary.json
+          if-no-files-found: error
+      - name: upload WeCom diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: im-e2e-wecom-diagnostics-${{ github.run_id }}
+          path: test-results
+          if-no-files-found: warn

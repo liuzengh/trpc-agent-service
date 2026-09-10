@@ -1,0 +1,189 @@
+groups:
+  - name: trpc-agent-service-control-plane
+    interval: 15s
+    rules:
+      - alert: TRPCAgentNoHealthyWorker
+        expr: max(trpc_agent_service_worker_count) < 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: No healthy worker is available
+          description: The control plane has observed no READY worker for at least two minutes.
+
+      - alert: TRPCAgentQueueLagHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(trpc_agent_service_queue_lag_bucket[5m]))) > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Queue lag is high
+          description: The p95 execution queue wait has exceeded 30 seconds for five minutes.
+
+      - alert: TRPCAgentWorkerCapacitySaturated
+        expr: max(trpc_agent_service_worker_utilization) > 0.9 and max(trpc_agent_service_queue_backlog) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker capacity is saturated
+          description: Worker utilization is above 90 percent while executable queue backlog is non-zero.
+
+      - alert: TRPCAgentModelLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(trpc_agent_service_model_latency_bucket[5m]))) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Model latency is high
+          description: The p95 model call latency has exceeded five seconds for five minutes.
+
+      - alert: TRPCAgentToolFailureHigh
+        expr: sum(rate(trpc_agent_service_tool_errors_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Tool failures are high
+          description: Tool failures exceed 0.1 events per second for five minutes.
+
+      - alert: TRPCAgentPostgresUnavailable
+        expr: min(trpc_agent_service_backend_ready{provider="postgres"}) < 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: PostgreSQL is unavailable
+          description: The service control plane cannot confirm PostgreSQL readiness.
+
+      - alert: TRPCAgentRedisUnavailable
+        expr: min(trpc_agent_service_backend_ready{provider="redis"}) < 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Redis is unavailable
+          description: The service control plane cannot confirm Redis readiness.
+
+      - alert: TRPCAgentReplyFailureHigh
+        expr: sum(rate(trpc_agent_service_im_reply_failure_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Reply delivery failures are high
+          description: Reply delivery failures exceed 0.1 events per second for five minutes.
+
+      - alert: TRPCAgentAuditBacklog
+        expr: max(trpc_agent_service_audit_backlog) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Audit backlog is non-zero
+          description: Audit delivery backlog has remained non-zero for five minutes.
+
+      - alert: TRPCAgentMigrationStuck
+        expr: max(trpc_agent_service_migration_stuck) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A data migration is stuck
+          description: At least one migration has not advanced for five minutes.
+
+      - alert: TRPCAgentIMDeliveryFailureSpike
+        expr: |
+          sum(rate(trpc_agent_service_im_reply_failure_total[5m]))
+            /
+          clamp_min(
+            sum(rate(trpc_agent_service_im_reply_success_total[5m]))
+            + sum(rate(trpc_agent_service_im_reply_failure_total[5m])), 1
+          ) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: IM delivery failure ratio is high
+          description: More than 20 percent of observed IM replies have failed for five minutes.
+
+      - alert: TRPCAgentIMCallbackFailureSpike
+        expr: |
+          sum(rate(trpc_agent_service_im_callback_count_total{result="failure"}[5m]))
+            /
+          clamp_min(sum(rate(trpc_agent_service_im_callback_count_total[5m])), 1) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: IM callback failure ratio is high
+          description: More than 20 percent of observed inbound IM callbacks have failed for five minutes.
+
+      - alert: TRPCAgentQuotaRejections
+        expr: sum(rate(trpc_agent_service_governance_rejected_total{error_type="quota_exceeded"}[5m])) > 0
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: Period quota is rejecting traffic
+          description: Tenant or application period quotas have rejected requests for ten minutes.
+
+      # These three alerts are the minimal candidate-health signals. An
+      # operator or Alertmanager integration passes the alert's
+      # tenant_id/app_id/config_version and the aggregated window to
+      # /admin/v1/configs/canary/evaluate. That endpoint performs the
+      # version-guarded Pause or Rollback and writes the audit event.
+      - alert: TRPCAgentCanaryErrorRateHigh
+        expr: |
+          (
+            sum by (tenant_id, app_id, config_version) (
+              rate(trpc_agent_service_execution_error_count_total[5m])
+            )
+            /
+            clamp_min(
+              sum by (tenant_id, app_id, config_version) (
+                rate(trpc_agent_service_execution_count_total[5m])
+              ), 1
+            )
+          ) > 0.10
+          and
+          sum by (tenant_id, app_id, config_version) (
+            increase(trpc_agent_service_execution_count_total[5m])
+          ) >= 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Canary execution error rate is high
+          description: Candidate execution error rate is above 10 percent after the minimum 20-sample guard.
+
+      - alert: TRPCAgentCanaryP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (tenant_id, app_id, config_version, le) (
+              rate(trpc_agent_service_execution_latency_bucket[5m])
+            )
+          ) > 5
+          and
+          sum by (tenant_id, app_id, config_version) (
+            increase(trpc_agent_service_execution_count_total[5m])
+          ) >= 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Canary p95 execution latency is high
+          description: Candidate p95 execution latency is above five seconds after the minimum 20-sample guard.
+
+      - alert: TRPCAgentCanaryBudgetRejections
+        expr: |
+          sum by (tenant_id, app_id, config_version) (
+            increase(trpc_agent_service_governance_rejected_total{error_type="budget_rejected"}[5m])
+          ) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Canary budget rejection threshold is breached
+          description: Candidate executions have produced budget rejections in the last five minutes.

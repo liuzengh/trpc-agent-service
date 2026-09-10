@@ -1,0 +1,7 @@
+# These are deterministic, non-secret test inputs from the initial platform
+# contract tests. Keep the entries fingerprint-scoped so a changed file or
+# newly introduced value is still reported.
+996e69dc45f8c0946f1ec8a181440d9db494c25b:trpcservice/log/log_test.go:generic-api-key:42
+996e69dc45f8c0946f1ec8a181440d9db494c25b:trpcservice/log/log_test.go:generic-api-key:45
+9deeafa3a9135fe336961303725cef0dd869be9f:trpcservice/auth/auth_test.go:generic-api-key:16
+9deeafa3a9135fe336961303725cef0dd869be9f:trpcservice/ingress/openai_test.go:generic-api-key:126

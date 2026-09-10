@@ -1,0 +1,52 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: trpc-agent-service-dev
+resources:
+  - ../../base
+images:
+  - name: trpc-agent-service
+    newName: trpc-agent-service
+    newTag: dev
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: trpc-agent-service-gateway
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: trpc-agent-service-worker
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      group: autoscaling
+      version: v2
+      kind: HorizontalPodAutoscaler
+      name: trpc-agent-service-gateway
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 2
+  - target:
+      group: autoscaling
+      version: v2
+      kind: HorizontalPodAutoscaler
+      name: trpc-agent-service-worker
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 2

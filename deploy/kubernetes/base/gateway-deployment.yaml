@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-service-gateway
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: gateway
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: gateway
+          image: trpc-agent-service:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: trpc-agent-service-config
+            - secretRef:
+                name: trpc-agent-service-secrets
+            - secretRef:
+                name: trpc-agent-service-admin-secrets
+          env:
+            - name: TRPC_AGENT_SERVICE_ROLE
+              value: gateway
+            - name: TRPC_AGENT_SERVICE_HTTP_ADDR
+              value: :8080
+            - name: TRPC_AGENT_SERVICE_DISPATCHER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TRPC_AGENT_SERVICE_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: TRPC_AGENT_SERVICE_POSTGRES_DSN
+            - name: TRPC_AGENT_SERVICE_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: TRPC_AGENT_SERVICE_REDIS_URL
+            - name: TRPC_AGENT_SERVICE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-admin-secrets
+                  key: TRPC_AGENT_SERVICE_ADMIN_TOKEN
+          volumeMounts:
+            - name: platform-secrets
+              mountPath: /var/run/secrets/trpc-agent-service
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: platform-secrets
+          secret:
+            secretName: trpc-agent-service-secrets

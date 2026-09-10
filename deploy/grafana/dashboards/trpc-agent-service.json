@@ -1,0 +1,120 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "title": "Gateway RPS",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(rate(trpc_agent_service_request_count_total[5m]))", "legendFormat": "requests/s", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+    {
+      "title": "Request errors",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "targets": [{"expr": "sum(rate(trpc_agent_service_error_count_total[5m]))", "legendFormat": "errors/s", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+    {
+      "title": "Worker active / capacity / utilization",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "targets": [
+        {"expr": "max(trpc_agent_service_execution_active)", "legendFormat": "active", "refId": "A"},
+        {"expr": "max(trpc_agent_service_worker_capacity)", "legendFormat": "capacity", "refId": "B"},
+        {"expr": "max(trpc_agent_service_worker_utilization)", "legendFormat": "utilization", "refId": "C"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "title": "Queue backlog / lag p95",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "max(trpc_agent_service_queue_backlog)", "legendFormat": "backlog", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(trpc_agent_service_queue_lag_bucket[5m])))", "legendFormat": "p95 lag (s)", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "title": "Retry / reply backlog",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "max(trpc_agent_service_execution_retry_backlog)", "legendFormat": "execution retry", "refId": "A"},
+        {"expr": "max(trpc_agent_service_im_reply_backlog)", "legendFormat": "reply", "refId": "B"},
+        {"expr": "sum(rate(trpc_agent_service_execution_retry_count_total[5m]))", "legendFormat": "retry/s", "refId": "C"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "title": "Model latency / tokens / cost",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(trpc_agent_service_model_latency_bucket[5m])))", "legendFormat": "model p95 (s)", "refId": "A"},
+        {"expr": "sum(rate(trpc_agent_service_tenant_model_token_usage_total[5m]))", "legendFormat": "tokens/s", "refId": "B"},
+        {"expr": "sum(rate(trpc_agent_service_tenant_estimated_cost_total[5m]))", "legendFormat": "cost/s", "refId": "C"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "title": "Tool latency / errors",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(trpc_agent_service_tool_latency_bucket[5m])))", "legendFormat": "tool p95 (s)", "refId": "A"},
+        {"expr": "sum(rate(trpc_agent_service_tool_errors_total[5m]))", "legendFormat": "errors/s", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "title": "Session / memory / knowledge latency",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(trpc_agent_service_session_operation_latency_bucket[5m])))", "legendFormat": "session p95 (s)", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(trpc_agent_service_memory_operation_latency_bucket[5m])))", "legendFormat": "memory p95 (s)", "refId": "B"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(trpc_agent_service_knowledge_operation_latency_bucket[5m])))", "legendFormat": "knowledge p95 (s)", "refId": "C"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "title": "IM delivery",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "targets": [
+        {"expr": "sum(rate(trpc_agent_service_im_callback_count_total[5m]))", "legendFormat": "callback/s", "refId": "C"},
+        {"expr": "sum(rate(trpc_agent_service_im_reply_success_total[5m]))", "legendFormat": "success/s", "refId": "A"},
+        {"expr": "sum(rate(trpc_agent_service_im_reply_failure_total[5m]))", "legendFormat": "failure/s", "refId": "B"},
+        {"expr": "sum(rate(trpc_agent_service_im_reply_failure_total[5m])) / clamp_min(sum(rate(trpc_agent_service_im_reply_success_total[5m])) + sum(rate(trpc_agent_service_im_reply_failure_total[5m])), 1)", "legendFormat": "reply failure ratio", "refId": "D"},
+        {"expr": "sum(rate(trpc_agent_service_im_callback_count_total{result=\"failure\"}[5m])) / clamp_min(sum(rate(trpc_agent_service_im_callback_count_total[5m])), 1)", "legendFormat": "callback failure ratio", "refId": "E"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+    {
+      "title": "Migrations / approvals / audit",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
+      "targets": [
+        {"expr": "max(trpc_agent_service_migration_active)", "legendFormat": "active migrations", "refId": "A"},
+        {"expr": "max(trpc_agent_service_migration_stuck)", "legendFormat": "stuck migrations", "refId": "B"},
+        {"expr": "max(trpc_agent_service_migration_progress)", "legendFormat": "migration progress", "refId": "C"},
+        {"expr": "max(trpc_agent_service_approval_pending)", "legendFormat": "pending approvals", "refId": "D"},
+        {"expr": "sum(rate(trpc_agent_service_audit_write_failure_total[5m]))", "legendFormat": "audit write failures/s", "refId": "E"},
+        {"expr": "max(trpc_agent_service_audit_backlog)", "legendFormat": "audit backlog", "refId": "F"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["trpc-agent-service", "operations"],
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "title": "trpc-agent-service Operations",
+  "uid": "trpc-agent-service-operations",
+  "version": 1
+}

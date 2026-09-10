@@ -1,0 +1,113 @@
+name: Admin UI Golden Path
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: admin-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  admin-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      COMPOSE_PROJECT_NAME: trpc-agent-service-admin-${{ github.run_id }}
+      COMPOSE_PARALLEL_LIMIT: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: validate rendered admin topology
+        run: docker compose --env-file .env.example -f compose.yaml -f compose.admin-e2e.yaml config --quiet
+
+      - name: build and start admin topology
+        run: |
+          docker compose --env-file .env.example -f compose.yaml -f compose.admin-e2e.yaml \
+            up -d --build --wait postgres redis qdrant gateway channel worker-1 worker-2 admin-ui
+
+      - name: provision real control-plane fixture
+        env:
+          TRPC_AGENT_SERVICE_GATEWAY_URL: http://127.0.0.1:8080
+          TRPC_AGENT_SERVICE_POSTGRES_DSN: postgres://trpc:development-only-change-me@127.0.0.1:55432/trpc_agent_service?sslmode=disable
+          TRPC_AGENT_SERVICE_ADMIN_TOKEN: development-only-admin-token
+          TRPC_ADMIN_UI_E2E_FIXTURE: ${{ github.workspace }}/test-results/admin-ui-fixture.json
+        run: |
+          mkdir -p test-results
+          go run ./cmd/admin-ui-e2e
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: admin-ui/package-lock.json
+
+      - name: install Admin UI test dependencies
+        run: npm ci --prefix admin-ui --ignore-scripts --no-audit --no-fund
+
+      - name: install Playwright browser
+        working-directory: admin-ui
+        run: npx playwright install --with-deps chromium
+
+      - name: run Admin UI golden path
+        env:
+          TRPC_AGENT_SERVICE_ADMIN_TOKEN: development-only-admin-token
+          TRPC_ADMIN_UI_E2E_FIXTURE: ${{ github.workspace }}/test-results/admin-ui-fixture.json
+        run: |
+          set -euo pipefail
+          npm run test:e2e --prefix admin-ui -- --reporter=line 2>&1 \
+            | tee test-results/playwright.log
+
+      - name: collect Compose logs
+        if: ${{ always() }}
+        run: |
+          docker compose --env-file .env.example -f compose.yaml -f compose.admin-e2e.yaml \
+            logs --no-color gateway channel worker-1 worker-2 admin-ui > test-results/compose.log 2>&1 || true
+
+      - name: scan Admin UI evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=0
+          for directory in test-results admin-ui/test-results; do
+            [ -d "$directory" ] || continue
+            for file in "$directory"/*; do
+              [ -f "$file" ] || continue
+              if rg -n -i 'admin-ui-e2e-raw-secret|authorization: bearer|postgres://[^[:space:]]+:[^@[:space:]]+@|TRPC_AGENT_SERVICE_ADMIN_TOKEN=' "$file"; then
+                echo "sensitive value found in Admin UI evidence: $file" >&2
+                rm -f "$file"
+                found=1
+              fi
+            done
+          done
+          test "$found" = 0
+
+      - name: upload Admin UI summary
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-e2e-${{ github.run_id }}
+          path: test-results/admin-ui-fixture.json
+          if-no-files-found: error
+      - name: upload Admin UI diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-e2e-diagnostics-${{ github.run_id }}
+          path: |
+            test-results
+            admin-ui/test-results
+          if-no-files-found: warn
+
+      - name: clean shutdown
+        if: ${{ always() }}
+        run: docker compose --env-file .env.example -f compose.yaml -f compose.admin-e2e.yaml down --volumes --remove-orphans
