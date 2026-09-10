@@ -1,4 +1,4 @@
-// Package modelregistry stores immutable, tenant-owned model connections.
+// Package modelregistry stores tenant-owned versioned model connections.
 // API keys are never part of revisions or the public metadata type.
 package modelregistry
 
@@ -30,13 +30,20 @@ var ErrEndpoint = errors.New("模型地址未获部署者允许；请检查 TRPC
 var ErrInvalid = errors.New("模型连接需要有效的名称、模型 ID、API 地址和 API Key")
 
 type Connection struct {
-	TenantID  string    `json:"tenant_id"`
-	ID        string    `json:"connection_id"`
-	Name      string    `json:"name"`
-	Model     string    `json:"model_name"`
-	BaseURL   string    `json:"base_url"`
-	CreatedBy string    `json:"created_by"`
-	CreatedAt time.Time `json:"created_at"`
+	TenantID          string    `json:"tenant_id"`
+	ID                string    `json:"connection_id"`
+	Name              string    `json:"name"`
+	Model             string    `json:"model_name"`
+	BaseURL           string    `json:"base_url"`
+	CreatedBy         string    `json:"created_by"`
+	CreatedAt         time.Time `json:"created_at"`
+	RootID            string    `json:"root_connection_id"`
+	ConfigVersion     int64     `json:"config_version"`
+	CredentialVersion int64     `json:"credential_version"`
+	Version           int64     `json:"version"`
+	SupersededBy      string    `json:"superseded_by,omitempty"`
+	UpdatedBy         string    `json:"updated_by"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type Store struct {
@@ -81,7 +88,8 @@ func New(ctx context.Context, repository any, encodedKey, allowedOrigins string)
 		s.origins[origin(u)] = true
 	}
 	var mismatched bool
-	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM model_connection WHERE key_id<>$1)`, s.keyID).Scan(&mismatched); err != nil || mismatched {
+	var version int64
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM model_connection WHERE key_id<>$1),COALESCE(max(version),1) FROM model_connection`, s.keyID).Scan(&mismatched, &version); err != nil || mismatched {
 		return nil, ErrUnavailable
 	}
 	return s, nil
@@ -126,7 +134,7 @@ func (s *Store) executor(ctx context.Context) executor {
 	return s.db
 }
 
-const metadata = `tenant_id,connection_id,display_name,model_name,base_url,created_by,created_at`
+const metadata = `tenant_id,connection_id,display_name,model_name,base_url,created_by,created_at,root_connection_id,config_version,credential_version,version,COALESCE(superseded_by,''),updated_by,updated_at`
 
 func mapError(err error) error {
 	if err == nil {
@@ -149,7 +157,7 @@ type scanner interface{ Scan(...any) error }
 
 func scan(row scanner) (Connection, error) {
 	var c Connection
-	err := row.Scan(&c.TenantID, &c.ID, &c.Name, &c.Model, &c.BaseURL, &c.CreatedBy, &c.CreatedAt)
+	err := row.Scan(&c.TenantID, &c.ID, &c.Name, &c.Model, &c.BaseURL, &c.CreatedBy, &c.CreatedAt, &c.RootID, &c.ConfigVersion, &c.CredentialVersion, &c.Version, &c.SupersededBy, &c.UpdatedBy, &c.UpdatedAt)
 	return c, mapError(err)
 }
 func (s *Store) Get(ctx context.Context, tenant, id string) (Connection, error) {
@@ -198,6 +206,11 @@ func aad(c Connection) []byte {
 	return []byte("model-connection-v1\x00" + c.TenantID + "\x00" + c.ID + "\x00" + c.Model + "\x00" + c.BaseURL)
 }
 func (s *Store) Create(ctx context.Context, c Connection, apiKey string) (Connection, error) {
+	c.RootID, c.ConfigVersion = c.ID, 1
+	return s.insert(ctx, c, apiKey)
+}
+
+func (s *Store) insert(ctx context.Context, c Connection, apiKey string) (Connection, error) {
 	if s == nil {
 		return Connection{}, ErrUnavailable
 	}
@@ -209,19 +222,26 @@ func (s *Store) Create(ctx context.Context, c Connection, apiKey string) (Connec
 			return Connection{}, ErrInvalid
 		}
 	}
-	if strings.TrimSpace(apiKey) == "" || len(apiKey) > 16384 || strings.ContainsAny(apiKey, "\r\n\x00") {
-		return Connection{}, ErrInvalid
+	encrypted, err := s.encrypt(c, apiKey)
+	if err != nil {
+		return Connection{}, err
 	}
-	nonce := make([]byte, s.aead.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return Connection{}, ErrUnavailable
-	}
-	encrypted := s.aead.Seal(nonce, nonce, []byte(apiKey), aad(c))
-	_, err := s.executor(ctx).ExecContext(ctx, `INSERT INTO model_connection(tenant_id,connection_id,display_name,model_name,base_url,encrypted_key,key_id,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, c.TenantID, c.ID, c.Name, c.Model, c.BaseURL, encrypted, s.keyID, c.CreatedBy)
+	_, err = s.executor(ctx).ExecContext(ctx, `INSERT INTO model_connection(tenant_id,connection_id,display_name,model_name,base_url,encrypted_key,key_id,created_by,root_connection_id,config_version,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$8)`, c.TenantID, c.ID, c.Name, c.Model, c.BaseURL, encrypted, s.keyID, c.CreatedBy, c.RootID, c.ConfigVersion)
 	if err != nil {
 		return Connection{}, mapError(err)
 	}
 	return s.Get(ctx, c.TenantID, c.ID)
+}
+
+func (s *Store) encrypt(c Connection, apiKey string) ([]byte, error) {
+	if strings.TrimSpace(apiKey) == "" || len(apiKey) > 16384 || strings.ContainsAny(apiKey, "\r\n\x00") {
+		return nil, ErrInvalid
+	}
+	nonce := make([]byte, s.aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, ErrUnavailable
+	}
+	return s.aead.Seal(nonce, nonce, []byte(apiKey), aad(c)), nil
 }
 
 func (s *Store) Resolve(ctx context.Context, tenant, id string) (config.ModelConfig, error) {
@@ -232,35 +252,51 @@ func (s *Store) Resolve(ctx context.Context, tenant, id string) (config.ModelCon
 	if !s.allows(c.BaseURL) {
 		return config.ModelConfig{}, ErrEndpoint
 	}
+	u, _ := endpoint(c.BaseURL)
+	client := &http.Client{Transport: boundTransport{base: http.DefaultTransport, expectedOrigin: origin(u), store: s, connection: c}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	// The SDK only retains a placeholder. The real key is resolved and injected
+	// immediately before each HTTP request, including cached compiled Agents.
+	return config.ModelConfig{Provider: "openai", Name: c.Model, BaseURL: c.BaseURL, APIKey: "managed-credential", HTTPClient: client}, nil
+}
+
+func (s *Store) credential(ctx context.Context, c Connection) (string, error) {
 	var encrypted []byte
-	var keyID string
-	err = s.executor(ctx).QueryRowContext(ctx, `SELECT encrypted_key,key_id FROM model_connection WHERE tenant_id=$1 AND connection_id=$2`, tenant, id).Scan(&encrypted, &keyID)
+	var keyID, modelName, baseURL string
+	err := s.executor(ctx).QueryRowContext(ctx, `SELECT encrypted_key,key_id,model_name,base_url FROM model_connection WHERE tenant_id=$1 AND connection_id=$2`, c.TenantID, c.ID).Scan(&encrypted, &keyID, &modelName, &baseURL)
 	if err != nil {
-		return config.ModelConfig{}, mapError(err)
+		return "", mapError(err)
 	}
-	if keyID != s.keyID || len(encrypted) < s.aead.NonceSize()+s.aead.Overhead() {
-		return config.ModelConfig{}, ErrUnavailable
+	if keyID != s.keyID || modelName != c.Model || baseURL != c.BaseURL || len(encrypted) < s.aead.NonceSize()+s.aead.Overhead() {
+		return "", ErrUnavailable
 	}
 	key, err := s.aead.Open(nil, encrypted[:s.aead.NonceSize()], encrypted[s.aead.NonceSize():], aad(c))
 	if err != nil {
-		return config.ModelConfig{}, ErrUnavailable
+		return "", ErrUnavailable
 	}
-	u, _ := endpoint(c.BaseURL)
-	// Enforce destination on EVERY request, including cached compiled Agents.
-	// Redirects are rejected before credentials can be forwarded elsewhere.
-	client := &http.Client{Transport: boundTransport{base: http.DefaultTransport, expectedOrigin: origin(u), origins: s.origins}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return config.ModelConfig{Provider: "openai", Name: c.Model, BaseURL: c.BaseURL, APIKey: string(key), HTTPClient: client}, nil
+	return string(key), nil
 }
 
 type boundTransport struct {
 	base           http.RoundTripper
 	expectedOrigin string
-	origins        map[string]bool
+	store          *Store
+	connection     Connection
 }
 
 func (t boundTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.URL == nil || origin(r.URL) != t.expectedOrigin || !t.origins[t.expectedOrigin] {
+	if r.URL == nil || origin(r.URL) != t.expectedOrigin || !t.store.origins[t.expectedOrigin] {
 		return nil, ErrEndpoint
 	}
-	return t.base.RoundTrip(r)
+	key, err := t.store.credential(r.Context(), t.connection)
+	if err != nil {
+		return nil, err
+	} // Never fall back to an old cached credential.
+	request := r.Clone(r.Context())
+	request.Header.Set("Authorization", "Bearer "+key)
+	response, err := t.base.RoundTrip(request)
+	if response != nil {
+		// Do not expose the injected header through SDK response diagnostics.
+		response.Request = r
+	}
+	return response, err
 }

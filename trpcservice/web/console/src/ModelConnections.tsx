@@ -16,6 +16,7 @@ import { api, errorText } from "./api";
 import { Blank, Failure, Icon, PageHeading, Panel } from "./components";
 import { date, type Principal } from "./types";
 import { navigate } from "./App";
+import { EditModelConnection } from "./EditModelConnection";
 
 export interface ModelConnection {
   tenant_id: string;
@@ -24,6 +25,12 @@ export interface ModelConnection {
   model_name: string;
   base_url: string;
   created_at: string;
+  root_connection_id: string;
+  config_version: number;
+  credential_version: number;
+  version: number;
+  superseded_by?: string;
+  updated_at: string;
 }
 export interface ModelConnectionPage {
   items: ModelConnection[];
@@ -184,6 +191,10 @@ export function ModelConnections({
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<{
+    id: string;
+    rotate: boolean;
+  } | null>(null);
   useEffect(() => {
     let live = true;
     setError("");
@@ -230,30 +241,75 @@ export function ModelConnections({
               type="info"
               showIcon
               title="此部署尚未启用网页模型存储"
-              description="原有 .env 模型仍可使用。新体验 Compose 会自动生成加密密钥；已有部署需先备份、迁移到 schema 28，并向 Admin/Worker/Jobs 注入相同的 TRPC_AGENT_MODEL_MASTER_KEY。不要在网页中填写该加密密钥。"
+              description="原有 .env 模型仍可使用。新体验 Compose 会自动生成加密密钥；已有部署需先备份、迁移到 schema 29，并向 Admin/Worker/Jobs 注入相同的 TRPC_AGENT_MODEL_MASTER_KEY。不要在网页中填写该加密密钥。"
             />
           )}
           {principal.role !== "superadmin" && (
             <p className="muted">
-              你可以在 Agent 中选择本租户已有连接；新增凭据请联系平台管理员。
+              你可以在 Agent
+              中选择本租户已有连接；管理连接与密钥请联系平台管理员。
             </p>
           )}
           <Panel
             title="当前租户的连接"
-            subtitle="连接内容固定。更换模型或 Key 时新增连接，在 Agent 草稿中切换并重新调试、发布，不会暗中改变已发布版本。"
+            subtitle="名称可编辑，Key 可单独更新。修改模型或地址会生成新配置版本，原 Agent 不会被自动切换；密钥更新仅作用于所选配置版本。"
           >
             {data.items.length ? (
               <Table
                 rowKey="connection_id"
                 dataSource={data.items}
                 pagination={false}
-                scroll={{ x: 720 }}
+                scroll={{ x: 1100 }}
                 columns={[
                   { title: "名称", dataIndex: "name" },
+                  {
+                    title: "配置版本",
+                    render: (_, v) => (
+                      <Space direction="vertical" size={0}>
+                        <Tag>v{v.config_version}</Tag>
+                        {v.superseded_by && <Tag color="default">历史配置</Tag>}
+                      </Space>
+                    ),
+                  },
                   { title: "模型 ID", dataIndex: "model_name" },
                   { title: "API 地址", dataIndex: "base_url" },
-                  { title: "凭据", render: () => <Tag>已加密 · 不回显</Tag> },
-                  { title: "创建时间", render: (_, v) => date(v.created_at) },
+                  {
+                    title: "凭据",
+                    render: (_, v) => (
+                      <Tag>已加密 · v{v.credential_version}</Tag>
+                    ),
+                  },
+                  { title: "更新时间", render: (_, v) => date(v.updated_at) },
+                  {
+                    title: "操作",
+                    fixed: "right",
+                    render: (_, v) => (
+                      <Space>
+                        <Button
+                          type="link"
+                          disabled={
+                            principal.role !== "superadmin" || !data.enabled
+                          }
+                          onClick={() =>
+                            setEditing({ id: v.connection_id, rotate: false })
+                          }
+                        >
+                          编辑
+                        </Button>
+                        <Button
+                          type="link"
+                          disabled={
+                            principal.role !== "superadmin" || !data.enabled
+                          }
+                          onClick={() =>
+                            setEditing({ id: v.connection_id, rotate: true })
+                          }
+                        >
+                          更新 Key
+                        </Button>
+                      </Space>
+                    ),
+                  },
                 ]}
               />
             ) : (
@@ -302,6 +358,27 @@ export function ModelConnections({
           }}
         />
       )}
+      {editing && (
+        <EditModelConnection
+          key={editing.id + String(editing.rotate)}
+          tenant={tenant}
+          id={editing.id}
+          rotate={editing.rotate}
+          origins={data?.allowed_origins || []}
+          onCancel={() => setEditing(null)}
+          onSaved={(result) => {
+            setEditing(null);
+            setRefresh((v) => v + 1);
+            message.success(
+              result.new_config_version
+                ? `配置 v${result.connection.config_version} 已创建，请到 Agent 草稿中切换、调试并发布`
+                : result.key_changed
+                  ? "密钥已更新，后续调用读取新 Key；在途请求不受此操作撤回"
+                  : "连接名称已保存",
+            );
+          }}
+        />
+      )}
     </>
   );
 }
@@ -329,7 +406,13 @@ export function ConnectionSelect({
         placeholder="选择当前租户的模型连接"
         options={data.items.map((c) => ({
           value: c.connection_id,
-          label: c.name + " · " + c.model_name,
+          label:
+            c.name +
+            " · v" +
+            c.config_version +
+            " · " +
+            c.model_name +
+            (c.superseded_by ? "（历史配置）" : ""),
         }))}
         onChange={onChange}
       />

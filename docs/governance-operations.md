@@ -63,13 +63,18 @@ Kubernetes 的分角色 Secret、NetworkPolicy 和依赖标签要在实际集群
 
 ### 2.1 网页模型连接
 
-`modelregistry` 和 schema 28 增加不可变的租户模型连接，仅 `superadmin` 可通过 `POST /admin/model-connections/create` 配置；租户管理者只能查看/选用自身连接。创建与审计在同一 PostgreSQL 事务提交。Cookie 请求仍须通过同源和 CSRF 检查；没有匿名首次注册密钥的接口。
+`modelregistry` 提供租户模型连接，schema 29 在原加密存储上增加编辑、配置版本链和 API Key 更新。仅 `superadmin` 可调用 `model-connections/create`、`update`、`rotate-key`；`list`、`get` 仍要求对应租户的读取权限，租户管理者不能自行授予凭据。所有变更与审计在同一 PostgreSQL 事务提交，带 `expected_version` 防止覆盖并发修改。Cookie 请求仍须通过同源和 CSRF 检查；没有匿名首次注册密钥的接口。
 
 - API Key 使用 AES-256-GCM、随机 nonce 加密后写入 `model_connection`。附加认证数据绑定 tenant、connection ID、模型与地址，不能把密文复制给另一租户或换个地址继续解密。
 - 主密钥来自独立部署配置 `TRPC_AGENT_MODEL_MASTER_KEY`（base64 的 32 字节值），Admin/Worker/Jobs 必须一致。数据库只保存主密钥指纹，不存主密钥；配置缺失时功能关闭，不回退明文存储。指纹不匹配时启动失败。
-- 连接列表、Agent 草稿/版本和审计均不含 Key 或密文。模型配置只保存 `{"source":"connection","connection_id":"..."}`，不能同时覆盖 provider/name/base_url/api_key_ref；Worker 按当前可信 tenant 再解析连接，继续调用框架 `model/openai` 与 Runner。
+- 连接列表、Agent 草稿/版本和审计均不含 Key 或密文。模型配置只保存 `{"source":"connection","connection_id":"..."}`，不能同时覆盖 provider/name/base_url/api_key_ref；ID 固定一个模型/地址配置版本。Worker 按可信 tenant 解析，继续调用框架 `model/openai` 与 Runner。
 - `TRPC_AGENT_MODEL_ALLOWED_ORIGINS` 是部署者控制的精确地址允许列表，不接受通配符。保存/运行都检查地址；客户端拒绝重定向，避免将凭据转发给其他地址。它不取代出口防火墙、可信 DNS 和代理配置；本地 HTTP 仅供受保护开发网络使用。
-- 连接不可原地改 Key 或目的地址。更换时新增连接，再通过草稿/新快照/发布切换；紧急撤销在供应商侧执行。此版本没有在线密钥轮换管理，**不能直接替换主密钥**，也不能丢失 setup 卷后生成新密钥冒充恢复。
+- 名称可原地修改，不改变模型或地址。修改模型 ID/地址时生成新 connection_id 和递增配置版本，旧 ID 与已有 Agent/调试快照继续有效；已有后继的旧配置不能再次分叉，但仍能更名或更新它自己的 Key。新配置须显式通过 Agent 草稿、调试与发布切换。
+- API Key 可以独立更新：留空表示保留，填写新值表示更新；更换地址必须重新填写目标服务的 Key，不能自动向新地址转发旧凭据。Key 的版本只属于所选配置版本，不自动联动同组其他版本。已经发出的请求可能仍持有旧 Key，紧急撤销仍须在供应商侧执行。
+- 框架模型实例只保留凭据占位符；受控 HTTP transport 在每次请求前从共享 PostgreSQL 读取和解密当前 Key，再克隆请求并注入认证头。因此更新已提交后，新取用凭据的请求使用新 Key，包括缓存模型实例和其他 Worker；读取失败不会回退到旧缓存。数据库需使用一致的写主库，代价是每次模型请求多一次 SQL 读取。SDK 响应中的 Request 不保留注入后的认证头。
+- 页面展示草稿、稳定/灰度和其他发布版本的引用关系，不列出聊天内容，也不将历史引用等同于活跃流量。调试快照与旧会话也可能引用旧配置。审计记录连接 ID、配置版本、凭据版本、操作者和是否换 Key，不记录密钥。
+
+API Key 更新不等于加密主密钥轮换：**仍不能直接替换 `TRPC_AGENT_MODEL_MASTER_KEY`**，也不能丢失 setup 卷后生成新主密钥冒充恢复。首次升级此功能必须停旧 Worker 并升级相关执行节点，旧版模型实例不会自动获得新的逐请求凭据机制。
 
 完整体验 Compose 自动生成主密钥、数据库密码和 Admin Token 并放入专用 setup 卷；启动日志不输出它们。只有管理员显式执行 `trpc-init -show-token` 才显示登录凭据。数据库与 setup 卷应分别加密备份、限制访问；源码交付不包括这些卷。
 

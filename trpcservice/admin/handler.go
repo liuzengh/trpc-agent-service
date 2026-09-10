@@ -80,7 +80,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
-	case "/admin/model-connections/list", "/admin/model-connections/create":
+	case "/admin/model-connections/list", "/admin/model-connections/create", "/admin/model-connections/get", "/admin/model-connections/update", "/admin/model-connections/rotate-key":
 		h.handleModelConnections(w, r)
 	case "/admin/releases/list":
 		h.handleReleases(w, r)

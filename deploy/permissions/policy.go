@@ -35,6 +35,7 @@ func SQL(schema, prefix string) (string, error) {
 			fmt.Fprintf(&out, "GRANT UPDATE (status,error_type,completed_at) ON %s.agent_run TO %s;\nGRANT SELECT (tenant_id,request_id), UPDATE (status,processed_at) ON %s.inbound_message TO %s;\n", schema, name, schema, name)
 		}
 		if role == "admin" {
+			fmt.Fprintf(&out, "GRANT UPDATE (display_name,encrypted_key,credential_version,version,superseded_by,updated_by,updated_at) ON %s.model_connection TO %s;\n", schema, name)
 			fmt.Fprintf(&out, "GRANT EXECUTE ON FUNCTION %s.platform_reconcile_outbound_part(TEXT,TEXT,INTEGER,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT) TO %s;\n", schema, name)
 			fmt.Fprintf(&out, "GRANT EXECUTE ON FUNCTION %s.platform_tenant_policy_update(TEXT,BIGINT,JSONB,JSONB,TEXT,TEXT) TO %s;\n", schema, name)
 		}

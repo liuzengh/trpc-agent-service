@@ -639,7 +639,7 @@ export function Workbench({
                 {source === "connection" && (
                   <Form.Item
                     label="模型连接"
-                    help="连接的模型、地址和密钥由管理员固定。修改调用限额不会修改连接本身。"
+                    help="模型和地址固定到所选配置版本，Key 由管理员独立更新。选择新配置后请保存并新建调试，发布后再供业务使用。"
                   >
                     <ConnectionSelect
                       data={connections}

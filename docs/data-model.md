@@ -12,7 +12,7 @@
 
 以下 DDL 是最小逻辑模型，省略了组织成员、RBAC、计费明细和知识文档分片等扩展表。
 
-当前仓库的可执行 schema 由 [001–028 migrations](../trpcservice/database/migrations) 管理，核心包括：
+当前仓库的可执行 schema 由 [001–029 migrations](../trpcservice/database/migrations) 管理，核心包括：
 
 024 增加控制台存储：`admin_session`（登录摘要与到期时间）、`agent_draft`（带版本的草稿）、`debug_snapshot`（不可变执行配置）、`debug_session`（发起者与独立运行身份）、`debug_run`（消息、租约、审批关联和结果）、`debug_event`、`debug_tool_execution`、`debug_tool_approval`、`debug_approval_decision` 和 `console_worker`。这些表使用 tenant_id + record_id 主键、owner_id、app_id、status、version、JSONB data 和时间字段；具体数据形状由 Go 类型约束。
 
@@ -26,7 +26,9 @@
 
 027 增加 `agent_run.finalized_at`。completed 结果不可覆写；Worker 按 tenant/app/revision/conversation/turn/调度代数读取 Run 与 `message_kind=result` 的 Outbound，恢复时不依赖有 TTL 的 Redis 缓存。finalized_at 为空只允许补收尾，不重新调用 Agent。历史数据不批量回填该标记，避免把可能未提交的后台任务误认为已经完成；旧 dead/expired/unknown 记录仍不重放。
 
-028 增加 `model_connection`，主键 `(tenant_id, connection_id)`，包含 display_name、model_name、base_url、encrypted_key、key_id、created_by、created_at。API Key 的密文为 BYTEA；key_id 是独立部署主密钥的指纹，不能用于解密。连接不可修改，Agent 版本只记录同租户 connection_id；创建连接与审计原子提交。角色权限为 Admin SELECT/INSERT、Worker/Jobs SELECT，其余运行角色不获得此表权限。
+028 增加 `model_connection`，主键 `(tenant_id, connection_id)`，包含 display_name、model_name、base_url、encrypted_key、key_id、created_by、created_at。API Key 的密文为 BYTEA；key_id 是独立部署主密钥的指纹，不能用于解密。Agent 版本只记录同租户 connection_id，创建连接与审计原子提交。
+
+029 保留既有 ID、模型、地址与密文，新增 root_connection_id、config_version、credential_version、version、superseded_by、updated_by、updated_at。每个 ID 仍固定模型/地址；改配置时插入同根的新版本，并原子标记旧版本的后继。唯一约束 `(tenant_id,root_connection_id,config_version)` 与行锁防止并发分叉；同租户外键约束根与后继。名称和 API Key 可更新，version 为乐观锁，只有重写密文时 credential_version 才递增。数据库触发器禁止原地更换执行配置、跳过版本或覆盖既有后继。Admin 有 SELECT/INSERT 及限定列 UPDATE，Worker/Jobs 仅 SELECT，其余角色无此表权限。
 
 ```text
 tenant / agent_app / agent_revision / model_connection
