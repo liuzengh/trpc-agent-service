@@ -10,8 +10,15 @@ coverage.out
 coverage.html
 *.test
 *.exe
+# Locally built service binary; release artifacts belong in an image or release.
+/trpc-service
 
 vendor/
 
-data/*
-!data/README.md
+.workbuddy
+.trpc-ci-cache/
+deploy/compose/.env.local
+deploy/compose/.env.live-im
+deploy/compose/secrets/*
+!deploy/compose/secrets/.gitkeep
+deploy/smoke/*.env

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: trpc-gateway
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: gateway
+spec:
+  selector:
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

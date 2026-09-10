@@ -1,0 +1,131 @@
+name: trpc-agent-minimal
+
+# Disposable backend integration environment. Unlike the full local compose
+# (which binds 0.0.0.0 for local development), every host port here is bound to
+# 127.0.0.1 only. The suite starts real PostgreSQL 16 with pgvector, Redis 7,
+# MinIO, Qdrant and Vault services; its Go container runs the opt-in repository,
+# runtime and adapter integration tests. Nothing here uses IM, model, OTEL or
+# Kubernetes credentials.
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    profiles: ["observability"]
+    environment: {COLLECTOR_OTLP_ENABLED: "true"}
+    ports: ["127.0.0.1:${TRPC_MINIMAL_JAEGER_PORT:-56686}:16686"]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    profiles: ["observability"]
+    command: ["--config=/etc/otelcol-contrib/config.yml"]
+    volumes: [./otel-collector.yml:/etc/otelcol-contrib/config.yml:ro]
+    ports:
+      - "127.0.0.1:${TRPC_MINIMAL_OTEL_HTTP_PORT:-54318}:4318"
+      - "127.0.0.1:${TRPC_MINIMAL_OTEL_PROMETHEUS_PORT:-59464}:9464"
+    depends_on: {jaeger: {condition: service_started}}
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: ["observability"]
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["127.0.0.1:${TRPC_MINIMAL_PROMETHEUS_PORT:-59090}:9090"]
+    depends_on: {otel-collector: {condition: service_started}}
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    profiles: ["observability"]
+    environment: {GF_AUTH_ANONYMOUS_ENABLED: "true", GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["127.0.0.1:${TRPC_MINIMAL_GRAFANA_PORT:-53000}:3000"]
+    depends_on: {prometheus: {condition: service_started}}
+
+  postgres:
+    # Digests keep the disposable CI environment reproducible. Keep the human
+    # readable tag as well so an operator can identify the intended release.
+    # pgvector is part of the production PostgreSQL capability surface even
+    # though this suite currently exercises only relational contracts.
+    image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
+    # The migration matrix executes several repository contract suites against
+    # this disposable cluster. Keep its test-only connection ceiling above the
+    # default so a short-lived pool burst cannot mask an adapter failure.
+    command: ["postgres", "-c", "max_connections=200"]
+    environment: {POSTGRES_USER: trpc, POSTGRES_PASSWORD: trpc_test_password, POSTGRES_DB: postgres}
+    ports:
+      - "127.0.0.1:${TRPC_MINIMAL_PG_PORT:-55434}:5432"
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U trpc -d postgres"], interval: 2s, timeout: 3s, retries: 30}
+
+  redis:
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    ports:
+      - "127.0.0.1:${TRPC_MINIMAL_REDIS_PORT:-56381}:6379"
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 2s, timeout: 3s, retries: 30}
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z@sha256:a929054ae025fa7997857cd0e2a2e3029238e31ad89877326dc032f4c1a14259
+    command: server /data --console-address ":9001"
+    environment: {MINIO_ROOT_USER: minioadmin, MINIO_ROOT_PASSWORD: minioadmin}
+
+  # The Qdrant image ships a Debian-slim runtime with neither wget, curl nor
+  # bash, so it cannot self-report a shell healthcheck. The smoke container
+  # waits for /healthz instead; keep this service on service_started.
+  qdrant:
+    image: qdrant/qdrant:v1.13.6@sha256:bd67306b6cc77c98122cada2321eb60b20d00b19d26cb61c86681e7bd5951498
+    ports:
+      - "127.0.0.1:${TRPC_MINIMAL_QDRANT_PORT:-56334}:6333"
+
+  vault:
+    image: hashicorp/vault:1.18@sha256:750bb37c1638fa194ab37053a81618c61bb0491ddec6fccac87c07a8e6cd8166
+    cap_add: ["IPC_LOCK"]
+    command: server -dev -dev-root-token-id=trpc-dev-token -dev-listen-address=0.0.0.0:8200
+    ports:
+      - "127.0.0.1:${TRPC_MINIMAL_VAULT_PORT:-58202}:8200"
+    healthcheck: {test: ["CMD-SHELL", "VAULT_ADDR=http://127.0.0.1:8200 vault status >/dev/null"], interval: 2s, timeout: 3s, retries: 30}
+
+  smoke:
+    image: golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
+    working_dir: /src
+    volumes:
+      - ../..:/src:ro
+      # Coverage suites persist raw go cover profiles here; the adapter script
+      # creates the host directory and reads the profile back after the run.
+      - ${TRPC_COVERAGE_DIR:-/tmp/trpc-coverage-out}:/out
+    environment:
+      TRPC_E2E_SUITE: ${TRPC_E2E_SUITE:-all}
+      TRPC_E2E_COVERAGE: ${TRPC_E2E_COVERAGE:-}
+      TRPC_COVERAGE_OUT: /out/postgres-adapter.out
+      TRPC_RUNTIME_COVERAGE_OUT: /out/runtime-slice.out
+      TRPC_STORAGE_COVERAGE_OUT: /out/storage-e2e.out
+      TRPC_ARTIFACT_COVERAGE_OUT: /out/artifact-e2e.out
+      TRPC_MIN_POSTGRES_ADAPTER_COVERAGE: ${TRPC_MIN_POSTGRES_ADAPTER_COVERAGE:-}
+      TRPC_MIN_RUNTIME_SLICE_COVERAGE: ${TRPC_MIN_RUNTIME_SLICE_COVERAGE:-}
+      TRPC_MIN_STORAGE_E2E_COVERAGE: ${TRPC_MIN_STORAGE_E2E_COVERAGE:-}
+      TRPC_MIN_ARTIFACT_E2E_COVERAGE: ${TRPC_MIN_ARTIFACT_E2E_COVERAGE:-}
+      TRPC_MIGRATION_TEST: "1"
+      TRPC_RUNTIME_TEST: "1"
+      TRPC_POSTGRES_ADMIN_DSN: postgres://trpc:trpc_test_password@postgres:5432/postgres?sslmode=disable
+      TRPC_REDIS_TEST_ADDR: redis:6379
+      TRPC_QDRANT_TEST_ENDPOINT: http://qdrant:6333
+      TRPC_MINIO_TEST_ENDPOINT: http://minio:9000
+      TRPC_S3_ENDPOINT: http://minio:9000
+      TRPC_S3_BUCKET: trpc-smoke
+      TRPC_S3_REGION: us-east-1
+      TRPC_S3_ACCESS_KEY: minioadmin
+      TRPC_S3_SECRET_KEY: minioadmin
+      TRPC_S3_ALLOW_INSECURE: "1"
+      TRPC_OBJECTSTORE_SMOKE: "1"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      TRPC_VAULT_TEST_ENDPOINT: http://vault:8200
+      TRPC_VAULT_TEST_TOKEN: trpc-dev-token
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      qdrant: {condition: service_started}
+      minio: {condition: service_started}
+      vault: {condition: service_healthy}
+    command: ["bash", "scripts/internal/backend-adapter-inside.sh"]

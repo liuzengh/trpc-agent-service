@@ -1,0 +1,562 @@
+name: trpc-agent-local
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${TRPC_LOCAL_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}
+    ports:
+      - "${TRPC_LOCAL_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - local-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  compliance-postgres:
+    image: postgres:16
+    profiles: ["gateway-worker", "audit", "audit-migration"]
+    environment:
+      POSTGRES_USER: ${TRPC_LOCAL_COMPLIANCE_POSTGRES_USER:-compliance}
+      POSTGRES_PASSWORD: ${TRPC_LOCAL_COMPLIANCE_POSTGRES_PASSWORD:-compliance}
+      POSTGRES_DB: ${TRPC_LOCAL_COMPLIANCE_POSTGRES_DB:-trpc_agent_compliance}
+    ports:
+      - "${TRPC_LOCAL_COMPLIANCE_POSTGRES_PORT:-55433}:5432"
+    volumes:
+      - local-compliance-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    ports:
+      - "${TRPC_LOCAL_REDIS_PORT:-56379}:6379"
+    volumes:
+      - local-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    profiles: ["webui", "webui-multinode", "feishu-local", "wecom-local"]
+    volumes:
+      - local-qdrant:/qdrant/storage
+    # The local bootstrap creates a collection before either WebUI node can
+    # start. A started container is not enough: wait until Qdrant accepts an
+    # HTTP request so the bootstrap cannot race its storage initialization.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/6333; printf \"GET /healthz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; IFS= read -r line <&3; [[ \"$$line\" == *\" 200 \"* ]]'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  clamav:
+    # `1.4_base` is amd64-only. Pin the full official multi-arch image so the
+    # local media verification stack also works on Apple Silicon Docker Desktop.
+    image: clamav/clamav:1.4.6-debian13-slim
+    profiles: ["webui", "webui-multinode", "feishu-local", "wecom-local"]
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping=1 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+    profiles: ["gateway-worker", "codeexec"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${TRPC_LOCAL_MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${TRPC_LOCAL_MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${TRPC_LOCAL_MINIO_PORT:-59000}:9000"
+      - "${TRPC_LOCAL_MINIO_CONSOLE_PORT:-59001}:9001"
+    volumes:
+      - local-minio:/data
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    profiles: ["gateway-worker", "audit", "webui", "webui-multinode", "feishu-local", "wecom-local", "codeexec"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${TRPC_LOCAL_JAEGER_PORT:-56686}:16686"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    profiles: ["gateway-worker", "audit", "webui", "webui-multinode", "feishu-local", "wecom-local", "codeexec"]
+    command: ["--config=/etc/otelcol-contrib/config.yml"]
+    volumes:
+      - ./otel-collector.yml:/etc/otelcol-contrib/config.yml:ro
+    ports:
+      - "${TRPC_LOCAL_OTEL_HTTP_PORT:-54318}:4318"
+      - "${TRPC_LOCAL_OTEL_PROMETHEUS_PORT:-59464}:9464"
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  runtime-test:
+    image: golang:1.25-bookworm
+    profiles: ["runtime-test"]
+    working_dir: /src
+    volumes:
+      - ../..:/src:ro
+    environment:
+      TRPC_MIGRATION_TEST: "1"
+      TRPC_RUNTIME_TEST: "1"
+      TRPC_POSTGRES_ADMIN_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_POSTGRES_TEST_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_TEST_ADDR: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    command: ["bash", "scripts/compose/runtime-slice-test.sh"]
+
+  # Docker creates named-volume roots as root-owned. The application image is
+  # deliberately distroless/nonroot and refuses to weaken its 0700 Skill
+  # staging permissions, so initialize ownership once before any local WebUI
+  # role mounts the shared catalog.
+  webui-local-skills-init:
+    image: busybox:1.36.1
+    profiles: ["webui", "webui-multinode", "feishu-local", "wecom-local"]
+    user: "0:0"
+    command: ["sh", "-ec", "chown 65532:65532 /var/lib/trpc-webui-local/skills && chmod 0700 /var/lib/trpc-webui-local/skills"]
+    volumes:
+      - webui-local-skills:/var/lib/trpc-webui-local/skills
+
+  codeexec-workspaces-init:
+    image: busybox:1.36.1
+    profiles: ["codeexec"]
+    user: "0:0"
+    command: ["sh", "-ec", "chown 65532:65532 /var/lib/trpc/codeexecutor && chmod 0700 /var/lib/trpc/codeexecutor"]
+    volumes:
+      - codeexec-workspaces:/var/lib/trpc/codeexecutor
+
+  webui-local:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["webui"]
+    command: ["webui-local"]
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_WEBUI_LOCAL_CLAMAV_ADDRESS: clamav:3310
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_WEBUI_LOCAL_EXCLUSIVE_RUNTIME: "true"
+      TRPC_WEBUI_DEEPSEEK_KEY_FILE: /run/secrets/deepseek_api_key
+      TRPC_WEBUI_LOCAL_SKILL_STAGING_ROOT: /var/lib/trpc-webui-local/skills
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    secrets:
+      - deepseek_api_key
+    volumes:
+      - webui-local-skills:/var/lib/trpc-webui-local/skills
+    ports:
+      - "${TRPC_LOCAL_WEBUI_PORT:-58081}:8080"
+    depends_on:
+      webui-local-skills-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      clamav:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # Development-only real Feishu callback and delivery loop. It intentionally
+  # reuses the WebUI local composition so PostgreSQL, Redis, the model worker,
+  # durable relays and delivery ledger are all exercised without cloud infra.
+  feishu-local:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["feishu-local"]
+    command: ["im-local"]
+    env_file:
+      - path: .env.local
+        required: false
+      - path: secrets/feishu.env
+        required: true
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_WEBUI_LOCAL_CLAMAV_ADDRESS: clamav:3310
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_WEBUI_LOCAL_EXCLUSIVE_RUNTIME: "true"
+      TRPC_FEISHU_LOCAL_ENABLED: "true"
+      TRPC_WEBUI_DEEPSEEK_KEY_FILE: /run/secrets/deepseek_api_key
+      TRPC_WEBUI_LOCAL_SKILL_STAGING_ROOT: /var/lib/trpc-webui-local/skills
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    secrets:
+      - deepseek_api_key
+    volumes:
+      - webui-local-skills:/var/lib/trpc-webui-local/skills
+    ports:
+      - "${TRPC_LOCAL_FEISHU_PORT:-58086}:8080"
+    depends_on:
+      webui-local-skills-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      clamav:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # Development-only real WeCom callback and delivery loop. Like feishu-local,
+  # it reuses the WebUI local composition while keeping app credentials in an
+  # ignored env file and all state in local Docker services.
+  wecom-local:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["wecom-local"]
+    command: ["wecom-local"]
+    env_file:
+      - path: .env.local
+        required: false
+      - path: secrets/wecom.env
+        required: true
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_WEBUI_LOCAL_CLAMAV_ADDRESS: clamav:3310
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_WEBUI_LOCAL_EXCLUSIVE_RUNTIME: "true"
+      TRPC_WECOM_LOCAL_ENABLED: "true"
+      TRPC_WEBUI_DEEPSEEK_KEY_FILE: /run/secrets/deepseek_api_key
+      TRPC_WEBUI_LOCAL_SKILL_STAGING_ROOT: /var/lib/trpc-webui-local/skills
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    secrets:
+      - deepseek_api_key
+    volumes:
+      - webui-local-skills:/var/lib/trpc-webui-local/skills
+    ports:
+      - "${TRPC_LOCAL_WECOM_PORT:-58087}:8080"
+    depends_on:
+      webui-local-skills-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      clamav:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  # The multi-node profile uses the same durable PostgreSQL/Redis authorities
+  # as webui-local, but starts two independently identified composition nodes.
+  # Bootstrap runs once, after Qdrant is actually queryable, so the nodes
+  # contend only on runtime work, never on fixture creation. Each node writes
+  # its own scoped secret projection inside its disposable container filesystem.
+  webui-bootstrap:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["webui-multinode"]
+    command: ["webui-local-bootstrap"]
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_WEBUI_DEEPSEEK_KEY_FILE: /run/secrets/deepseek_api_key
+      TRPC_WEBUI_LOCAL_INSTANCE_ID: bootstrap
+      TRPC_WEBUI_LOCAL_SKILL_STAGING_ROOT: /var/lib/trpc-webui-local/skills
+    secrets:
+      - deepseek_api_key
+    volumes:
+      - webui-local-skills:/var/lib/trpc-webui-local/skills
+    depends_on:
+      webui-local-skills-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  webui-node-a:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["webui-multinode"]
+    command: ["webui-local"]
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_WEBUI_LOCAL_CLAMAV_ADDRESS: clamav:3310
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_WEBUI_DEEPSEEK_KEY_FILE: /run/secrets/deepseek_api_key
+      TRPC_WEBUI_LOCAL_INSTANCE_ID: node-a
+      TRPC_WEBUI_LOCAL_SKILL_STAGING_ROOT: /var/lib/trpc-webui-local/skills
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    secrets:
+      - deepseek_api_key
+    volumes:
+      - webui-local-skills:/var/lib/trpc-webui-local/skills
+    ports:
+      - "${TRPC_LOCAL_MULTINODE_NODE_A_PORT:-58083}:8080"
+    depends_on:
+      webui-bootstrap:
+        condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  webui-node-b:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["webui-multinode"]
+    command: ["webui-local"]
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_WEBUI_LOCAL_CLAMAV_ADDRESS: clamav:3310
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_WEBUI_DEEPSEEK_KEY_FILE: /run/secrets/deepseek_api_key
+      TRPC_WEBUI_LOCAL_INSTANCE_ID: node-b
+      TRPC_WEBUI_LOCAL_SKILL_STAGING_ROOT: /var/lib/trpc-webui-local/skills
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    secrets:
+      - deepseek_api_key
+    volumes:
+      - webui-local-skills:/var/lib/trpc-webui-local/skills
+    ports:
+      - "${TRPC_LOCAL_MULTINODE_NODE_B_PORT:-58084}:8080"
+    depends_on:
+      webui-bootstrap:
+        condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["gateway-worker"]
+    command: ["gateway"]
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_SECRET_ROOT: /run/secrets/trpc
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    volumes:
+      - ./secrets:/run/secrets/trpc:ro
+    ports:
+      - "${TRPC_LOCAL_GATEWAY_PORT:-58080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+
+  admin:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["gateway-worker"]
+    command: ["admin"]
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_SECRET_ROOT: /run/secrets/trpc
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    volumes:
+      - ./secrets:/run/secrets/trpc:ro
+    ports:
+      - "${TRPC_LOCAL_ADMIN_PORT:-58083}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["gateway-worker"]
+    command: ["worker"]
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_S3_ENDPOINT: http://minio:9000
+      TRPC_S3_PATH_STYLE: "true"
+      TRPC_SECRET_ROOT: /run/secrets/trpc
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    volumes:
+      - ./secrets:/run/secrets/trpc:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+
+  # Opt-in Worker image for reviewed CodeExec ToolRefs. It is intentionally a
+  # separate profile: do not run the generic distroless worker with a shell.
+  # Operators supply the exact TRPC_CODE_EXECUTORS digest declaration through
+  # .env.local and enable this profile only after selecting this worker pool.
+  worker-codeexec:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+      target: codeexec
+    profiles: ["codeexec"]
+    command: ["worker"]
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_S3_ENDPOINT: http://minio:9000
+      TRPC_S3_PATH_STYLE: "true"
+      TRPC_SECRET_ROOT: /run/secrets/trpc
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_CODE_EXECUTOR_WORKSPACE_ROOT: /var/lib/trpc/codeexecutor
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    volumes:
+      - ./secrets:/run/secrets/trpc:ro
+      - codeexec-workspaces:/var/lib/trpc/codeexecutor
+    depends_on:
+      codeexec-workspaces-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+
+  audit-relay:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["gateway-worker", "audit"]
+    command: ["audit-relay"]
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_AUDIT_COMPLIANCE_POSTGRES_DSN: postgres://${TRPC_LOCAL_COMPLIANCE_POSTGRES_USER:-compliance}:${TRPC_LOCAL_COMPLIANCE_POSTGRES_PASSWORD:-compliance}@compliance-postgres:5432/${TRPC_LOCAL_COMPLIANCE_POSTGRES_DB:-trpc_agent_compliance}?sslmode=disable
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_AUDIT_LAG_POLL_INTERVAL: ${TRPC_LOCAL_AUDIT_LAG_POLL_INTERVAL:-5s}
+      TRPC_AUDIT_LAG_ALERT_AGE: ${TRPC_LOCAL_AUDIT_LAG_ALERT_AGE:-5m}
+      TRPC_AUDIT_LAG_ALERT_COUNT: ${TRPC_LOCAL_AUDIT_LAG_ALERT_COUNT:-10000}
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    ports:
+      - "${TRPC_LOCAL_AUDIT_PORT:-58082}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      compliance-postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  audit-compliance-migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["audit-migration"]
+    command: ["audit-compliance-migrate"]
+    environment:
+      TRPC_AUDIT_COMPLIANCE_POSTGRES_DSN: postgres://${TRPC_LOCAL_COMPLIANCE_POSTGRES_USER:-compliance}:${TRPC_LOCAL_COMPLIANCE_POSTGRES_PASSWORD:-compliance}@compliance-postgres:5432/${TRPC_LOCAL_COMPLIANCE_POSTGRES_DB:-trpc_agent_compliance}?sslmode=disable
+    depends_on:
+      compliance-postgres:
+        condition: service_healthy
+
+volumes:
+  local-postgres:
+  local-compliance-postgres:
+  local-redis:
+  local-qdrant:
+  local-minio:
+  webui-local-skills:
+  codeexec-workspaces:
+
+secrets:
+  deepseek_api_key:
+    file: ./secrets/deepseek-api-key

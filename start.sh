@@ -4,17 +4,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-mkdir -p "$ROOT/bin" "$ROOT/data"
-if [[ ! -x "$ROOT/bin/trpc-service" ]]; then
-  "$ROOT/build.sh"
+if [[ "${1:-}" == "--demo" ]]; then
+  [[ $# -eq 1 ]] || { echo "usage: $0 [--demo]" >&2; exit 2; }
+  exec "$ROOT/scripts/compose/quickstart.sh" --demo
+fi
+[[ $# -eq 0 ]] || { echo "usage: $0 [--demo]" >&2; exit 2; }
+
+compose_file="$ROOT/deploy/compose/docker-compose.local.yml"
+secret_file="$ROOT/deploy/compose/secrets/deepseek-api-key"
+
+command -v docker >/dev/null 2>&1 || { echo "Docker Desktop is required" >&2; exit 2; }
+docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required" >&2; exit 2; }
+if [[ ! -s "$secret_file" ]]; then
+  cat >&2 <<EOF
+DeepSeek API key file is required for the local WebUI:
+  mkdir -p deploy/compose/secrets
+  install -m 600 /absolute/path/to/deepseek-api-key $secret_file
+EOF
+  exit 2
 fi
 
-PID_FILE="$ROOT/data/trpc-service.pid"
-if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "already running: pid=$(cat "$PID_FILE")"
-  exit 0
-fi
-
-nohup "$ROOT/bin/trpc-service" >"$ROOT/data/trpc-service.log" 2>&1 &
-echo $! >"$PID_FILE"
-echo "started: pid=$(cat "$PID_FILE")"
+docker compose -f "$compose_file" --profile webui up -d --build
+echo "Local WebUI: http://localhost:${TRPC_LOCAL_WEBUI_PORT:-58081}/webui/"
+echo "Local Jaeger: http://localhost:${TRPC_LOCAL_JAEGER_PORT:-56686}/"
