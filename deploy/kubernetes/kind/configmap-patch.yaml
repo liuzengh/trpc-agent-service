@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trpc-agent-service-config
+  namespace: trpc-agent
+data:
+  platform.json: |
+    {
+      "service": {
+        "listen_address": ":8080",
+        "request_timeout": "15s",
+        "max_inbound_bytes": 1048576,
+        "docling_endpoint": "http://docling-serve:5001",
+        "document_extract_timeout": "5m",
+        "allowed_secret_refs": ["env:MODEL_API_KEY", "env:KIND_S3_CONFIG_JSON"]
+      },
+      "model_providers": [
+        {
+          "id": "kind-openai",
+          "base_url": "http://mock-openai:9999/v1",
+          "api_key_ref": "env:MODEL_API_KEY",
+          "models": [{"name": "mock-model"}]
+        }
+      ]
+    }

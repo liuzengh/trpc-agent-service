@@ -1,0 +1,2 @@
+deployment "trpc-agent-service" successfully rolled out
+Kubernetes smoke passed for trpc-agent/trpc-agent-service on kind-trpc-agent

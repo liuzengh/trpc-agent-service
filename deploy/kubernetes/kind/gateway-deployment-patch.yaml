@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-gateway
+  namespace: trpc-agent
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - {name: LOGIN_PROVIDER, value: mock}
+            - {name: LOGIN_SECURE_COOKIE, value: "false"}
+            - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: ""}
+            - name: KIND_S3_CONFIG_JSON
+              valueFrom:
+                secretKeyRef: {name: trpc-agent-service-secrets, key: s3-config-json}

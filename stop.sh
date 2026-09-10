@@ -17,3 +17,6 @@ else
   echo "stale pid file: $PID"
 fi
 rm -f "$PID_FILE"
+
+# Also terminate any lingering trpc-service processes
+pkill -f "trpc-service serve" 2>/dev/null || true

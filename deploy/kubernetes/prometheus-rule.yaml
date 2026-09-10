@@ -1,0 +1,62 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: trpc-agent-service-alerts
+  namespace: trpc-agent
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+spec:
+  groups:
+    - name: trpc-agent-service
+      rules:
+        - alert: TrpcAgentHTTP5xxRateHigh
+          expr: |
+            sum(rate(http_server_requests_total{http_response_status_code=~"5.."}[10m]))
+            /
+            clamp_min(sum(rate(http_server_requests_total[10m])), 1) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service HTTP 5xx rate is above 5%
+            runbook: Inspect http.server requests by route and correlate the trace ID with downstream Store or Sender spans.
+        - alert: TrpcAgentChannelDeliveryFailures
+          expr: sum(rate(channel_delivery_failures_total[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service channel delivery is failing
+            runbook: Inspect channel.sender.send spans and durable Outbox delivery attempts; retries are at-least-once.
+        - alert: TrpcAgentStoreFailures
+          expr: sum(rate(platform_store_failures_total[10m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: trpc-agent-service durable store operation is failing
+            runbook: Inspect platform.store.operation spans by backend and operation, then verify PostgreSQL or Redis readiness.
+        - alert: TrpcAgentExecutionFailures
+          expr: sum(rate(agent_execution_failures_total[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service agent execution is failing
+            runbook: Correlate agent.runtime.handle with governed tool and Store spans; no request content is emitted to telemetry.
+        - alert: TrpcAgentTenantModelTokenRateHigh
+          expr: sum by (tenant_id, app_code) (rate(model_tokens_total_total[10m])) > 10000
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service tenant model token rate is high
+            runbook: Inspect model token usage by tenant and app. Review tenant requests_per_minute and model pricing before changing a limit.
+        - alert: TrpcAgentTenantModelCostRateHigh
+          expr: sum by (tenant_id, app_code) (rate(model_cost_microunits_total[1h])) > 1000000
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service tenant model cost rate is high
+            runbook: Inspect model cost by tenant, app, provider, and model. Verify platform-owned pricing before changing a limit.

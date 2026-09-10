@@ -3,6 +3,8 @@
 .DS_Store
 *.log
 *.swp
+__pycache__/
+*.pyc
 
 bin/
 dist/
@@ -10,8 +12,39 @@ coverage.out
 coverage.html
 *.test
 *.exe
+/trpc-service
+/.vite/
+/tmp/
+/.scratch/
 
 vendor/
 
 data/*
 !data/README.md
+
+# local secrets
+deploy/.env
+
+# Keep deterministic console bundles under version control even though the
+# repository-wide dist/ rule ignores other build outputs. Legacy hashed files
+# stay ignored and may remain locally without entering commits.
+.toolchain/
+!webui/dist/
+!webui/dist/**
+webui/dist/assets/index-*.js
+webui/dist/assets/index-*.css
+# frontend toolchain artifacts (dist is committed for go:embed)
+webui/node_modules/
+webui/.vite/
+
+# browser E2E artifacts
+tests/browser/node_modules/
+tests/browser/artifacts/
+# generated coverage reports
+tests/coverage/artifacts/
+webui/coverage/
+# local coding-agent workspace
+/.agents/
+/agent/skills/
+/AGENTS.md
+/skills-lock.json

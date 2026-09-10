@@ -1,0 +1,1 @@
+import{j as t}from"./app.js";function o({tone:a="neutral",appearance:s="text",dot:r=!0,children:e,className:n=""}){return t.jsxs("span",{className:`status-indicator tone-${a} appearance-${s} ${n}`.trim(),children:[r&&t.jsx("span",{className:"status-indicator-dot","aria-hidden":"true"}),e]})}export{o as S};

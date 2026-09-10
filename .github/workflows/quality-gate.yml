@@ -1,0 +1,162 @@
+name: quality-gate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go quality gate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Verify module integrity
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Run static analysis
+        run: go vet ./...
+
+      - name: Run tests with race detection
+        run: go test -race ./...
+
+      - name: Generate Go coverage evidence
+        run: scripts/check-go-coverage.sh
+
+      - name: Build embedded console
+        working-directory: webui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run test:coverage
+          npm run build
+
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-evidence
+          path: |
+            tests/coverage/artifacts
+            webui/coverage
+
+      - name: Verify generated console is committed
+        run: |
+          git diff --exit-code -- webui/dist
+          test -z "$(git ls-files --others --exclude-standard -- webui/dist)"
+
+      - name: Verify the delivery tree contains no untracked source files
+        run: test -z "$(git ls-files --others --exclude-standard)"
+      - name: Validate deployment contract
+        run: |
+          docker compose --env-file deploy/.env.example -f deploy/compose.yaml config >/dev/null
+          docker compose -p trpc-agent-service-acceptance -f deploy/compose.test.yaml config >/dev/null
+
+      - name: Build production image
+        run: docker build -t trpc-agent-service:quality-gate .
+
+  infrastructure:
+    name: PostgreSQL, Kafka and S3 integration
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - name: Run isolated infrastructure gate
+        run: scripts/infrastructure-test.sh all
+      - name: Upload infrastructure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: infrastructure-evidence
+          path: tests/infrastructure/artifacts
+
+  browser-e2e:
+    name: Browser login and async chat E2E
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      POSTGRES_DB: trpc_agent_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            webui/package-lock.json
+            tests/browser/package-lock.json
+      - name: Start application dependencies
+        run: scripts/infrastructure-test.sh up
+      - name: Prepare browser dependencies
+        working-directory: tests/browser
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Prepare application environment
+        run: |
+          mkdir -p data
+          sed 's#https://api.openai.com/v1#http://127.0.0.1:9999/v1#; s#gpt-4o-mini#mock-model#g; s#":8080"#":18080"#g' configs/platform.example.json > data/platform-e2e.json
+          sed 's#/trpc_agent?#/trpc_agent_test?#g' deploy/.env.example > data/platform.env
+          cat >> data/platform.env <<'EOF'
+          CONFIG_PATH=./data/platform-e2e.json
+          MODEL_API_KEY=mock-key
+          AUDIT_HMAC_KEY=browser-e2e-audit-key-at-least-32-bytes
+          LOGIN_SESSION_TTL=24h
+          LOGIN_STATE_SECRET=e2e-state-secret
+          DATABASE_URL=postgres://trpc_test:test-postgres-password@127.0.0.1:15432/trpc_agent_test?sslmode=disable
+          REDIS_ADDR=127.0.0.1:16379
+          KAFKA_BROKERS=127.0.0.1:29092
+          TEST_KAFKA_BROKERS=127.0.0.1:29092
+          EOF
+      - name: Run browser E2E
+        run: tests/browser/run.sh
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-e2e-evidence
+          path: tests/browser/artifacts
+      - name: Stop application dependencies
+        if: always()
+        run: scripts/infrastructure-test.sh down
+
+  manifests:
+    name: Kubernetes manifest validation
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate deployment manifests against Kubernetes schemas
+        run: >-
+          docker run --rm
+          -v "$PWD/deploy/kubernetes:/manifests:ro"
+          ghcr.io/yannh/kubeconform:v0.6.7
+          -strict -summary -ignore-missing-schemas
+          -ignore-filename-pattern '.*/kind/.*' /manifests

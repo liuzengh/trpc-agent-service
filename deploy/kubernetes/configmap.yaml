@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trpc-agent-service-config
+  namespace: trpc-agent
+data:
+  platform.json: |
+    {
+      "service": {
+        "listen_address": ":8080",
+        "request_timeout": "15s",
+        "max_inbound_bytes": 1048576,
+        "docling_endpoint": "http://docling-serve:5001",
+        "document_extract_timeout": "5m",
+        "allowed_secret_refs": ["env:MODEL_API_KEY", "env:TELEGRAM_EXAMPLE_CONFIG_JSON"],
+        "channel_credential_refs": ["env:TELEGRAM_EXAMPLE_CONFIG_JSON"]
+      },
+      "model_providers": [
+        {
+          "id": "openai-primary",
+          "base_url": "https://api.openai.com/v1",
+          "models": [{"name": "gpt-4o-mini"}],
+          "api_key_ref": "env:MODEL_API_KEY"
+        }
+      ]
+    }

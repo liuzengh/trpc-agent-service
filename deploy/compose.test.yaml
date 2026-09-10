@@ -1,0 +1,96 @@
+name: trpc-agent-service-acceptance
+
+# Disposable acceptance infrastructure. It intentionally has no application
+# service and does not bind development ports or development named volumes.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: trpc_agent_test
+      POSTGRES_USER: trpc_test
+      POSTGRES_PASSWORD: test-postgres-password
+      PLATFORM_DB_USER: trpc_platform
+      PLATFORM_DB_PASSWORD: test-platform-password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trpc_test -d trpc_agent_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - postgres-test-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${TEST_POSTGRES_PORT:-15432}:5432"
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - redis-test-data:/data
+    ports:
+      - "127.0.0.1:${TEST_REDIS_PORT:-16379}:6379"
+
+  redpanda:
+    image: redpandadata/redpanda:v24.1.7
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:29093,OUTSIDE://0.0.0.0:29092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:29093,OUTSIDE://127.0.0.1:${TEST_KAFKA_PORT:-29092}
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    ports:
+      - "127.0.0.1:${TEST_KAFKA_PORT:-29092}:29092"
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: trpc_test
+      MINIO_ROOT_PASSWORD: test-minio-password
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - minio-test-data:/data
+    ports:
+      - "127.0.0.1:${TEST_S3_PORT:-19000}:9000"
+      - "127.0.0.1:${TEST_S3_CONSOLE_PORT:-19001}:9001"
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set acceptance http://minio:9000 trpc_test test-minio-password &&
+        mc mb --ignore-existing acceptance/trpc-artifacts
+
+volumes:
+  postgres-test-data:
+  redis-test-data:
+  minio-test-data:
