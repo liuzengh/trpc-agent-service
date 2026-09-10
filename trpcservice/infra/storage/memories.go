@@ -6,6 +6,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/memory"
 	memoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
+	memorymysql "trpc.group/trpc-go/trpc-agent-go/memory/mysql"
 	memoryredis "trpc.group/trpc-go/trpc-agent-go/memory/redis"
 )
 
@@ -24,6 +25,12 @@ func NewMemories(cfg MemoryConfig) (*Memories, error) {
 		svc, err := memoryredis.NewService(memoryredis.WithRedisClientURL(cfg.RedisURL))
 		if err != nil {
 			return nil, fmt.Errorf("storage: redis memory: %w", err)
+		}
+		return &Memories{svc: svc}, nil
+	case BackendMySQL:
+		svc, err := memorymysql.NewService(memorymysql.WithMySQLClientDSN(cfg.MySQLDSN))
+		if err != nil {
+			return nil, fmt.Errorf("storage: mysql memory: %w", err)
 		}
 		return &Memories{svc: svc}, nil
 	default:

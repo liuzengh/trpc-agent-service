@@ -79,6 +79,11 @@ func (a *TenantAPI) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *TenantAPI) get(w http.ResponseWriter, r *http.Request) {
+	if claims := GetClaims(r.Context()); claims != nil && claims.TenantID != r.PathValue("id") &&
+		!HasPermission(claims.Role, PermTenantManage) {
+		writeError(w, http.StatusNotFound, tenant.ErrNotFound)
+		return
+	}
 	t, err := a.mgr.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
 		if errors.Is(err, tenant.ErrNotFound) {
@@ -96,6 +101,16 @@ func (a *TenantAPI) list(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if claims := GetClaims(r.Context()); claims != nil && !HasPermission(claims.Role, PermTenantManage) {
+		filtered := make([]*tenant.Tenant, 0, 1)
+		for _, item := range all {
+			if item.ID == claims.TenantID {
+				filtered = append(filtered, item)
+				break
+			}
+		}
+		all = filtered
 	}
 	writeJSON(w, http.StatusOK, all)
 }

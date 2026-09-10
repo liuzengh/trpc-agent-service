@@ -20,6 +20,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/knowledge"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/llm"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/member"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/skill"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tenant"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tool"
@@ -27,6 +28,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/bus"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/config"
+
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/health"
 	srvlog "github.com/liuzengh/trpc-agent-service/trpcservice/infra/log"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/metrics"
@@ -34,6 +36,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/agentstore"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/bindingstore"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/dlqstore"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/knowledgestore"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/ledgerstore"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/llmstore"
@@ -41,7 +44,6 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/tenantstore"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/toolstore"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/workspace"
-
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
 	fmetric "trpc.group/trpc-go/trpc-agent-go/telemetry/metric"
 	ftrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
@@ -53,6 +55,13 @@ import (
 // built-in tool). Constructed once; the docker daemon is only contacted on
 // the first execution.
 var dockerExec = workspace.NewDockerExecutor()
+
+func envOrDefault(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
 
 func main() {
 	role := flag.String("role", "all", "service role: gateway|worker|admin|all")
@@ -106,28 +115,69 @@ func main() {
 	if db != nil {
 		reg = llmstore.NewMySQLRegistry(db, nil)
 		tenantMgr = tenantstore.NewMySQLManager(db)
-		agentMgr = agentstore.NewMySQLManager(db, reg)
-		toolReg = toolstore.NewMySQLRegistry(db)
-		kbMgr = knowledgestore.NewMySQLManager(db, vectorStoreFactory(cfg), knowledge.RegistryEmbedderFactory(reg))
-		skillMgr = skillstore.NewMySQLManager(db)
 	} else {
 		reg = llm.NewRegistry(nil)
 		tenantMgr = tenant.NewManager()
+	}
+
+	// Per-tenant data-backend router: session / memory / vector / artifact /
+	// audit are selected per tenant via Tenant.DataBackend (summary follows the
+	// session backend). Defaults here match the production backends.
+	router := storage.NewRouter(tenantMgr,
+		storage.SessionConfig{Backend: storage.BackendRedis, RedisURL: cfg.Redis.URL, MySQLDSN: cfg.MySQL.DSN},
+		storage.MemoryConfig{Backend: storage.BackendRedis, RedisURL: cfg.Redis.URL, MySQLDSN: cfg.MySQL.DSN},
+	)
+
+	// Tenant-routed vector-store factory: Milvus by default, in-memory opt-in.
+	var milvusVSF knowledge.VectorStoreFactory
+	if cfg.Milvus.Address != "" {
+		milvusVSF = knowledgestore.MilvusVectorStoreFactory(cfg.Milvus.Address, cfg.Milvus.Username, cfg.Milvus.Password)
+	} else {
+		slog.Warn("milvus address not configured, knowledge bases stay in memory")
+	}
+	vsf := storage.NewRouterVectorFactory(router, milvusVSF, knowledge.InMemoryVectorStoreFactory())
+
+	if db != nil {
+		agentMgr = agentstore.NewMySQLManager(db, reg)
+		toolReg = toolstore.NewMySQLRegistry(db)
+		kbMgr = knowledgestore.NewMySQLManager(db, vsf, knowledge.RegistryEmbedderFactory(reg))
+		skillMgr = skillstore.NewMySQLManager(db)
+	} else {
 		agentMgr = agent.NewManager(reg)
 		toolReg = tool.NewRegistry()
-		kbMgr = knowledge.NewManager(vectorStoreFactory(cfg), knowledge.RegistryEmbedderFactory(reg))
+		kbMgr = knowledge.NewManager(vsf, knowledge.RegistryEmbedderFactory(reg))
 		skillMgr = skill.NewManager()
 	}
 	registerBuiltinTools(toolReg)
 
-	// Audit recorder writes governance decisions + per-request accounting to
-	// MySQL asynchronously; without MySQL it is nil (audit disabled). The
-	// concrete recorder also serves the admin read side (GET /audit).
+	// Member management + auth. With MySQL we read tenant_members; without
+	// MySQL we fall back to an in-memory store for local development.
+	var memberMgr *member.Manager
+	if db != nil {
+		memberMgr = member.NewManagerWithStore(member.NewMySQLStore(db))
+	} else {
+		memberMgr = member.NewManager()
+	}
+	if err := web.EnsureInitialOwner(
+		runCtx,
+		tenantMgr,
+		memberMgr,
+		envOrDefault("ADMIN_TENANT_ID", "t-demo"),
+		envOrDefault("ADMIN_USER_ID", "admin"),
+		envOrDefault("ADMIN_PASSWORD", "admin123"),
+	); err != nil {
+		logger.Warn("initial owner bootstrap failed", "err", err)
+	}
+
+	// Audit recorder writes governance decisions + per-request accounting.
+	// Per-tenant routing (MySQL default, in-memory opt-in) applies when MySQL
+	// is up; without MySQL audit stays disabled. The concrete MySQL recorder
+	// also serves the admin read side (GET /audit /usage).
 	var auditor audit.Recorder
 	var auditRec *audit.MySQLRecorder
 	if db != nil {
 		auditRec = audit.NewMySQL(db)
-		auditor = auditRec
+		auditor = storage.NewRouterAuditRecorder(router, auditRec, nil)
 		defer func() { _ = auditRec.Close() }()
 	}
 
@@ -167,7 +217,18 @@ func main() {
 	reg.SetKeySource(secretStore)
 	reg.SetKeySink(secretStore)
 
+	// Auth middleware: wraps all API routes. Skip paths are unauthenticated.
+	jwtSecret := os.Getenv("TRPC_JWT_SECRET")
+	if jwtSecret == "" {
+		jwtSecret = cfg.Secret.MasterKey // fallback to master key if no dedicated JWT secret
+	}
+	if jwtSecret == "" {
+		jwtSecret = "dev-jwt-secret-change-me" // dev mode only
+	}
+	authMW := web.NewAuthMiddleware(memberMgr, jwtSecret)
+
 	web.NewTenantAPI(tenantMgr).Register(mux)
+	web.NewMemberAPI(memberMgr).Register(mux)
 	agentAPI := web.NewAgentAPI(agentMgr)
 	agentAPI.SetGrants(toolReg, skillMgr)
 	agentAPI.Register(mux)
@@ -185,12 +246,27 @@ func main() {
 		web.NewUsageAPI(auditRec).Register(mux)
 	}
 
+	// Login is unauthenticated; registration and session validation are
+	// protected by the outer auth middleware.
+	mux.HandleFunc("/auth/login", authMW.Login)
+	mux.HandleFunc("/auth/register", authMW.Register)
+	mux.HandleFunc("/auth/me", authMW.Me)
+
 	// Worker + outbox dispatcher + IM gateway: started when the role includes
 	// worker and both Redis and MySQL are configured.
-	startRuntime(runCtx, cfg, db, tenantMgr, agentMgr, toolReg, kbMgr, skillMgr, auditor, auditRec, secretStore, bindStore, mux, channelAPI, logger)
+	startRuntime(runCtx, cfg, db, router, tenantMgr, agentMgr, toolReg, kbMgr, skillMgr, auditor, auditRec, secretStore, bindStore, mux, channelAPI, logger)
 
 	logger.Info("starting server", "addr", cfg.Server.HTTPAddr, "role", cfg.Role)
-	srv := &http.Server{Addr: cfg.Server.HTTPAddr, Handler: web.CORS(mux)}
+	// Middleware order matters: CORS is outermost so that every response —
+	// including auth rejections (401/403) — carries the CORS headers the
+	// browser needs to read the status instead of reporting a network error.
+	// The auth middleware then lets preflights through and enforces the Bearer
+	// token: /healthz and /auth/login are public, everything else needs a token.
+	skipAuth := []string{"/healthz", "/auth/login"}
+	srv := &http.Server{
+		Addr:    cfg.Server.HTTPAddr,
+		Handler: web.CORS(authMW.Wrap(skipAuth, web.RequireRoutePermission(mux))),
+	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
 
@@ -213,8 +289,11 @@ func main() {
 // startRuntime wires and starts the worker, outbox dispatcher and IM gateway
 // when the role includes worker and both Redis and MySQL are configured (the
 // bus needs Redis, the outbox MySQL). Extracted from main so the composition
-// root stays a thin assembly over the wiring below.
-func startRuntime(runCtx context.Context, cfg *config.Config, db *sql.DB,
+// root stays a thin assembly over the wiring below. router is the shared
+// per-tenant data-backend router built in main (session/memory defaults come
+// from config; vector/artifact/audit dispatchers hang off the same tenant
+// selections).
+func startRuntime(runCtx context.Context, cfg *config.Config, db *sql.DB, router *storage.Router,
 	tenantMgr *tenant.Manager, agentMgr *agent.Manager, toolReg *tool.Registry,
 	kbMgr *knowledge.Manager, skillMgr *skill.Manager, auditor audit.Recorder,
 	auditRec *audit.MySQLRecorder, secretStore secret.Store,
@@ -231,13 +310,36 @@ func startRuntime(runCtx context.Context, cfg *config.Config, db *sql.DB,
 	}
 
 	outbox := bus.NewOutbox(db)
-	router := storage.NewRouter(tenantMgr,
-		storage.SessionConfig{Backend: storage.BackendRedis, RedisURL: cfg.Redis.URL},
-		storage.MemoryConfig{Backend: storage.BackendRedis, RedisURL: cfg.Redis.URL},
-	)
+
+	// Dead-letter policy: after 5 business failures an inbound message is
+	// moved out of the live stream (Redis DLQ copy) and persisted to MySQL so
+	// an operator can inspect and replay it via the admin API.
+	dlqStore := dlqstore.NewStore(db)
+	rb.SetDeadLetter(bus.DefaultMaxDeliveries, func(ctx context.Context, e bus.DeadLetter) {
+		entry := dlqstore.Entry{
+			MessageID:   e.MessageID,
+			StreamEntry: e.StreamEntry,
+			TenantID:    e.TenantID,
+			AgentID:     e.AgentID,
+			SessionID:   e.SessionID,
+			Channel:     e.Channel,
+			UserID:      e.UserID,
+			TraceID:     e.TraceID,
+			Payload:     e.Payload,
+			FailReason:  e.FailReason,
+			Attempts:    e.Attempts,
+		}
+		if err := dlqStore.Record(ctx, entry); err != nil {
+			slog.Error("dlq persistence failed (redis copy retained)", "message", e.MessageID, "err", err)
+		}
+	})
+	web.NewDLQAPI(dlqStore, rb).Register(mux)
 
 	// Artifact persistence on MinIO when configured; without it the runner
-	// just does not persist artifacts.
+	// just does not persist artifacts. When MinIO is up, per-tenant routing
+	// applies (a tenant may opt into the in-memory artifact backend); with no
+	// MinIO the domain stays disabled rather than silently degrading to an
+	// ephemeral in-memory store.
 	var artSvc artifact.Service
 	if cfg.MinIO.Endpoint != "" {
 		bucket := cfg.MinIO.Bucket
@@ -249,14 +351,15 @@ func startRuntime(runCtx context.Context, cfg *config.Config, db *sql.DB,
 		if err != nil {
 			logger.Error("minio unavailable, artifact persistence disabled", "err", err)
 		} else {
-			artSvc = svc
+			artSvc = storage.NewRouterArtifactService(router, svc, nil)
 			logger.Info("artifact persistence enabled", "endpoint", cfg.MinIO.Endpoint, "bucket", bucket)
 		}
 	}
 
-	// Data-domain assembly point: session/memory via the Router,
-	// knowledge/artifact/audit as their single production backends.
-	// Summary has no standalone domain (lives in the session backend).
+	// Data-domain assembly point: session/memory/vector/artifact/audit all
+	// resolve per tenant through the Router (or a Router-wrapped dispatcher);
+	// knowledge keeps its manager (metadata + routed vector stores). Summary
+	// has no standalone domain (lives in the session backend).
 	dss := storage.NewDataStores(router, kbMgr, artSvc, auditor)
 
 	// Admin chat rides the same worker pipeline: POST /chat publishes inbound,
@@ -367,16 +470,6 @@ func setupTelemetry(t config.TelemetryConfig, logger *slog.Logger) func() {
 // isWorkerRole reports whether the role runs message workers.
 func isWorkerRole(role string) bool {
 	return role == "worker" || role == "all"
-}
-
-// vectorStoreFactory picks the KB vector backend: Milvus when configured,
-// otherwise the in-memory store (dev mode, data lost on restart).
-func vectorStoreFactory(cfg *config.Config) knowledge.VectorStoreFactory {
-	if cfg.Milvus.Address == "" {
-		slog.Warn("milvus address not configured, knowledge bases stay in memory")
-		return knowledge.InMemoryVectorStoreFactory()
-	}
-	return knowledgestore.MilvusVectorStoreFactory(cfg.Milvus.Address, cfg.Milvus.Username, cfg.Milvus.Password)
 }
 
 // builtinTool couples a built-in tool's registry definition with its runtime

@@ -1,4 +1,4 @@
-import axios from 'axios'
+import api from './index'
 
 export type SkillScope = 'global' | 'tenant'
 export type SkillStatus = 'draft' | 'published' | 'disabled'
@@ -42,43 +42,40 @@ export interface VersionInput {
   prompt_template?: string
 }
 
-const baseURL = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'
-const client = axios.create({ baseURL })
-
 export async function listSkills(tenantId = ''): Promise<Skill[]> {
-  const { data } = await client.get<Skill[]>('/skills', { params: { tenant_id: tenantId } })
+  const { data } = await api.get<Skill[]>('/skills', { params: { tenant_id: tenantId } })
   return data
 }
 
 export async function getSkill(id: string): Promise<Skill> {
-  const { data } = await client.get<Skill>(`/skills/${id}`)
+  const { data } = await api.get<Skill>(`/skills/${id}`)
   return data
 }
 
 export async function createSkill(s: SkillInput): Promise<Skill> {
-  const { data } = await client.post<Skill>('/skills', s)
+  const { data } = await api.post<Skill>('/skills', s)
   return data
 }
 
 export async function updateSkill(id: string, patch: Partial<SkillInput> & { status?: SkillStatus }): Promise<Skill> {
-  const { data } = await client.put<Skill>(`/skills/${id}`, patch)
+  const { data } = await api.put<Skill>(`/skills/${id}`, patch)
   return data
 }
 
 export async function deleteSkill(id: string): Promise<void> {
-  await client.delete(`/skills/${id}`)
+  await api.delete(`/skills/${id}`)
 }
 
 export async function createVersion(skillId: string, v: VersionInput): Promise<SkillVersion> {
-  const { data } = await client.post<SkillVersion>(`/skills/${skillId}/versions`, v)
+  const { data } = await api.post<SkillVersion>(`/skills/${skillId}/versions`, v)
   return data
 }
 
 export async function publishVersion(skillId: string, version: number): Promise<void> {
-  await client.post(`/skills/${skillId}/versions/${version}/publish`)
+  await api.post(`/skills/${skillId}/versions/${version}/publish`)
 }
 
 export async function listVersions(skillId: string): Promise<SkillVersion[]> {
-  const { data } = await client.get<SkillVersion[]>(`/skills/${skillId}/versions`)
+  const { data } = await api.get<SkillVersion[]>(`/skills/${skillId}/versions`)
   return data
 }

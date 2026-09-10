@@ -8,13 +8,29 @@ const kbId = `kb-${ts}`
 const kbName = `E2E FAQ ${ts}`
 const agentId = `ag-${ts}`
 const agentName = `E2E 助手 ${ts}`
+const memberId = `e2e-member-${ts}`
+
+// The guard sends unauthenticated visitors to /login?redirect=<target>, so the
+// login URL normally carries a query string — match the path only, never anchor
+// the pattern at the end of the whole URL.
+const loginUrl = /\/login(\?|$)/
 
 // State is held by the in-memory backend that the playwright webServer boots,
 // so ids must be unique per run (they persist across tests within one run).
 
 async function openTenant(page: import('@playwright/test').Page) {
+  await login(page)
   await page.goto('/')
   await page.getByRole('heading', { name: '租户管理' }).waitFor()
+}
+
+async function login(page: import('@playwright/test').Page) {
+  await page.goto('/login')
+  await page.getByPlaceholder('用户名').fill('admin')
+  await page.getByPlaceholder('密码').fill('admin123')
+  await page.getByRole('button', { name: '登录' }).click()
+  await page.waitForURL(/\/(agents|endpoints|)$/)
+  await expect(page).not.toHaveURL(loginUrl)
 }
 
 async function selectFirst(page: import('@playwright/test').Page, dialog: import('@playwright/test').Locator, text: string) {
@@ -44,8 +60,41 @@ test.describe('租户管理页', () => {
   })
 })
 
+test.describe('认证与成员管理', () => {
+  test('直达受保护页面必须回到登录页', async ({ page }) => {
+    await page.goto('/agents')
+    await expect(page).toHaveURL(loginUrl)
+  })
+
+  test('失效 token 不能通过 URL 绕过登录', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('auth_token', 'stale-token')
+      localStorage.setItem('auth_user', JSON.stringify({
+        tenant_id: 't-demo',
+        user_id: 'admin',
+        role: 'owner',
+      }))
+    })
+    await page.goto('/agents')
+    await expect(page).toHaveURL(loginUrl)
+  })
+
+  test('登录后可以在成员页创建当前租户成员', async ({ page }) => {
+    await login(page)
+    await page.goto('/users')
+    await page.getByRole('heading', { name: '用户管理' }).waitFor()
+    await page.getByRole('button', { name: '新增成员' }).click()
+    await page.getByLabel('用户名').fill(memberId)
+    await page.getByLabel('密码').fill('member123')
+    await page.getByRole('button', { name: '创建' }).click()
+    await expect(page.locator('tr', { hasText: memberId })).toBeVisible()
+    await expect(page.locator('tr', { hasText: memberId })).toContainText('member')
+  })
+})
+
 test.describe('端点 → 知识库 → Agent 发布链路', () => {
   test('新建模型端点', async ({ page }) => {
+    await login(page)
     await page.goto('/endpoints')
     await page.getByRole('heading', { name: '模型端点' }).waitFor()
     await page.getByRole('button', { name: '新建端点' }).click()
@@ -63,6 +112,7 @@ test.describe('端点 → 知识库 → Agent 发布链路', () => {
   })
 
   test('新建知识库（挂载端点）', async ({ page }) => {
+    await login(page)
     await page.goto('/kbs')
     await page.getByRole('heading', { name: '知识库管理' }).waitFor()
     await page.getByRole('button', { name: '新建知识库' }).click()
@@ -77,8 +127,10 @@ test.describe('端点 → 知识库 → Agent 发布链路', () => {
   })
 
   test('发布 Agent 挂载端点 + 知识库', async ({ page }) => {
+    await login(page)
     // Seed the bare agent over the API (the UI only edits/publishes).
     const res = await page.request.post('http://localhost:8080/agents', {
+      headers: { Authorization: `Bearer ${await page.evaluate(() => localStorage.getItem('auth_token'))}` },
       data: { id: agentId, tenant_id: tenantId, name: agentName, status: 'draft', current_version: 0 },
     })
     expect(res.ok()).toBeTruthy()
@@ -103,6 +155,7 @@ test.describe('端点 → 知识库 → Agent 发布链路', () => {
   })
 
   test('Agent 列表显示已发布版本', async ({ page }) => {
+    await login(page)
     await page.goto('/agents')
     await page.getByRole('heading', { name: 'Agent 配置' }).waitFor()
     const row = page.locator('tr', { hasText: agentName })

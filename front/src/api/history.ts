@@ -1,4 +1,4 @@
-import axios from 'axios'
+import api from './index'
 
 export interface LedgerSession {
   session_id: string
@@ -24,18 +24,15 @@ export interface LedgerMessage {
   created_at: string
 }
 
-const baseURL = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'
-const client = axios.create({ baseURL })
-
 export async function listSessions(tenantId = '', memberId = '', limit = 20): Promise<LedgerSession[]> {
-  const { data } = await client.get<LedgerSession[]>('/sessions', {
+  const { data } = await api.get<LedgerSession[]>('/sessions', {
     params: { tenant_id: tenantId, member_id: memberId, limit },
   })
   return data
 }
 
 export async function listMessages(sessionId: string, beforeTurn = 0, limit = 50): Promise<LedgerMessage[]> {
-  const { data } = await client.get<LedgerMessage[]>(`/sessions/${sessionId}/messages`, {
+  const { data } = await api.get<LedgerMessage[]>(`/sessions/${sessionId}/messages`, {
     params: { before_turn: beforeTurn || undefined, limit },
   })
   return data

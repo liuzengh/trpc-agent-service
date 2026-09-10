@@ -1,0 +1,81 @@
+flowchart TB
+    subgraph 客户端["客户端层"]
+        WECOM["企业微信用户"]
+        FEISHU["飞书用户"]
+        ADMIN["管理员"]
+    end
+
+    subgraph Gateway["Gateway 层"]
+        subgraph IM["IM 适配器"]
+            WC[WeCom Adapter]
+            FC[Feishu Adapter]
+        end
+        GW[Gateway<br/>pumpInbound/Run]
+        RL[RateLimiter<br/>限流]
+    end
+
+    subgraph Bus["消息总线<br/>Redis Streams"]
+        IN[stream:inbound]
+        OUT[stream:outbound]
+        DLQ[stream:inbound:dlq]
+    end
+
+    subgraph Worker["Worker 层"]
+        WRK[Worker.Run]
+        HANDLE[handle<br/>幂等/审批/锁]
+        RUN[run<br/>Runner执行]
+        GOV[治理层<br/>Guardrail/Approval]
+    end
+
+    subgraph Framework["tRPC-Agent-Go"]
+        RUNNER[runner.Runner]
+        SESS[session.Service]
+        MEM[memory.Service]
+        TOOL[tool.Registry]
+    end
+
+    subgraph Data["数据层<br/>Router 五域路由"]
+        ROUTER[storage.Router]
+        SESS_DB[(MySQL/Redis)]
+        MEM_DB[(MySQL/Redis)]
+        VEC_DB[(Milvus)]
+        ART_DB[(MinIO)]
+        AUD_DB[(MySQL)]
+    end
+
+    subgraph Telemetry["可观测层"]
+        OTEL[OpenTelemetry]
+        JAEGER[(Jaeger)]
+        PROM[(Prometheus)]
+    end
+
+    WECOM -->|WSS| WC
+    FEISHU -->|WebSocket| FC
+    ADMIN -->|HTTP| GW
+
+    WC --> RL --> GW
+    FC --> RL --> GW
+
+    GW -->|PublishInbound| IN
+    IN -->|XReadGroup| WRK
+    WRK --> HANDLE --> RUN
+    RUN --> GOV --> RUNNER
+
+    RUNNER --> SESS & MEM & TOOL
+    RUN --> ROUTER
+    ROUTER --> SESS_DB & MEM_DB & VEC_DB & ART_DB & AUD_DB
+
+    RUN -->|Audit| AUD_DB
+    RUN -->|Metrics| OTEL
+    OTEL --> JAEGER & PROM
+
+    RUN -->|Outbox| OUT
+    OUT -->|ReadOutbound| GW
+    GW -->|Send| WC & FC
+
+    DLQ -.->|Replay| IN
+
+    style WECOM fill:#e1f5fe
+    style FEISHU fill:#f3e5f5
+    style ADMIN fill:#e8f5e9
+    style ROUTER fill:#fff3e0

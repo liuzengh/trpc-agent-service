@@ -66,6 +66,15 @@ type Message struct {
 	UserID    string         `json:"user_id"`
 	Content   *model.Message `json:"content"`
 	ReplyTo   string         `json:"reply_to,omitempty"` // outbound routing hint
+	Kind      string         `json:"kind,omitempty"`        // text | stream | card
+	Segments  []Segment      `json:"segments,omitempty"`   // card segments
+}
+
+// Segment represents a rich content segment for card messages.
+type Segment struct {
+	Type string `json:"type"` // "text" | "markdown" | "image"
+	Text string `json:"text,omitempty"`
+	URL  string `json:"url,omitempty"`
 }
 
 // encode serializes a Message into Redis Stream field/value pairs.
@@ -136,13 +145,20 @@ type Bus interface {
 }
 
 // RedisBus implements Bus on Redis Streams with a Consumer Group. It also
-// owns the cross-node session state (route / idempotency / lock / approval).
+// owns the cross-node session state (route / idempotency / lock / approval)
+// and the inbound dead-letter policy (see dlq.go).
 type RedisBus struct {
 	client *redis.Client
 	// consumeWorkers bounds how many messages a single consumer processes at
 	// once. A bounded pool keeps one long turn (e.g. an approval wait) from
 	// blocking the delivery of later messages, e.g. the human approval reply.
 	consumeWorkers int
+
+	// dlqMu guards the dead-letter policy, armed via SetDeadLetter before the
+	// consumers start and read per failure from the worker pool.
+	dlqMu         sync.Mutex
+	maxDeliveries int
+	sink          DeadLetterSink
 }
 
 // NewRedis returns a Redis-backed bus over an existing client.
@@ -160,14 +176,19 @@ func NewRedisFromURL(url string) (*RedisBus, error) {
 }
 
 // WithConsumeWorkers returns a copy of the bus that processes at most n
-// messages concurrently per consumer. n < 1 resets to the default.
+// messages concurrently per consumer. n < 1 resets to the default. The copy
+// carries the same dead-letter policy (fields are copied explicitly so the
+// policy mutex is never cloned).
 func (b *RedisBus) WithConsumeWorkers(n int) *RedisBus {
 	if n < 1 {
 		n = defaultConsumeWorkers
 	}
-	cp := *b
-	cp.consumeWorkers = n
-	return &cp
+	return &RedisBus{
+		client:         b.client,
+		consumeWorkers: n,
+		maxDeliveries:  b.deadLetterLimit(),
+		sink:           b.deadLetterSink(),
+	}
 }
 
 // Client exposes the underlying Redis client (for shutdown and stream
@@ -316,7 +337,10 @@ loop:
 }
 
 // handle decodes one stream message, runs fn, and acks on success. A malformed
-// envelope is acked too, so it can never become a poison pill.
+// envelope is acked too, so it can never become a poison pill. A business
+// failure increments the DLQ retry counter (see dlq.go): under the threshold
+// the message stays pending for XAUTOCLAIM; at the threshold it is moved to
+// the dead-letter stream.
 func (b *RedisBus) handle(ctx context.Context, group string, msg redis.XMessage, fn func(ctx context.Context, m *Message) error) {
 	m, err := decode(msg.Values)
 	if err != nil {
@@ -328,13 +352,15 @@ func (b *RedisBus) handle(ctx context.Context, group string, msg redis.XMessage,
 		return
 	}
 	if err := fn(ctx, m); err != nil {
-		return // leave unacked: XAUTOCLAIM will retry it later
+		b.onFailed(ctx, group, msg, m, err)
+		return // under the threshold: left pending, XAUTOCLAIM retries it
 	}
 	if ackErr := b.client.XAck(ctx, StreamInbound, group, msg.ID).Err(); ackErr != nil {
 		// A failed ack just means redelivery (idempotency dedups it); log so
 		// recurring ack failures are not invisible.
 		slog.Warn("bus: ack inbound failed", "id", msg.ID, "err", ackErr)
 	}
+	b.onSucceeded(ctx, msg)
 }
 
 // reclaim picks up pending messages abandoned by dead consumers and enqueues

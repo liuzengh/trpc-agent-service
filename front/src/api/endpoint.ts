@@ -1,4 +1,4 @@
-import axios from 'axios'
+import api from './index'
 
 export interface Endpoint {
   id: string
@@ -13,25 +13,21 @@ export interface Endpoint {
   api_key_ref?: string
 }
 
-const baseURL = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'
-
-const client = axios.create({ baseURL })
-
 export async function listEndpoints(tenantId = ''): Promise<Endpoint[]> {
-  const { data } = await client.get<Endpoint[]>('/endpoints', { params: { tenant_id: tenantId } })
+  const { data } = await api.get<Endpoint[]>('/endpoints', { params: { tenant_id: tenantId } })
   return data
 }
 
 export async function createEndpoint(e: Endpoint): Promise<Endpoint> {
-  const { data } = await client.post<Endpoint>('/endpoints', e)
+  const { data } = await api.post<Endpoint>('/endpoints', e)
   return data
 }
 
 export async function updateEndpoint(e: Endpoint): Promise<Endpoint> {
-  const { data } = await client.put<Endpoint>(`/endpoints/${e.id}`, e)
+  const { data } = await api.put<Endpoint>(`/endpoints/${e.id}`, e)
   return data
 }
 
 export async function deleteEndpoint(id: string): Promise<void> {
-  await client.delete(`/endpoints/${id}`)
+  await api.delete(`/endpoints/${id}`)
 }

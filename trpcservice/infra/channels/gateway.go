@@ -123,11 +123,27 @@ func (g *Gateway) Run(ctx context.Context) error {
 					attribute.String("session_id", m.SessionID),
 				),
 			)
-			sendErr := route.adapter.Send(replyCtx, &OutboundMessage{
-				Inbound:  &InboundMessage{SessionID: m.SessionID, ChatID: route.chatID},
-				Kind:     KindText,
-				Segments: []Segment{{Type: "text", Text: text}},
-			})
+			var outMsg *OutboundMessage
+			switch m.Kind {
+			case KindStream:
+				outMsg = &OutboundMessage{
+					Inbound: &InboundMessage{SessionID: m.SessionID, ChatID: route.chatID},
+					Kind:    KindStream,
+				}
+			case KindCard:
+				outMsg = &OutboundMessage{
+					Inbound:  &InboundMessage{SessionID: m.SessionID, ChatID: route.chatID},
+					Kind:     KindCard,
+					Segments: convertSegments(m.Segments),
+				}
+			default: // KindText or empty
+				outMsg = &OutboundMessage{
+					Inbound:  &InboundMessage{SessionID: m.SessionID, ChatID: route.chatID},
+					Kind:     KindText,
+					Segments: []Segment{{Type: "text", Text: text}},
+				}
+			}
+			sendErr := route.adapter.Send(replyCtx, outMsg)
 			replySpan.End()
 			// Delivery metrics: every attempt is bucketed by ok (for the IM
 			// success rate); a successful send additionally counts as an
@@ -233,4 +249,16 @@ func (g *Gateway) resolveAgent(ctx context.Context, channel string, opt Attach) 
 		}
 	}
 	return opt.AgentID
+}
+
+// convertSegments converts bus.Segment slice to channels.Segment slice.
+func convertSegments(busSegs []bus.Segment) []Segment {
+	if len(busSegs) == 0 {
+		return nil
+	}
+	segs := make([]Segment, len(busSegs))
+	for i, s := range busSegs {
+		segs[i] = Segment{Type: s.Type, Text: s.Text, URL: s.URL}
+	}
+	return segs
 }

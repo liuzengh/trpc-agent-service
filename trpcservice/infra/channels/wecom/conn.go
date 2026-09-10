@@ -187,6 +187,36 @@ func (c *Conn) Send(_ context.Context, target, _ string, text string) error {
 	return nil
 }
 
+// SendStream drains the string channel and delivers the accumulated text as a
+// single active markdown push. The aibot SDK (v1.0.4) only supports stream
+// replies tied to an inbound callback frame (ReplyStream); there is no
+// CreateStream / active stream-push API, so progressive updates are not
+// available for outbound-initiated streams. We therefore collect all chunks
+// and send the final result in one shot, matching the fallback behaviour of
+// Send when no inbound placeholder is pending.
+func (c *Conn) SendStream(_ context.Context, target, _ string, stream <-chan string) error {
+	var full string
+	for chunk := range stream {
+		full += chunk
+	}
+	if full == "" {
+		return nil
+	}
+	return c.Send(context.Background(), target, "", full)
+}
+
+// SendCard sends the card payload as an active markdown push. The aibot SDK
+// only exposes SendTemplateCard (for structured template cards) and
+// SendMarkdown (for plain markdown); channels.Card is a generic payload with
+// no guaranteed 1:1 mapping to a template card, so we render the card content
+// as markdown text.
+func (c *Conn) SendCard(_ context.Context, target, _ string, card channels.Card) error {
+	if card.Content == "" {
+		return nil
+	}
+	return c.Send(context.Background(), target, "", card.Content)
+}
+
 // Close disconnects the underlying SDK client exactly once.
 func (c *Conn) Close() error {
 	c.once.Do(func() {

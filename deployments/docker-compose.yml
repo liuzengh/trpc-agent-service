@@ -126,6 +126,9 @@ services:
     # lands in the mounted config in plaintext.
     environment:
       TRPC_SECRET_MASTER_KEY: ${TRPC_SECRET_MASTER_KEY:-dev-master-key-change-me}
+      ADMIN_TENANT_ID: ${ADMIN_TENANT_ID:-t-demo}
+      ADMIN_USER_ID: ${ADMIN_USER_ID:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
       # MySQL DSN is injected via env (never committed); the mounted config
       # references it as ${TRPC_MYSQL_DSN} and expands it at load time.
       TRPC_MYSQL_DSN: ${TRPC_MYSQL_DSN:-root:trpc123@tcp(mysql:3306)/trpc_agent_service?parseTime=true&multiStatements=true}

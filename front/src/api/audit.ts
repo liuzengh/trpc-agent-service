@@ -1,4 +1,4 @@
-import axios from 'axios'
+import api from './index'
 
 export interface AuditLog {
   audit_id: string
@@ -16,12 +16,8 @@ export interface AuditLog {
   created_at: string
 }
 
-const baseURL = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'
-
-const client = axios.create({ baseURL })
-
 export async function listAudit(tenantId = '', limit = 200): Promise<AuditLog[]> {
-  const { data } = await client.get<AuditLog[]>('/audit', {
+  const { data } = await api.get<AuditLog[]>('/audit', {
     params: { tenant_id: tenantId, limit },
   })
   return data

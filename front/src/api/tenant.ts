@@ -1,4 +1,4 @@
-import axios from 'axios'
+import api from './index'
 
 export interface TenantQuota {
   /** per-tenant token budget; 0 / absent = unlimited */
@@ -24,27 +24,23 @@ export interface Tenant {
   audit_policy?: TenantAuditPolicy
 }
 
-const baseURL = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'
-
-const client = axios.create({ baseURL })
-
 export async function listTenants(): Promise<Tenant[]> {
-  const { data } = await client.get<Tenant[]>('/tenants')
+  const { data } = await api.get<Tenant[]>('/tenants')
   return data
 }
 
 export async function createTenant(t: Tenant): Promise<Tenant> {
-  const { data } = await client.post<Tenant>('/tenants', t)
+  const { data } = await api.post<Tenant>('/tenants', t)
   return data
 }
 
 export async function updateTenant(t: Tenant): Promise<Tenant> {
-  const { data } = await client.put<Tenant>(`/tenants/${t.id}`, t)
+  const { data } = await api.put<Tenant>(`/tenants/${t.id}`, t)
   return data
 }
 
 export async function deleteTenant(id: string): Promise<void> {
-  await client.delete(`/tenants/${id}`)
+  await api.delete(`/tenants/${id}`)
 }
 
 /** A recorded tenant configuration snapshot (see 011_tenant_config_versions). */
@@ -57,12 +53,12 @@ export interface TenantConfigVersion {
 
 /** Lists the tenant's configuration history, newest first. */
 export async function listConfigVersions(id: string): Promise<TenantConfigVersion[]> {
-  const { data } = await client.get<TenantConfigVersion[]>(`/tenants/${id}/config-versions`)
+  const { data } = await api.get<TenantConfigVersion[]>(`/tenants/${id}/config-versions`)
   return data
 }
 
 /** Restores a tenant to a recorded configuration version; returns the restored tenant. */
 export async function rollbackConfig(id: string, version: number): Promise<Tenant> {
-  const { data } = await client.post<Tenant>(`/tenants/${id}/config-rollback`, { version })
+  const { data } = await api.post<Tenant>(`/tenants/${id}/config-rollback`, { version })
   return data
 }

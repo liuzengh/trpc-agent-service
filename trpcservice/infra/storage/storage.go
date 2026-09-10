@@ -13,6 +13,10 @@ const (
 	BackendMySQL Backend = "mysql"
 	// BackendRedis is the Redis-backed session/memory store.
 	BackendRedis Backend = "redis"
+	// BackendMilvus selects the Milvus vector backend (knowledge domain).
+	BackendMilvus Backend = "milvus"
+	// BackendMinIO selects the MinIO object-store backend (artifact domain).
+	BackendMinIO Backend = "minio"
 )
 
 // SessionConfig holds session backend settings.
@@ -26,4 +30,5 @@ type SessionConfig struct {
 type MemoryConfig struct {
 	Backend  Backend
 	RedisURL string
+	MySQLDSN string
 }

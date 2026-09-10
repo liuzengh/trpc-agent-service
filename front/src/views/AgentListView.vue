@@ -7,11 +7,16 @@ import { useKBStore } from '../stores/kb'
 import { useSkillStore } from '../stores/skill'
 import { listTools, type ToolDef } from '../api/tool'
 import { listVersions, type Agent, type VersionInfo } from '../api/agent'
+import { useAuthStore } from '../stores/auth'
 
 const store = useAgentStore()
 const endpoints = useEndpointStore()
 const kbs = useKBStore()
 const skills = useSkillStore()
+const authStore = useAuthStore()
+const canCreate = computed(() => authStore.hasPermission('agent:create'))
+const canUpdate = computed(() => authStore.hasPermission('agent:update'))
+const canDelete = computed(() => authStore.hasPermission('agent:delete'))
 
 const dialogVisible = ref(false)
 const editing = ref(false)
@@ -159,7 +164,7 @@ function statusTag(s: string) {
     <h1>Agent 配置</h1>
     <p class="hint">Agent 是团队级助手；通过发布冻结版本、可原子回滚，运行中会话不受切换影响。</p>
     <div class="toolbar">
-      <el-button type="primary" @click="openCreate">新建 Agent</el-button>
+      <el-button v-if="canCreate" type="primary" @click="openCreate">新建 Agent</el-button>
     </div>
 
     <el-table v-loading="store.loading" :data="store.agents" border>
@@ -174,11 +179,11 @@ function statusTag(s: string) {
       <el-table-column prop="description" label="描述" show-overflow-tooltip />
       <el-table-column label="操作" width="340">
         <template #default="{ row }">
-          <el-button size="small" @click="openEdit(row)">编辑</el-button>
-          <el-button size="small" @click="toggle(row)">{{ row.status === 'disabled' ? '启用' : '禁用' }}</el-button>
-          <el-button size="small" type="primary" @click="openPublish(row)">发布</el-button>
-          <el-button size="small" @click="openRollback(row)">回滚</el-button>
-          <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
+          <el-button v-if="canUpdate" size="small" @click="openEdit(row)">编辑</el-button>
+          <el-button v-if="canUpdate" size="small" @click="toggle(row)">{{ row.status === 'disabled' ? '启用' : '禁用' }}</el-button>
+          <el-button v-if="canUpdate" size="small" type="primary" @click="openPublish(row)">发布</el-button>
+          <el-button v-if="canUpdate" size="small" @click="openRollback(row)">回滚</el-button>
+          <el-button v-if="canDelete" size="small" type="danger" @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>

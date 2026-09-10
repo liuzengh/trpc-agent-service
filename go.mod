@@ -1,6 +1,6 @@
 module github.com/liuzengh/trpc-agent-service
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/go-sphere/wecom-aibot-go-sdk v1.0.4
@@ -19,6 +19,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	trpc.group/trpc-go/trpc-agent-go v1.11.2
 	trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/milvus v1.11.0
+	trpc.group/trpc-go/trpc-agent-go/memory/mysql v1.11.0
 	trpc.group/trpc-go/trpc-agent-go/memory/redis v1.11.0
 	trpc.group/trpc-go/trpc-agent-go/model/anthropic v1.11.2
 	trpc.group/trpc-go/trpc-agent-go/model/gemini v1.11.2
@@ -72,7 +73,7 @@ require (
 	github.com/goccy/go-json v0.10.3 // indirect
 	github.com/godbus/dbus/v5 v5.0.4 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
+	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
@@ -168,12 +169,12 @@ require (
 	go.uber.org/automaxprocs v1.5.3 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
-	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect

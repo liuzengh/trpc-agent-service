@@ -24,6 +24,8 @@ import (
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/channels"
 )
 
 // Conn implements channels.Conn over the Lark long connection.
@@ -140,10 +142,33 @@ func (c *Conn) Recv(ctx context.Context) ([]byte, error) {
 // the source of 230001 invalid receive_id).
 func (c *Conn) Send(ctx context.Context, target, chatType, text string) error {
 	content, _ := json.Marshal(map[string]string{"text": text})
+	return c.send(ctx, target, larkim.MsgTypeText, string(content))
+}
+
+// SendStream collects all streaming chunks and sends as a single text message.
+// Feishu does not natively support message-in-place streaming updates.
+func (c *Conn) SendStream(ctx context.Context, target, chatType string, stream <-chan string) error {
+	var fullText string
+	for chunk := range stream {
+		fullText += chunk
+	}
+	if fullText == "" {
+		return nil
+	}
+	return c.Send(ctx, target, chatType, fullText)
+}
+
+// SendCard sends an interactive card message via Feishu.
+func (c *Conn) SendCard(ctx context.Context, target, chatType string, card channels.Card) error {
+	content := fmt.Sprintf(`{"elements":[{"tag":"markdown","content":"%s"}]}`, escapeJSON(card.Content))
+	return c.send(ctx, target, "interactive", content)
+}
+
+func (c *Conn) send(ctx context.Context, target string, msgType, content string) error {
 	body := larkim.NewCreateMessageReqBodyBuilder().
 		ReceiveId(target).
-		MsgType(larkim.MsgTypeText).
-		Content(string(content)).
+		MsgType(msgType).
+		Content(content).
 		Build()
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType("chat_id").
@@ -157,6 +182,15 @@ func (c *Conn) Send(ctx context.Context, target, chatType, text string) error {
 		return fmt.Errorf("feishu: create message code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+// escapeJSON returns a JSON-escaped string suitable for embedding inside a
+// Feishu card markdown content literal. json.Marshal wraps the value in double
+// quotes; we strip the surrounding quotes so callers can embed the result
+// directly inside a JSON string literal.
+func escapeJSON(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b[1 : len(b)-1])
 }
 
 // Close stops the long connection.

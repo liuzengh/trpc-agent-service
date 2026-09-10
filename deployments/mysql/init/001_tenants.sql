@@ -32,21 +32,19 @@ CREATE TABLE IF NOT EXISTS tenants (
   COMMENT='tenant root entity: the first isolation boundary';
 
 -- -----------------------------------------------------------------------------
--- Reserved (stage 33): tenant membership + RBAC tables below are PLANNED, not
--- wired. Domain model: tenant = a business team, member = a signed-in employee
--- (login user) of that team, roles = enterprise-internal authorization. They
--- stay reserved for the phase that introduces authentication/SSO (the Admin
--- API currently has no login); no production code reads or writes them yet.
+-- Membership and RBAC: a login member belongs to exactly one tenant. Migration
+-- 013 adds the global user_id uniqueness constraint to existing databases.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tenant_members (
     tenant_id  VARCHAR(36) NOT NULL,
     user_id    VARCHAR(64) NOT NULL                COMMENT 'member external identity (IM/SSO user id)',
     role       ENUM('owner','admin','member') NOT NULL DEFAULT 'member',
+    password_hash VARCHAR(255) NOT NULL DEFAULT '' COMMENT 'bcrypt hash; never expose to clients',
     created_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (tenant_id, user_id),
     KEY idx_tenant_members_tenant (tenant_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  COMMENT='tenant membership: a member belongs to one or more tenants';
+  COMMENT='tenant membership: one login member belongs to exactly one tenant';
 
 CREATE TABLE IF NOT EXISTS roles (
     role_id    VARCHAR(36)  NOT NULL,

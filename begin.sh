@@ -70,6 +70,12 @@ case "${1:-up}" in
         info "等待前端管理台就绪 ..."
         wait_http "http://127.0.0.1:5173/" "前端管理台" frontend || true
 
+        # The backend bootstraps the configured owner before serving requests.
+        info "管理员账号由后端启动时自动初始化..."
+        ADMIN_TENANT="${ADMIN_TENANT_ID:-t-demo}"
+        ADMIN_USER="${ADMIN_USER_ID:-admin}"
+        ADMIN_PASS="${ADMIN_PASSWORD:-admin123}"
+
         echo
         printf "${GREEN}==================== 启动完成 ====================${NC}\n"
         printf "  前端管理台     http://localhost:5173\n"
@@ -79,12 +85,15 @@ case "${1:-up}" in
         printf "  MinIO 控制台   http://localhost:9001\n"
         printf "${GREEN}=================================================${NC}\n"
         echo
+        info "管理员账号：tenant=${ADMIN_TENANT}, user=${ADMIN_USER}, pass=${ADMIN_PASS}"
+        info "登录方式：POST /auth/login 获取 JWT，然后携带 Bearer token 访问接口"
+        echo
         info "查看日志：${COMPOSE[*]} logs -f backend frontend"
         info "停止服务：./begin.sh down"
         ;;
     down)
-        info "停止并移除容器（数据卷保留）..."
-        "${COMPOSE[@]}" down
+        info "停止所有容器（数据卷保留，重启更快）..."
+        "${COMPOSE[@]}" stop
         info "已停止。重新启动：./begin.sh"
         ;;
     status)

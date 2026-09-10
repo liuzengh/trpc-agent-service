@@ -148,16 +148,129 @@
 
 ## 快速开始
 
+### 前置条件
+
+- [Docker](https://docs.docker.com/get-docker/) 和 Docker Compose（v2 推荐）
+- Git
+- Go 1.26+（仅本地开发需要，Docker 部署不需要）
+
+### 方式一：Docker Compose（推荐，自动建表）
+
+MySQL 首次启动时会自动执行 `deployments/mysql/init/001~012.sql` 建表，无需手动操作。
+
+**Linux / macOS：**
+
 ```bash
 git clone https://github.com/liuzengh/trpc-agent-service.git
 cd trpc-agent-service
 
+# 一键启动完整栈（MySQL + Redis + Milvus + MinIO + Jaeger + Prometheus + 后端 + 前端）
+./begin.sh up
+
+# 查看服务状态
+./begin.sh status
+
+# 查看日志
+./begin.sh logs
+```
+
+**Windows（PowerShell）：**
+
+```powershell
+git clone https://github.com/liuzengh/trpc-agent-service.git
+cd trpc-agent-service
+
+# 复制环境配置
+copy deployments\.env.example deployments\.env
+
+# 启动完整栈
+docker compose -f deployments\docker-compose.yml up -d --build
+```
+
+**启动后访问地址：**
+
+| 服务 | 地址 |
+|------|------|
+| 后端 API | http://127.0.0.1:8080 |
+| 健康检查 | http://127.0.0.1:8080/healthz |
+| 管理前端 | http://127.0.0.1:5173 |
+| Jaeger 追踪 | http://127.0.0.1:16686 |
+| Prometheus | http://127.0.0.1:9090 |
+
+**首次使用：管理员账号已自动创建**
+
+`./begin.sh` 启动完成后会自动注册管理员账号：
+- tenant: `t-demo`
+- user: `admin`
+- password: `admin123`
+
+可通过环境变量自定义：`ADMIN_TENANT_ID`、`ADMIN_USER_ID`、`ADMIN_PASSWORD`。
+
+**登录获取 Token：**
+
+```bash
+curl -X POST http://127.0.0.1:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"admin","password":"admin123"}'
+```
+
+**停止服务（数据保留）：**
+
+```bash
+# Linux / macOS
+./begin.sh down
+
+# Windows
+docker compose -f deployments\docker-compose.yml down
+```
+
+> 注意：`docker compose down` 不会删除数据卷。下次启动时 MySQL 不会重新建表（表已存在）。
+> 如需重置数据库：`docker compose -f deployments\docker-compose.yml down -v`
+
+### 方式二：本地开发（无 Docker）
+
+需要已安装 MySQL 8.0 + Redis 7。
+
+```bash
+# 建表
+for f in deployments/mysql/init/*.sql; do
+  mysql -uroot -p trpc_agent_service < "$f"
+done
+
+# 配置环境变量
+export TRPC_MYSQL_DSN="root:yourpassword@tcp(127.0.0.1:3306)/trpc_agent_service?parseTime=true"
+export TRPC_SECRET_MASTER_KEY="dev-master-key"
+export TRPC_JWT_SECRET="dev-jwt-secret"
+
+# 编译运行
 ./build.sh
 ./start.sh
 ```
 
-停止服务：
+### 验收测试
 
 ```bash
-./stop.sh
+# 一键验收向导（自动启动 + 健康检查 + 数据库验证 + 输出访问地址）
+bash scripts/supervisor.sh
+
+# 单独验证数据库初始化
+bash scripts/verify_init.sh
+
+# 负载测试
+go run ./scripts/loadtest/chat_load.go \
+  -tenant t-demo -agent a-demo -concurrency 8 -each 5 -text "你好"
 ```
+
+### 文档导航
+
+| 文档 | 说明 |
+|------|------|
+| [架构设计文档](docs/架构设计文档.md) | 多租户、部署拓扑、消息链路、数据层、IM、治理、故障恢复 |
+| [系统架构图](docs/系统架构图.png) | 全组件关系图（PNG 可直接查看） |
+| [核心时序图](docs/核心时序图.png) | 完整消息链路时序（PNG 可直接查看） |
+| [ER 图](docs/ER图.png) | 数据库表关系图（PNG 可直接查看） |
+| [数据模型设计](docs/数据模型设计.md) | 26 张表结构 + ER 图 + Redis 键 + JSON Schema |
+| [数据同步与幂等策略](docs/数据同步与幂等策略.md) | 并发一致性、更新顺序、迁移方案、IM 幂等 |
+| [多后端适配方案](docs/多后端适配方案.md) | 五域路由、Redis/MySQL/Milvus/MinIO 适配 |
+| [风险清单](docs/风险清单.md) | 10 个生产风险及缓解措施 |
+| [验收检查清单](docs/验收检查清单.md) | 32 项验收测试用例 |

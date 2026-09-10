@@ -29,6 +29,20 @@ func (m *mockConn) Send(_ context.Context, target, chatType, text string) error 
 	return nil
 }
 
+func (m *mockConn) SendCard(_ context.Context, target, chatType string, card channels.Card) error {
+	m.sent = append(m.sent, target+":card:"+card.Content)
+	return nil
+}
+
+func (m *mockConn) SendStream(_ context.Context, target, chatType string, stream <-chan string) error {
+	var full string
+	for chunk := range stream {
+		full += chunk
+	}
+	m.sent = append(m.sent, target+":stream:"+full)
+	return nil
+}
+
 func (m *mockConn) Close() error { return nil }
 
 const eventJSON1 = `{"header":{"event_id":"ev-1","event_type":"im.message.receive_v1"},"event":{"sender":{"sender_id":{"open_id":"ou_1"}},"message":{"message_id":"om_1","chat_id":"oc_1","chat_type":"p2p","message_type":"text","content":"{\"text\":\"first\"}"}}}`

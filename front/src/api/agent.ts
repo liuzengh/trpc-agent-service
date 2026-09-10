@@ -1,4 +1,4 @@
-import axios from 'axios'
+import api from './index'
 
 export interface Agent {
   id: string
@@ -23,44 +23,40 @@ export interface VersionInfo {
   status: string
 }
 
-const baseURL = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'
-
-const client = axios.create({ baseURL })
-
 export async function listAgents(tenantId = ''): Promise<Agent[]> {
-  const { data } = await client.get<Agent[]>('/agents', { params: { tenant_id: tenantId } })
+  const { data } = await api.get<Agent[]>('/agents', { params: { tenant_id: tenantId } })
   return data
 }
 
 export async function createAgent(a: Agent): Promise<Agent> {
-  const { data } = await client.post<Agent>('/agents', a)
+  const { data } = await api.post<Agent>('/agents', a)
   return data
 }
 
 export async function updateAgent(a: Agent): Promise<Agent> {
-  const { data } = await client.put<Agent>(`/agents/${a.id}`, a)
+  const { data } = await api.put<Agent>(`/agents/${a.id}`, a)
   return data
 }
 
 export async function deleteAgent(id: string): Promise<void> {
-  await client.delete(`/agents/${id}`)
+  await api.delete(`/agents/${id}`)
 }
 
 export async function publishAgent(id: string, p: RuntimeProfile): Promise<{ version: number }> {
-  const { data } = await client.post<{ version: number }>(`/agents/${id}/publish`, p)
+  const { data } = await api.post<{ version: number }>(`/agents/${id}/publish`, p)
   return data
 }
 
 export async function rollbackAgent(id: string, version: number): Promise<void> {
-  await client.post(`/agents/${id}/rollback`, { version })
+  await api.post(`/agents/${id}/rollback`, { version })
 }
 
 export async function listVersions(id: string): Promise<VersionInfo[]> {
-  const { data } = await client.get<VersionInfo[]>(`/agents/${id}/versions`)
+  const { data } = await api.get<VersionInfo[]>(`/agents/${id}/versions`)
   return data
 }
 
 export async function getProfile(id: string): Promise<RuntimeProfile> {
-  const { data } = await client.get<RuntimeProfile>(`/agents/${id}/profile`)
+  const { data } = await api.get<RuntimeProfile>(`/agents/${id}/profile`)
   return data
 }

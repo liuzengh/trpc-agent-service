@@ -16,10 +16,15 @@ const (
 )
 
 // Data-backend domain keys and backend values stored in Tenant.DataBackend.
-// Values align with storage.Backend* string constants by contract.
+// Values align with storage.Backend* string constants by contract. Summary is
+// deliberately absent: it has no standalone backend and follows the session
+// backend (see docs/存储与数据访问设计.md §3.2).
 const (
-	DomainSession = "session"
-	DomainMemory  = "memory"
+	DomainSession  = "session"
+	DomainMemory   = "memory"
+	DomainVector   = "vector"
+	DomainArtifact = "artifact"
+	DomainAudit    = "audit"
 )
 
 // Backend values selectable per domain (kept as plain strings to avoid an

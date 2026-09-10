@@ -1,0 +1,51 @@
+sequenceDiagram
+    autonumber
+    participant User as 企业微信用户
+    participant WX as 企业微信平台
+    participant Adapter as WeCom Adapter
+    participant GW as Gateway
+    participant BUS as RedisBus
+    participant WRK as Worker
+    participant Router as storage.Router
+    participant Runner as runner.Runner
+    participant LLM as Model Endpoint
+    participant Tool as Tool
+    participant Session as Session DB
+    participant Memory as Memory DB
+    participant Audit as Audit DB
+    participant Outbox as Outbox DB
+
+    User->>WX: 发送消息
+    WX->>Adapter: WSS 回调
+    Adapter->>GW: InboundMessage
+
+    Note over GW: trace_id 生成<br/>幂等校验<br/>路由解析
+    GW->>BUS: PublishInbound
+    BUS->>WRK: XReadGroup
+
+    Note over WRK: 幂等校验<br/>租户策略<br/>LockSession
+
+    WRK->>Router: Sessions(tenantID)
+    Router-->>WRK: session.Service
+
+    WRK->>Runner: runner.Run
+
+    Runner->>LLM: model.Call
+    LLM-->>Runner: tool_calls
+    Runner->>Tool: tool.Execute
+    Tool-->>Runner: tool result
+    Runner->>LLM: model.Call
+    LLM-->>Runner: final text
+
+    Runner-->>WRK: events 完成
+
+    WRK->>Session: SaveSession
+    WRK->>Memory: AddMemory
+    WRK->>Audit: Record Entry
+    WRK->>Outbox: Append
+
+    Outbox->>BUS: stream:outbound
+    BUS->>GW: ReadOutbound
+    GW->>Adapter: OutboundMessage
+    Adapter->>WX: Send
+    WX->>User: 收到回复

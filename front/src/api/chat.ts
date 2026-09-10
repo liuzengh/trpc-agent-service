@@ -1,4 +1,4 @@
-import axios from 'axios'
+import api from './index'
 
 export interface ChatSendInput {
   tenant_id: string
@@ -21,10 +21,8 @@ export interface ChatMessageEvent {
 }
 
 const baseURL = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'
-const client = axios.create({ baseURL })
-
 export async function sendChat(input: ChatSendInput): Promise<ChatSendResult> {
-  const { data } = await client.post<ChatSendResult>('/chat', input)
+  const { data } = await api.post<ChatSendResult>('/chat', input)
   return data
 }
 

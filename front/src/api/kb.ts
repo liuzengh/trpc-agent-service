@@ -1,4 +1,4 @@
-import axios from 'axios'
+import api from './index'
 
 export interface KnowledgeBase {
   id: string
@@ -34,40 +34,36 @@ export interface SearchHit {
   score: number
 }
 
-const baseURL = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'
-
-const client = axios.create({ baseURL })
-
 export async function listKBs(tenantId = ''): Promise<KnowledgeBase[]> {
-  const { data } = await client.get<KnowledgeBase[]>('/kbs', { params: { tenant_id: tenantId } })
+  const { data } = await api.get<KnowledgeBase[]>('/kbs', { params: { tenant_id: tenantId } })
   return data
 }
 
 export async function getKB(id: string): Promise<KnowledgeBase> {
-  const { data } = await client.get<KnowledgeBase>(`/kbs/${id}`)
+  const { data } = await api.get<KnowledgeBase>(`/kbs/${id}`)
   return data
 }
 
 export async function createKB(kb: KBInput): Promise<KnowledgeBase> {
-  const { data } = await client.post<KnowledgeBase>('/kbs', kb)
+  const { data } = await api.post<KnowledgeBase>('/kbs', kb)
   return data
 }
 
 export async function deleteKB(id: string): Promise<void> {
-  await client.delete(`/kbs/${id}`)
+  await api.delete(`/kbs/${id}`)
 }
 
 export async function addDocument(kbId: string, doc: Partial<Document>): Promise<Document> {
-  const { data } = await client.post<Document>(`/kbs/${kbId}/documents`, doc)
+  const { data } = await api.post<Document>(`/kbs/${kbId}/documents`, doc)
   return data
 }
 
 export async function listDocuments(kbId: string): Promise<Document[]> {
-  const { data } = await client.get<Document[]>(`/kbs/${kbId}/documents`)
+  const { data } = await api.get<Document[]>(`/kbs/${kbId}/documents`)
   return data
 }
 
 export async function searchKB(kbId: string, query: string, limit = 5): Promise<SearchHit[]> {
-  const { data } = await client.post<SearchHit[]>(`/kbs/${kbId}/search`, { query, limit })
+  const { data } = await api.post<SearchHit[]>(`/kbs/${kbId}/search`, { query, limit })
   return data
 }

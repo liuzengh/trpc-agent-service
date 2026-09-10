@@ -56,6 +56,10 @@ type Conn interface {
 	// user id for single chats). chatType is ChatTypeSingle / ChatTypeGroup
 	// and lets the conn pick the right receive-id type.
 	Send(ctx context.Context, target, chatType, text string) error
+	// SendCard delivers a rich card message to target.
+	SendCard(ctx context.Context, target, chatType string, card Card) error
+	// SendStream delivers a streamed reply to target.
+	SendStream(ctx context.Context, target, chatType string, stream <-chan string) error
 	// Close releases the underlying connection.
 	Close() error
 }
@@ -87,6 +91,12 @@ type Segment struct {
 	Type string // text | image | file
 	Text string
 	URL  string
+}
+
+// Card represents a rich card message payload.
+type Card struct {
+	Title   string // card title
+	Content string // markdown or JSON content
 }
 
 // Text returns the concatenated plain text of the message's segments.

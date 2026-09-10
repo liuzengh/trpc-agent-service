@@ -49,7 +49,25 @@ func (a *BaseAdapter) Send(ctx context.Context, msg *OutboundMessage) error {
 	if msg == nil || msg.Inbound == nil {
 		return fmt.Errorf("channels: outbound requires inbound context")
 	}
-	return a.conn.Send(ctx, msg.Inbound.ChatID, msg.Inbound.ChatType, msg.Text())
+	chatID := msg.Inbound.ChatID
+	chatType := msg.Inbound.ChatType
+	switch msg.Kind {
+	case KindCard:
+		card := Card{}
+		for _, seg := range msg.Segments {
+			if seg.Type == "markdown" || seg.Type == "text" {
+				card.Content += seg.Text
+			}
+		}
+		if card.Content == "" {
+			card.Content = msg.Text()
+		}
+		return a.conn.SendCard(ctx, chatID, chatType, card)
+	case KindStream:
+		return a.conn.SendStream(ctx, chatID, chatType, msg.Stream)
+	default:
+		return a.conn.Send(ctx, chatID, chatType, msg.Text())
+	}
 }
 
 // Stop closes the underlying connection.

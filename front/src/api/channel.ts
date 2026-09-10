@@ -1,4 +1,4 @@
-import axios from 'axios'
+import api from './index'
 
 export interface ChannelBinding {
   binding_id: string
@@ -20,20 +20,17 @@ export interface ChannelInput {
   verification_token_ref?: string
 }
 
-const baseURL = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'
-const client = axios.create({ baseURL })
-
 export async function listChannels(tenantId = '', channel = ''): Promise<ChannelBinding[]> {
-  const { data } = await client.get<ChannelBinding[]>('/channels', {
+  const { data } = await api.get<ChannelBinding[]>('/channels', {
     params: { tenant_id: tenantId, channel },
   })
   return data
 }
 
 export async function createChannel(input: ChannelInput): Promise<void> {
-  await client.post('/channels', input)
+  await api.post('/channels', input)
 }
 
 export async function deleteChannel(bindingId: string): Promise<void> {
-  await client.delete(`/channels/${bindingId}`)
+  await api.delete(`/channels/${bindingId}`)
 }

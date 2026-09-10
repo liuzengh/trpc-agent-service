@@ -1,25 +1,25 @@
 // Unified data-access aggregate.
 //
-// The platform's storage is organized into data domains (see docs/存储与数据
-// 访问设计.md and CONTEXT.md 数据访问与存储域):
+// The platform's storage is organized into data domains (see docs/多后端适配
+// 方案.md and CONTEXT.md 数据访问与存储域):
 //
-//	session / memory  -> storage.Router  (per-tenant backend selection)
-//	knowledge (vector) -> knowledge.Manager
-//	artifact           -> artifact.Service (MinIO, S3)
-//	audit              -> audit.Recorder   (MySQL, async batch)
-//	summary            -> no standalone domain: summaries live in the session
-//	                     backend (framework session/mysql tables)
+//	session / memory / vector / artifact / audit -> per-tenant backend
+//	    selection via storage.Router (Tenant.DataBackend); each domain has a
+//	    production backend and an in-memory opt-in, dispatched per call.
+//	knowledge (metadata) -> knowledge.Manager (vector stores are routed per
+//	    tenant by the Router-wrapped factory).
+//	summary -> no standalone domain: summaries live in the session backend
+//	    (framework session tables).
 //
 // DataStores is the assembly point for these domains: main builds it once and
 // hands the domain implementations on to consumers (currently the worker).
 // It also makes the "how each domain is stored" decision explicit and testable
 // without scattering construction across call sites.
 //
-// Expansion rule (stage 18 decision): a domain joins storage.Router's
-// per-tenant backend selection only when a second backend implementation
-// actually exists. Until then a domain keeps its single production backend
-// referenced here, and Tenant.DataBackend remains the reserved extension
-// point (domain -> backend value).
+// Routing rule (stage 18 + G1 decision): a domain joins the Router's per-tenant
+// selection when a second backend implementation exists. All five domains now
+// qualify: session/memory (in-memory/Redis/MySQL), vector (Milvus/in-memory),
+// artifact (MinIO/in-memory), audit (MySQL/in-memory).
 package storage
 
 import (

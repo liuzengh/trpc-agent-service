@@ -1,4 +1,4 @@
-import axios from 'axios'
+import api from './index'
 
 export interface UsageSummary {
   dimension: string
@@ -44,10 +44,7 @@ export interface UsageQuery {
   to?: string
 }
 
-const baseURL = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'
-const client = axios.create({ baseURL })
-
 export async function getUsage(q: UsageQuery = {}): Promise<UsageResponse> {
-  const { data } = await client.get<UsageResponse>('/usage', { params: q })
+  const { data } = await api.get<UsageResponse>('/usage', { params: q })
   return data
 }

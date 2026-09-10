@@ -3,8 +3,13 @@ import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useEndpointStore } from '../stores/endpoint'
 import type { Endpoint } from '../api/endpoint'
+import { useAuthStore } from '../stores/auth'
 
 const store = useEndpointStore()
+const authStore = useAuthStore()
+const canCreate = computed(() => authStore.hasPermission('agent:create'))
+const canUpdate = computed(() => authStore.hasPermission('agent:update'))
+const canDelete = computed(() => authStore.hasPermission('agent:delete'))
 const dialogVisible = ref(false)
 const editing = ref(false)
 
@@ -73,7 +78,7 @@ async function remove(row: Endpoint) {
     <h1>模型端点</h1>
     <p class="hint">配置 LLM 端点（OpenAI / Anthropic / Gemini / 兼容协议），Agent 发布时按 endpoint_id 绑定。</p>
     <div class="toolbar">
-      <el-button type="primary" @click="openCreate">新建端点</el-button>
+      <el-button v-if="canCreate" type="primary" @click="openCreate">新建端点</el-button>
     </div>
 
     <el-table v-loading="store.loading" :data="store.endpoints" border>
@@ -85,8 +90,8 @@ async function remove(row: Endpoint) {
       <el-table-column prop="base_url" label="Base URL" show-overflow-tooltip />
       <el-table-column label="操作" width="180">
         <template #default="{ row }">
-          <el-button size="small" @click="openEdit(row)">编辑</el-button>
-          <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
+          <el-button v-if="canUpdate" size="small" @click="openEdit(row)">编辑</el-button>
+          <el-button v-if="canDelete" size="small" type="danger" @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>

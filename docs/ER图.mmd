@@ -1,0 +1,126 @@
+erDiagram
+    tenants ||--o{ agents : "has"
+    tenants ||--o{ tools : "has"
+    tenants ||--o{ skills : "has"
+    tenants ||--o{ model_endpoints : "has"
+    tenants ||--o{ knowledge_bases : "has"
+    tenants ||--o{ channel_bindings : "has"
+    tenants ||--o{ audit_logs : "audits"
+    tenants ||--o{ usage_records : "usage"
+    tenants ||--o{ tenant_config_versions : "versions"
+    tenants ||--o{ chat_sessions : "sessions"
+    tenants ||--o{ tenant_members : "members"
+
+    agents ||--o{ agent_versions : "versions"
+    agents ||--o{ agent_tool_grants : "grants"
+    agents ||--o{ agent_skills : "skills"
+    agents ||--o{ chat_sessions : "chats"
+    agents ||--o{ chat_messages : "messages"
+
+    knowledge_bases ||--o{ knowledge_documents : "documents"
+
+    secrets ||--o{ channel_bindings : "credential_ref"
+    secrets ||--o{ model_endpoints : "api_key_ref"
+
+    tenants {
+        varchar tenant_id PK
+        varchar name
+        enum status
+        json data_backend
+        json audit_policy
+        json quota
+        tinyint is_deleted
+    }
+
+    agents {
+        varchar agent_id PK
+        varchar tenant_id FK
+        varchar agent_code
+        varchar name
+        enum status
+        int current_version
+    }
+
+    agent_versions {
+        varchar agent_id PK,FK
+        int version PK
+        json runtime_profile
+        enum status
+    }
+
+    tools {
+        varchar tool_id PK
+        enum scope
+        varchar tenant_id FK
+        varchar name
+        enum type
+        json definition
+        enum risk_level
+    }
+
+    skills {
+        varchar skill_id PK
+        enum scope
+        varchar owner_tenant_id FK
+        varchar code
+        varchar name
+        int current_version
+    }
+
+    model_endpoints {
+        varchar endpoint_id PK
+        enum scope
+        varchar tenant_id FK
+        varchar name
+        varchar provider
+        varchar base_url
+        varchar model_name
+        varchar api_key_ref FK
+    }
+
+    knowledge_bases {
+        varchar kb_id PK
+        varchar tenant_id FK
+        varchar name
+        varchar embedding_model
+    }
+
+    channel_bindings {
+        varchar binding_id PK
+        varchar tenant_id FK
+        varchar agent_id FK
+        varchar channel
+        varchar account_id
+        varchar credential_ref FK
+    }
+
+    chat_sessions {
+        varchar session_id PK
+        varchar tenant_id FK
+        varchar agent_id FK
+        varchar member_id
+        varchar channel
+    }
+
+    audit_logs {
+        bigint id PK
+        varchar audit_id
+        varchar tenant_id FK
+        varchar session_id
+        varchar agent_name
+        varchar tool_name
+        varchar decision
+        int latency_ms
+    }
+
+    tenant_members {
+        varchar tenant_id PK,FK
+        varchar user_id PK
+        enum role
+    }
+
+    roles {
+        varchar role_id PK
+        varchar tenant_id FK
+        varchar name
+    }

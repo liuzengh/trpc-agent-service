@@ -1,69 +1,24 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
+import { resolveNavigation } from './guard'
+import { routes } from './routes'
 
-const routes = [
-  {
-    path: '/',
-    name: 'tenants',
-    component: () => import('../views/TenantListView.vue'),
-  },
-  {
-    path: '/agents',
-    name: 'agents',
-    component: () => import('../views/AgentListView.vue'),
-  },
-  {
-    path: '/endpoints',
-    name: 'endpoints',
-    component: () => import('../views/EndpointListView.vue'),
-  },
-  {
-    path: '/tools',
-    name: 'tools',
-    component: () => import('../views/ToolListView.vue'),
-  },
-  {
-    path: '/kbs',
-    name: 'kbs',
-    component: () => import('../views/KnowledgeBaseListView.vue'),
-  },
-  {
-    path: '/skills',
-    name: 'skills',
-    component: () => import('../views/SkillListView.vue'),
-  },
-  {
-    path: '/chat',
-    name: 'chat',
-    component: () => import('../views/ChatView.vue'),
-  },
-  {
-    path: '/history',
-    name: 'history',
-    component: () => import('../views/SessionHistoryView.vue'),
-  },
-  {
-    path: '/channels',
-    name: 'channels',
-    component: () => import('../views/ChannelListView.vue'),
-  },
-  {
-    path: '/secrets',
-    name: 'secrets',
-    component: () => import('../views/SecretListView.vue'),
-  },
-  {
-    path: '/audit',
-    name: 'audit',
-    component: () => import('../views/AuditListView.vue'),
-  },
-  {
-    path: '/usage',
-    name: 'usage',
-    component: () => import('../views/UsageView.vue'),
-  },
-]
-
-export default createRouter({
+const router = createRouter({
   history: createWebHistory(),
   routes,
 })
+
+// 路由守卫：认证 + 粗粒度权限。
+// 具体判定规则见 ./guard.ts（纯函数，单测覆盖「不产生重定向死循环」）。
+router.beforeEach(async (to) => {
+  const authStore = useAuthStore()
+  const authenticated = await authStore.ensureSession()
+
+  return resolveNavigation(to, routes, {
+    isAuthenticated: authenticated,
+    hasPermission: authStore.hasPermission,
+    logout: authStore.logout,
+  })
+})
+
+export default router

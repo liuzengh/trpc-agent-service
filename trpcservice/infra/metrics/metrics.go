@@ -32,6 +32,7 @@ type instruments struct {
 	imDelivery        otelmetric.Int64Counter
 	tenantCost        otelmetric.Float64Counter
 	sessionLatency    otelmetric.Float64Histogram
+	deadLetters       otelmetric.Int64Counter
 }
 
 // current is the active instrument set. It starts bound to the noop provider
@@ -104,6 +105,10 @@ func Init() {
 		otelmetric.WithDescription("Session backend latency"),
 		otelmetric.WithUnit("s"),
 	)
+	ins.deadLetters, _ = meter.Int64Counter(
+		"platform.dlq_total",
+		otelmetric.WithDescription("Messages moved to the dead-letter queue"),
+	)
 
 	current.Store(ins)
 }
@@ -156,6 +161,11 @@ func TenantCost(ctx context.Context, tenantID string, cost float64) {
 // SessionLatency records session-backend access latency.
 func SessionLatency(ctx context.Context, tenantID string, dur time.Duration) {
 	current.Load().sessionLatency.Record(ctx, dur.Seconds(), otelmetric.WithAttributes(attrTenant.String(tenantID)))
+}
+
+// DeadLetter counts one message moved to the dead-letter queue.
+func DeadLetter(ctx context.Context, tenantID, channel string) {
+	current.Load().deadLetters.Add(ctx, 1, otelmetric.WithAttributes(attrTenant.String(tenantID), attrChannel.String(channel)))
 }
 
 // TraceContextFromID returns parent carrying the given trace id as a remote

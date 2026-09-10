@@ -33,6 +33,20 @@ func (m *mockConn) Send(_ context.Context, target, chatType, text string) error 
 	return nil
 }
 
+func (m *mockConn) SendCard(_ context.Context, target, chatType string, card channels.Card) error {
+	m.sent = append(m.sent, target+":card:"+card.Content)
+	return nil
+}
+
+func (m *mockConn) SendStream(_ context.Context, target, chatType string, stream <-chan string) error {
+	var full string
+	for chunk := range stream {
+		full += chunk
+	}
+	m.sent = append(m.sent, target+":stream:"+full)
+	return nil
+}
+
 func (m *mockConn) Close() error { return nil }
 
 const textXML1 = `<xml><FromUserName><![CDATA[openid-1]]></FromUserName><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[first]]></Content><MsgId><![CDATA[1001]]></MsgId></xml>`
