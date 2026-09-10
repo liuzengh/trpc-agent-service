@@ -22,22 +22,16 @@ metadata:
     app.kubernetes.io/name: trpc-agent-service
     app.kubernetes.io/component: gateway
 spec:
-  # Pinned to 1. The msg_id dedup table and the per-session serializer are both
-  # in-process (fact #7), so a second replica silently breaks idempotency and
-  # lets two nodes drive one session at once. Raising this number is the LAST
-  # step of the second-phase work (Redis SETNX dedup + consistent-hash session
-  # routing), not the first.
-  replicas: 1
+  # Redis coordinates msg_id claims and session leases, so workers are now
+  # stateless enough to run concurrently. Keep Redis available: readiness
+  # removes a Pod from traffic when its shared state backend is unavailable.
+  replicas: 2
 
-  # Recreate, not RollingUpdate, and this follows from the same fact. A rolling
-  # update with replicas: 1 computes maxUnavailable = 25% -> 0, so the new Pod
-  # comes up BEFORE the old one goes down: for the whole readiness window there
-  # are two processes, each with its own dedup table and its own session locks,
-  # both able to accept the same msg_id or run the same session concurrently.
-  # The duplicate-delivery guarantee D3 asserts would be false during every
-  # deploy. Recreate trades a few seconds of downtime for not violating it.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
 
   # Keep the selector minimal: it is immutable after creation, and every label
   # added here is a label that can never be removed.
@@ -81,10 +75,8 @@ spec:
         # swapping the live config, the change is rejected — not merely lost on
         # restart.
         #
-        # Cost, stated plainly: the copy lives in an emptyDir, so a hot change
-        # survives a container restart but not a reschedule. The ConfigMap stays
-        # the durable source of truth. Durable live config needs a real store
-        # (Redis or a PVC), which is second-phase work.
+        # The local copy is only a recovery cache. Successful admin writes are
+        # also stored in Redis and a new Pod loads that shared snapshot first.
         #
         # busybox is the only image referenced here that is not already local;
         # swap it for any image with `cp` if your cluster vendors one. It runs

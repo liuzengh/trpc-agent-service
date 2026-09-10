@@ -25,6 +25,8 @@ const (
 	testKey      = "sk-secret-key-1234567890"
 	testWecomKey = "jWmYm7qr5nMoAUwZRjGtBxmz3KA1tkAj3ykkR6q2B2C"
 	initialYAML  = `default_tenant: demo
+admin:
+  token: test-admin-token
 tenants:
   - id: demo
     name: Demo
@@ -59,6 +61,7 @@ func setupService(t *testing.T, aud ...*audit.Logger) (*Service, string, *agent.
 	t.Setenv("AGENT_MESSAGE_TIMEOUT", "")
 	t.Setenv("AGENT_MAX_CONCURRENCY_PER_TENANT", "")
 	t.Setenv("AGENT_MAX_LLM_CALLS", "")
+	t.Setenv("ADMIN_TOKEN", "")
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(initialYAML), 0o600); err != nil {
@@ -86,7 +89,9 @@ func do(t *testing.T, h http.Handler, method, path, body string) *httptest.Respo
 		rdr = strings.NewReader(body)
 	}
 	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, httptest.NewRequest(method, path, rdr))
+	req := httptest.NewRequest(method, path, rdr)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+	h.ServeHTTP(rw, req)
 	return rw
 }
 
@@ -120,6 +125,15 @@ func TestListMasksSecrets(t *testing.T) {
 	}
 	if resp.DefaultTenant != "demo" || len(resp.Tenants) != 2 || resp.Tenants[0].ID != "demo" {
 		t.Fatalf("resp = %+v", resp)
+	}
+}
+
+func TestAdminRequiresBearerToken(t *testing.T) {
+	s, _, _ := setupService(t)
+	rw := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/admin/tenants", nil))
+	if rw.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token status = %d, want %d", rw.Code, http.StatusUnauthorized)
 	}
 }
 

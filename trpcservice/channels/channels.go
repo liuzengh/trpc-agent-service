@@ -19,6 +19,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/guardrail"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -149,6 +150,7 @@ type Gateway struct {
 	dedup    *dedup
 	serial   *sessionSerializer
 	quota    *tenantQuota
+	coord    coordination.Coordinator
 	gov      Governance
 }
 
@@ -172,6 +174,13 @@ type Governance struct {
 // WithGovernance attaches the governance hooks; main wires it once at boot.
 func (g *Gateway) WithGovernance(gov Governance) *Gateway {
 	g.gov = gov
+	return g
+}
+
+// WithCoordinator switches message idempotency and session serialization to a
+// shared backend. It is required before running more than one gateway replica.
+func (g *Gateway) WithCoordinator(c coordination.Coordinator) *Gateway {
+	g.coord = c
 	return g
 }
 
@@ -310,7 +319,12 @@ func (g *Gateway) handleCallback(a Adapter, tenantID string, w http.ResponseWrit
 		}
 		in.TenantID = tenantID
 		in.Channel = a.Type()
-		if g.dedup.seen(in.MsgID) {
+		freshMessage, claimErr := g.claim(r.Context(), in.MsgID)
+		if claimErr != nil {
+			http.Error(w, "message coordination unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !freshMessage {
 			continue // duplicate delivery: idempotent skip, ACK already written
 		}
 		fresh = append(fresh, in)
@@ -386,7 +400,11 @@ func (g *Gateway) dispatch(parent context.Context, a Adapter, in *InboundMessage
 	}
 	defer release()
 
-	unlock := g.serial.lock(in.SessionID())
+	unlock, err := g.lockSession(ctx, in.SessionID(), lim.MessageTimeout)
+	if err != nil {
+		g.failModel(ctx, a, modelFailure{traceID: traceID, in: in, start: time.Now(), errType: errorTypeOf(ctx, "coordination"), detail: err.Error()})
+		return
+	}
 	defer unlock()
 
 	pol := g.policy(in.TenantID)
@@ -534,8 +552,10 @@ func (g *Gateway) failModel(ctx context.Context, a Adapter, f modelFailure) {
 	if f.errType == errorTypeTimeout {
 		reply = TimeoutText
 	}
-	f.span.SetStatus(codes.Error, f.detail)
-	f.span.End()
+	if f.span != nil {
+		f.span.SetStatus(codes.Error, f.detail)
+		f.span.End()
+	}
 	latency := time.Since(f.start)
 	g.gov.Metrics.ModelLatency(f.in.TenantID, latency)
 	g.gov.Audit.Log(audit.Record{
@@ -546,6 +566,20 @@ func (g *Gateway) failModel(ctx context.Context, a Adapter, f modelFailure) {
 	})
 	g.gov.Metrics.Message(f.in.TenantID, string(f.in.Channel), resultError)
 	g.reply(ctx, a, f.in, reply, audit.DecisionError)
+}
+
+func (g *Gateway) claim(ctx context.Context, id string) (bool, error) {
+	if g.coord != nil {
+		return g.coord.Claim(ctx, id, 10*time.Minute)
+	}
+	return !g.dedup.seen(id), nil
+}
+
+func (g *Gateway) lockSession(ctx context.Context, sessionID string, ttl time.Duration) (func(), error) {
+	if g.coord != nil {
+		return g.coord.Lock(ctx, sessionID, ttl+10*time.Second)
+	}
+	return g.serial.lock(sessionID), nil
 }
 
 // sessionSerializer provides one mutex per session_id. It is the

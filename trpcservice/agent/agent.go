@@ -15,6 +15,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 )
 
 const (
@@ -61,6 +62,7 @@ func NewRunner(t *tenant.Context, sess session.Service, maxLLMCalls int) (runner
 		llmagent.WithInstruction("You are a helpful assistant."),
 		llmagent.WithGenerationConfig(model.GenerationConfig{Stream: true}),
 		llmagent.WithMaxLLMCalls(maxLLMCalls),
+		llmagent.WithTools(platformtool.Select(t.Tools.Allowed)),
 	)
 
 	return runner.NewRunner(appName, a,

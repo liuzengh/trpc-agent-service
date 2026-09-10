@@ -46,6 +46,8 @@ SMOKE=.smoke/e2e
 rm -rf "$SMOKE"; mkdir -p "$SMOKE"
 
 BASE=${E2E_BASE:-http://localhost:8080}
+ADMIN_TOKEN=${ADMIN_TOKEN:-local-admin-token}
+ADMIN_AUTH="Authorization: Bearer $ADMIN_TOKEN"
 MODEL=${E2E_MODEL:-http://localhost:9009}
 TENANT=${E2E_TENANT:-demo}
 BYSTANDER=${E2E_BYSTANDER:-demo-alt}   # 只用来断言租户列表里有两个（D7 需要）
@@ -189,7 +191,7 @@ JSON
 }
 
 echo "--- A. 拓扑与健康 ---"
-curl -s "$BASE/admin/tenants" > "$SMOKE/tenants.json"
+curl -s -H "$ADMIN_AUTH" "$BASE/admin/tenants" > "$SMOKE/tenants.json"
 has "租户列表里有 $TENANT"        "$SMOKE/tenants.json" "\"$TENANT\""
 has "租户列表里有 ${BYSTANDER}（D7 的旁观者）" "$SMOKE/tenants.json" "\"$BYSTANDER\""
 has "default_tenant = $TENANT"    "$SMOKE/tenants.json" "\"default_tenant\":\"$TENANT\""
@@ -233,13 +235,13 @@ echo "--- D. 输出 tripwire：跨 chunk 的关键词必须被截断 ---"
 # 「还原」会把真密钥替换成打码串，对着真实供应商就是一次静默破坏。
 restore() {
   [ -s "$ORIG" ] || return 0
-  curl -s -o /dev/null -X PUT --data-binary @"$ORIG" "$BASE/admin/tenants/$TENANT"
+  curl -s -H "$ADMIN_AUTH" -o /dev/null -X PUT --data-binary @"$ORIG" "$BASE/admin/tenants/$TENANT"
 }
 # 跑完不删 $SMOKE：SSE 原文、trace.out 这些是归档进 spec 的证据，而脚本开头已经
 # rm -rf 过一次，每次都是干净的。trap 只负责还原租户。
 trap 'restore' EXIT
 
-check "GET 原租户（还原用的底本）" "200" "$(curl -s -o "$ORIG" -w '%{http_code}' "$BASE/admin/tenants/$TENANT")"
+check "GET 原租户（还原用的底本）" "200" "$(curl -s -H "$ADMIN_AUTH" -o "$ORIG" -w '%{http_code}' "$BASE/admin/tenants/$TENANT")"
 python3 - "$ORIG" "$SMOKE/tenant.tripped.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding='utf-8'))
@@ -251,7 +253,7 @@ PY
 python3 -c 'import json,sys; json.load(open(sys.argv[1],encoding="utf-8"))' "$SMOKE/tenant.tripped.json" \
   && check "装上 tripwire 的 payload 是合法 JSON" "yes" "yes" \
   || check "装上 tripwire 的 payload 是合法 JSON" "yes" "no（python 拼坏了）"
-check "PUT 装上 output tripwire" "200" "$(curl -s -o "$SMOKE/put.out" -w '%{http_code}' \
+check "PUT 装上 output tripwire" "200" "$(curl -s -H "$ADMIN_AUTH" -o "$SMOKE/put.out" -w '%{http_code}' \
   -X PUT --data-binary @"$SMOKE/tenant.tripped.json" "$BASE/admin/tenants/$TENANT")"
 
 setmode '{"mode":"ok","reset":true}'
@@ -270,7 +272,7 @@ fi
 echo "--- D'. 还原：租户回到原样，基线回复恢复完整 ---"
 restore
 : > "$ORIG"   # 已还原，别让 trap 再 PUT 一次
-curl -s "$BASE/admin/tenants/$TENANT" > "$SMOKE/tenant.after.json"
+curl -s -H "$ADMIN_AUTH" "$BASE/admin/tenants/$TENANT" > "$SMOKE/tenant.after.json"
 hasnt "output_blocked_keywords 已清掉" "$SMOKE/tenant.after.json" 'output_blocked_keywords'
 has "预置的输入 guardrail 还在（还原没多删）" "$SMOKE/tenant.after.json" '敏感词'
 setmode '{"mode":"ok","reset":true}'

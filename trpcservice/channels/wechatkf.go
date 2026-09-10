@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -54,6 +55,15 @@ type WeChatKf struct {
 	cursors map[string]string           // key: tenant_id + ":" + open_kfid -> next_cursor
 	kfIDs   map[string]string           // key: SessionID() -> open_kfid to reply on
 	bufs    map[string]*strings.Builder // key: SessionID(), pending aggregated reply
+	state   coordination.StateStore
+}
+
+// WithStateStore persists sync cursors outside the process. Use the shared
+// Redis coordinator in production so callback ownership can move or restart
+// without replaying the customer-service backlog.
+func (k *WeChatKf) WithStateStore(state coordination.StateStore) *WeChatKf {
+	k.state = state
+	return k
 }
 
 // NewWeChatKf builds the WeChat KF adapter. lookup resolves the per-tenant
@@ -182,6 +192,13 @@ func (k *WeChatKf) syncMessages(ctx context.Context, tenantID string, b *tenant.
 	k.mu.Lock()
 	cursor := k.cursors[key]
 	k.mu.Unlock()
+	if cursor == "" && k.state != nil {
+		stored, err := k.state.Get(ctx, "wechat-kf-cursor:"+key)
+		if err != nil {
+			return nil, fmt.Errorf("wechat_kf load cursor: %w", err)
+		}
+		cursor = stored
+	}
 	// With no cursor the server replays up to 3 days of history; on a fresh
 	// boot we only accept messages newer than the process start.
 	fresh := cursor == ""
@@ -207,6 +224,11 @@ func (k *WeChatKf) syncMessages(ctx context.Context, tenantID string, b *tenant.
 		}
 		if resp.NextCursor != "" {
 			cursor = resp.NextCursor
+			if k.state != nil {
+				if err := k.state.Set(ctx, "wechat-kf-cursor:"+key, cursor); err != nil {
+					return out, fmt.Errorf("wechat_kf save cursor: %w", err)
+				}
+			}
 			k.mu.Lock()
 			k.cursors[key] = cursor
 			k.mu.Unlock()
@@ -273,16 +295,47 @@ func (k *WeChatKf) Send(ctx context.Context, msg *OutboundMessage) error {
 		return fmt.Errorf("wechat_kf: no open_kfid recorded for session %q", key)
 	}
 
+	if err := k.flushOutbox(ctx, b, key, msg.Target.UserID, kfID); err != nil {
+		return err
+	}
+	if err := k.sendFull(ctx, b, msg.Target.UserID, kfID, full); err != nil {
+		k.saveOutbox(ctx, key, full)
+		return err
+	}
+	return nil
+}
+
+func (k *WeChatKf) sendFull(ctx context.Context, b *tenant.WeChatKfBinding, toUser, kfID, full string) error {
 	token, err := k.accessToken(ctx, b)
 	if err != nil {
 		return err
 	}
 	for _, part := range splitUTF8(full, kfMaxTextBytes) {
-		if err := k.sendText(ctx, b, token, msg.Target.UserID, kfID, part); err != nil {
+		if err := k.sendText(ctx, b, token, toUser, kfID, part); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (k *WeChatKf) flushOutbox(ctx context.Context, b *tenant.WeChatKfBinding, key, toUser, kfID string) error {
+	if k.state == nil {
+		return nil
+	}
+	pending, err := k.state.Get(ctx, "wechat-kf-outbox:"+key)
+	if err != nil || pending == "" {
+		return err
+	}
+	if err := k.sendFull(ctx, b, toUser, kfID, pending); err != nil {
+		return err
+	}
+	return k.state.Delete(ctx, "wechat-kf-outbox:"+key)
+}
+
+func (k *WeChatKf) saveOutbox(ctx context.Context, key, full string) {
+	if k.state != nil {
+		_ = k.state.Set(ctx, "wechat-kf-outbox:"+key, full)
+	}
 }
 
 func (k *WeChatKf) decrypt(b *tenant.WeChatKfBinding, b64 string) (string, error) {

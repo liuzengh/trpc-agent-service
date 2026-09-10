@@ -31,6 +31,8 @@ default_tenant: demo
 #   json: false        # true = JSON encoding for container deployments
 # audit:
 #   file: data/audit.jsonl   # append-only JSONL trail; omit = log-only audit
+# admin:
+#   token: REPLACE_WITH_A_LONG_RANDOM_TOKEN  # or inject ADMIN_TOKEN (preferred)
 # telemetry:
 #   traces:
 #     exporter: off                          # off | stdout | otlp

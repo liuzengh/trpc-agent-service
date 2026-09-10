@@ -1,20 +1,10 @@
-# HorizontalPodAutoscaler — shipped inert on purpose, maxReplicas: 1.
+# HorizontalPodAutoscaler for Redis-coordinated gateway workers.
 #
 # Not verified in a cluster (fact #3).
 #
-# WHY IT DOES NOT SCALE
-# Raising maxReplicas above 1 is unsafe today for the same reason the
-# Deployment is pinned to replicas: 1 and uses strategy: Recreate. The msg_id
-# dedup table and the per-session serializer are in-process (fact #7), so two
-# Pods means a duplicate IM delivery can be executed twice and one session can
-# be driven concurrently from two nodes. An autoscaler that does this under load
-# — precisely when duplicates and retries are most likely — is worse than none.
-#
-# WHAT HAS TO BE TRUE FIRST
-#   1. dedup moves to Redis SETNX with a TTL, and
-#   2. sessions are routed by consistent hashing on the session key (or the
-#      serializer moves into Redis too).
-# Then set maxReplicas, and 50-pdb.yaml starts earning its keep.
+# Redis SETNX claims duplicate deliveries and Redis leases serialize each
+# session across Pods. The per-tenant concurrency quota remains local to each
+# worker, so it protects one worker but is not a cluster-wide tenant quota.
 #
 # WHY CPU, AND WHY THAT IS ALSO NOT THE RIGHT SIGNAL
 # The proposal doc asked for scaling on concurrent sessions. That needs a custom
@@ -41,8 +31,8 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: trpc-agent-service
-  minReplicas: 1
-  maxReplicas: 1 # see above: inert until dedup and session routing leave the process
+  minReplicas: 2
+  maxReplicas: 10
   metrics:
     - type: Resource
       resource:

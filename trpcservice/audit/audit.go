@@ -22,6 +22,7 @@ const (
 	EventModelCall      = "model_call"
 	EventReply          = "reply"
 	EventAdmin          = "admin"
+	EventTool           = "tool"
 )
 
 // Decisions recorded alongside events.

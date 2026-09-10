@@ -308,10 +308,10 @@ if have docker && have jq; then
     jqcheck "全部服务 restart=no（D4/D5 要能真停）" "no" \
       "$COMPOSE_DEF" '[.services[] | .restart] | unique | join(",")'
 
-    # In-process dedup and session locks (fact #7) make a second replica
-    # silently wrong, so the count is pinned in the file rather than left to
-    # `up --scale`.
-    jqcheck "app 副本数固定 1（fact #7）" "1" \
+    # Compose stays at one replica because fault drills address tas-app by a
+    # fixed name. Redis coordination makes K8s, not this local drill stack,
+    # the scaling target.
+    jqcheck "Compose 演练栈固定 1 个 app" "1" \
       "$COMPOSE_DEF" '.services.app.deploy.replicas'
     # srv.Shutdown gets 5s and main returns without waiting for in-flight
     # dispatch goroutines (fact #8), so a longer grace buys nothing.
@@ -407,15 +407,13 @@ if have kubectl && have ruby && have jq; then
                    and ([$sp[] | select(.n==$x.p)]|length>0) | not)]) as $bad
         | if ($bad|length)==0 then "ok" else "悬空 backend：\($bad)" end end'
 
-    # --- the numbers three files have to agree on ------------------------------
-    # fact #7: dedup and the session serializer are in-process, so replicas > 1
-    # breaks idempotency. All three places are pinned, and an autoscaler that
-    # could raise the count under load would be worse than none.
-    jqcheck "replicas=1 + Recreate + HPA 上限 1（三处一致）" "ok" "$K8S_JSON" '
+    # Redis-backed SETNX and leases make replicas safe; assert the deployment
+    # starts above one, rolls safely, and the HPA can add capacity.
+    jqcheck "Redis 协调后允许滚动扩容（Deployment + HPA）" "ok" "$K8S_JSON" '
       ([.[] | select(.kind=="Deployment") | .spec] | .[0]) as $d
       | ([.[] | select(.kind=="HorizontalPodAutoscaler") | .spec] | .[0]) as $h
-      | if $d.replicas==1 and $d.strategy.type=="Recreate"
-           and $h.minReplicas==1 and $h.maxReplicas==1 then "ok"
+      | if $d.replicas>=2 and $d.strategy.type=="RollingUpdate"
+           and $h.minReplicas>=2 and $h.maxReplicas>$h.minReplicas then "ok"
         else "replicas=\($d.replicas) strategy=\($d.strategy.type) hpa=\($h.minReplicas)-\($h.maxReplicas)" end'
     jqcheck "terminationGracePeriodSeconds = 10（Shutdown 5s，不等在飞消息）" "10" \
       "$K8S_JSON" '[.[] | select(.kind=="Deployment") | .spec.terminationGracePeriodSeconds] | .[0]'
@@ -547,7 +545,7 @@ echo "── D. 部署配置过真校验器（go test，计数以防改名后匹
 
 if have go; then
   DEPLOY_TESTS='^(TestComposeConfigs|TestComposeDemoTenant|TestKubernetesConfig|TestDeployConfigs|TestObservabilityConfigDiffers)'
-  out=$(go test ./trpcservice/config/ -run "$DEPLOY_TESTS" -count=1 -v 2>&1)
+  out=$(GOCACHE=/private/tmp/trpc-agent-go-cache go test ./trpcservice/config/ -run "$DEPLOY_TESTS" -count=1 -v 2>&1)
   n=$(printf '%s\n' "$out" | grep -cE '^--- PASS' || true)
   check "7 个部署配置测试全过" "7" "$n"
   [ "$n" = 7 ] || printf '%s\n' "$out" | grep -E '^(--- FAIL|    )' | head -10
@@ -555,7 +553,7 @@ if have go; then
   # fact #20: audit.New("") used to return a nil logger, so omitting audit.file
   # dropped the entire trail while the docs promised "log-only". The K8s config
   # depends on the fixed behaviour, so its regression test belongs in this gate.
-  out=$(go test ./trpcservice/audit/ -run '^TestEmptyPathIsLogOnlyNotSilent$' -count=1 -v 2>&1)
+  out=$(GOCACHE=/private/tmp/trpc-agent-go-cache go test ./trpcservice/audit/ -run '^TestEmptyPathIsLogOnlyNotSilent$' -count=1 -v 2>&1)
   n=$(printf '%s\n' "$out" | grep -cE '^--- PASS' || true)
   check "空 audit.file 是 log-only 而不是静默丢弃" "1" "$n"
   [ "$n" = 1 ] || printf '%s\n' "$out" | grep -E '^(--- FAIL|    )' | head -10

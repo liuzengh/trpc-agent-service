@@ -19,6 +19,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
@@ -58,6 +59,29 @@ func main() {
 		fmt.Fprintf(os.Stderr, "init log: %v\n", err)
 		os.Exit(1)
 	}
+	// Redis backs both framework sessions and cross-replica coordination. Load
+	// the shared runtime config before constructing runners so a rescheduled Pod
+	// starts from the latest authenticated admin change, not its ConfigMap copy.
+	var coord *coordination.Redis
+	if cfg.Storage.Session.Backend == config.BackendRedis {
+		coord, err = coordination.NewRedis(cfg.Storage.Session.RedisURL, cfg.Storage.Session.KeyPrefix)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "init coordination: %v\n", err)
+			os.Exit(1)
+		}
+		defer coord.Close()
+		if persisted, err := admin.NewRedisRuntimeStore(coord).Load(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "load runtime config: %v\n", err)
+			os.Exit(1)
+		} else if persisted != nil {
+			// Storage is deployment-owned and must not be changed through admin.
+			persisted.Storage = cfg.Storage
+			if cfg.Admin.Token != "" {
+				persisted.Admin.Token = cfg.Admin.Token
+			}
+			cfg = persisted
+		}
+	}
 	// Governance trail and telemetry (proposal doc 3.5): the audit file is
 	// optional, exporters default to off so local runs stay quiet.
 	aud, err := audit.New(cfg.Audit.File)
@@ -94,10 +118,17 @@ func main() {
 	// Admin service owns the live config: adapters resolve bindings through
 	// it so tenant hot updates take effect without rewiring the gateway.
 	adm := admin.NewService(*configPath, cfg, reg, aud)
+	if coord != nil {
+		adm.WithRuntimeStore(admin.NewRedisRuntimeStore(coord))
+	}
+	kf := channels.NewWeChatKf(adm.WeChatKfBinding)
+	if coord != nil {
+		kf.WithStateStore(coord)
+	}
 	gw := channels.NewGateway(reg,
 		channels.NewWebChat(),
 		channels.NewWeCom(adm.WeComBinding),
-		channels.NewWeChatKf(adm.WeChatKfBinding),
+		kf,
 	).WithGovernance(channels.Governance{
 		PolicyFor: adm.Guardrails,
 		// Read per dispatch, like the policy above: retuning the envelope needs
@@ -106,6 +137,9 @@ func main() {
 		Audit:     aud,
 		Metrics:   rec,
 	})
+	if coord != nil {
+		gw.WithCoordinator(coord)
+	}
 	srv := &http.Server{
 		Addr: *addr,
 		// Readiness is a closure over the live session service, evaluated per

@@ -29,11 +29,12 @@ import (
 // config, mutates the clone, then validates + saves + hot-applies it. A
 // failure at any stage leaves the running config untouched.
 type Service struct {
-	mu   sync.Mutex
-	path string
-	cfg  *config.Config
-	reg  *agent.Registry
-	aud  *audit.Logger
+	mu    sync.Mutex
+	path  string
+	cfg   *config.Config
+	reg   *agent.Registry
+	aud   *audit.Logger
+	store RuntimeStore
 }
 
 // NewService builds the admin service over the live config and registry.
@@ -41,6 +42,13 @@ type Service struct {
 // log-only auditing.
 func NewService(path string, cfg *config.Config, reg *agent.Registry, aud *audit.Logger) *Service {
 	return &Service{path: path, cfg: cfg, reg: reg, aud: aud}
+}
+
+// WithRuntimeStore makes successful admin mutations survive a reschedule. The
+// file remains a local recovery copy; the store is the shared source of truth.
+func (s *Service) WithRuntimeStore(store RuntimeStore) *Service {
+	s.store = store
+	return s
 }
 
 // auditAdmin records one mutation attempt on the governance trail. The
@@ -107,6 +115,10 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/admin/tenants/", s.handleItem)
 	mux.HandleFunc("/admin/settings", s.handleSettings)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorized(r) {
+			writeErr(w, http.StatusUnauthorized, "admin bearer token required")
+			return
+		}
 		ctx, span := otel.Tracer(metrics.ServiceName).Start(r.Context(), "admin.request",
 			trace.WithAttributes(
 				attribute.String("http.method", r.Method),
@@ -115,6 +127,16 @@ func (s *Service) Handler() http.Handler {
 		defer span.End()
 		mux.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (s *Service) authorized(r *http.Request) bool {
+	s.mu.Lock()
+	token := s.cfg.Admin.Token
+	s.mu.Unlock()
+	if token == "" {
+		return false
+	}
+	return r.Header.Get("Authorization") == "Bearer "+token
 }
 
 // Wire DTOs. The same shapes serve requests and responses; responses carry
@@ -449,6 +471,13 @@ func (s *Service) commit(next *config.Config) error {
 		_ = config.Save(s.path, s.cfg)
 		return err
 	}
+	if s.store != nil {
+		if err := s.store.Save(context.Background(), next); err != nil {
+			_ = config.Save(s.path, s.cfg)
+			_ = s.reg.Apply(s.cfg)
+			return err
+		}
+	}
 	s.cfg = next
 	return nil
 }
@@ -576,10 +605,11 @@ func fromDTO(p tenantDTO) *tenant.Context {
 func cloneConfig(c *config.Config) *config.Config {
 	n := &config.Config{
 		DefaultTenant: c.DefaultTenant,
-		Storage:       c.Storage,   // plain value: backend is not tenant-editable
-		Agent:         c.Agent,     // plain value: Save validates the envelope,
-		Log:           c.Log,       // so it must survive a tenant-only mutation
-		Audit:         c.Audit,     // plain values: observability is not
+		Storage:       c.Storage, // plain value: backend is not tenant-editable
+		Agent:         c.Agent,   // plain value: Save validates the envelope,
+		Log:           c.Log,     // so it must survive a tenant-only mutation
+		Audit:         c.Audit,   // plain values: observability is not
+		Admin:         c.Admin,
 		Telemetry:     c.Telemetry, // tenant-editable either, but Save
 		Tenants:       make(map[string]*tenant.Context, len(c.Tenants)),
 	}

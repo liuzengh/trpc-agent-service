@@ -50,6 +50,14 @@ type Guardrails struct {
 	OutputBlockedKeywords []string `yaml:"output_blocked_keywords,omitempty"`
 }
 
+// Tools is the tenant-scoped capability policy. Allowed controls which built-in
+// tools are visible to its agent; ApprovalRequired keeps a visible tool from
+// executing until a host-side approval workflow supplies an allow decision.
+type Tools struct {
+	Allowed          []string `yaml:"allowed,omitempty"`
+	ApprovalRequired []string `yaml:"approval_required,omitempty"`
+}
+
 // Context is the per-tenant configuration carried across the platform.
 // Routing, execution, storage, and telemetry all key off ID (tenant_id).
 // The yaml tags double as the persistence and Admin API wire shape.
@@ -59,4 +67,5 @@ type Context struct {
 	Model      ModelConfig `yaml:"model"`
 	Channels   Channels    `yaml:"channels,omitempty"`
 	Guardrails Guardrails  `yaml:"guardrails,omitempty"`
+	Tools      Tools       `yaml:"tools,omitempty"`
 }

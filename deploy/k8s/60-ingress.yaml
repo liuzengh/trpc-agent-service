@@ -65,12 +65,10 @@ spec:
           # SSE path needs a long one, that is two Ingress resources, not two
           # paths.
           #
-          # /admin is exposed here for convenience and that is a decision to
-          # revisit: it is the surface that mutates tenants and the runtime
-          # envelope, and it has no authentication of its own. Put it behind an
-          # authenticating proxy, restrict it with a source-range annotation, or
-          # drop it from the Ingress entirely and reach it with
-          # `kubectl port-forward`.
+          # /admin requires an application-level Bearer token from ADMIN_TOKEN.
+          # For production, also restrict its source or place it behind an
+          # authenticating proxy; a bearer token is not a replacement for
+          # network segmentation and audit controls.
           - path: /
             pathType: Prefix
             backend:

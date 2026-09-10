@@ -21,9 +21,10 @@ const DefaultPath = "config.yaml"
 // Environment variables overriding the default tenant's model settings, kept
 // for the pre-config-file development workflow.
 const (
-	envAPIKey  = "MODEL_API_KEY"
-	envModel   = "MODEL_NAME"
-	envBaseURL = "MODEL_BASE_URL"
+	envAPIKey     = "MODEL_API_KEY"
+	envModel      = "MODEL_NAME"
+	envBaseURL    = "MODEL_BASE_URL"
+	envAdminToken = "ADMIN_TOKEN"
 )
 
 // Session storage backend names and defaults (proposal doc 3.3). The
@@ -83,6 +84,7 @@ type fileYAML struct {
 	Agent         *agentYAML       `yaml:"agent,omitempty"`
 	Log           *logYAML         `yaml:"log,omitempty"`
 	Audit         *auditYAML       `yaml:"audit,omitempty"`
+	Admin         *adminYAML       `yaml:"admin,omitempty"`
 	Telemetry     *telemetryYAML   `yaml:"telemetry,omitempty"`
 	Tenants       []tenant.Context `yaml:"tenants"`
 }
@@ -141,6 +143,12 @@ type AuditConfig struct {
 	File string
 }
 
+// AdminConfig protects the runtime configuration API. Prefer ADMIN_TOKEN in
+// deployment environments so the credential never lives in a ConfigMap.
+type AdminConfig struct {
+	Token string
+}
+
 // ExporterConfig selects a trace/metric exporter: off, stdout, or otlp
 // (OTLP/HTTP base endpoint, e.g. http://127.0.0.1:4318).
 type ExporterConfig struct {
@@ -169,6 +177,7 @@ type Config struct {
 	Agent         AgentConfig
 	Log           LogConfig
 	Audit         AuditConfig
+	Admin         AdminConfig
 	Telemetry     TelemetryConfig
 	Tenants       map[string]*tenant.Context
 }
@@ -185,19 +194,31 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 
-	var f fileYAML
-	if err := yaml.Unmarshal(data, &f); err != nil {
+	cfg, err := LoadBytes(data)
+	if err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	applyEnvOverride(cfg.Tenants[cfg.DefaultTenant])
+	applyAdminEnv(&cfg.Admin)
+	return cfg, nil
+}
 
+// LoadBytes parses a persisted config snapshot. Runtime stores use this form;
+// environment overrides deliberately remain at the process boundary in Load.
+func LoadBytes(data []byte) (*Config, error) {
+	var err error
+	var f fileYAML
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		return nil, err
+	}
 	cfg := &Config{Tenants: make(map[string]*tenant.Context, len(f.Tenants))}
 	for i := range f.Tenants {
 		t := f.Tenants[i]
 		if t.ID == "" {
-			return nil, fmt.Errorf("config %s: every tenant needs an id", path)
+			return nil, fmt.Errorf("every tenant needs an id")
 		}
 		if _, dup := cfg.Tenants[t.ID]; dup {
-			return nil, fmt.Errorf("config %s: duplicate tenant %q", path, t.ID)
+			return nil, fmt.Errorf("duplicate tenant %q", t.ID)
 		}
 		cfg.Tenants[t.ID] = &t
 	}
@@ -206,19 +227,19 @@ func Load(path string) (*Config, error) {
 		cfg.DefaultTenant = f.Tenants[0].ID
 	}
 	if cfg.Storage, err = parseStorage(f.Storage); err != nil {
-		return nil, fmt.Errorf("config %s: %w", path, err)
+		return nil, err
 	}
 	if cfg.Agent, err = parseAgent(f.Agent); err != nil {
-		return nil, fmt.Errorf("config %s: %w", path, err)
+		return nil, err
 	}
 	if cfg.Log, cfg.Audit, cfg.Telemetry, err = parseObservability(f.Log, f.Audit, f.Telemetry); err != nil {
-		return nil, fmt.Errorf("config %s: %w", path, err)
+		return nil, err
 	}
+	cfg.Admin = parseAdmin(f.Admin)
 
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("config %s: %w", path, err)
+		return nil, err
 	}
-	applyEnvOverride(cfg.Tenants[cfg.DefaultTenant])
 	return cfg, nil
 }
 
@@ -245,6 +266,9 @@ func (c *Config) Validate() error {
 		if err := validateGuardrails(id, t.Guardrails); err != nil {
 			return err
 		}
+		if err := validateTools(id, t.Tools); err != nil {
+			return err
+		}
 	}
 	if err := c.validateStorage(); err != nil {
 		return err
@@ -265,8 +289,25 @@ func (c *Config) Validate() error {
 // write can never leave an unloadable config behind. Tenants are written in
 // sorted order for stable diffs.
 func Save(path string, cfg *Config) error {
-	if err := cfg.Validate(); err != nil {
+	data, err := Marshal(cfg)
+	if err != nil {
 		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	return nil
+}
+
+// Marshal serializes a validated config for the local file and shared runtime
+// store. Tenants are sorted for stable snapshots.
+func Marshal(cfg *Config) ([]byte, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 	ids := make([]string, 0, len(cfg.Tenants))
 	for id := range cfg.Tenants {
@@ -280,6 +321,7 @@ func Save(path string, cfg *Config) error {
 		Agent:         agentToYAML(cfg.Agent),
 		Log:           logToYAML(cfg.Log),
 		Audit:         auditToYAML(cfg.Audit),
+		Admin:         adminToYAML(cfg.Admin),
 		Telemetry:     telemetryToYAML(cfg.Telemetry),
 	}
 	for _, id := range ids {
@@ -287,16 +329,9 @@ func Save(path string, cfg *Config) error {
 	}
 	data, err := yaml.Marshal(f)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("replace %s: %w", path, err)
-	}
-	return nil
+	return data, nil
 }
 
 // parseStorage normalizes the on-disk storage section: it fills defaults,
@@ -489,6 +524,10 @@ type auditYAML struct {
 	File string `yaml:"file,omitempty"`
 }
 
+type adminYAML struct {
+	Token string `yaml:"token,omitempty"`
+}
+
 type telemetryYAML struct {
 	Traces  exporterYAML        `yaml:"traces,omitempty"`
 	Metrics metricsExporterYAML `yaml:"metrics,omitempty"`
@@ -546,6 +585,19 @@ func parseObservability(l *logYAML, a *auditYAML, t *telemetryYAML) (LogConfig, 
 	return lc, ac, tc, nil
 }
 
+func parseAdmin(a *adminYAML) AdminConfig {
+	if a == nil {
+		return AdminConfig{}
+	}
+	return AdminConfig{Token: a.Token}
+}
+
+func applyAdminEnv(a *AdminConfig) {
+	if token := os.Getenv(envAdminToken); token != "" {
+		a.Token = token
+	}
+}
+
 // validateObservability rejects unknown levels/exporters and half-filled
 // otlp settings at load time, like validateStorage does for redis.
 func (c *Config) validateObservability() error {
@@ -593,6 +645,25 @@ func validateGuardrails(tenantID string, g tenant.Guardrails) error {
 	return nil
 }
 
+func validateTools(tenantID string, tools tenant.Tools) error {
+	seen := make(map[string]struct{}, len(tools.Allowed))
+	for _, name := range tools.Allowed {
+		if name == "" {
+			return fmt.Errorf("tenant %q: tools.allowed must not contain empty entries", tenantID)
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("tenant %q: tools.allowed contains duplicate %q", tenantID, name)
+		}
+		seen[name] = struct{}{}
+	}
+	for _, name := range tools.ApprovalRequired {
+		if _, ok := seen[name]; !ok {
+			return fmt.Errorf("tenant %q: tools.approval_required %q is not allowed", tenantID, name)
+		}
+	}
+	return nil
+}
+
 // logToYAML / auditToYAML / telemetryToYAML omit pure-default sections so
 // Save output stays diff-clean, mirroring storageToYAML.
 func logToYAML(l LogConfig) *logYAML {
@@ -611,6 +682,13 @@ func auditToYAML(a AuditConfig) *auditYAML {
 		return nil
 	}
 	return &auditYAML{File: a.File}
+}
+
+func adminToYAML(a AdminConfig) *adminYAML {
+	if a.Token == "" {
+		return nil
+	}
+	return &adminYAML{Token: a.Token}
 }
 
 func telemetryToYAML(t TelemetryConfig) *telemetryYAML {
@@ -717,6 +795,7 @@ func fromEnv(path string) (*Config, error) {
 		Agent:         ag,
 		Log:           lc,
 		Audit:         ac,
+		Admin:         AdminConfig{Token: os.Getenv(envAdminToken)},
 		Telemetry:     tc,
 		Tenants:       map[string]*tenant.Context{t.ID: t},
 	}, nil

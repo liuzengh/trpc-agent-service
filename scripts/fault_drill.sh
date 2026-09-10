@@ -51,6 +51,8 @@
 #   scripts/fault_drill.sh --keep          # 跑完不拆栈（供人工检查）
 set -u
 cd "$(dirname "$0")/.."
+ADMIN_TOKEN=${ADMIN_TOKEN:-local-admin-token}
+ADMIN_AUTH="Authorization: Bearer $ADMIN_TOKEN"
 
 ONLY=""; STRICT=0; KEEP=0
 while [ $# -gt 0 ]; do
@@ -128,10 +130,10 @@ settings() {
   cat > "$SMOKE/settings.json" <<JSON
 {"message_timeout":"$1","max_concurrency_per_tenant":$2,"max_llm_calls":8}
 JSON
-  curl -s -o "$SMOKE/settings.out" -w '%{http_code}' -X PUT "$BASE/admin/settings" \
+  curl -s -H "$ADMIN_AUTH" -o "$SMOKE/settings.out" -w '%{http_code}' -X PUT "$BASE/admin/settings" \
     --data-binary @"$SMOKE/settings.json" > "$SMOKE/settings.code"
   check "PUT settings（timeout=$1 quota=$2）" "200" "$(cat "$SMOKE/settings.code")"
-  real=$(curl -s "$BASE/admin/settings")
+  real=$(curl -s -H "$ADMIN_AUTH" "$BASE/admin/settings")
   has "settings 回读含 timeout=$1" <(printf '%s' "$real") "\"message_timeout\":\"$1\""
   has "settings 回读含 quota=$2" <(printf '%s' "$real") "\"max_concurrency_per_tenant\":$2"
 }
@@ -719,7 +721,7 @@ if want D6; then
   # 实测 admin.commit 第一步就是 config.Save(s.path, next)，而 /config 是可写的 bind
   # mount，所以 PUT 同时改了内存和文件，应急预算活得过节点重启。
   check "热更新跨了重启：新进程读到的还是 PUT 进去的 30s" "yes" \
-    "$(curl -s "$BASE/admin/settings" | grep -q '"message_timeout":"30s"' && echo yes || echo no)"
+    "$(curl -s -H "$ADMIN_AUTH" "$BASE/admin/settings" | grep -q '"message_timeout":"30s"' && echo yes || echo no)"
   has "而且它确实落进了挂载的配置文件（不是只在内存里）" "$CFGDIR/config.yaml" 'message_timeout: 30s'
   # 落盘是有代价的，代价本身也要钉住：Save 重写整个文件，注释被抹平（事实 #19）。
   num_gt "仓库那份配置本来是有注释的（对照，否则下面那条是空断言）" \

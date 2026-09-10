@@ -132,17 +132,17 @@ services:
       AGENT_MAX_LLM_CALLS: ${AGENT_MAX_LLM_CALLS:-}
       STORAGE_SESSION_BACKEND: ${STORAGE_SESSION_BACKEND:-}
       STORAGE_SESSION_REDIS_URL: ${STORAGE_SESSION_REDIS_URL:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-local-admin-token}
     # 10s, and no more: srv.Shutdown gets a 5s budget and then main returns —
     # it does not wait for in-flight dispatch goroutines, which hold a
     # WithoutCancel context (fact #8). A grace period above message_timeout
     # therefore buys nothing; the messages are cut off either way. Draining them
     # properly is a known gap, not something a bigger number here fixes.
     stop_grace_period: 10s
-    # Pinned to 1 on purpose. The msg_id dedup table and the per-session
-    # serializer are both in-process (fact #7), so a second replica would
-    # silently break idempotency and let two nodes run one session at once.
-    # D3 asserts dedup; it only means something while this is 1. Consistent-hash
-    # routing is the second-phase fix.
+    # Redis SETNX claims deliveries and Redis leases serialize sessions, so
+    # duplicate IM callbacks remain safe when this is raised for local testing.
+    # Compose keeps one instance by default because its fixed container_name
+    # is a convenient drill target; production scaling is in the K8s HPA.
     deploy:
       replicas: 1
     networks: [tas]
