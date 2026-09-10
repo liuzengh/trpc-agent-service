@@ -27,6 +27,9 @@ func BuildModel(cfg config.ModelConfig) (model.Model, error) {
 			openai.WithAPIKey(cfg.APIKey),
 			openai.WithOpenAIOptions(option.WithMiddleware(modelops.AvailabilityMiddleware), option.WithMaxRetries(0)),
 		}
+		if cfg.HTTPClient != nil {
+			options = append(options, openai.WithOpenAIOptions(option.WithHTTPClient(cfg.HTTPClient)))
+		}
 		if cfg.BaseURL != "" {
 			options = append(options, openai.WithBaseURL(cfg.BaseURL))
 		}

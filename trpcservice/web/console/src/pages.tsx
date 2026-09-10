@@ -86,6 +86,7 @@ export function AgentList({
     try {
       const app = await api<AgentApp>("apps/onboard", {
         ...values,
+        app_id: form.getFieldValue("app_id"),
         tenant_id: tenant,
       });
       setOpen(false);
@@ -118,6 +119,7 @@ export function AgentList({
                 disabled={!writable(principal)}
                 onClick={() => {
                   form.resetFields();
+                  form.setFieldValue("app_id", "app-" + crypto.randomUUID());
                   setOpen(true);
                 }}
               >
@@ -181,7 +183,15 @@ export function AgentList({
       ) : (
         <Blank title="还没有 Agent 应用">
           {!compact && writable(principal) && (
-            <Button onClick={() => setOpen(true)}>创建第一个 Agent</Button>
+            <Button
+              onClick={() => {
+                form.resetFields();
+                form.setFieldValue("app_id", "app-" + crypto.randomUUID());
+                setOpen(true);
+              }}
+            >
+              创建第一个 Agent
+            </Button>
           )}
         </Blank>
       )}
@@ -1130,20 +1140,28 @@ export function RunsPage({
             />
             {detail.error_type && (
               <Alert
-                type={["expired", "waiting"].includes(detail.status) ? "info" : "error"}
+                type={
+                  ["expired", "waiting"].includes(detail.status)
+                    ? "info"
+                    : "error"
+                }
                 title={
                   detail.status === "waiting"
-                    ? (detail.error_type === "session_order" ? "等待本会话前一条请求完成" : detail.error_type === "tenant_capacity" ? "等待租户并发名额" : "等待模型服务恢复")
+                    ? detail.error_type === "session_order"
+                      ? "等待本会话前一条请求完成"
+                      : detail.error_type === "tenant_capacity"
+                        ? "等待租户并发名额"
+                        : "等待模型服务恢复"
                     : detail.status === "expired"
-                    ? "聊天消息已过期，未进入 Agent 执行"
-                    : detail.error_type
+                      ? "聊天消息已过期，未进入 Agent 执行"
+                      : detail.error_type
                 }
                 description={
                   detail.status === "waiting"
                     ? `请求已持久保存，无需重复发送。下次调度：${date(detail.next_attempt_at)}。`
                     : detail.status === "expired"
-                    ? "未调用模型或工具，也未补发旧回复。如仍需要处理，请发送一条新消息。"
-                    : "执行失败不代表外部操作已回滚；未知结果请先核对。"
+                      ? "未调用模型或工具，也未补发旧回复。如仍需要处理，请发送一条新消息。"
+                      : "执行失败不代表外部操作已回滚；未知结果请先核对。"
                 }
               />
             )}

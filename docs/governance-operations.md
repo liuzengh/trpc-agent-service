@@ -34,7 +34,7 @@ Admin 是独立入口和 Principal RBAC，支持 superadmin、租户管理及只
 
 ## 2. 密钥与节点权限
 
-控制面只存 `secret_ref`。运行时通过 `tenant_id + purpose + reference` 精确 grant 解析 `env://`，默认拒绝。部署者维护 grants；租户不能通过设置 namespace 或任意环境变量名扩大权限。
+环境变量模式的控制配置只存 `secret_ref`。运行时通过 `tenant_id + purpose + reference` 精确 grant 解析 `env://`，默认拒绝。部署者维护 grants；租户不能通过设置 namespace 或任意环境变量名扩大权限。网页模型连接是下述独立的、可选的加密存储方式，不改变原有 IM/后端/工具授权。
 
 ```json
 [
@@ -46,7 +46,7 @@ Admin 是独立入口和 Principal RBAC，支持 superadmin、租户管理及只
 
 真实值在对应环境变量或部署 Secret 中。用途还包括 session、memory、artifact、knowledge、embedding、wecom_callback/aes/app、wecom_mcp_read/send、mcp_server。知识库 Key 和 Embedding Key 分开授权，S3/Embedding 不隐式回退到进程默认凭据。
 
-`POST /admin/resources/list` 使用 `kind=credentials` 和精确 `purpose` 分页查询当前租户的授权引用。此接口不调用 Resolve、不检查变量存在性，也不返回其他租户或其他用途的引用。网页模型与 Embedding 表单使用该清单；配置保存、发布和实际执行仍重复校验授权。
+`POST /admin/resources/list` 使用 `kind=credentials` 和精确 `purpose` 分页查询当前租户的授权引用。此接口不调用 Resolve、不检查变量存在性，也不返回其他租户或其他用途的引用。高级环境凭据模型与 Embedding 表单使用该清单；配置保存、发布和实际执行仍重复校验授权。
 
 Gateway 获得入站密钥，Sender 获得 IM 出站密钥，Worker/Jobs 获得执行模型与后端密钥；Relay 不解析模型或 IM 凭据。all 是本地组合权限，不代表进程级隔离。上游企业微信 MCP URL 可能同时具备读写权限，平台用途分离不等于上游签发了独立 Token。
 
@@ -60,6 +60,18 @@ Gateway 获得入站密钥，Sender 获得 IM 出站密钥，Worker/Jobs 获得�
 SQL 生成 NOLOGIN 最小职责角色，迁移、运行和管理身份分离；审计 append/prune/策略更新通过受限函数。部署者另建登录账号。共享角色不是租户 RLS，业务查询和 Storage Scope 校验仍必需。Redis 同时约束命令和 key prefix，禁止 FLUSH、CONFIG、全局扫描和任意键授权，Lua 也受 ACL 约束。
 
 Kubernetes 的分角色 Secret、NetworkPolicy 和依赖标签要在实际集群配置验证；模板不是域名防火墙。Secret 引用不能代替网络出口/SSRF 控制。当前没有 Vault/KMS、Workload Identity 或在线撤销，修改配置需更新相关进程，紧急撤销还应在供应商侧执行。
+
+### 2.1 网页模型连接
+
+`modelregistry` 和 schema 28 增加不可变的租户模型连接，仅 `superadmin` 可通过 `POST /admin/model-connections/create` 配置；租户管理者只能查看/选用自身连接。创建与审计在同一 PostgreSQL 事务提交。Cookie 请求仍须通过同源和 CSRF 检查；没有匿名首次注册密钥的接口。
+
+- API Key 使用 AES-256-GCM、随机 nonce 加密后写入 `model_connection`。附加认证数据绑定 tenant、connection ID、模型与地址，不能把密文复制给另一租户或换个地址继续解密。
+- 主密钥来自独立部署配置 `TRPC_AGENT_MODEL_MASTER_KEY`（base64 的 32 字节值），Admin/Worker/Jobs 必须一致。数据库只保存主密钥指纹，不存主密钥；配置缺失时功能关闭，不回退明文存储。指纹不匹配时启动失败。
+- 连接列表、Agent 草稿/版本和审计均不含 Key 或密文。模型配置只保存 `{"source":"connection","connection_id":"..."}`，不能同时覆盖 provider/name/base_url/api_key_ref；Worker 按当前可信 tenant 再解析连接，继续调用框架 `model/openai` 与 Runner。
+- `TRPC_AGENT_MODEL_ALLOWED_ORIGINS` 是部署者控制的精确地址允许列表，不接受通配符。保存/运行都检查地址；客户端拒绝重定向，避免将凭据转发给其他地址。它不取代出口防火墙、可信 DNS 和代理配置；本地 HTTP 仅供受保护开发网络使用。
+- 连接不可原地改 Key 或目的地址。更换时新增连接，再通过草稿/新快照/发布切换；紧急撤销在供应商侧执行。此版本没有在线密钥轮换管理，**不能直接替换主密钥**，也不能丢失 setup 卷后生成新密钥冒充恢复。
+
+完整体验 Compose 自动生成主密钥、数据库密码和 Admin Token 并放入专用 setup 卷；启动日志不输出它们。只有管理员显式执行 `trpc-init -show-token` 才显示登录凭据。数据库与 setup 卷应分别加密备份、限制访问；源码交付不包括这些卷。
 
 ## 3. 工具、审批与业务幂等
 

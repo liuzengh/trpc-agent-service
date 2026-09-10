@@ -1,0 +1,266 @@
+// Package modelregistry stores immutable, tenant-owned model connections.
+// API keys are never part of revisions or the public metadata type.
+package modelregistry
+
+import (
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/database"
+)
+
+var ErrUnavailable = errors.New("model connection store unavailable; check schema, role permissions and encryption key")
+var ErrEndpoint = errors.New("模型地址未获部署者允许；请检查 TRPC_AGENT_MODEL_ALLOWED_ORIGINS，不要把 API Key 放入 URL")
+var ErrInvalid = errors.New("模型连接需要有效的名称、模型 ID、API 地址和 API Key")
+
+type Connection struct {
+	TenantID  string    `json:"tenant_id"`
+	ID        string    `json:"connection_id"`
+	Name      string    `json:"name"`
+	Model     string    `json:"model_name"`
+	BaseURL   string    `json:"base_url"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type Store struct {
+	db      *sql.DB
+	aead    cipher.AEAD
+	keyID   string
+	origins map[string]bool
+}
+
+// New is opt-in. Existing installations without a master key are unchanged.
+// The key must be shared by Admin, Worker and Jobs, never stored in the DB.
+func New(ctx context.Context, repository any, encodedKey, allowedOrigins string) (*Store, error) {
+	if encodedKey == "" {
+		return nil, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(encodedKey)
+	if err != nil || len(key) != 32 {
+		return nil, ErrUnavailable
+	}
+	provider, ok := repository.(interface{ SQLDB() *sql.DB })
+	if !ok || provider.SQLDB() == nil {
+		return nil, ErrUnavailable
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	digest := sha256.Sum256(key)
+	s := &Store{db: provider.SQLDB(), aead: aead, keyID: hex.EncodeToString(digest[:]), origins: map[string]bool{}}
+	if allowedOrigins == "" {
+		allowedOrigins = "https://api.openai.com"
+	}
+	for _, raw := range strings.Split(allowedOrigins, ",") {
+		u, err := endpoint(strings.TrimSpace(raw))
+		if err != nil || (u.Path != "" && u.Path != "/") {
+			return nil, ErrEndpoint
+		}
+		s.origins[origin(u)] = true
+	}
+	var mismatched bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM model_connection WHERE key_id<>$1)`, s.keyID).Scan(&mismatched); err != nil || mismatched {
+		return nil, ErrUnavailable
+	}
+	return s, nil
+}
+
+func endpoint(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u == nil || len(raw) > 2048 || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || strings.ContainsAny(raw, "\r\n\\") {
+		return nil, ErrEndpoint
+	}
+	return u, nil
+}
+func origin(u *url.URL) string { return strings.ToLower(u.Scheme + "://" + u.Host) }
+func (s *Store) AllowedOrigins() []string {
+	if s == nil {
+		return []string{}
+	}
+	result := []string{}
+	for value := range s.origins {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+func (s *Store) allows(raw string) bool {
+	if s == nil {
+		return false
+	}
+	u, err := endpoint(raw)
+	return err == nil && s.origins[origin(u)]
+}
+
+type executor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *Store) executor(ctx context.Context) executor {
+	if tx := database.Transaction(ctx, s.db); tx != nil {
+		return tx
+	}
+	return s.db
+}
+
+const metadata = `tenant_id,connection_id,display_name,model_name,base_url,created_by,created_at`
+
+func mapError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return controlplane.ErrNotFound
+	}
+	var pg *pgconn.PgError
+	if errors.As(err, &pg) && pg.Code == "23505" {
+		return controlplane.ErrConflict
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return ErrUnavailable // Never log raw SQL/provider errors alongside credentials.
+}
+
+type scanner interface{ Scan(...any) error }
+
+func scan(row scanner) (Connection, error) {
+	var c Connection
+	err := row.Scan(&c.TenantID, &c.ID, &c.Name, &c.Model, &c.BaseURL, &c.CreatedBy, &c.CreatedAt)
+	return c, mapError(err)
+}
+func (s *Store) Get(ctx context.Context, tenant, id string) (Connection, error) {
+	if s == nil {
+		return Connection{}, ErrUnavailable
+	}
+	return scan(s.executor(ctx).QueryRowContext(ctx, `SELECT `+metadata+` FROM model_connection WHERE tenant_id=$1 AND connection_id=$2`, tenant, id))
+}
+
+// ValidateReference checks tenant scope and the current endpoint policy without
+// decrypting a credential or contacting a model during publication preflight.
+func (s *Store) ValidateReference(ctx context.Context, tenant, id string) error {
+	c, err := s.Get(ctx, tenant, id)
+	if err != nil {
+		return err
+	}
+	if !s.allows(c.BaseURL) {
+		return ErrEndpoint
+	}
+	return nil
+}
+func (s *Store) List(ctx context.Context, tenant, after string) ([]Connection, string, error) {
+	result := []Connection{}
+	if s == nil {
+		return result, "", nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+metadata+` FROM model_connection WHERE tenant_id=$1 AND connection_id>$2 ORDER BY connection_id LIMIT 101`, tenant, after)
+	if err != nil {
+		return nil, "", mapError(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		c, err := scan(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(result) == 100 {
+			return result, result[99].ID, nil
+		}
+		result = append(result, c)
+	}
+	return result, "", mapError(rows.Err())
+}
+func aad(c Connection) []byte {
+	// Bind the ciphertext to its tenant, immutable ID, model and destination.
+	return []byte("model-connection-v1\x00" + c.TenantID + "\x00" + c.ID + "\x00" + c.Model + "\x00" + c.BaseURL)
+}
+func (s *Store) Create(ctx context.Context, c Connection, apiKey string) (Connection, error) {
+	if s == nil {
+		return Connection{}, ErrUnavailable
+	}
+	if !s.allows(c.BaseURL) {
+		return Connection{}, ErrEndpoint
+	}
+	for _, v := range []string{c.TenantID, c.ID, c.Name, c.Model, c.CreatedBy} {
+		if strings.TrimSpace(v) == "" || len(v) > 256 || strings.ContainsAny(v, "\x00\r\n") {
+			return Connection{}, ErrInvalid
+		}
+	}
+	if strings.TrimSpace(apiKey) == "" || len(apiKey) > 16384 || strings.ContainsAny(apiKey, "\r\n\x00") {
+		return Connection{}, ErrInvalid
+	}
+	nonce := make([]byte, s.aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return Connection{}, ErrUnavailable
+	}
+	encrypted := s.aead.Seal(nonce, nonce, []byte(apiKey), aad(c))
+	_, err := s.executor(ctx).ExecContext(ctx, `INSERT INTO model_connection(tenant_id,connection_id,display_name,model_name,base_url,encrypted_key,key_id,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, c.TenantID, c.ID, c.Name, c.Model, c.BaseURL, encrypted, s.keyID, c.CreatedBy)
+	if err != nil {
+		return Connection{}, mapError(err)
+	}
+	return s.Get(ctx, c.TenantID, c.ID)
+}
+
+func (s *Store) Resolve(ctx context.Context, tenant, id string) (config.ModelConfig, error) {
+	c, err := s.Get(ctx, tenant, id)
+	if err != nil {
+		return config.ModelConfig{}, err
+	}
+	if !s.allows(c.BaseURL) {
+		return config.ModelConfig{}, ErrEndpoint
+	}
+	var encrypted []byte
+	var keyID string
+	err = s.executor(ctx).QueryRowContext(ctx, `SELECT encrypted_key,key_id FROM model_connection WHERE tenant_id=$1 AND connection_id=$2`, tenant, id).Scan(&encrypted, &keyID)
+	if err != nil {
+		return config.ModelConfig{}, mapError(err)
+	}
+	if keyID != s.keyID || len(encrypted) < s.aead.NonceSize()+s.aead.Overhead() {
+		return config.ModelConfig{}, ErrUnavailable
+	}
+	key, err := s.aead.Open(nil, encrypted[:s.aead.NonceSize()], encrypted[s.aead.NonceSize():], aad(c))
+	if err != nil {
+		return config.ModelConfig{}, ErrUnavailable
+	}
+	u, _ := endpoint(c.BaseURL)
+	// Enforce destination on EVERY request, including cached compiled Agents.
+	// Redirects are rejected before credentials can be forwarded elsewhere.
+	client := &http.Client{Transport: boundTransport{base: http.DefaultTransport, expectedOrigin: origin(u), origins: s.origins}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return config.ModelConfig{Provider: "openai", Name: c.Model, BaseURL: c.BaseURL, APIKey: string(key), HTTPClient: client}, nil
+}
+
+type boundTransport struct {
+	base           http.RoundTripper
+	expectedOrigin string
+	origins        map[string]bool
+}
+
+func (t boundTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL == nil || origin(r.URL) != t.expectedOrigin || !t.origins[t.expectedOrigin] {
+		return nil, ErrEndpoint
+	}
+	return t.base.RoundTrip(r)
+}

@@ -13,9 +13,13 @@ import type { AgentApp, Page, Principal, Tenant } from "./types";
 import { roleName, writable } from "./types";
 import { AgentList, ResourcePage, RunsPage, SystemPage } from "./pages";
 import { Workbench } from "./Workbench";
+import { GettingStarted } from "./GettingStarted";
+import { ModelConnections } from "./ModelConnections";
 
 const navigation = [
+  { id: "start", label: "上手引导", icon: "arrow" },
   { id: "overview", label: "工作空间", icon: "grid" },
+  { id: "models", label: "模型连接", icon: "settings" },
   { id: "agents", label: "Agent 应用", icon: "agent" },
   { id: "resources", label: "资源中心", icon: "layers" },
   { id: "channels", label: "通道接入", icon: "channel" },
@@ -92,7 +96,7 @@ function SignIn({ onLogin }: { onLogin: (p: Principal) => void }) {
       <div className="login-form-wrap">
         <form onSubmit={submit} className="login-form">
           <Tag color="purple">管理控制台</Tag>
-          <h2>欢迎回到工作空间</h2>
+          <h2>进入你的工作空间</h2>
           <p>使用部署者分配的管理凭据登录。登录后刷新页面无需再次输入。</p>
           <label>Admin Token</label>
           <Input.Password
@@ -119,6 +123,13 @@ function SignIn({ onLogin }: { onLogin: (p: Principal) => void }) {
             小时。
           </div>
           <div className="login-help">
+            使用体验版 Compose？在终端执行{" "}
+            <code>
+              docker compose --env-file deploy/compose/demo.env.example -f
+              compose.demo.yaml exec platform trpc-init -show-token
+            </code>{" "}
+            获取本机生成的凭据，请勿分享或截图。
+            <br />
             首次使用？凭据来自服务端的 <code>TRPC_AGENT_ADMIN_TOKEN</code>{" "}
             或已配置的 Principal。它不是模型或机器人 API Key。
           </div>
@@ -137,6 +148,7 @@ export function ConsoleApp() {
   const [current, setCurrent] = useState(route());
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
+  const [tenantsLoaded, setTenantsLoaded] = useState(false);
   useEffect(() => {
     let live = true;
     restoreSession()
@@ -154,6 +166,7 @@ export function ConsoleApp() {
       setPrincipal(null);
       setTenants([]);
       setTenant("");
+      setTenantsLoaded(false);
     };
     const change = () => setCurrent(route());
     window.addEventListener("session-expired", expired);
@@ -168,6 +181,7 @@ export function ConsoleApp() {
     if (!principal) return;
     let live = true;
     setError("");
+    setTenantsLoaded(false);
     api<Page<Tenant>>("catalog/list", { kind: "tenants", limit: 100 })
       .then((data) => {
         if (live) {
@@ -181,6 +195,9 @@ export function ConsoleApp() {
       })
       .catch((e) => {
         if (live) setError(errorText(e));
+      })
+      .finally(() => {
+        if (live) setTenantsLoaded(true);
       });
     return () => {
       live = false;
@@ -304,20 +321,24 @@ export function ConsoleApp() {
             {error && (
               <Failure error={error} retry={() => setRefresh((v) => v + 1)} />
             )}{" "}
-            {!tenant && current.section !== "tenants" ? (
-              <div className="no-tenant">
-                <PageHeading
-                  title="创建第一个工作空间"
-                  subtitle="租户隔离配置、数据和权限。先创建租户，再添加 Agent。"
-                />
-                <Button
-                  type="primary"
-                  disabled={principal.role !== "superadmin"}
-                  onClick={() => navigate("tenants")}
-                >
-                  管理租户
-                </Button>
-              </div>
+            {!tenantsLoaded ? (
+              <Skeleton active />
+            ) : current.section === "start" ||
+              (!tenant && current.section !== "tenants") ? (
+              <GettingStarted
+                tenant={tenant}
+                principal={principal}
+                onTenantCreated={(created) => {
+                  setTenants((old) => [
+                    ...old.filter((t) => t.tenant_id !== created.tenant_id),
+                    created,
+                  ]);
+                  setTenant(created.tenant_id);
+                  navigate("start");
+                }}
+              />
+            ) : current.section === "models" ? (
+              <ModelConnections tenant={tenant} principal={principal} />
             ) : current.section === "agents" && current.id ? (
               <Workbench
                 key={tenant + current.id}

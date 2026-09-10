@@ -16,6 +16,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/modelops"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/modelregistry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
@@ -105,10 +106,15 @@ type RevisionCompiler struct {
 	toolJournal   toolexec.Journal
 	secrets       secret.Store
 	modelBudget   *tenant.Guard
+	models        *modelregistry.Store
 	skills        *platformskill.Registry
 }
 
 type RevisionCompilerOption func(*RevisionCompiler)
+
+func WithModelConnections(store *modelregistry.Store) RevisionCompilerOption {
+	return func(c *RevisionCompiler) { c.models = store }
+}
 
 func WithSkills(registry *platformskill.Registry) RevisionCompilerOption {
 	return func(c *RevisionCompiler) { c.skills = registry }
@@ -279,6 +285,7 @@ type revisionModelConfig struct {
 	MaxCompletionTokens      int     `json:"max_completion_tokens,omitempty"`
 	TimeoutSeconds           int     `json:"timeout_seconds,omitempty"`
 	Source                   string  `json:"source"`
+	ConnectionID             string  `json:"connection_id,omitempty"`
 	Provider                 string  `json:"provider"`
 	Name                     string  `json:"name"`
 	BaseURL                  string  `json:"base_url"`
@@ -531,6 +538,13 @@ func (c *RevisionCompiler) buildRevisionModel(ctx context.Context, tenantID stri
 		return nil, err
 	}
 	modelConfig.Source = strings.ToLower(strings.TrimSpace(modelConfig.Source))
+	if modelConfig.Source == "connection" {
+		cfg, err := c.models.Resolve(ctx, tenantID, modelConfig.ConnectionID)
+		if err != nil {
+			return nil, err
+		}
+		return BuildModel(cfg)
+	}
 	if modelConfig.Source == "" || modelConfig.Source == "startup_env" {
 		return c.startupModel, nil
 	}

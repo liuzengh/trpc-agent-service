@@ -22,6 +22,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/console"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/modelregistry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
 	platformskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
@@ -39,6 +40,7 @@ type Service struct {
 	draftMu                sync.Mutex
 	debugMu                sync.Mutex
 	startupModelName       string
+	models                 *modelregistry.Store
 	consoleStore           *console.Store
 	dependencyObservations func() []DependencyCheck
 	outboundParts          gateway.PartJournal

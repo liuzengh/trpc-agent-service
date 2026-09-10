@@ -50,6 +50,9 @@ func (s *Service) modelResources(ctx context.Context, tenant, after string) ([]m
 		if source := strings.ToLower(strings.TrimSpace(cfg.Source)); source == "" || source == "startup_env" {
 			continue
 		}
+		if cfg.Source == "connection" {
+			continue // Managed connections have their own tenant-scoped catalog.
+		}
 		id := "model-" + digest(string(revision.ModelConfig))[:24]
 		if seen[id] {
 			continue

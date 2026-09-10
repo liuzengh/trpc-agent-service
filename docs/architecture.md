@@ -4,6 +4,8 @@
 
 平台面向多个部门、业务线和外部 IM 入口，允许租户独立创建 Agent 应用，选择模型、工具、知识库和数据后端。运行面需要横向扩展，任意 Worker 都能处理任意租户的请求；节点退出后，其他节点可以接管未完成任务。平台还要保留完整的审计链路，避免租户配置、数据、工具权限和密钥相互串用。
 
+产品入口是浏览器工作台：首次创建工作空间 → 配置租户模型连接 → 创建/调试 Agent → 发布与接入业务通道。独立体验 Compose 包含一次性初始化、数据库迁移和 all 运行角色；它与开发者日常环境分开，不依赖作者的模型或 IM 账号。模型连接由平台管理员配置，租户选用；框架执行内核和原有环境变量模型模式不变。
+
 本方案以 tRPC-Agent-Go `v1.11.x` 为运行内核。框架负责 Agent 编排、Runner 事件流、Session、Memory、Artifact、Knowledge、Tool/MCP、Plugin/Guardrail 和 OpenTelemetry 埋点。平台层负责租户注册、配置发布、消息路由、分布式并发控制、后端选择、持久化任务、IM 账号绑定、审计与运维。
 
 图中标注“扩展”的后端、渠道和密钥服务是生产方案选项，不表示本版已接入。实际复用范围见第 9 节，验证层级见[验收说明](acceptance.md)。
@@ -36,7 +38,7 @@ flowchart LR
         UI[管理工作台<br/>配置 / 调试 / 发布]
         ADMIN[Admin API]
         CONFIG[(Control DB)]
-        SECRET[EnvStore / Secret 引用<br/>KMS 扩展]
+        SECRET[EnvStore / 租户加密模型连接<br/>KMS 扩展]
         DIST[Revision 读取与缓存<br/>主动分发可扩展]
     end
 

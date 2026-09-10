@@ -57,7 +57,7 @@ npm --prefix "$ROOT/trpcservice/web/console" ci --ignore-scripts --no-audit --no
 npm --prefix "$ROOT/trpcservice/web/console" run build
 
 mkdir -p "$ROOT/bin"
-COMMANDS=(trpc-service trpc-local trpc-migrate trpc-loadgen trpc-modelcheck trpc-embeddingcheck trpc-tracecheck trpc-wecomcheck trpc-wecomsample trpc-wecomsetup trpc-permissions)
+COMMANDS=(trpc-service trpc-local trpc-migrate trpc-init trpc-loadgen trpc-modelcheck trpc-embeddingcheck trpc-tracecheck trpc-wecomcheck trpc-wecomsample trpc-wecomsetup trpc-permissions)
 for command_name in "${COMMANDS[@]}"; do
   go build -o "$ROOT/bin/$command_name" "./cmd/$command_name"
 done

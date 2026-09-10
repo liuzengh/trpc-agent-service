@@ -1,0 +1,87 @@
+# Isolated first-use installation. Does not mount the author's .env or data.
+# docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml up -d --build --wait
+name: trpc-agent-demo
+
+x-platform: &platform
+  image: trpc-agent-service:demo
+  build:
+    context: .
+    args:
+      GOPROXY: ${TRPC_AGENT_BUILD_GOPROXY:-https://proxy.golang.org,direct}
+  restart: "no"
+  volumes:
+    - setup:/setup:ro
+
+services:
+  init:
+    <<: *platform
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/trpc-init", "-dir", "/setup"]
+    volumes:
+      - setup:/setup
+
+  postgres:
+    image: postgres:16-alpine
+    restart: "no"
+    group_add: ["65534"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_DB: trpc_agent
+      POSTGRES_USER: trpc_agent
+      POSTGRES_PASSWORD_FILE: /setup/postgres-password
+    volumes:
+      - setup:/setup:ro
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trpc_agent -d trpc_agent"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    restart: "no"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  migrate:
+    <<: *platform
+    entrypoint: ["/usr/local/bin/trpc-migrate", "-env-file", "/setup/platform.env"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  platform:
+    <<: *platform
+    command: ["-env-file", "/setup/platform.env"]
+    environment:
+      # Exact origins only. Model API paths (e.g. /v1) are entered in the UI.
+      TRPC_AGENT_MODEL_ALLOWED_ORIGINS: ${TRPC_AGENT_MODEL_ALLOWED_ORIGINS:-https://api.openai.com,http://host.docker.internal:8787}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${TRPC_AGENT_DEMO_PORT:-18080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 20
+
+volumes:
+  setup:
+  postgres:
+  redis:

@@ -132,6 +132,9 @@ func NewHandler(chatService ChatService, opts ...Option) http.Handler {
 	}
 	if h.adminHandler != nil {
 		mux.Handle("/admin/", h.adminHandler)
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/admin/ui/", http.StatusTemporaryRedirect)
+		})
 	}
 	return mux
 }

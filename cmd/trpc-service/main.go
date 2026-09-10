@@ -33,6 +33,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
 	platformlog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	platformmetrics "github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/modelregistry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/reply"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
@@ -379,6 +380,15 @@ func run() error {
 		return fmt.Errorf("build attachments: %w", err)
 	}
 	consoleStore := console.NewStore(controlPlaneRepository)
+	var modelConnections *modelregistry.Store
+	if roles.Worker || roles.Jobs || roles.Admin {
+		startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
+		modelConnections, err = modelregistry.New(startupCtx, controlPlaneRepository, os.Getenv("TRPC_AGENT_MODEL_MASTER_KEY"), os.Getenv("TRPC_AGENT_MODEL_ALLOWED_ORIGINS"))
+		cancelStartup()
+		if err != nil {
+			return err
+		}
+	}
 	if roles.Worker || adminConfig.Enabled {
 		startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
 		err = consoleStore.Ready(startupCtx)
@@ -405,6 +415,7 @@ func run() error {
 		agentservice.WithToolExecutionJournal(runtimeJournal),
 		agentservice.WithSecretStore(secretStore),
 		agentservice.WithModelBudget(quotaGuard),
+		agentservice.WithModelConnections(modelConnections),
 		agentservice.WithSkills(skillRegistry),
 	)
 	if err != nil {
@@ -646,6 +657,7 @@ func run() error {
 		adminService.WithAuditWriter(auditWriter)
 		adminService.WithSkills(skillRegistry)
 		adminService.WithConsoleStore(consoleStore)
+		adminService.WithModelConnections(modelConnections)
 		checks := map[string]func(context.Context) error{}
 		if roles.Worker {
 			checks["session"] = sessionRouter.Ready

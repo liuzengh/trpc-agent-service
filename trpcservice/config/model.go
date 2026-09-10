@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -18,11 +19,12 @@ const (
 // ModelConfig contains the model settings needed by the tutorial runtime.
 // APIKey must never be logged or serialized into HTTP responses.
 type ModelConfig struct {
-	Provider string
-	Name     string
-	BaseURL  string
-	APIKey   string
-	Stream   bool
+	Provider   string
+	Name       string
+	BaseURL    string
+	APIKey     string
+	Stream     bool
+	HTTPClient *http.Client // Optional deployment-bound transport; never serialized.
 }
 
 // LoadModelConfigFromEnv reads model settings from environment variables.

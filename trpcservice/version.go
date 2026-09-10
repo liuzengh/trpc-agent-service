@@ -2,4 +2,4 @@
 package trpcservice
 
 // Version is the service version.
-const Version = "0.3.0-rc.4"
+const Version = "0.4.0-rc.1"

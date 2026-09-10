@@ -45,6 +45,11 @@ import { RunsPage } from "./pages";
 import { DebugPanel } from "./debug";
 import { CredentialSelect } from "./CredentialSelect";
 import { ActivityPanel } from "./ActivityPanel";
+import {
+  ConnectionSelect,
+  CreateModelConnection,
+  type ModelConnectionPage,
+} from "./ModelConnections";
 
 const sections: Record<string, string> = {
   agent_config: "Agent 指令与能力",
@@ -93,6 +98,26 @@ export function Workbench({
   const [versions, setVersions] = useState<Revision[]>([]);
   const [versionsNext, setVersionsNext] = useState("");
   const [models, setModels] = useState<Dict[]>([]);
+  const [connections, setConnections] = useState<ModelConnectionPage>({
+    items: [],
+    enabled: false,
+    allowed_origins: [],
+  });
+  const [connectionsError, setConnectionsError] = useState("");
+  const [connectionOpen, setConnectionOpen] = useState(false);
+  useEffect(() => {
+    let live = true;
+    api<ModelConnectionPage>("model-connections/list", { tenant_id: tenant })
+      .then((data) => {
+        if (live) setConnections(data);
+      })
+      .catch((e) => {
+        if (live) setConnectionsError(errorText(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [tenant]);
   useEffect(() => {
     let live = true;
     api<Page<Dict>>("resources/list", { tenant_id: tenant, kind: "models" })
@@ -401,6 +426,17 @@ export function Workbench({
     );
   const selectedTools: string[] = cfg.tool_policy.allowed_tools || [];
   const source = cfg.model_config.source || "startup_env";
+  const modelLimits = Object.fromEntries(
+    [
+      "max_prompt_tokens",
+      "max_completion_tokens",
+      "timeout_seconds",
+      "prompt_cost_per_million",
+      "completion_cost_per_million",
+    ]
+      .filter((k) => cfg.model_config[k] !== undefined)
+      .map((k) => [k, cfg.model_config[k]]),
+  );
   const changed = Object.keys(sections).filter(
     (key) =>
       canonical((cfg as any)[key]) !==
@@ -408,6 +444,30 @@ export function Workbench({
   );
   return (
     <>
+      {connectionOpen && (
+        <CreateModelConnection
+          tenant={tenant}
+          origins={connections.allowed_origins}
+          onCancel={() => setConnectionOpen(false)}
+          onCreated={(created) => {
+            setConnectionOpen(false);
+            setConnections((old) => ({
+              ...old,
+              items: [created, ...old.items],
+            }));
+            setCfg({
+              ...cfg,
+              model_config: {
+                source: "connection",
+                connection_id: created.connection_id,
+                ...modelLimits,
+              },
+            });
+            setReport(null);
+            message.success("连接已选用，请保存草稿并开始新调试");
+          }}
+        />
+      )}
       <div className="workbench-header">
         <div className="workbench-title">
           <button
@@ -473,6 +533,16 @@ export function Workbench({
           </Button>
         </Space>
       </div>
+      <div className="workbench-guide">
+        <strong>
+          配置模型和指令 → 保存草稿 → 右侧调试 → 发布版本 → 接入通道
+        </strong>
+        <span>
+          {workspace.app.stable_revision_id
+            ? "已发布；修改草稿不会改变线上版本。"
+            : "尚未发布；你可以先调试，不需要先绑定机器人。"}
+        </span>
+      </div>
       <div className="workbench-tabs">
         <Tabs
           activeKey={tab}
@@ -511,8 +581,29 @@ export function Workbench({
             <Form layout="vertical" disabled={!canWrite || !!busy}>
               <Panel
                 title="模型"
-                subtitle="选择执行模型。凭据由部署者授权，页面不保存 API Key。"
+                subtitle="选择租户模型连接或部署者默认模型。Agent 版本只记录引用，不保存 API Key。"
+                action={
+                  principal.role === "superadmin" &&
+                  connections.enabled && (
+                    <Button
+                      disabled={!!busy}
+                      onClick={() => setConnectionOpen(true)}
+                    >
+                      新增模型连接
+                    </Button>
+                  )
+                }
               >
+                {connectionsError && <Failure error={connectionsError} />}
+                {source === "startup_env" &&
+                  workspace.startup_model_name === "tutorial-mock-model" && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      title="当前使用 Mock 演示模型"
+                      description="只能验证固定对话流程，不会真实理解提示词或调用在线 AI。请新增或选择真实模型连接，再开始新调试。"
+                    />
+                  )}
                 <Form.Item label="模型来源">
                   <Select
                     value={source}
@@ -520,7 +611,7 @@ export function Workbench({
                       setCfg({
                         ...cfg,
                         model_config: {
-                          ...cfg.model_config,
+                          ...modelLimits,
                           source: value,
                           ...(value === "revision"
                             ? {
@@ -540,11 +631,46 @@ export function Workbench({
                             ? " · " + workspace.startup_model_name
                             : ""),
                       },
-                      { value: "revision", label: "为此 Agent 单独配置" },
+                      { value: "connection", label: "当前租户的模型连接" },
+                      { value: "revision", label: "高级：使用环境凭据引用" },
                     ]}
                   />
                 </Form.Item>
-                {models.length > 0 && (
+                {source === "connection" && (
+                  <Form.Item
+                    label="模型连接"
+                    help="连接的模型、地址和密钥由管理员固定。修改调用限额不会修改连接本身。"
+                  >
+                    <ConnectionSelect
+                      data={connections}
+                      value={cfg.model_config.connection_id}
+                      disabled={!canWrite || !!busy}
+                      onChange={(value) =>
+                        patch("model_config", "connection_id", value)
+                      }
+                      onMore={async () => {
+                        try {
+                          const p = await api<ModelConnectionPage>(
+                            "model-connections/list",
+                            { tenant_id: tenant, after: connections.next },
+                          );
+                          setConnections((old) => ({
+                            ...p,
+                            items: [...old.items, ...p.items],
+                          }));
+                        } catch (e) {
+                          setConnectionsError(errorText(e));
+                        }
+                      }}
+                    />
+                    {!connections.items.length && (
+                      <p className="muted">
+                        还没有可用连接。平台管理员可在此新增；或先使用部署者默认模型。
+                      </p>
+                    )}
+                  </Form.Item>
+                )}
+                {source === "revision" && models.length > 0 && (
                   <Form.Item
                     label="复用模型配置"
                     help="复用当前租户已发布的模型配置；保留本 Agent 已设置的 Token 和超时上限。"

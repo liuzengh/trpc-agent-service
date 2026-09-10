@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -20,7 +21,12 @@ func main() {
 }
 
 func run() error {
-	_, _ = config.LoadDotEnv(".env")
+	envFile := flag.String("env-file", ".env", "private dotenv configuration")
+	flag.Parse()
+	loaded, err := config.LoadDotEnv(*envFile)
+	if err != nil || (!loaded && *envFile != ".env") {
+		return fmt.Errorf("cannot load migration configuration")
+	}
 	cfg, err := config.LoadControlPlaneConfigFromEnv()
 	if err != nil {
 		return err

@@ -176,11 +176,17 @@ func (s *Service) requireValidRevision(ctx context.Context, revision controlplan
 
 func (s *Service) validateCredentialGrants(ctx context.Context, revision controlplane.AgentRevision, r *ValidationReport) {
 	var cfg struct {
-		Source string `json:"source"`
-		Ref    string `json:"api_key_ref"`
-		Env    string `json:"api_key_env"`
+		Source       string `json:"source"`
+		Ref          string `json:"api_key_ref"`
+		Env          string `json:"api_key_env"`
+		ConnectionID string `json:"connection_id"`
 	}
 	_ = json.Unmarshal(revision.ModelConfig, &cfg)
+	if strings.EqualFold(strings.TrimSpace(cfg.Source), "connection") {
+		if err := s.models.ValidateReference(ctx, revision.TenantID, cfg.ConnectionID); err != nil {
+			r.add("model_connection_unavailable", "model_config.connection_id", "error", "模型连接不存在、属于其他租户、地址未允许或部署未启用加密模型存储。", "在当前租户选择有效连接，并检查执行节点的地址允许列表；请勿复制其他租户的连接 ID。")
+		}
+	}
 	if strings.EqualFold(strings.TrimSpace(cfg.Source), "revision") || cfg.Ref != "" || cfg.Env != "" {
 		ref := cfg.Ref
 		if cfg.Env != "" {

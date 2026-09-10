@@ -384,6 +384,9 @@ func (h *Handler) onboardApp(w http.ResponseWriter, r *http.Request) {
 	if !decodeAdmin(w, r, &in) || !h.require(w, r, in.TenantID, PermissionWrite) {
 		return
 	}
+	if in.ID == "" {
+		in.ID = newConsoleID("app-")
+	}
 	var result controlplane.AgentApp
 	err := h.service.consoleStore.Transaction(r.Context(), func(ctx context.Context) error {
 		app, err := h.service.CreateAgentApp(ctx, in)

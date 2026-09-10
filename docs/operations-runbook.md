@@ -4,9 +4,50 @@
 
 ## 0. 第一次拿到源码：从空环境到可用平台
 
-本节是一条完整的本地交付路径，不依赖作者电脑上的数据库、域名、workbuddy2api 或私有脚本。已有环境跳过本节，按升级章节处理；不要通过删数据卷获得“空环境”。需要 Go（版本见 go.mod）、Node.js 22.12+/24、npm、Docker Compose v2，以及可用的 8080/5432/6379 端口。
+本节提供两条路径，不依赖作者电脑上的数据库、域名、workbuddy2api 或私有脚本。首次体验推荐 **0.0 的完整 Compose**，只需 Docker；开发者需要在宿主机编译时再从 0.1 开始。已有环境按升级章节处理，不要通过删数据卷获得“空环境”。
+
+### 0.0 推荐：只用 Docker 打开平台
+
+准备 Docker Engine/Desktop 与 Docker Compose v2，解压源码，进入仓库目录。首次构建需要访问镜像、Go 和 npm 依赖源；不要求宿主机安装 Go、Node 或数据库。
+
+```bash
+docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml up -d --build --wait
+```
+
+这条命令启动**独立的体验环境**：生成私有配置 → PostgreSQL/Redis 就绪 → 数据库迁移 → 平台启动。默认项目名 `trpc-agent-demo`，页面端口 18080；不挂载日常 `.env`、data 或数据库卷，不注册 IM，不配置开机自启。显式指定的 env-file 只有公开的端口、构建代理与模型地址设置，避免 Compose 自动加载日常 `.env`。
+
+体验模板默认使用本次环境可达的 `goproxy.cn` 构建代理。部署者可在公开设置文件的 `TRPC_AGENT_BUILD_GOPROXY` 改用官方 `https://proxy.golang.org,direct` 或企业镜像；如连接超时，先检查构建网络。不要把含用户名/密码的代理 URL 写进公开模板或构建参数。构建失败不会重置已有安装数据。
+
+获取本机生成的管理员凭据（仅此命令显示 Token，不会打印到启动日志）：
+
+```bash
+docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml exec platform trpc-init -show-token
+```
+
+打开 **http://127.0.0.1:18080/admin/ui/**，使用该 Token 登录。不要分享 Token 或终端截图。页面引导按以下顺序进行：
+
+1. 填写工作空间名称，创建自己的租户；没有自动创建作者的测试租户或绑定。
+2. 在“模型连接”新增连接，填写模型 ID、API Base URL 和 API Key；Key 在服务器加密持久化，页面不回显。无模型凭据时可跳过，使用 Mock 验证固定对话流程，页面会明确提示。
+3. 创建 Agent，在工作台选择模型连接、填写指令、保存草稿，在右侧发送消息。修改配置后用“新调试”创建新快照；连接保存本身不代表模型可用，真实调试会调用模型并受平台预算约束。
+4. 确认回复后发布版本，在发布记录里查看结果。网页调试不需要机器人或域名；需要 IM 时，再按[通道说明](im-channels.md)准备自己的凭据、授权和公网回调。
+
+模型连接只允许部署者声明的服务地址。`deploy/compose/demo.env.example` 的 `TRPC_AGENT_MODEL_ALLOWED_ORIGINS` 填 **origin**（例如 `https://provider.example`，不含 `/v1`）；网页填写完整 Base URL（例如 `https://provider.example/v1`）。更换允许列表后重建 platform 容器即可，新建连接不要求重启 Worker。文件中不得填写 Key。默认允许 OpenAI 官方地址和宿主机 8787 端口，不意味着它们已经有可用模型。
+
+容器内的 `127.0.0.1` 不是宿主机。若模型只监听宿主机回环地址，`host.docker.internal` 仍可能无法访问；需部署者提供容器可达的受保护监听/代理地址，或选择下面的宿主机运行方式。不要为了连通而将低强度认证的模型服务暴露到公网。
+
+重复启动命令保留原有凭据和数据。日常停止使用：
+
+```bash
+docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml stop
+```
+
+重新启动执行第一条命令；查看状态可将 `up -d --build --wait` 换成 `ps`。不要执行 `down -v`：setup 卷保存 Admin Token、数据库密码和模型加密主密钥，postgres/redis 卷保存平台数据；丢失主密钥会导致已有模型 Key 无法解密。备份时单独保护 setup 卷与数据库，不将它们加入交付源码包。
+
+此路径是单机组合部署，默认只监听本机回环端口；不是多用户公网注册站点。远程体验须配置 HTTPS、受限管理身份和访问控制。高级后端、Skill/沙箱及生产角色拆分按本手册后续章节单独配置。
 
 ### 0.1 构建并准备私有配置
+
+本路径需要 Go（版本见 go.mod）、Node.js 22.12+/24、npm、Docker Compose v2，以及可用的 8080/5432/6379 端口。
 
 在新 clone 或源码包解压目录执行：
 
@@ -204,7 +245,7 @@ docker compose --profile observability up -d
 
 1. 备份配置、当前二进制和数据库，先核对未完成工具及 unknown/attempting 发送事实。
 2. 停止旧 Worker/Jobs/Sender，不能混跑不兼容的队列、权限或分段发送协议。
-3. 构建，使用迁移身份应用缺失 migrations；当前控制面 schema 为 27，不能修改已应用 SQL 文件。026 增加持久化等待、调度代数和独立补读，027 增加 Run 收尾回执，不重建业务会话。Worker 需要 INSERT queue_outbox，Gateway 需要 UPDATE channel_poll_gap；同步更新权限后再启动新版本，不给 Worker 开放修改投递状态的权限。
+3. 构建，使用迁移身份应用缺失 migrations；当前新部署 schema 为 28，不能修改已应用 SQL 文件。026 增加持久化等待、调度代数和独立补读，027 增加 Run 收尾回执，028 增加加密模型连接，不重建业务会话。Worker 需要 INSERT queue_outbox，Gateway 需要 UPDATE channel_poll_gap；模型连接表仅 Admin 有 SELECT/INSERT、Worker/Jobs 有 SELECT。同步更新权限后再启动新版本，不给 Worker 开放修改投递状态的权限。既有环境不开启模型加密存储时，原环境变量模式保持不变；要启用时先迁移，再向 Admin/Worker/Jobs 注入一致的主密钥与地址允许列表。
 4. 核对新增表/函数/Redis 命令权限，再启动候选实例，检查就绪和受控请求。
 5. Agent 行为通过不可变 Revision、stable/canary 和 conversation pin 灰度；切回稳定 revision 不会自动迁移已 pin 的会话。
 6. 数据迁移按[迁移协议](data-consistency.md)执行。回滚配置不会撤销已提交的工作项或已发送消息，不得恢复旧备份后盲目重放。
@@ -244,7 +285,7 @@ docker compose --profile observability up -d
 
 新版工作台从 `0.3.0-rc.1` 提供，需要 schema 24。先升级 Admin/Worker，再开放工作台。网页调试使用独立 SQL 调试队列，不会被旧版 IM Worker 误领；旧版本的管理页不支持新的登录会话。升级不会自动发布 Agent 版本或迁移已有 IM 会话。
 
-当前 `0.3.0-rc.4` 需要 schema 27。“近期优先”的 30～120 秒是接收窗口，不是请求有效期；配置键 `max_age_seconds` 为兼容保留。已接收消息持久保存，模型尚未产生输出且无工具执行时，暂时连接故障进入 waiting，5/10/20/30 秒退避，不消耗普通执行错误的三次尝试。模型恢复后自动继续，管理页展示等待原因与下一次调度时间。每条请求最多一条等待提示；未发出的提示会在最终完成时撤回，已经发送或结果未知的提示不能撤销。
+`0.4.0-rc.1` 新增首次体验引导和 schema 28 的加密模型连接；继续保留 rc.4 / schema 27 的消息恢复协议。“近期优先”的 30～120 秒是接收窗口，不是请求有效期；配置键 `max_age_seconds` 为兼容保留。已接收消息持久保存，模型尚未产生输出且无工具执行时，暂时连接故障进入 waiting，5/10/20/30 秒退避，不消耗普通执行错误的三次尝试。模型恢复后自动继续，管理页展示等待原因与下一次调度时间。每条请求最多一条等待提示；未发出的提示会在最终完成时撤回，已经发送或结果未知的提示不能撤销。
 
 已经 completed 的请求从 Run/最终 Outbound 读取结果，不再进入 Agent。finalized_at 为空时只补审计、用量及幂等后台任务提交；有回执时只 ACK 重投。因此去重缓存过期不会重做已持久完成的模型/工具执行，收尾错误也不能被普通模型重试次数上限吞掉。该保证针对 IM 和 `/inbound` 持久入口；同步 `/chat` 是诊断接口，其去重缓存有明确 TTL。
 

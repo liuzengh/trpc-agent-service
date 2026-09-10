@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 )
+
+var regexpConnectionID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // ValidateRevisionAgentConfig performs only local parsing, never compilation,
 // credential resolution, model calls or MCP discovery.
@@ -41,6 +44,15 @@ func ValidateRevisionModelConfig(raw json.RawMessage) error {
 		return errors.New("invalid model configuration")
 	}
 	source := strings.ToLower(strings.TrimSpace(cfg.Source))
+	if source == "connection" {
+		if !regexpConnectionID.MatchString(cfg.ConnectionID) || cfg.Provider != "" || cfg.Name != "" || cfg.BaseURL != "" || cfg.APIKeyRef != "" || cfg.APIKeyEnv != "" {
+			return errors.New("model connection requires its ID only; endpoint and credentials cannot be overridden")
+		}
+		return nil
+	}
+	if cfg.ConnectionID != "" {
+		return errors.New("connection_id requires connection source")
+	}
 	if source == "" || source == "startup_env" {
 		return nil
 	}
