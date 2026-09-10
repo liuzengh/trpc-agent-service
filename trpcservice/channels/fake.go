@@ -83,11 +83,6 @@ func NewFakeCandidateResolver(repo CandidateConsumer, secrets map[SecretScope]st
 	}
 }
 
-// NewFakeResolver is a concise compatibility alias for the offline fake.
-func NewFakeResolver(repo CandidateConsumer, secrets map[SecretScope]string, options ...FakeResolverOptions) *FakeCandidateResolver {
-	return NewFakeCandidateResolver(repo, secrets, options...)
-}
-
 var _ CandidateResolver = (*FakeCandidateResolver)(nil)
 var _ CandidateVerifier = (*FakeCandidateResolver)(nil)
 

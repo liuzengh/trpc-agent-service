@@ -20,6 +20,7 @@ func TestChannelRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 	}{
 		{"create", func() error { _, _, err := r.Create(ctx, channels.CreateInput{}); return err }},
 		{"get", func() error { _, err := r.Get(ctx, "tenant", "binding"); return err }},
+		{"list", func() error { _, _, err := r.List(ctx, "tenant", "", "", "", 1); return err }},
 		{"update", func() error { _, _, err := r.UpdateConfiguration(ctx, channels.UpdateConfigurationInput{}); return err }},
 		{"transition", func() error { _, _, err := r.TransitionStatus(ctx, channels.TransitionStatusInput{}); return err }},
 		{"lookup candidates", func() error { _, err := r.LookupCandidates(ctx, "channel", "digest"); return err }},
@@ -29,6 +30,61 @@ func TestChannelRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.call(); !errors.Is(err, context.Canceled) {
 				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestChannelRepositoryListBoundaryBranches(t *testing.T) {
+	ctx := context.Background()
+	if _, _, err := NewRepository(nil).List(ctx, "tenant", "", "", "", 1); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil-storage List error = %v", err)
+	}
+	binding := newStoredChannelBinding(t)
+	for _, tc := range []struct {
+		name        string
+		setup       func(sqlmock.Sqlmock)
+		wantStorage bool
+		wantNoMatch bool
+	}{
+		{"invalid cursor", func(sqlmock.Sqlmock) {}, false, false},
+		{"query error", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery("SELECT binding_id FROM channel_binding").WithArgs(binding.TenantID).WillReturnError(errors.New("list query"))
+		}, true, false},
+		{"rows error", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery("SELECT binding_id FROM channel_binding").WithArgs(binding.TenantID).WillReturnRows(sqlmock.NewRows([]string{"binding_id"}).AddRow(binding.BindingID).RowError(0, errors.New("rows")))
+		}, true, false},
+		{"filter no-match", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery("SELECT binding_id FROM channel_binding").WithArgs(binding.TenantID).WillReturnRows(sqlmock.NewRows([]string{"binding_id"}).AddRow(binding.BindingID))
+			mock.ExpectQuery(".*").WithArgs(binding.TenantID, binding.BindingID).WillReturnRows(testChannelBindingRows(t, binding))
+		}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			tc.setup(mock)
+			cursor, query := "", ""
+			if tc.name == "invalid cursor" {
+				cursor = "bad"
+			}
+			if tc.wantNoMatch {
+				query = "missing"
+			}
+			items, _, callErr := NewRepository(db).List(ctx, binding.TenantID, query, "", cursor, 1)
+			if tc.wantStorage && !errors.Is(callErr, ErrStorage) {
+				t.Fatalf("error = %v", callErr)
+			}
+			if !tc.wantStorage && tc.name == "invalid cursor" && callErr == nil {
+				t.Fatal("invalid cursor was accepted")
+			}
+			if tc.wantNoMatch && (callErr != nil || len(items) != 0) {
+				t.Fatalf("no-match result = items=%+v err=%v", items, callErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

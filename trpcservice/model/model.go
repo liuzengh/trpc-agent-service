@@ -852,6 +852,11 @@ func normalizeProfileKey(key string) (string, error) {
 
 func validateTenantID(id string) error { return validateCrockfordID(id, "t_", "tenant") }
 
+// ValidateTenantID validates the tenant scope used by runtime adapters.
+// Tenant identity remains a model-domain concern even when a runtime package
+// uses it to key an in-process registry.
+func ValidateTenantID(id string) error { return validateTenantID(id) }
+
 func validateProfileID(id string) error { return validateCrockfordID(id, "mp_", "model profile") }
 
 func validateCrockfordID(id, prefix, label string) error {

@@ -60,7 +60,7 @@ POSTGRES_DB=validation-db \
 grep -Fq -- 'postgres://validation-user:validation-pass@postgres:5432/validation-db?sslmode=disable' "$custom_compose_config"
 
 kubectl kustomize deploy/kubernetes >"$kustomize_output"
-grep -Fq -- 'image: ghcr.io/xnlemon/trpc-agent-service:0.1.0' "$kustomize_output"
+grep -Fq -- 'image: ghcr.io/xnlemon/trpc-agent-service:0.1.1' "$kustomize_output"
 grep -Fq -- '0.0.0.0:8080' "$kustomize_output"
 
 echo "deployment manifests and build-context guards validated"

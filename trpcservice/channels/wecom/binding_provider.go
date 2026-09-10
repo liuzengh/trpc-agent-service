@@ -8,8 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 )
 
@@ -25,6 +26,7 @@ type BindingProvider struct {
 	HTTPClient  *http.Client
 	BaseURL     string
 	Now         func() time.Time
+	Attachments attachment.Reader
 
 	mu        sync.Mutex
 	providers map[string]*Provider
@@ -82,7 +84,7 @@ func (p *BindingProvider) provider(ctx context.Context, value storage.ReplyOutbo
 			return provider, nil
 		}
 	}
-	provider := &Provider{CorpID: binding.Protocol.WeCom.CorpID, AgentID: binding.Protocol.WeCom.AgentID, AppSecret: credentials.AppSecret, HTTPClient: p.HTTPClient, BaseURL: p.BaseURL, Now: p.Now}
+	provider := &Provider{CorpID: binding.Protocol.WeCom.CorpID, AgentID: binding.Protocol.WeCom.AgentID, AppSecret: credentials.AppSecret, HTTPClient: p.HTTPClient, BaseURL: p.BaseURL, Now: p.Now, Attachments: p.Attachments}
 	p.providers[key] = provider
 	return provider, nil
 }

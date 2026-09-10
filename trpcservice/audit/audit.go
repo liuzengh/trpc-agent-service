@@ -35,29 +35,51 @@ type EventType string
 const (
 	// EventControlPlaneChanged records a control-plane mutation.
 	EventControlPlaneChanged EventType = "control_plane.changed"
-	EventExecutionStarted    EventType = "execution.started"
-	EventExecutionCompleted  EventType = "execution.completed"
-	EventExecutionFailed     EventType = "execution.failed"
-	EventExecutionCanceled   EventType = "execution.canceled"
-	EventExecutionTimedOut   EventType = "execution.timed_out"
-	EventExecutionFallback   EventType = "execution.fallback"
+	// EventExecutionStarted records admission into runner execution.
+	EventExecutionStarted EventType = "execution.started"
+	// EventExecutionCompleted records successful execution completion.
+	EventExecutionCompleted EventType = "execution.completed"
+	// EventExecutionFailed records terminal execution failure.
+	EventExecutionFailed EventType = "execution.failed"
+	// EventExecutionCanceled records caller cancellation.
+	EventExecutionCanceled EventType = "execution.canceled"
+	// EventExecutionTimedOut records an execution deadline expiring.
+	EventExecutionTimedOut EventType = "execution.timed_out"
+	// EventExecutionFallback records use of a fallback provider.
+	EventExecutionFallback EventType = "execution.fallback"
 	// EventCanarySelected records that the App's tenant-wide candidate revision
 	// was selected for one execution before the execution-started fact.
-	EventCanarySelected           EventType = "execution.canary_selected"
-	EventToolAllowed              EventType = "tool.allowed"
-	EventToolDenied               EventType = "tool.denied"
-	EventToolApprovalRequired     EventType = "tool.approval_required"
-	EventIMAuthorizationAllowed   EventType = "im.authorization_allowed"
-	EventIMAuthorizationDenied    EventType = "im.authorization_denied"
-	EventIMIngressAccepted        EventType = "im.ingress_accepted"
-	EventIMIngressDuplicate       EventType = "im.ingress_duplicate"
-	EventIMDeliverySent           EventType = "im.delivery_sent"
+	EventCanarySelected EventType = "execution.canary_selected"
+	// EventToolAllowed records permission to invoke a tool.
+	EventToolAllowed EventType = "tool.allowed"
+	// EventToolDenied records a rejected tool invocation.
+	EventToolDenied EventType = "tool.denied"
+	// EventToolApprovalRequired records a tool invocation awaiting approval.
+	EventToolApprovalRequired EventType = "tool.approval_required"
+	// EventToolExecuted records a completed tool invocation.
+	EventToolExecuted EventType = "tool.executed"
+	// EventIMAuthorizationAllowed records an authorized channel message.
+	EventIMAuthorizationAllowed EventType = "im.authorization_allowed"
+	// EventIMAuthorizationDenied records a rejected channel message.
+	EventIMAuthorizationDenied EventType = "im.authorization_denied"
+	// EventIMIngressAccepted records channel message admission.
+	EventIMIngressAccepted EventType = "im.ingress_accepted"
+	// EventIMIngressDuplicate records suppression of duplicate channel input.
+	EventIMIngressDuplicate EventType = "im.ingress_duplicate"
+	// EventIMDeliverySent records successful reply delivery.
+	EventIMDeliverySent EventType = "im.delivery_sent"
+	// EventIMDeliveryRetryScheduled records a deferred delivery retry.
 	EventIMDeliveryRetryScheduled EventType = "im.delivery_retry_scheduled"
-	EventIMDeliveryDeadLettered   EventType = "im.delivery_dead_lettered"
-	EventIMDeliveryReconciled     EventType = "im.delivery_reconciled"
-	EventBudgetRejected           EventType = "budget.rejected"
-	EventContentRedacted          EventType = "content.redacted"
-	EventAuditIncomplete          EventType = "audit_incomplete"
+	// EventIMDeliveryDeadLettered records terminal reply delivery failure.
+	EventIMDeliveryDeadLettered EventType = "im.delivery_dead_lettered"
+	// EventIMDeliveryReconciled records a provider delivery status check.
+	EventIMDeliveryReconciled EventType = "im.delivery_reconciled"
+	// EventBudgetRejected records admission denied by a tenant budget.
+	EventBudgetRejected EventType = "budget.rejected"
+	// EventContentRedacted records content removed by redaction policy.
+	EventContentRedacted EventType = "content.redacted"
+	// EventAuditIncomplete records an incomplete audit lifecycle.
+	EventAuditIncomplete EventType = "audit_incomplete"
 )
 
 // Decision records the outcome of an authorization decision.
@@ -562,7 +584,7 @@ func hasControl(value string) bool {
 }
 func validEventType(value EventType) bool {
 	switch value {
-	case EventControlPlaneChanged, EventExecutionStarted, EventExecutionCompleted, EventExecutionFailed, EventExecutionCanceled, EventExecutionTimedOut, EventExecutionFallback, EventCanarySelected, EventToolAllowed, EventToolDenied, EventToolApprovalRequired, EventIMAuthorizationAllowed, EventIMAuthorizationDenied, EventIMIngressAccepted, EventIMIngressDuplicate, EventIMDeliverySent, EventIMDeliveryRetryScheduled, EventIMDeliveryDeadLettered, EventIMDeliveryReconciled, EventBudgetRejected, EventContentRedacted, EventAuditIncomplete:
+	case EventControlPlaneChanged, EventExecutionStarted, EventExecutionCompleted, EventExecutionFailed, EventExecutionCanceled, EventExecutionTimedOut, EventExecutionFallback, EventCanarySelected, EventToolAllowed, EventToolDenied, EventToolApprovalRequired, EventToolExecuted, EventIMAuthorizationAllowed, EventIMAuthorizationDenied, EventIMIngressAccepted, EventIMIngressDuplicate, EventIMDeliverySent, EventIMDeliveryRetryScheduled, EventIMDeliveryDeadLettered, EventIMDeliveryReconciled, EventBudgetRejected, EventContentRedacted, EventAuditIncomplete:
 		return true
 	}
 	return false
@@ -611,9 +633,21 @@ func containsSensitivePhrase(value string) bool {
 }
 
 func containsSensitiveWords(value string) bool {
-	words := strings.FieldsFunc(value, func(r rune) bool { return r < 'a' || r > 'z' })
+	// Opaque identifiers may contain arbitrary letter fragments separated by
+	// punctuation or digits. Treating every non-letter as a word boundary makes
+	// random ULID fragments such as "dsn" look like sensitive metadata. Natural
+	// language sensitive words are still detected when separated by whitespace;
+	// explicit assignment/phrase forms are handled by containsSensitivePhrase.
+	words := strings.Fields(strings.ToLower(value))
 	for i, word := range words {
-		if i+1 < len(words) && (word == "bearer" || word == "authorization" || word == "token" || word == "secret" || word == "password" || word == "dsn" || word == "api" && words[i+1] == "key") {
+		word = strings.Trim(word, ".,:;!?()[]{}<>\"'`")
+		if i+1 < len(words) {
+			next := strings.Trim(words[i+1], ".,:;!?()[]{}<>\"'`")
+			if word == "api" && next == "key" {
+				return true
+			}
+		}
+		if word == "bearer" || word == "authorization" || word == "token" || word == "secret" || word == "password" || word == "dsn" {
 			return true
 		}
 	}

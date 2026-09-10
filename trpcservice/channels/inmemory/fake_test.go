@@ -46,7 +46,7 @@ func setupFakeResolverTest(t *testing.T) fakeResolverTestSetup {
 	}
 	secret := "package-fake-secret"
 	scope := channels.SecretScope{TenantID: binding.TenantID, SecretRef: binding.SecretRef}
-	resolver := NewFakeResolver(repo, map[channels.SecretScope]string{scope: secret}, FakeResolverOptions{Clock: clock.Now, MaxClockSkew: time.Minute})
+	resolver := NewFakeCandidateResolver(repo, map[channels.SecretScope]string{scope: secret}, FakeResolverOptions{Clock: clock.Now, MaxClockSkew: time.Minute})
 	return fakeResolverTestSetup{base: base, clock: clock, repo: repo, routeDigest: routeDigest, binding: binding, secret: secret, resolver: resolver}
 }
 
@@ -232,7 +232,7 @@ func TestFakeResolverPrunesAndBoundsUnverifiedHandles(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret := "handle-capacity-secret"
-	resolver := NewFakeResolver(repo, map[channels.SecretScope]string{{TenantID: binding.TenantID, SecretRef: binding.SecretRef}: secret}, FakeResolverOptions{Clock: clock.Now, MaxHandles: 2})
+	resolver := NewFakeCandidateResolver(repo, map[channels.SecretScope]string{{TenantID: binding.TenantID, SecretRef: binding.SecretRef}: secret}, FakeResolverOptions{Clock: clock.Now, MaxHandles: 2})
 	if _, err := resolveHandleForTest(t, repo, resolver, routeDigest); err != nil {
 		t.Fatal(err)
 	}

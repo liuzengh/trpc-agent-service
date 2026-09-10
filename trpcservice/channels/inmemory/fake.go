@@ -30,11 +30,6 @@ func NewFakeCandidateResolver(repo *InMemoryRepository, secrets map[channels.Sec
 	return channels.NewFakeCandidateResolver(repo, secrets, options...)
 }
 
-// NewFakeResolver is an alias for NewFakeCandidateResolver.
-func NewFakeResolver(repo *InMemoryRepository, secrets map[channels.SecretScope]string, options ...FakeResolverOptions) *FakeCandidateResolver {
-	return NewFakeCandidateResolver(repo, secrets, options...)
-}
-
 // SignFakeRequest signs an offline verification request with secret.
 func SignFakeRequest(secret string, request channels.VerificationRequest) string {
 	return channels.SignFakeRequest(secret, request)

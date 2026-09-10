@@ -6,25 +6,28 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 )
 
 // Store persists tenant-scoped runtime state in PostgreSQL.
 type Store struct{ db *sql.DB }
 
 const eventColumns = "tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,reply_conversation_kind,reply_receiver_id,reply_thread_id,created_at,updated_at"
-const replyColumns = "tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at"
+const replyColumns = "tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_kind,attachment_id,attachment_kind,attachment_mime_type,attachment_name,attachment_size,attachment_sha256,attachment_provider,attachment_provider_id,fallback,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at"
+const insertReplyStatement = "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_kind,attachment_id,attachment_kind,attachment_mime_type,attachment_name,attachment_size,attachment_sha256,attachment_provider,attachment_provider_id,fallback,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'pending' WHERE EXISTS (SELECT 1 FROM public.message_event WHERE tenant_id=$1 AND event_id=$3 AND ((reply_conversation_kind='' AND reply_receiver_id='' AND reply_thread_id='' AND $17='' AND $18='' AND $19='' AND $20='') OR (binding_id=$17 AND reply_conversation_kind=$18 AND reply_receiver_id=$19 AND reply_thread_id=$20))) ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_kind=EXCLUDED.reply_kind AND public.reply_outbox.attachment_id=EXCLUDED.attachment_id AND public.reply_outbox.attachment_kind=EXCLUDED.attachment_kind AND public.reply_outbox.attachment_mime_type=EXCLUDED.attachment_mime_type AND public.reply_outbox.attachment_name=EXCLUDED.attachment_name AND public.reply_outbox.attachment_size=EXCLUDED.attachment_size AND public.reply_outbox.attachment_sha256=EXCLUDED.attachment_sha256 AND public.reply_outbox.attachment_provider=EXCLUDED.attachment_provider AND public.reply_outbox.attachment_provider_id=EXCLUDED.attachment_provider_id AND public.reply_outbox.fallback=EXCLUDED.fallback AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id"
 
 // New creates a PostgreSQL runtime store over db.
 func New(db *sql.DB) *Store { return &Store{db: db} }
 
 // GetReplyCorrelation loads the durable execution-to-reply correlation.
 func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID string) (runtimestorage.ReplyCorrelation, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.ReplyCorrelation{}, err
 	}
 	if tenantID == "" || eventID == "" {
@@ -33,95 +36,95 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 	var value runtimestorage.ReplyCorrelation
 	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,event_id,request_id,trace_id,trace_parent FROM public.runtime_reply_correlation WHERE tenant_id=$1 AND event_id=$2", tenantID, eventID).Scan(&value.TenantID, &value.EventID, &value.RequestID, &value.TraceID, &value.TraceParent)
 	if err != nil {
-		return runtimestorage.ReplyCorrelation{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.ReplyCorrelation{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	value.TraceParent = observability.NormalizeTraceParent(value.TraceParent)
 	return value, nil
 }
 
 // GetSession loads a tenant-scoped session.
-func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
-	if err := check(ctx); err != nil {
-		return runtimestorage.Session{}, err
+func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (sessionstorage.Session, error) {
+	if err := checkStore(ctx, s); err != nil {
+		return sessionstorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
-	var value runtimestorage.Session
+	var value sessionstorage.Session
 	var state []byte
 	err := s.db.QueryRowContext(ctx, "SELECT tenant_id, session_id, status, version, state, created_at, updated_at FROM public.runtime_session WHERE tenant_id=$1 AND session_id=$2", tenantID, sessionID).Scan(&value.TenantID, &value.SessionID, &value.Status, &value.Version, &state, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
-		return runtimestorage.Session{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return sessionstorage.Session{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if err := pgstorage.DecodeJSON(state, &value.State); err != nil {
-		return runtimestorage.Session{}, runtimestorage.ErrStorage
+		return sessionstorage.Session{}, runtimestorage.ErrStorage
 	}
 	return cloneSession(value), nil
 }
 
 // CreateSession persists a new tenant-scoped session.
-func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
-	if err := check(ctx); err != nil {
-		return runtimestorage.Session{}, err
+func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (sessionstorage.Session, error) {
+	if err := checkStore(ctx, s); err != nil {
+		return sessionstorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if state == nil {
 		state = map[string]any{}
 	}
 	encoded, err := pgstorage.EncodeJSON(state)
 	if err != nil {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
-	var value runtimestorage.Session
+	var value sessionstorage.Session
 	var persisted []byte
 	err = s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_session (tenant_id, session_id, status, version, state) VALUES ($1,$2,'active',1,$3) RETURNING tenant_id,session_id,status,version,state,created_at,updated_at", tenantID, sessionID, encoded).Scan(&value.TenantID, &value.SessionID, &value.Status, &value.Version, &persisted, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
-		return runtimestorage.Session{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return sessionstorage.Session{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if err := pgstorage.DecodeJSON(persisted, &value.State); err != nil {
-		return runtimestorage.Session{}, runtimestorage.ErrStorage
+		return sessionstorage.Session{}, runtimestorage.ErrStorage
 	}
 	return cloneSession(value), nil
 }
 
 // UpdateSessionState applies an expected-version session state update.
-func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (runtimestorage.Session, error) {
-	if err := check(ctx); err != nil {
-		return runtimestorage.Session{}, err
+func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (sessionstorage.Session, error) {
+	if err := checkStore(ctx, s); err != nil {
+		return sessionstorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if state == nil {
 		state = map[string]any{}
 	}
 	encoded, err := pgstorage.EncodeJSON(state)
 	if err != nil {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
-	var value runtimestorage.Session
+	var value sessionstorage.Session
 	var persisted []byte
 	err = s.db.QueryRowContext(ctx, "UPDATE public.runtime_session SET version=version+1,state=$4,updated_at=now() WHERE tenant_id=$1 AND session_id=$2 AND version=$3 RETURNING tenant_id,session_id,status,version,state,created_at,updated_at", tenantID, sessionID, expectedVersion, encoded).Scan(&value.TenantID, &value.SessionID, &value.Status, &value.Version, &persisted, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			if _, getErr := s.GetSession(ctx, tenantID, sessionID); getErr != nil {
-				return runtimestorage.Session{}, getErr
+				return sessionstorage.Session{}, getErr
 			}
-			return runtimestorage.Session{}, runtimestorage.ErrConflict
+			return sessionstorage.Session{}, runtimestorage.ErrConflict
 		}
-		return runtimestorage.Session{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return sessionstorage.Session{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if err := pgstorage.DecodeJSON(persisted, &value.State); err != nil {
-		return runtimestorage.Session{}, runtimestorage.ErrStorage
+		return sessionstorage.Session{}, runtimestorage.ErrStorage
 	}
 	return cloneSession(value), nil
 }
 
 // DeleteSession removes a tenant-scoped session.
 func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) error {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
@@ -129,7 +132,7 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 	}
 	result, err := s.db.ExecContext(ctx, "DELETE FROM public.runtime_session WHERE tenant_id=$1 AND session_id=$2", tenantID, sessionID)
 	if err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
@@ -143,13 +146,13 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 
 // RecordMessage inserts or returns an idempotent inbound message event.
 func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageEventInput) (runtimestorage.MessageEvent, bool, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
 	}
 	if runtimestorage.ValidateSession(input.TenantID, input.SessionID) != nil || input.BindingID == "" || input.ExternalMessageID == "" || input.EventID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil || (input.ReplyTarget != (runtimestorage.ReplyTarget{}) && input.ReplyTarget.BindingID != input.BindingID) {
 		return runtimestorage.MessageEvent{}, false, runtimestorage.ErrInvalid
 	}
-	tx, err := pgstorage.Begin(ctx, s.db)
+	tx, err := begin(ctx, s.db)
 	if err != nil {
 		return runtimestorage.MessageEvent{}, false, err
 	}
@@ -160,15 +163,15 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 		return cloneEvent(existing), true, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return runtimestorage.MessageEvent{}, false, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.MessageEvent{}, false, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	var version int64
 	if err := tx.QueryRowContext(ctx, "UPDATE public.runtime_session SET version=version+1,updated_at=now() WHERE tenant_id=$1 AND session_id=$2 RETURNING version", input.TenantID, input.SessionID).Scan(&version); err != nil {
-		return runtimestorage.MessageEvent{}, false, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.MessageEvent{}, false, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	err = tx.QueryRowContext(ctx, "INSERT INTO public.message_event (tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,reply_conversation_kind,reply_receiver_id,reply_thread_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'received',$8,$9,$10) RETURNING "+eventColumns, input.TenantID, input.EventID, input.SessionID, input.BindingID, input.ExternalMessageID, input.IdempotencyKey, version, input.ReplyTarget.ConversationKind, input.ReplyTarget.ReceiverID, input.ReplyTarget.ThreadID).Scan(eventArgs(&existing)...)
 	if err != nil {
-		mapped := pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		mapped := mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 		if errors.Is(mapped, runtimestorage.ErrDuplicate) {
 			pgstorage.Rollback(tx)
 			if duplicate, lookupErr := s.lookupMessageByExternal(ctx, input.TenantID, input.BindingID, input.ExternalMessageID); lookupErr == nil {
@@ -177,7 +180,7 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 		}
 		return runtimestorage.MessageEvent{}, false, mapped
 	}
-	if err := pgstorage.Commit(ctx, tx); err != nil {
+	if err := commit(ctx, tx); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
 	}
 	return cloneEvent(existing), false, nil
@@ -187,14 +190,14 @@ func (s *Store) lookupMessageByExternal(ctx context.Context, tenantID, bindingID
 	var value runtimestorage.MessageEvent
 	err := s.db.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM public.message_event WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3", tenantID, bindingID, externalID).Scan(eventArgs(&value)...)
 	if err != nil {
-		return runtimestorage.MessageEvent{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.MessageEvent{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return cloneEvent(value), nil
 }
 
 // GetMessage loads a tenant-scoped inbound message event.
 func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runtimestorage.MessageEvent, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.MessageEvent{}, err
 	}
 	if runtimestorage.ValidateTenant(tenantID) != nil || eventID == "" {
@@ -211,14 +214,14 @@ func lookupMessage(ctx context.Context, query messageQuerier, tenantID, eventID 
 	var value runtimestorage.MessageEvent
 	err := query.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM public.message_event WHERE tenant_id=$1 AND event_id=$2", tenantID, eventID).Scan(eventArgs(&value)...)
 	if err != nil {
-		return runtimestorage.MessageEvent{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.MessageEvent{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return cloneEvent(value), nil
 }
 
 // TransitionMessage applies a fenced message lifecycle transition.
 func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.MessageEvent{}, err
 	}
 	if runtimestorage.ValidateTenant(transition.TenantID) != nil || transition.EventID == "" || transition.Owner == "" {
@@ -246,7 +249,7 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 		return cloneEvent(value), nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return runtimestorage.MessageEvent{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.MessageEvent{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if _, lookupErr := s.GetMessage(ctx, transition.TenantID, transition.EventID); lookupErr != nil {
 		return runtimestorage.MessageEvent{}, lookupErr
@@ -261,7 +264,7 @@ func (s *Store) transitionMessageWithReply(ctx context.Context, transition runti
 		return cloneEvent(value), nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return runtimestorage.MessageEvent{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.MessageEvent{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if _, lookupErr := s.GetMessage(ctx, transition.TenantID, transition.EventID); lookupErr != nil {
 		return runtimestorage.MessageEvent{}, lookupErr
@@ -270,27 +273,27 @@ func (s *Store) transitionMessageWithReply(ctx context.Context, transition runti
 }
 
 // AppendEventPayload stores an immutable session event payload.
-func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.EventPayload) (runtimestorage.EventPayload, error) {
-	if err := check(ctx); err != nil {
-		return runtimestorage.EventPayload{}, err
+func (s *Store) AppendEventPayload(ctx context.Context, payload sessionstorage.EventPayload) (sessionstorage.EventPayload, error) {
+	if err := checkStore(ctx, s); err != nil {
+		return sessionstorage.EventPayload{}, err
 	}
 	if err := validatePayload(payload); err != nil {
-		return runtimestorage.EventPayload{}, err
+		return sessionstorage.EventPayload{}, err
 	}
-	var value runtimestorage.EventPayload
+	var value sessionstorage.EventPayload
 	err := s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_event_history (tenant_id,session_id,event_id,payload) VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (tenant_id,session_id,event_id) DO UPDATE SET event_id=public.runtime_event_history.event_id WHERE public.runtime_event_history.payload=EXCLUDED.payload RETURNING tenant_id,session_id,event_id,payload::text,history_seq,created_at", payload.TenantID, payload.SessionID, payload.EventID, payload.Payload).Scan(&value.TenantID, &value.SessionID, &value.EventID, &value.Payload, &value.HistorySeq, &value.CreatedAt)
 	if err == nil {
 		return clonePayload(value), nil
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return runtimestorage.EventPayload{}, runtimestorage.ErrConflict
+		return sessionstorage.EventPayload{}, runtimestorage.ErrConflict
 	}
-	return runtimestorage.EventPayload{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	return sessionstorage.EventPayload{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 }
 
 // ListEventPayloads returns ordered event history for a session.
-func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.EventPayload, error) {
-	if err := check(ctx); err != nil {
+func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]sessionstorage.EventPayload, error) {
+	if err := checkStore(ctx, s); err != nil {
 		return nil, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
@@ -298,12 +301,12 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 	}
 	rows, err := s.db.QueryContext(ctx, "SELECT tenant_id,session_id,event_id,payload::text,history_seq,created_at FROM public.runtime_event_history WHERE tenant_id=$1 AND session_id=$2 ORDER BY history_seq", tenantID, sessionID)
 	if err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer func() { _ = rows.Close() }()
-	var result []runtimestorage.EventPayload
+	var result []sessionstorage.EventPayload
 	for rows.Next() {
-		var value runtimestorage.EventPayload
+		var value sessionstorage.EventPayload
 		if err := rows.Scan(&value.TenantID, &value.SessionID, &value.EventID, &value.Payload, &value.HistorySeq, &value.CreatedAt); err != nil {
 			return nil, runtimestorage.ErrStorage
 		}
@@ -316,15 +319,20 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 		if _, err := s.GetSession(ctx, tenantID, sessionID); err != nil {
 			return nil, err
 		}
-		result = []runtimestorage.EventPayload{}
+		result = []sessionstorage.EventPayload{}
 	}
 	return result, nil
 }
 
 // EnqueueReply stores one durable reply segment idempotently.
 func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
+	}
+	var normalizeErr error
+	value, normalizeErr = runtimestorage.NormalizeReplyOutbox(value)
+	if normalizeErr != nil {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
 	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
@@ -345,7 +353,7 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 		}
 	}
 	var result runtimestorage.ReplyOutbox
-	err := s.db.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending' WHERE EXISTS (SELECT 1 FROM public.message_event WHERE tenant_id=$1 AND event_id=$3 AND ((reply_conversation_kind='' AND reply_receiver_id='' AND reply_thread_id='' AND $7='' AND $8='' AND $9='' AND $10='') OR (binding_id=$7 AND reply_conversation_kind=$8 AND reply_receiver_id=$9 AND reply_thread_id=$10))) ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id RETURNING "+replyColumns, value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload, value.ReplyTarget.BindingID, value.ReplyTarget.ConversationKind, value.ReplyTarget.ReceiverID, value.ReplyTarget.ThreadID).Scan(replyArgs(&result)...)
+	err := s.db.QueryRowContext(ctx, insertReplyStatement+" RETURNING "+replyColumns, replyInsertArgs(value)...).Scan(replyArgs(&result)...)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			if _, lookupErr := s.GetMessage(ctx, value.TenantID, value.EventID); lookupErr != nil {
@@ -353,7 +361,7 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 			}
 			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 		}
-		return runtimestorage.ReplyOutbox{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.ReplyOutbox{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return cloneReply(result), nil
 }
@@ -362,7 +370,12 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 //
 //nolint:gocyclo // The transaction validates and atomically persists the complete reply batch.
 func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
+		return nil, err
+	}
+	var err error
+	values, err = normalizeReplyBatch(values)
+	if err != nil {
 		return nil, err
 	}
 	if err := validateReplyBatch(values); err != nil {
@@ -380,7 +393,7 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer func() { _ = tx.Rollback() }()
 	result, err := s.insertReplySegments(ctx, tx, values)
@@ -388,7 +401,7 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return result, nil
 }
@@ -396,13 +409,18 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 // EnqueueRepliesWithCorrelation atomically persists execution correlation and
 // the complete reply segment batch.
 func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return nil, err
 	}
 	if correlation.TenantID == "" || correlation.EventID == "" || correlation.RequestID == "" {
 		return nil, runtimestorage.ErrInvalid
 	}
 	correlation.TraceParent = observability.NormalizeTraceParent(correlation.TraceParent)
+	var normalizeErr error
+	values, normalizeErr = normalizeReplyBatch(values)
+	if normalizeErr != nil {
+		return nil, normalizeErr
+	}
 	first, err := validateReplyBatchForCorrelation(correlation, values)
 	if err != nil {
 		return nil, err
@@ -418,21 +436,21 @@ func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation r
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := tx.QueryRowContext(ctx, "INSERT INTO public.runtime_reply_correlation (tenant_id,event_id,request_id,trace_id,trace_parent) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (tenant_id,event_id) DO UPDATE SET request_id=public.runtime_reply_correlation.request_id, trace_id=public.runtime_reply_correlation.trace_id, trace_parent=public.runtime_reply_correlation.trace_parent WHERE public.runtime_reply_correlation.request_id=EXCLUDED.request_id AND public.runtime_reply_correlation.trace_id=EXCLUDED.trace_id AND public.runtime_reply_correlation.trace_parent=EXCLUDED.trace_parent RETURNING tenant_id", correlation.TenantID, correlation.EventID, correlation.RequestID, correlation.TraceID, correlation.TraceParent).Scan(new(string)); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, runtimestorage.ErrConflict
 		}
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	result, err := s.insertReplySegments(ctx, tx, values)
 	if err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return result, nil
 }
@@ -474,11 +492,23 @@ func validateReplyBatch(values []runtimestorage.ReplyOutbox) error {
 	return nil
 }
 
+func normalizeReplyBatch(values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	normalized := make([]runtimestorage.ReplyOutbox, 0, len(values))
+	for _, value := range values {
+		reply, err := runtimestorage.NormalizeReplyOutbox(value)
+		if err != nil {
+			return nil, runtimestorage.ErrInvalid
+		}
+		normalized = append(normalized, reply)
+	}
+	return normalized, nil
+}
+
 func (s *Store) insertReplySegments(ctx context.Context, tx *sql.Tx, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
 	result := make([]runtimestorage.ReplyOutbox, 0, len(values))
 	for _, value := range values {
 		var row runtimestorage.ReplyOutbox
-		err := tx.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending' WHERE EXISTS (SELECT 1 FROM public.message_event WHERE tenant_id=$1 AND event_id=$3 AND ((reply_conversation_kind='' AND reply_receiver_id='' AND reply_thread_id='' AND $7='' AND $8='' AND $9='' AND $10='') OR (binding_id=$7 AND reply_conversation_kind=$8 AND reply_receiver_id=$9 AND reply_thread_id=$10))) ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id RETURNING "+replyColumns, value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload, value.ReplyTarget.BindingID, value.ReplyTarget.ConversationKind, value.ReplyTarget.ReceiverID, value.ReplyTarget.ThreadID).Scan(replyArgs(&row)...)
+		err := tx.QueryRowContext(ctx, insertReplyStatement+" RETURNING "+replyColumns, replyInsertArgs(value)...).Scan(replyArgs(&row)...)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				if _, lookupErr := lookupMessage(ctx, tx, value.TenantID, value.EventID); lookupErr != nil {
@@ -486,7 +516,7 @@ func (s *Store) insertReplySegments(ctx context.Context, tx *sql.Tx, values []ru
 				}
 				return nil, runtimestorage.ErrConflict
 			}
-			return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+			return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 		}
 		result = append(result, cloneReply(row))
 	}
@@ -495,7 +525,7 @@ func (s *Store) insertReplySegments(ctx context.Context, tx *sql.Tx, values []ru
 
 // GetReply loads one durable reply segment.
 func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment int) (runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
 	if runtimestorage.ValidateTenant(tenantID) != nil || replyID == "" || segment < 0 {
@@ -504,14 +534,14 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 	var value runtimestorage.ReplyOutbox
 	err := s.db.QueryRowContext(ctx, "SELECT "+replyColumns+" FROM public.reply_outbox WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3", tenantID, replyID, segment).Scan(replyArgs(&value)...)
 	if err != nil {
-		return runtimestorage.ReplyOutbox{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.ReplyOutbox{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return cloneReply(value), nil
 }
 
 // ListReplyCandidates returns reply segments eligible for delivery.
 func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return nil, err
 	}
 	if err := runtimestorage.ValidateTenant(tenantID); err != nil {
@@ -519,7 +549,7 @@ func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]run
 	}
 	rows, err := s.db.QueryContext(ctx, "SELECT "+replyColumns+" FROM public.reply_outbox WHERE tenant_id=$1 ORDER BY updated_at", tenantID)
 	if err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer func() { _ = rows.Close() }()
 	result := make([]runtimestorage.ReplyOutbox, 0)
@@ -538,7 +568,7 @@ func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]run
 
 // ClaimReply leases one reply segment to a delivery worker.
 func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segment int, owner string, leaseDuration time.Duration) (runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
 	if runtimestorage.ValidateTenant(tenantID) != nil || replyID == "" || owner == "" || leaseDuration <= 0 {
@@ -554,7 +584,7 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 		return cloneReply(value), nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return runtimestorage.ReplyOutbox{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.ReplyOutbox{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if _, lookupErr := s.GetReply(ctx, tenantID, replyID, segment); lookupErr != nil {
 		return runtimestorage.ReplyOutbox{}, lookupErr
@@ -562,9 +592,32 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 	return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 }
 
+// RecordReplyReceipt persists a provider acknowledgement without releasing
+// the current sending lease. The worker later owns the sent transition.
+func (s *Store) RecordReplyReceipt(ctx context.Context, receipt runtimestorage.ReplyReceipt) (runtimestorage.ReplyOutbox, error) {
+	if err := checkStore(ctx, s); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	if runtimestorage.ValidateTenant(receipt.TenantID) != nil || receipt.ReplyID == "" || receipt.SegmentIndex < 0 || receipt.Owner == "" || receipt.FencingToken <= 0 || strings.TrimSpace(receipt.ProviderID) == "" {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	var value runtimestorage.ReplyOutbox
+	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET provider_message_id=$6, updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND status='sending' AND lease_owner=$4 AND fencing_token=$5 AND lease_expires_at IS NOT NULL AND lease_expires_at > now() AND (provider_message_id='' OR provider_message_id=$6) RETURNING "+replyColumns, receipt.TenantID, receipt.ReplyID, receipt.SegmentIndex, receipt.Owner, receipt.FencingToken, receipt.ProviderID).Scan(replyArgs(&value)...)
+	if err == nil {
+		return cloneReply(value), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return runtimestorage.ReplyOutbox{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	if _, lookupErr := s.GetReply(ctx, receipt.TenantID, receipt.ReplyID, receipt.SegmentIndex); lookupErr != nil {
+		return runtimestorage.ReplyOutbox{}, lookupErr
+	}
+	return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+}
+
 // TransitionReply applies a fenced reply delivery transition.
 func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.ReplyTransition) (runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
 	if runtimestorage.ValidateTenant(transition.TenantID) != nil || transition.ReplyID == "" || transition.Owner == "" {
@@ -586,7 +639,7 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 		return cloneReply(value), nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return runtimestorage.ReplyOutbox{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.ReplyOutbox{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if _, lookupErr := s.GetReply(ctx, transition.TenantID, transition.ReplyID, transition.SegmentIndex); lookupErr != nil {
 		return runtimestorage.ReplyOutbox{}, lookupErr
@@ -596,6 +649,17 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 
 // Close releases store resources; the borrowed database remains caller-owned.
 func (s *Store) Close() error { return nil }
+
+func checkStore(ctx context.Context, store *Store) error {
+	if err := check(ctx); err != nil {
+		return err
+	}
+	if store == nil || store.db == nil {
+		return runtimestorage.ErrStorage
+	}
+	return nil
+}
+
 func check(ctx context.Context) error {
 	if ctx == nil {
 		return runtimestorage.ErrInvalid
@@ -605,10 +669,25 @@ func check(ctx context.Context) error {
 func eventArgs(value *runtimestorage.MessageEvent) []any {
 	return []any{&value.TenantID, &value.EventID, &value.SessionID, &value.BindingID, &value.ExternalMessageID, &value.IdempotencyKey, &value.EventSeq, &value.Status, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt, &value.ReplyID, &value.SegmentCount, &value.ReplyTarget.ConversationKind, &value.ReplyTarget.ReceiverID, &value.ReplyTarget.ThreadID, &value.CreatedAt, &value.UpdatedAt}
 }
-func replyArgs(value *runtimestorage.ReplyOutbox) []any {
-	return []any{&value.TenantID, &value.ReplyID, &value.EventID, &value.SegmentIndex, &value.SegmentCount, &value.Payload, &value.ReplyTarget.BindingID, &value.ReplyTarget.ConversationKind, &value.ReplyTarget.ReceiverID, &value.ReplyTarget.ThreadID, &value.Status, &value.Attempts, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt, &value.ProviderMessageID, &value.LastErrorClass, &value.CreatedAt, &value.UpdatedAt}
+func replyInsertArgs(value runtimestorage.ReplyOutbox) []any {
+	return []any{
+		value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload,
+		value.Kind, value.Attachment.ID, value.Attachment.Kind, value.Attachment.MIMEType, value.Attachment.Name,
+		value.Attachment.Size, value.Attachment.SHA256, value.Attachment.Provider, value.Attachment.ProviderID, value.Fallback,
+		value.ReplyTarget.BindingID, value.ReplyTarget.ConversationKind, value.ReplyTarget.ReceiverID, value.ReplyTarget.ThreadID,
+	}
 }
-func cloneSession(value runtimestorage.Session) runtimestorage.Session {
+func replyArgs(value *runtimestorage.ReplyOutbox) []any {
+	return []any{
+		&value.TenantID, &value.ReplyID, &value.EventID, &value.SegmentIndex, &value.SegmentCount, &value.Payload,
+		&value.Kind, &value.Attachment.ID, &value.Attachment.Kind, &value.Attachment.MIMEType, &value.Attachment.Name,
+		&value.Attachment.Size, &value.Attachment.SHA256, &value.Attachment.Provider, &value.Attachment.ProviderID, &value.Fallback,
+		&value.ReplyTarget.BindingID, &value.ReplyTarget.ConversationKind, &value.ReplyTarget.ReceiverID, &value.ReplyTarget.ThreadID,
+		&value.Status, &value.Attempts, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt,
+		&value.ProviderMessageID, &value.LastErrorClass, &value.CreatedAt, &value.UpdatedAt,
+	}
+}
+func cloneSession(value sessionstorage.Session) sessionstorage.Session {
 	if value.State != nil {
 		copy := make(map[string]any, len(value.State))
 		for k, v := range value.State {
@@ -628,11 +707,11 @@ func cloneEvent(value runtimestorage.MessageEvent) runtimestorage.MessageEvent {
 	}
 	return value
 }
-func clonePayload(value runtimestorage.EventPayload) runtimestorage.EventPayload {
+func clonePayload(value sessionstorage.EventPayload) sessionstorage.EventPayload {
 	value.Payload = append([]byte(nil), value.Payload...)
 	return value
 }
-func validatePayload(value runtimestorage.EventPayload) error {
+func validatePayload(value sessionstorage.EventPayload) error {
 	if runtimestorage.ValidateSession(value.TenantID, value.SessionID) != nil || value.EventID == "" || len(value.Payload) == 0 || !json.Valid(value.Payload) {
 		return runtimestorage.ErrInvalid
 	}
@@ -646,4 +725,8 @@ func cloneReply(value runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 	return value
 }
 
-var _ runtimestorage.RuntimeStore = (*Store)(nil)
+var _ sessionstorage.SessionStateStore = (*Store)(nil)
+var _ sessionstorage.EventHistoryStore = (*Store)(nil)
+var _ runtimestorage.MessageStore = (*Store)(nil)
+var _ runtimestorage.ReplyStore = (*Store)(nil)
+var _ runtimestorage.ReplyReceiptRecorder = (*Store)(nil)

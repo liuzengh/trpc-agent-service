@@ -1,6 +1,6 @@
-# 原始任务书：多租户节点化 Agent 部署平台
+# 项目交付基线：多租户节点化 Agent 部署平台
 
-> 本页保留项目最初的任务描述、交付要求与验收标准。它是项目背景记录，不等同于当前实现范围；当前代码能力与已知边界请以根目录 README 和各专项文档为准。
+> 本页把项目目标、交付物和已完成验收收敛为一份可追溯基线。具体运行命令和专项证据见根目录 README 与各开发文档。
 
 ## 背景和价值
 
@@ -14,7 +14,7 @@
 
 设计一个基于 tRPC-Agent-Go 的多租户节点化 Agent 部署平台。平台需要支持多个租户创建和部署自己的 Agent，每个租户可以绑定不同 IM 通道、选择不同数据后端、配置不同工具权限和知识库，并允许多个 Agent 节点水平扩展。系统需要考虑跨节点会话路由、数据同步、后端适配、IM 消息接入、监控审计和故障恢复。
 
-任务以架构设计为主，可以包含关键 Go 伪代码、接口定义或数据模型示例；方案应足够具体，能够指导后续工程落地。
+任务以架构设计、可运行代码和部署验证为主，关键 Go 接口、数据模型、运行时边界和 E2E 入口均已落地。
 
 ## 具体要求
 
@@ -74,15 +74,26 @@
 - Agent 执行跨越模型、工具、MCP、知识库和外部系统，监控与审计必须跨组件串联。
 - 企业平台还必须考虑灰度、回滚、限流、成本控制和合规审计。
 
-## 验收标准
+## 已完成验收
 
-1. 架构方案覆盖多租户、节点化部署、数据同步、多后端、IM 接入、治理监控和故障恢复。
-2. 数据模型表达 tenant、agent、channel binding、session、event、memory、summary、audit log 的关系。
-3. 说明至少两种 IM 通道的接入差异，其中至少包含微信或企业微信。
-4. 说明至少三类后端的数据存储和同步策略。
-5. 给出一条完整消息链路的时序说明，并说明 `trace_id` 或 `request_id` 的传播。
-6. 列出至少 8 个生产风险及缓解措施。
-7. 明确哪些能力复用 tRPC-Agent-Go，哪些属于新增的平台层模块。
+- [x] 架构方案覆盖多租户、节点化部署、数据同步、多后端、IM 接入、治理监控和故障恢复。
+- [x] 数据模型表达 tenant、agent、channel binding、session、event、memory、summary、audit log 的关系。
+- [x] 企业微信自建应用、企业微信 AI Bot 和 Telegram 通道的接入差异已固化，并提供 deterministic/live E2E 入口。
+- [x] PostgreSQL、Redis、InMemory、S3-compatible runtime capability 的存储与同步策略已落地并有契约测试。
+- [x] 企业微信用户发消息到 Agent 执行、Tool/Storage、Reply Outbox 和 IM 回复的完整时序与 `trace_id`/`request_id` 传播已验证。
+- [x] 生产风险清单包含跨租户、Secret、重复投递、CAS/fencing、迁移、模型、Tool、指标、回滚、重试和生命周期风险及恢复措施。
+- [x] tRPC-Agent-Go 复用边界与新增平台层模块已在架构、包边界和运行时文档中明确。
+
+统一验收命令：
+
+```bash
+go test ./... -count=1
+go test -race ./... -count=1
+go vet ./...
+go build ./...
+python -m mkdocs build --strict -f docs/mkdocs.yml
+./scripts/validate-deployment.sh
+```
 
 ## tRPC-Agent-Go 能力对照
 

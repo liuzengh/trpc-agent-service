@@ -1,12 +1,14 @@
 # Issue #79：生产可观测性、Dashboard 与告警
 
-> 本页是 Issue [#79](https://github.com/XnLemon/trpc-agent-service/issues/79) 的文档先行契约。它承接 Issue #45 的 provider-neutral telemetry 和 Issue #54 的 tenant-scoped usage/audit；本页固定实现边界，再进入代码阶段。
+> 本页是 Issue [#79](https://github.com/XnLemon/trpc-agent-service/issues/79) 的交付契约。它承接 Issue #45 的 provider-neutral telemetry 和 Issue #54 的 tenant-scoped usage/audit，记录代码、资源和验收证据。
 
-## 目标与非目标
+## 已交付能力
 
 目标是让一次可信请求在 http.request → gateway.dispatch → runner.execution 下继续关联到 model.call、tool.call、storage.operation 和 channel.receive/channel.send，并提供可安全聚合的运行指标、租户授权的查询模型以及可部署的 dashboard/alert 资源。
 
-本 Issue 不改变审计事实源，不把 Prometheus 当作成本或合规事实源，不新增 Session/Memory/Knowledge/Artifact 后端，不实现新的 IM 协议。指标导出失败只能丢弃 telemetry，不能阻塞业务提交、租约或关闭。
+审计事实源继续由 AuditEvent 提供，Prometheus/Grafana 展示进程级低基数聚合，租户 usage/cost
+通过授权查询读取；Session/Memory/Knowledge/Artifact 和 IM 适配器复用各自已验收模块。指标导出
+失败只丢弃 telemetry，不阻塞业务提交、租约或关闭。
 
 ## Trace 合同
 
@@ -14,7 +16,7 @@
 
 每个 operation 只能有一个终态：开始时可记录 `status=started`，但必须在成功、业务错误、取消或超时时记录恰好一个终态并结束 span。HTTP/SSE 请求的终态由整个协议生命周期决定：客户端断开、写入失败、request context 取消、空 stream 或没有 `done` 的不完整 stream 不能被记为成功；已经写出 HTTP 200 后只能在 telemetry/audit 中记录失败或取消，不能再写第二个 HTTP status。Model callback 以一次模型调用为边界：流式 partial response 不能提前结束 span 或重复累计 token；`GenerateContent` 在创建响应流前返回的错误也必须结束同一 span。企业微信 receive 创建的 context 必须作为 Gateway/Runner dispatch 的 parent，不能从独立的 handler 根 context 重新开始链路。
 
-Storage telemetry 覆盖实际 RuntimeStore/Session service 的读写方法（Get/Create/Update/Delete Session、Append/List event、message/reply lifecycle），而不只覆盖 capability factory construction 或 inbound claim；新增 adapter 必须复用同一 hook。
+Storage telemetry 覆盖实际运行时存储能力/Session service 的读写方法（Get/Create/Update/Delete Session、Append/List event、message/reply lifecycle），而不只覆盖 capability factory construction 或 inbound claim；新增 adapter 必须复用同一 hook。
 
 不得写入 token、API key、DSN 密码、Authorization、完整 URL、session/user/message/request 原文或不受界限的外部 ID。tenant/app 关联只使用配置的短 hash；hash 不作为 Prometheus label，避免租户数量直接变成指标基数。
 
@@ -48,10 +50,11 @@ Dashboard 展示四组面板：请求与错误率、端到端/分阶段延迟、
 
 ## 验收台账
 
-- [ ] HTTP/IM callback 到 Gateway、Runner、Model、Tool、Storage、IM reply 的 trace context 连续且取消安全；每个模型调用和 HTTP/SSE 请求只有一个终态（含流式、断连、空 stream 和创建流失败）。
-- [ ] 目录指标覆盖 volume、latency、终态 errors、IM success/retry/dead-letter、tokens、cost 和 backend latency。
-- [ ] 标签白名单、上述固定低基数映射、脱敏和 tenant-authorized aggregate query adapter 有负向测试。
-- [ ] Prometheus/Grafana dashboard 与 alert rules 可加载，并不包含 secret、原始租户标识或无界 ID。
-- [ ] no-op provider 保持默认行为；生产 bootstrap 按 OTLP 环境变量构造 exporter，trace/metric exporter 的 shutdown 故障不阻塞业务路径。
+- [x] HTTP/IM callback 到 Gateway、Runner、Model、Tool、Storage、IM reply 的 trace context 连续且取消安全；每个模型调用和 HTTP/SSE 请求只有一个终态（含流式、断连、空 stream 和创建流失败）。
+- [x] 目录指标覆盖 volume、latency、终态 errors、IM success/retry/dead-letter、tokens、cost 和 backend latency。
+- [x] 标签白名单、固定低基数映射、脱敏和 tenant-authorized aggregate query adapter 有负向测试。
+- [x] Prometheus/Grafana dashboard 与 alert rules 可加载，并不包含 secret、原始租户标识或无界 ID。
+- [x] no-op provider 保持默认行为；生产 bootstrap 按 OTLP 环境变量构造 exporter，trace/metric exporter 的 shutdown 故障不阻塞业务路径。
 
-代码阶段必须把本页所有 `[ ]` 变为有代码和测试证据的 `[x]`，并在 PR 描述中列出验证命令与 dashboard/query adapter 的授权边界。
+验收证据包括 `go test ./...`、`go test -race ./...`、Prometheus/Grafana 资源加载、真实 WeCom
+trace、低基数与脱敏负向测试，以及 observability compose 的健康检查。

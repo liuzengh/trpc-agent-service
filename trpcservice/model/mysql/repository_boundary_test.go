@@ -20,6 +20,7 @@ func TestModelRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 	}{
 		{"create", func() error { _, _, err := r.Create(ctx, model.CreateInput{}); return err }},
 		{"get", func() error { _, err := r.Get(ctx, "tenant", "profile"); return err }},
+		{"list", func() error { _, _, err := r.List(ctx, "tenant", "", "", "", 1); return err }},
 		{"update", func() error { _, _, err := r.UpdateConfiguration(ctx, model.UpdateConfigurationInput{}); return err }},
 		{"transition", func() error { _, _, err := r.TransitionStatus(ctx, model.TransitionStatusInput{}); return err }},
 	}
@@ -30,6 +31,73 @@ func TestModelRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestModelRepositoryListBoundaryBranches(t *testing.T) {
+	ctx := context.Background()
+	profile, catalog := newListModelProfile(t)
+	if _, _, err := NewRepository(nil, nil).List(ctx, "tenant", "", "", "", 1); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil-storage List error = %v", err)
+	}
+	for _, tc := range []struct {
+		name        string
+		setup       func(sqlmock.Sqlmock)
+		wantStorage bool
+	}{
+		{"invalid cursor", func(sqlmock.Sqlmock) {}, false},
+		{"query error", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery("FROM model_profile WHERE tenant_id").WithArgs("tenant").WillReturnError(errors.New("list query"))
+		}, true},
+		{"rows error", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery("FROM model_profile WHERE tenant_id").WithArgs("tenant").WillReturnRows(sqlmock.NewRows([]string{"profile_id"}).AddRow("profile").RowError(0, errors.New("rows")))
+		}, true},
+		{"filter no-match", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery("FROM model_profile WHERE tenant_id").WithArgs(profile.TenantID).WillReturnRows(testModelProfileRows(t, profile))
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			tc.setup(mock)
+			cursor := ""
+			if tc.name == "invalid cursor" {
+				cursor = "bad"
+			}
+			query, tenantID := "", "tenant"
+			if tc.name == "filter no-match" {
+				query, tenantID = "missing", "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+			}
+			items, _, callErr := NewRepository(db, catalog).List(ctx, tenantID, query, "", cursor, 1)
+			if tc.wantStorage && !errors.Is(callErr, ErrStorage) {
+				t.Fatalf("error = %v", callErr)
+			}
+			if !tc.wantStorage && tc.name == "invalid cursor" && callErr == nil {
+				t.Fatal("invalid cursor was accepted")
+			}
+			if !tc.wantStorage && tc.name == "filter no-match" && (callErr != nil || len(items) != 0) {
+				t.Fatalf("no-match result = items=%+v err=%v", items, callErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func newListModelProfile(t *testing.T) (*model.Profile, *model.ProviderCatalog) {
+	t.Helper()
+	catalog, err := model.NewProviderCatalog(model.ProviderSpec{Provider: "public", Models: []string{"chat"}, EndpointPolicy: model.FieldOptional, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"example.test"}, SecretRefPolicy: model.FieldOptional})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := model.NewProfile(model.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", ProfileKey: "primary", DisplayName: "Primary", Status: model.StatusActive, SchemaVersion: model.SchemaVersionV1, Configuration: model.Configuration{Provider: "public", Model: "chat"}}, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return profile, catalog
 }
 
 func TestModelRepositoryBoundaryWriteFailures(t *testing.T) {

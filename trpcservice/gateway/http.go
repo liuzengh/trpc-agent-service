@@ -15,6 +15,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 )
 
 const (
@@ -32,7 +34,9 @@ type HTTPConfig struct {
 	Dispatcher     DispatchService
 	Authenticator  APIAuthenticator
 	Admin          http.Handler
+	AdminAuth      http.Handler
 	WeCom          http.Handler
+	Web            http.Handler
 	Ready          func() bool
 	Limiter        *TenantLimiter
 	Idempotency    *IdempotencyStore
@@ -46,7 +50,9 @@ type HTTPHandler struct {
 	dispatcher     DispatchService
 	authenticator  APIAuthenticator
 	admin          http.Handler
+	adminAuth      http.Handler
 	wecom          http.Handler
+	web            http.Handler
 	ready          func() bool
 	limiter        *TenantLimiter
 	idempotency    *IdempotencyStore
@@ -109,7 +115,9 @@ func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 	handler := &HTTPHandler{
 		dispatcher: config.Dispatcher, authenticator: config.Authenticator, ready: config.Ready,
 		admin:        config.Admin,
+		adminAuth:    config.AdminAuth,
 		wecom:        config.WeCom,
+		web:          config.Web,
 		maxBodyBytes: config.MaxBodyBytes, requestTimeout: config.RequestTimeout,
 		telemetry: config.Observability, metrics: metrics.New(config.Observability),
 		limiter: config.Limiter, idempotency: config.Idempotency,
@@ -200,6 +208,14 @@ func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 		handler.wecom.ServeHTTP(writer, request)
 		return
 	}
+	if request.URL.Path == "/admin/auth" || strings.HasPrefix(request.URL.Path, "/admin/auth/") {
+		if handler.adminAuth == nil {
+			handler.writeError(writer, request, http.StatusNotFound, "not found", "", "")
+			return
+		}
+		handler.adminAuth.ServeHTTP(writer, request)
+		return
+	}
 	if request.URL.Path == "/admin/v1" || strings.HasPrefix(request.URL.Path, "/admin/v1/") {
 		if handler.admin == nil {
 			handler.writeError(writer, request, http.StatusNotFound, "not found", "", "")
@@ -218,6 +234,10 @@ func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	case "/v1/chat/stream":
 		handler.chat(writer, request, true)
 	default:
+		if handler.web != nil && request.URL.Path != "/v1" && !strings.HasPrefix(request.URL.Path, "/v1/") && request.URL.Path != "/admin" && !strings.HasPrefix(request.URL.Path, "/admin/") {
+			handler.web.ServeHTTP(writer, request)
+			return
+		}
 		handler.writeError(writer, request, http.StatusNotFound, "not found", "", "")
 	}
 }
@@ -386,7 +406,12 @@ func (handler *HTTPHandler) decodeMessage(writer http.ResponseWriter, request *h
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return InboundMessage{}, fmt.Errorf("%w: request JSON has trailing data", ErrInvalid)
 	}
-	message := InboundMessage(input)
+	message := InboundMessage{
+		Content: input.Content, ContentType: input.ContentType,
+		ExternalMessageID: input.ExternalMessageID, ExternalUserID: input.ExternalUserID,
+		ConversationKind: input.ConversationKind, ExternalPeerID: input.ExternalPeerID,
+		ExternalChatID: input.ExternalChatID, ExternalThreadID: input.ExternalThreadID,
+	}
 	return message.Normalize()
 }
 
@@ -554,15 +579,21 @@ func mapHTTPError(err error) (int, string) {
 		return http.StatusBadRequest, "invalid request"
 	case errors.Is(err, ErrRateLimited):
 		return http.StatusTooManyRequests, "rate limited"
+	case errors.Is(err, runtimebudget.ErrExceeded):
+		return http.StatusTooManyRequests, "budget exceeded"
+	case errors.Is(err, runtimebudget.ErrCostUnavailable):
+		return http.StatusServiceUnavailable, "cost configuration unavailable"
+	case errors.Is(err, runtimebudget.ErrUnavailable):
+		return http.StatusServiceUnavailable, "budget unavailable"
 	case errors.Is(err, ErrDuplicateMessage):
 		return http.StatusConflict, "duplicate message"
-	case errors.Is(err, ErrNotReady), errors.Is(err, ErrClosed):
+	case errors.Is(err, ErrNotReady), errors.Is(err, ErrClosed), errors.Is(err, runtimerunner.ErrNotReady), errors.Is(err, runtimerunner.ErrClosed):
 		return http.StatusServiceUnavailable, "not ready"
 	case errors.Is(err, ErrIdempotencyCapacity):
 		return http.StatusServiceUnavailable, "gateway capacity unavailable"
 	case errors.Is(err, ErrAuditWriteFailed):
 		return http.StatusBadGateway, ErrAuditWriteFailed.Error()
-	case errors.Is(err, ErrExecution), errors.Is(err, ErrPlanUnavailable), errors.Is(err, ErrRunnerUnavailable):
+	case errors.Is(err, ErrExecution), errors.Is(err, ErrPlanUnavailable), errors.Is(err, runtimerunner.ErrRunnerUnavailable):
 		return http.StatusBadGateway, "execution failed"
 	default:
 		return http.StatusInternalServerError, "gateway error"

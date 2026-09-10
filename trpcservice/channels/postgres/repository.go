@@ -15,6 +15,77 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 )
 
+// List returns a stable page of Channel Bindings belonging to one tenant.
+func (r *ChannelRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*channels.Binding, string, error) {
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := 0
+	if cursor != "" {
+		if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT binding_id FROM public.channel_binding WHERE tenant_id=$1 ORDER BY binding_id`, tenantID)
+	if err != nil {
+		return nil, "", ErrStorage
+	}
+	bindingIDs, err := scanBindingIDs(rows)
+	if err != nil {
+		return nil, "", ErrStorage
+	}
+	items := make([]*channels.Binding, 0)
+	q := strings.ToLower(strings.TrimSpace(query))
+	for _, id := range bindingIDs {
+		value, err := r.Get(ctx, tenantID, id)
+		if err != nil {
+			return nil, "", ErrStorage
+		}
+		if status != "" && string(value.Status) != status {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(value.BindingID+" "+value.BindingKey+" "+string(value.Channel)+" "+value.ProviderAccountID), q) {
+			continue
+		}
+		items = append(items, value)
+	}
+	if offset >= len(items) {
+		return []*channels.Binding{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
+func scanBindingIDs(rows *sql.Rows) ([]string, error) {
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	return ids, rows.Close()
+}
+
 const (
 	postgresCandidateTTL  = channels.DefaultCandidateTTL
 	postgresMaxCandidates = 4096
@@ -290,8 +361,11 @@ func (r *ChannelRepository) LookupCandidates(ctx context.Context, channel channe
 		if err != nil {
 			return nil, channels.ErrCandidateUnavailable
 		}
-		candidate, err := channels.NewCandidateBindingContext(channel, routeDigest, value.version, value.digest,
-			channels.PurposeWebhookVerification, token, now, now.Add(postgresCandidateTTL))
+		candidate, err := channels.NewCandidateBindingContextFromInput(channels.CandidateBindingInput{
+			Channel: channel, PublicRouteKeyDigest: routeDigest, BindingVersion: value.version,
+			ConfigDigest: value.digest, Purpose: channels.PurposeWebhookVerification,
+			CandidateToken: token, IssuedAt: now, ExpiresAt: now.Add(postgresCandidateTTL),
+		})
 		if err != nil {
 			return nil, channels.ErrCandidateUnavailable
 		}

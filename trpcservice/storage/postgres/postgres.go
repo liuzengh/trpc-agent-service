@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	storageerrors "github.com/XnLemon/trpc-agent-service/trpcservice/storage/errors"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -17,7 +18,7 @@ import (
 // ErrStorage is the stable error category returned for unexpected database
 // failures. The underlying driver error is intentionally not exposed to the
 // Gateway because it may contain connection details or provider metadata.
-var ErrStorage = errors.New("postgres storage error")
+var ErrStorage = storageerrors.ErrPostgres
 
 // Options configures a database/sql pool opened by Open. A caller that
 // already owns a pool can pass it directly to repository constructors.

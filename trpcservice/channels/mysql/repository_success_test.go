@@ -33,6 +33,84 @@ func TestChannelRepositoryGetDecodesStoredBinding(t *testing.T) {
 	}
 }
 
+func TestChannelRepositoryListsBindings(t *testing.T) {
+	binding := newStoredChannelBinding(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT binding_id FROM channel_binding WHERE tenant_id = \? ORDER BY binding_id`).WithArgs(binding.TenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"binding_id"}).AddRow(binding.BindingID))
+	mock.ExpectQuery(".*").WithArgs(binding.TenantID, binding.BindingID).WillReturnRows(testChannelBindingRows(t, binding))
+
+	items, next, err := NewRepository(db).List(context.Background(), binding.TenantID, "primary", string(binding.Status), "", 50)
+	if err != nil || len(items) != 1 || items[0].BindingID != binding.BindingID || next != "" {
+		t.Fatalf("listed channel bindings = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChannelRepositoryListSearchIncludesChannel(t *testing.T) {
+	binding := newStoredChannelBinding(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT binding_id FROM channel_binding WHERE tenant_id = \? ORDER BY binding_id`).
+		WithArgs(binding.TenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"binding_id"}).AddRow(binding.BindingID))
+	mock.ExpectQuery(".*").WithArgs(binding.TenantID, binding.BindingID).WillReturnRows(testChannelBindingRows(t, binding))
+
+	items, next, err := NewRepository(db).List(context.Background(), binding.TenantID, "telegram", "", "", 50)
+	if err != nil || len(items) != 1 || items[0].BindingID != binding.BindingID || next != "" {
+		t.Fatalf("channel search = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChannelRepositoryListBoundaries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := NewRepository(nil).List(ctx, "tenant", "", "", "", 50); err == nil {
+		t.Fatal("canceled channel list was accepted")
+	}
+	if _, _, err := NewRepository(nil).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil channel list error = %v", err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repository := NewRepository(db)
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "bad", 50); err == nil {
+		t.Fatal("invalid channel cursor was accepted")
+	}
+	mock.ExpectQuery(`SELECT binding_id FROM channel_binding WHERE tenant_id = \? ORDER BY binding_id`).WithArgs("tenant").WillReturnError(errors.New("query down"))
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("channel query error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	scanDB, scanMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = scanDB.Close() })
+	scanMock.ExpectQuery(`SELECT binding_id FROM channel_binding WHERE tenant_id = \? ORDER BY binding_id`).WithArgs("tenant").WillReturnRows(sqlmock.NewRows([]string{"binding_id", "extra"}).AddRow("binding", "bad"))
+	if _, _, err := NewRepository(scanDB).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("channel scan error = %v", err)
+	}
+}
+
 func TestChannelRepositoryRejectsInvalidCreationMetadata(t *testing.T) {
 	binding := newStoredChannelBinding(t)
 	db, mock, err := sqlmock.New()
@@ -356,7 +434,11 @@ func TestChannelRepositoryCandidateAndScanGuards(t *testing.T) {
 	binding := newStoredChannelBinding(t)
 	repository := NewRepository(nil)
 	now := time.Now().UTC()
-	candidate, err := channels.NewCandidateBindingContext(binding.Channel, binding.PublicRouteKeyDigest, binding.Version, binding.ConfigDigest, channels.PurposeWebhookVerification, "token", now, now.Add(time.Minute))
+	candidate, err := channels.NewCandidateBindingContextFromInput(channels.CandidateBindingInput{
+		Channel: binding.Channel, PublicRouteKeyDigest: binding.PublicRouteKeyDigest, BindingVersion: binding.Version,
+		ConfigDigest: binding.ConfigDigest, Purpose: channels.PurposeWebhookVerification, CandidateToken: "token",
+		IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +467,11 @@ func TestChannelRepositoryCandidateAndScanGuards(t *testing.T) {
 	}
 	mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "binding_id", "version", "config_digest"}).AddRow(binding.TenantID, binding.BindingID, binding.Version, binding.ConfigDigest))
 	full := NewRepository(db)
-	valid, err := channels.NewCandidateBindingContext(binding.Channel, binding.PublicRouteKeyDigest, binding.Version, binding.ConfigDigest, channels.PurposeWebhookVerification, "seed", now, now.Add(time.Minute))
+	valid, err := channels.NewCandidateBindingContextFromInput(channels.CandidateBindingInput{
+		Channel: binding.Channel, PublicRouteKeyDigest: binding.PublicRouteKeyDigest, BindingVersion: binding.Version,
+		ConfigDigest: binding.ConfigDigest, Purpose: channels.PurposeWebhookVerification, CandidateToken: "seed",
+		IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

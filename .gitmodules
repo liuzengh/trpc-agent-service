@@ -1,0 +1,3 @@
+[submodule "third_party/tdesign-react"]
+	path = third_party/tdesign-react
+	url = https://github.com/Tencent/tdesign-react.git

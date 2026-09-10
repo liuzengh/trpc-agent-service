@@ -8,10 +8,67 @@ import (
 	"encoding/base64"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 )
+
+// List returns a stable page of channel bindings in one tenant.
+func (r *InMemoryRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*channels.Binding, string, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, "", err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset, err := decodeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := r.rlock(ctx); err != nil {
+		return nil, "", err
+	}
+	defer r.runlock()
+	query, status = strings.ToLower(strings.TrimSpace(query)), strings.TrimSpace(status)
+	items := make([]*channels.Binding, 0)
+	for scope, value := range r.byID {
+		if scope.tenantID != tenantID || (status != "" && string(value.Status) != status) {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(value.BindingID+" "+value.BindingKey+" "+string(value.Channel)+" "+value.ProviderAccountID), query) {
+			continue
+		}
+		items = append(items, cloneBinding(value))
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].BindingID < items[j].BindingID })
+	if offset >= len(items) {
+		return []*channels.Binding{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
+func decodeCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	var offset int
+	if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	return offset, nil
+}
 
 const defaultCandidateTTL = channels.DefaultCandidateTTL
 
@@ -67,18 +124,19 @@ type InMemoryRepository struct {
 
 // NewInMemoryRepository creates an empty repository. A zero Options value uses
 // a 30-second candidate TTL, the default candidate capacity, and the UTC wall
-// clock.
+// clock. Options are applied in order; later positive values and non-nil clocks
+// override earlier ones. Zero and negative values leave the defaults unchanged.
 func NewInMemoryRepository(options ...Options) *InMemoryRepository {
 	configuration := Options{CandidateTTL: defaultCandidateTTL, Clock: func() time.Time { return time.Now().UTC() }, MaxCandidates: DefaultMaxCandidates}
-	if len(options) > 0 {
-		if options[0].CandidateTTL > 0 {
-			configuration.CandidateTTL = options[0].CandidateTTL
+	for _, option := range options {
+		if option.CandidateTTL > 0 {
+			configuration.CandidateTTL = option.CandidateTTL
 		}
-		if options[0].Clock != nil {
-			configuration.Clock = options[0].Clock
+		if option.Clock != nil {
+			configuration.Clock = option.Clock
 		}
-		if options[0].MaxCandidates > 0 {
-			configuration.MaxCandidates = options[0].MaxCandidates
+		if option.MaxCandidates > 0 {
+			configuration.MaxCandidates = option.MaxCandidates
 		}
 	}
 	if configuration.CandidateTTL > channels.MaxCandidateLifetime {
@@ -301,7 +359,11 @@ func (r *InMemoryRepository) LookupCandidates(ctx context.Context, channel chann
 		if err != nil {
 			return nil, channels.ErrCandidateUnavailable
 		}
-		candidate, err := channels.NewCandidateBindingContext(channel, routeDigest, binding.Version, binding.ConfigDigest, channels.PurposeWebhookVerification, token, now, now.Add(r.candidateTTL))
+		candidate, err := channels.NewCandidateBindingContextFromInput(channels.CandidateBindingInput{
+			Channel: channel, PublicRouteKeyDigest: routeDigest, BindingVersion: binding.Version,
+			ConfigDigest: binding.ConfigDigest, Purpose: channels.PurposeWebhookVerification,
+			CandidateToken: token, IssuedAt: now, ExpiresAt: now.Add(r.candidateTTL),
+		})
 		if err != nil {
 			return nil, channels.ErrCandidateUnavailable
 		}

@@ -1,29 +1,28 @@
 # Issue #82: Agent App Registry, tenant canary, and rollback
 
-> This page is the document-first contract for [Issue #82](https://github.com/XnLemon/trpc-agent-service/issues/82). It builds on the existing immutable execution plan, reference-counted `RunnerRegistry`, and Admin control plane. Code must not claim a distributed registry or a platform-wide traffic manager.
+> This page records the implemented [Issue #82](https://github.com/XnLemon/trpc-agent-service/issues/82) App Registry: immutable execution plans, reference-counted `RunnerRegistry`, tenant canaries, rollback, and durable audit facts.
 
 ## Goal and boundary
 
-One deployed tRPC instance owns an isolated control-plane namespace and materializes tenant Agent Apps locally. The platform may govern multiple instances, but instance registration, placement, and cross-instance broadcast are outside this issue. Within an instance, an Agent App selects one stable published revision and may select one candidate published revision for its own tenant.
+Each deployed tRPC instance owns an isolated control-plane namespace and materializes tenant Agent Apps locally. Within an instance, an Agent App selects one stable published revision and can select one candidate published revision for its tenant.
 
 ~~~text
-Platform control plane (future instance placement)
-  -> tRPC instance
-       -> tenant
-            -> Agent App
-                 -> current revision (stable)
-                 -> canary revision (optional candidate)
-                      -> immutable ExecutionPlan
-                           -> reference-counted Runner lease
+tRPC instance
+  -> tenant
+       -> Agent App
+            -> current revision (stable)
+            -> canary revision (candidate)
+                 -> immutable ExecutionPlan
+                      -> reference-counted Runner lease
 ~~~
 
-Issue #82 delivers only the instance-local App Registry behavior: revision selection, exact Runner reuse, lease-safe invalidation, tenant-authorized canary configuration, durable rollback, and auditable decisions. It does not add percentage, user, session, or hash-based routing; a selected tenant receives the candidate revision for every new execution of that App. It does not execute tenant-supplied code, add a distributed cache, or implement the Tool/Guardrail policy chain planned for Issue #78.
+The implemented App Registry provides revision selection, exact Runner reuse, lease-safe invalidation, tenant-authorized canary configuration, durable rollback, and auditable decisions. A selected tenant receives the candidate revision for each new execution of that App.
 
-## Existing baseline
+## Implemented baseline
 
-`runtime.ExecutionPlan.CacheKey()` already contains the tenant, App, revision, content digest, and resolved Model/Backend versions. `gateway.RunnerRegistry` owns runners by that complete key, combines concurrent construction, and keeps invalidated runners alive until the last lease releases. `agent.Repository` already persists immutable published revisions and atomically moves `current_revision` for publish and rollback.
+`runtime.ExecutionPlan.CacheKey()` already contains the tenant, App, revision, content digest, and resolved Model/Backend versions. `runtime/runner.RunnerRegistry` owns runners by that complete key, combines concurrent construction, and keeps invalidated runners alive until the last lease releases. `agent.Repository` already persists immutable published revisions and atomically moves `current_revision` for publish and rollback.
 
-The new contract must preserve those properties. A canary must choose a different immutable plan; it must never mutate a cached runner or evict an in-flight lease.
+The implementation preserves those properties. A canary selects a different immutable plan and never mutates a cached runner or evicts an in-flight lease.
 
 ## App selection state
 
@@ -60,7 +59,7 @@ POST /admin/v1/tenants/{tenant_id}/apps/{app_id}/canary
 
 An omitted or JSON `null` `candidate_revision` clears the canary. The route returns the updated App and a control-plane change event. A non-admin caller is rejected before repository access; a scoped administrator cannot configure another tenant.
 
-`Rollback` continues to atomically move `CurrentRevision` to a historical published revision. It clears `CanaryRevision` in the same update, so rollback restores one selected stable runtime plan for all future executions. Rolling back to the candidate revision therefore promotes it; rolling back to the former stable revision terminates the rollout. In either case, a post-commit App invalidation removes only future runner entries for that tenant/App.
+`Rollback` atomically moves `CurrentRevision` to a historical published revision. It clears `CanaryRevision` in the same update, so rollback restores one selected stable runtime plan for new executions. Rolling back to the candidate revision promotes it; rolling back to the former stable revision terminates the rollout. In either case, post-commit App invalidation removes the affected tenant/App entries before the next resolution.
 
 ## Deterministic runtime behavior
 
@@ -70,7 +69,7 @@ The resolver loads and validates the selected published revision before construc
 
 1. same selected key reuses a local Runner;
 2. different tenant, App, revision, or dependency version cannot share a Runner;
-3. a canary mutation or rollback invalidates only future entries for the affected App;
+3. a canary mutation or rollback invalidates the affected App entries before the next resolution;
 4. an already acquired lease keeps its frozen Runner until `Release`; and
 5. a restart reloads selection state from PostgreSQL before accepting traffic.
 
@@ -86,15 +85,14 @@ For every execution selected through the candidate pointer, Gateway writes an `a
 - Existing `Publish`, status transitions, cache keys, and lease API remain source-compatible.
 - New public inputs follow existing `context.Context`-first repository methods and return existing sentinel error classes (`agent.ErrInvalid`, `agent.ErrConflict`, `agent.ErrDisabled`, and `agent.ErrNotFound`).
 - No goroutine, channel, or timer is introduced for canary selection. The existing Registry remains the single owner of runner lifecycle and bounded close.
-- Future percentage or per-user rollout requires a separate contract with a versioned stable bucketing key; it must not overload this tenant-wide selection field.
 
 ## Issue ledger and verification
 
 - [x] Add a durable App candidate-revision pointer with PostgreSQL migration, repository support, and a tenant-authorized Admin operation.
 - [x] Resolve an immutable candidate plan when configured, otherwise preserve stable-plan resolution and exact complete-key Runner reuse.
-- [x] Invalidate only future tenant/App entries for canary changes and rollback; in-flight leases complete on their frozen revision.
+- [x] Invalidate affected tenant/App entries for canary changes and rollback; in-flight leases complete on their frozen revision.
 - [x] Append durable control-plane canary facts and per-execution candidate-selection audit facts without exposing sensitive data.
 - [x] Prove tenant isolation, optimistic conflicts, candidate validation, publish/promotion/rollback, in-flight leases, restart recovery, and stable-only compatibility with contract tests.
 - [x] Update the README and documentation navigation after the implemented behavior was covered by tests.
 
-Implementation validation will run focused Agent, Gateway, Admin, Bootstrap, migration, and audit tests first, then `go test ./... -count=1`, `go test -race ./... -count=1`, `go vet ./...`, formatting, and strict MkDocs build when their local dependencies are available.
+Verification covers focused Agent, Gateway, Bootstrap, migration, and audit tests, followed by `go test ./... -count=1`, `go test -race ./... -count=1`, `go vet ./...`, formatting, and strict MkDocs build.

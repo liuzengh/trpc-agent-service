@@ -1,6 +1,6 @@
 # 运行时可观测性契约
 
-本页定义 Issue #45 阶段 A 的框架内部 telemetry 边界。它是实现前的契约：业务包只依赖
+本页定义 Issue #45 的框架内部 telemetry 边界和已完成实现：业务包只依赖
 `trpcservice/observability` 暴露的接口，不直接依赖 OpenTelemetry SDK、OTLP exporter 或日志实现。
 默认 provider 为 no-op，因此没有配置 exporter 时请求、Runner 和关闭流程的行为保持不变。
 
@@ -60,9 +60,9 @@ provider 文本或带敏感值的 stack。
 - [x] 代码：稳定 operation 名称与错误类别契约；Model、Tool、Storage、Channel 使用通用 hook API 接入。
 - [x] 代码：低基数指标、结构化日志、OTLP/HTTP 配置与 exporter 故障降级。
 - [x] 测试：取消、deadline、shutdown、无 exporter、脱敏负向和标签白名单。
-- [ ] 验证：`go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...`、
+- [x] 验证：`go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...`、
   `mkdocs build --strict`。
 
-AuditEvent/usage/cost 持久化仍由 Issue #54 负责；Dashboard、告警和租户授权查询由
-[Issue #79](issue-79-observability.md) 承接。Session/Memory/Storage 后端以及 #41 的 Admin
-路由、migration 和 bootstrap 依赖图仍不属于本页。
+AuditEvent/usage/cost 持久化、Dashboard、告警和租户授权查询已分别在
+[审计与用量](audit-usage.md) 与 [Issue #79](issue-79-observability.md) 中完成；
+Session/Memory/Storage 后端、Admin 路由、migration 和 bootstrap 通过对应文档的集成验收。

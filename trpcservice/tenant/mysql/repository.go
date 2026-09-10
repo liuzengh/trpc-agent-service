@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	storagemysql "github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
@@ -18,6 +19,113 @@ type TenantRepository struct {
 }
 
 var _ tenant.Repository = (*TenantRepository)(nil)
+
+// List returns a stable page of only the requested tenant scopes.
+//
+//nolint:gocyclo // Collection listing coordinates scope, filter, and paging boundaries.
+func (r *TenantRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	visible := make(map[string]struct{}, len(scopes))
+	all := false
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "*" {
+			all = true
+		} else if scope != "" {
+			visible[scope] = struct{}{}
+		}
+	}
+	if !all && len(visible) == 0 {
+		return []*tenant.Tenant{}, "", nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset, err := decodeListCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	querySQL := `SELECT tenant_id FROM tenant ORDER BY tenant_id`
+	var args []any
+	if !all {
+		ids := make([]string, 0, len(visible))
+		for id := range visible {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+		args = make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+		// Placeholders are generated from validated scope count; values remain bound arguments.
+		querySQL = `SELECT tenant_id FROM tenant WHERE tenant_id IN (` + placeholders + `) ORDER BY tenant_id` //nolint:gosec // placeholder list contains no user-controlled SQL
+	}
+	rows, err := r.db.QueryContext(ctx, querySQL, args...)
+	if err != nil {
+		return nil, "", ErrStorage
+	}
+	var tenantIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, "", ErrStorage
+		}
+		tenantIDs = append(tenantIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, "", ErrStorage
+	}
+	_ = rows.Close()
+	query, status = strings.ToLower(strings.TrimSpace(query)), strings.TrimSpace(status)
+	items := make([]*tenant.Tenant, 0)
+	for _, id := range tenantIDs {
+		value, err := r.Get(ctx, id)
+		if err != nil {
+			return nil, "", ErrStorage
+		}
+		if status != "" && string(value.Status) != status {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(value.TenantID+" "+value.TenantKey+" "+value.DisplayName), query) {
+			continue
+		}
+		items = append(items, value)
+	}
+	if offset >= len(items) {
+		return []*tenant.Tenant{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
+func decodeListCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	var offset int
+	if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	return offset, nil
+}
 
 // NewRepository creates a Tenant repository over an owned or borrowed pool.
 func NewRepository(db *sql.DB) *TenantRepository { return &TenantRepository{db: db} }

@@ -3,9 +3,14 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,23 +18,27 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/replies"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway/replies"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
 
 const (
-	defaultPollTimeout = time.Minute
-	minimumPollTimeout = 2 * time.Second
-	maximumPollTimeout = 10 * time.Minute
-	maximumTokenRunes  = 1024
-	maximumReplyRunes  = 4096
-	failureReply       = "Sorry, I couldn't process that message."
+	defaultPollTimeout     = time.Minute
+	minimumPollTimeout     = 2 * time.Second
+	maximumPollTimeout     = 10 * time.Minute
+	maximumTokenRunes      = 1024
+	maximumReplyRunes      = 4096
+	failureReply           = "Sorry, I couldn't process that message."
+	defaultAttachmentBytes = 64 << 20
+	maximumAttachmentBytes = 64 << 20
 )
 
 var (
@@ -58,6 +67,8 @@ var (
 	ErrSendMessage = errors.New("telegram send message failed")
 	// ErrPolling reports a redacted SDK polling error delivered to ErrorHook.
 	ErrPolling = errors.New("telegram polling failed")
+	// ErrAttachment reports a redacted media download or storage failure.
+	ErrAttachment = errors.New("telegram attachment processing failed")
 )
 
 // ErrorOperation identifies the safe operation category supplied to ErrorHook.
@@ -93,6 +104,92 @@ type BotClient interface {
 	Start(context.Context)
 	GetMe(context.Context) (*models.User, error)
 	SendMessage(context.Context, *bot.SendMessageParams) (*models.Message, error)
+}
+
+// MediaDownloader downloads one authenticated Telegram file into the adapter's
+// attachment store. Implementations must not expose provider URLs or tokens to
+// callers.
+type MediaDownloader interface {
+	Download(context.Context, string) (io.ReadCloser, error)
+}
+
+type telegramFileClient interface {
+	GetFile(context.Context, *bot.GetFileParams) (*models.File, error)
+	FileDownloadLink(*models.File) string
+}
+
+type telegramMediaDownloader struct {
+	client     telegramFileClient
+	httpClient bot.HttpClient
+	maximum    int64
+}
+
+func (downloader telegramMediaDownloader) Download(ctx context.Context, fileID string) (io.ReadCloser, error) {
+	if ctx == nil || downloader.client == nil || downloader.httpClient == nil || fileID == "" || downloader.maximum < 1 {
+		return nil, ErrAttachment
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, err := downloader.client.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
+	if err != nil {
+		return nil, telegramAttachmentError(ctx)
+	}
+	fileURL, err := downloader.fileDownloadURL(file)
+	if err != nil {
+		return nil, ErrAttachment
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL.String(), nil)
+	if err != nil {
+		return nil, ErrAttachment
+	}
+	response, err := downloader.httpClient.Do(request)
+	if err != nil {
+		return nil, telegramAttachmentError(ctx)
+	}
+	data, err := readTelegramMediaResponse(ctx, response, downloader.maximum)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+func (downloader telegramMediaDownloader) fileDownloadURL(file *models.File) (*url.URL, error) {
+	if file == nil || file.FilePath == "" {
+		return nil, ErrAttachment
+	}
+	fileURL, err := url.Parse(downloader.client.FileDownloadLink(file))
+	if err != nil || fileURL.Scheme != "https" || fileURL.Host == "" || fileURL.User != nil || fileURL.RawQuery != "" || fileURL.Fragment != "" {
+		return nil, ErrAttachment
+	}
+	return fileURL, nil
+}
+
+func readTelegramMediaResponse(ctx context.Context, response *http.Response, maximum int64) ([]byte, error) {
+	if response == nil || response.Body == nil {
+		return nil, ErrAttachment
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices || response.ContentLength > maximum {
+		return nil, ErrAttachment
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, maximum+1))
+	if err != nil {
+		return nil, telegramAttachmentError(ctx)
+	}
+	if int64(len(data)) > maximum {
+		return nil, ErrAttachment
+	}
+	return data, nil
+}
+
+func telegramAttachmentError(ctx context.Context) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return ErrAttachment
 }
 
 // BotFactoryConfig contains non-secret options for constructing one BotClient.
@@ -160,21 +257,34 @@ type Config struct {
 	Factory BotFactory
 	// Observability supplies provider-neutral trace and metric hooks.
 	Observability observability.Provider
+	// Attachments is the explicit durable boundary for native inbound media.
+	// When nil, media keeps the legacy text-marker behavior.
+	Attachments runtimestorage.AttachmentStore
+	// MediaDownloader optionally replaces the authenticated Telegram file
+	// downloader. It is primarily useful for deterministic tests.
+	MediaDownloader MediaDownloader
+	// MaxAttachmentBytes bounds each downloaded media object. Zero defaults to
+	// the protocol-neutral attachment limit.
+	MaxAttachmentBytes int64
 }
 
 // Adapter owns one trusted Telegram Binding and routes its updates through the
 // existing Gateway contracts. It does not create or cache a Runner directly.
 type Adapter struct {
-	client         BotClient
-	dispatcher     gateway.DispatchService
-	principal      gateway.Principal
-	target         channels.RoutingTarget
-	idempotency    *gateway.IdempotencyStore
-	ownIdempotency bool
-	errorHook      ErrorHook
-	audit          audit.Recorder
-	telemetry      observability.Provider
-	metrics        metrics.Catalog
+	client             BotClient
+	username           string
+	dispatcher         gateway.DispatchService
+	principal          gateway.Principal
+	target             channels.RoutingTarget
+	idempotency        *gateway.IdempotencyStore
+	ownIdempotency     bool
+	errorHook          ErrorHook
+	audit              audit.Recorder
+	telemetry          observability.Provider
+	metrics            metrics.Catalog
+	attachments        runtimestorage.AttachmentStore
+	mediaDownloader    MediaDownloader
+	maxAttachmentBytes int64
 
 	mu        sync.RWMutex
 	closed    bool
@@ -184,13 +294,14 @@ type Adapter struct {
 var _ channels.PollingAdapter = (*Adapter)(nil)
 
 type normalizedConfig struct {
-	token          string
-	target         channels.RoutingTarget
-	principal      gateway.Principal
-	apiBaseURL     string
-	pollTimeout    time.Duration
-	workers        int
-	providerAcctID string
+	token              string
+	target             channels.RoutingTarget
+	principal          gateway.Principal
+	apiBaseURL         string
+	pollTimeout        time.Duration
+	workers            int
+	maxAttachmentBytes int64
+	providerAcctID     string
 }
 
 // New validates the trusted route, constructs the Bot client, and verifies its
@@ -216,7 +327,8 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 	adapter := &Adapter{
 		dispatcher: config.Dispatcher, principal: normalized.principal, target: normalized.target,
 		idempotency: idempotency, ownIdempotency: ownIdempotency, errorHook: config.ErrorHook,
-		audit: audit.Recorder{Writer: config.AuditWriter, TenantID: normalized.target.TenantID},
+		audit:       audit.NewRecorder(config.AuditWriter, normalized.target.TenantID),
+		attachments: config.Attachments, maxAttachmentBytes: normalized.maxAttachmentBytes,
 	}
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
@@ -240,6 +352,12 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 	if err := adapter.verifyIdentity(ctx, normalized.providerAcctID); err != nil {
 		_ = adapter.closeOwnedIdempotency()
 		return nil, err
+	}
+	adapter.mediaDownloader = config.MediaDownloader
+	if adapter.mediaDownloader == nil {
+		if fileClient, ok := client.(telegramFileClient); ok && config.Attachments != nil {
+			adapter.mediaDownloader = telegramMediaDownloader{client: fileClient, httpClient: configuredHTTPClient(config.HTTPClient, normalized.pollTimeout), maximum: normalized.maxAttachmentBytes}
+		}
 	}
 	return adapter, nil
 }
@@ -280,11 +398,15 @@ func normalizeConfig(ctx context.Context, config Config) (normalizedConfig, erro
 	if err != nil {
 		return normalizedConfig{}, err
 	}
+	maxAttachmentBytes, err := normalizeAttachmentBytes(config.MaxAttachmentBytes)
+	if err != nil {
+		return normalizedConfig{}, err
+	}
 	principal, err := gateway.NewChannelPrincipal(config.Target)
 	if err != nil {
 		return normalizedConfig{}, fmt.Errorf("%w: trusted principal is invalid", ErrInvalid)
 	}
-	return normalizedConfig{token: token, target: config.Target, principal: principal, apiBaseURL: apiBaseURL, pollTimeout: pollTimeout, workers: workers, providerAcctID: strconv.FormatInt(providerAccountID, 10)}, nil
+	return normalizedConfig{token: token, target: config.Target, principal: principal, apiBaseURL: apiBaseURL, pollTimeout: pollTimeout, workers: workers, maxAttachmentBytes: maxAttachmentBytes, providerAcctID: strconv.FormatInt(providerAccountID, 10)}, nil
 }
 
 func (adapter *Adapter) verifyIdentity(ctx context.Context, providerAccountID string) error {
@@ -300,7 +422,32 @@ func (adapter *Adapter) verifyIdentity(ctx context.Context, providerAccountID st
 		adapter.report(ErrorOperationInitialization, ErrBotIdentityMismatch)
 		return ErrBotIdentityMismatch
 	}
+	adapter.mu.Lock()
+	adapter.username = strings.TrimSpace(me.Username)
+	adapter.mu.Unlock()
 	return nil
+}
+
+// Username returns the provider handle returned by Telegram during identity
+// verification. It is used only to build the operator's first-chat link.
+func (adapter *Adapter) Username() string {
+	if adapter == nil {
+		return ""
+	}
+	adapter.mu.RLock()
+	defer adapter.mu.RUnlock()
+	return adapter.username
+}
+
+// Ready reports whether the adapter has an authenticated Bot client and has
+// not been closed.
+func (adapter *Adapter) Ready() bool {
+	if adapter == nil {
+		return false
+	}
+	adapter.mu.RLock()
+	defer adapter.mu.RUnlock()
+	return adapter.client != nil && !adapter.closed
 }
 
 // Run starts blocking Telegram long polling and returns after ctx is canceled
@@ -397,7 +544,7 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 	if client == nil || adapter.idempotency == nil {
 		return ErrNotReady
 	}
-	message, err := normalizeUpdate(adapter.target, update)
+	message, err := adapter.normalizeUpdate(ctx, update)
 	if err != nil {
 		adapter.report(ErrorOperationUpdate, err)
 		return err
@@ -418,7 +565,10 @@ func (adapter *Adapter) beginUpdate(ctx context.Context, message gateway.Inbound
 		return claim, replay, nil
 	}
 	if errors.Is(err, gateway.ErrDuplicateMessage) {
-		if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressDuplicate, message.ExternalMessageID, "", message.ExternalUserID, "", audit.DecisionDuplicate, string(audit.ErrorDuplicate)); auditErr != nil {
+		if auditErr := adapter.audit.Record(ctx, audit.Event{
+			EventType: audit.EventIMIngressDuplicate, RequestID: message.ExternalMessageID,
+			UserID: message.ExternalUserID, Decision: audit.DecisionDuplicate, ErrorType: string(audit.ErrorDuplicate),
+		}); auditErr != nil {
 			adapter.report(ErrorOperationUpdate, ErrDispatch)
 			return nil, nil, ErrDispatch
 		}
@@ -434,7 +584,10 @@ func (adapter *Adapter) beginUpdate(ctx context.Context, message gateway.Inbound
 }
 
 func (adapter *Adapter) handleReplay(ctx context.Context, message *models.Message, inbound gateway.InboundMessage, replay []gateway.DispatchEvent) error {
-	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+	if auditErr := adapter.audit.Record(ctx, audit.Event{
+		EventType: audit.EventIMIngressAccepted, RequestID: inbound.ExternalMessageID,
+		UserID: inbound.ExternalUserID, Decision: audit.DecisionAccepted,
+	}); auditErr != nil {
 		return ErrDispatch
 	}
 	if err := adapter.sendEvents(ctx, message, replay); err != nil {
@@ -448,7 +601,10 @@ func (adapter *Adapter) handleReplay(ctx context.Context, message *models.Messag
 }
 
 func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models.Message, inbound gateway.InboundMessage, claim *gateway.IdempotencyClaim) error {
-	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+	if auditErr := adapter.audit.Record(ctx, audit.Event{
+		EventType: audit.EventIMIngressAccepted, RequestID: inbound.ExternalMessageID,
+		UserID: inbound.ExternalUserID, Decision: audit.DecisionAccepted,
+	}); auditErr != nil {
 		_ = claim.Fail()
 		return ErrDispatch
 	}
@@ -477,7 +633,10 @@ func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models
 		adapter.report(ErrorOperationSend, ErrSendMessage)
 		return err
 	}
-	if auditErr := adapter.audit.IM(ctx, audit.EventIMDeliverySent, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+	if auditErr := adapter.audit.Record(ctx, audit.Event{
+		EventType: audit.EventIMDeliverySent, RequestID: inbound.ExternalMessageID,
+		UserID: inbound.ExternalUserID, Decision: audit.DecisionAccepted,
+	}); auditErr != nil {
 		return ErrDispatch
 	}
 	return nil
@@ -607,6 +766,186 @@ func normalizeUpdate(target channels.RoutingTarget, update *models.Update) (gate
 		return gateway.InboundMessage{}, ErrInvalidUpdate
 	}
 	return normalized, nil
+}
+
+func (adapter *Adapter) normalizeUpdate(ctx context.Context, update *models.Update) (gateway.InboundMessage, error) {
+	inbound, err := normalizeUpdate(adapter.target, update)
+	if err != nil || adapter.attachments == nil || adapter.mediaDownloader == nil || update == nil || update.Message == nil {
+		return inbound, err
+	}
+	references, err := adapter.ingestAttachments(ctx, inbound.ExternalMessageID, update.Message)
+	if err != nil {
+		return gateway.InboundMessage{}, err
+	}
+	if len(references) == 0 {
+		return inbound, nil
+	}
+	inbound.Attachments = references
+	inbound.ContentType = gateway.ContentTypeMedia
+	return inbound.Normalize()
+}
+
+type telegramAttachment struct {
+	fileID   string
+	kind     attachment.Kind
+	mimeType string
+	name     string
+}
+
+func (adapter *Adapter) ingestAttachments(ctx context.Context, externalMessageID string, message *models.Message) ([]attachment.Reference, error) {
+	descriptors := nativeAttachments(message)
+	if len(descriptors) == 0 {
+		return nil, nil
+	}
+	references := make([]attachment.Reference, 0, len(descriptors))
+	for index, descriptor := range descriptors {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		reader, err := adapter.mediaDownloader.Download(ctx, descriptor.fileID)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
+			return nil, ErrAttachment
+		}
+		if reader == nil {
+			return nil, ErrAttachment
+		}
+		data, readErr := io.ReadAll(io.LimitReader(reader, adapter.maxAttachmentBytes+1))
+		closeErr := reader.Close()
+		if readErr != nil || closeErr != nil {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return nil, contextErr
+			}
+			return nil, ErrAttachment
+		}
+		if int64(len(data)) == 0 || int64(len(data)) > adapter.maxAttachmentBytes {
+			return nil, ErrAttachment
+		}
+		upload := attachment.Upload{
+			ID: attachmentID(externalMessageID, index, descriptor.fileID), Kind: descriptor.kind,
+			MIMEType: descriptor.mimeType, Name: descriptor.name, Size: int64(len(data)),
+			Provider: "telegram", ProviderID: descriptor.fileID,
+		}
+		reference, err := adapter.attachments.PutAttachment(ctx, adapter.target.TenantID, upload, bytes.NewReader(data))
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
+			return nil, ErrAttachment
+		}
+		references = append(references, reference)
+	}
+	return references, nil
+}
+
+func nativeAttachments(message *models.Message) []telegramAttachment {
+	if message == nil {
+		return nil
+	}
+	if photo := largestPhoto(message.Photo); photo != nil {
+		return []telegramAttachment{{fileID: photo.FileID, kind: attachment.KindImage, mimeType: "image/jpeg", name: photo.FileID + ".jpg"}}
+	}
+	if message.Video != nil && strings.TrimSpace(message.Video.FileID) != "" {
+		return []telegramAttachment{{fileID: message.Video.FileID, kind: attachment.KindVideo, mimeType: mediaMIME(attachment.KindVideo, message.Video.MimeType), name: mediaName(message.Video.FileName, message.Video.FileID, ".mp4")}}
+	}
+	if message.Animation != nil && strings.TrimSpace(message.Animation.FileID) != "" {
+		return []telegramAttachment{{fileID: message.Animation.FileID, kind: attachment.KindVideo, mimeType: mediaMIME(attachment.KindVideo, message.Animation.MimeType), name: mediaName(message.Animation.FileName, message.Animation.FileID, ".mp4")}}
+	}
+	if message.Audio != nil && strings.TrimSpace(message.Audio.FileID) != "" {
+		return []telegramAttachment{{fileID: message.Audio.FileID, kind: attachment.KindAudio, mimeType: mediaMIME(attachment.KindAudio, message.Audio.MimeType), name: mediaName(message.Audio.FileName, message.Audio.FileID, ".mp3")}}
+	}
+	if message.Voice != nil && strings.TrimSpace(message.Voice.FileID) != "" {
+		return []telegramAttachment{{fileID: message.Voice.FileID, kind: attachment.KindAudio, mimeType: mediaMIME(attachment.KindAudio, message.Voice.MimeType), name: message.Voice.FileID + ".ogg"}}
+	}
+	if message.Document != nil && strings.TrimSpace(message.Document.FileID) != "" {
+		mimeType := strings.TrimSpace(strings.ToLower(message.Document.MimeType))
+		kind := attachment.KindDocument
+		if strings.HasPrefix(mimeType, "image/") {
+			kind = attachment.KindImage
+		} else if strings.HasPrefix(mimeType, "video/") {
+			kind = attachment.KindVideo
+		} else if strings.HasPrefix(mimeType, "audio/") {
+			kind = attachment.KindAudio
+		}
+		if !validMIME(mimeType) || !kindSupportsMIME(kind, mimeType) {
+			mimeType = "application/octet-stream"
+			kind = attachment.KindDocument
+		}
+		return []telegramAttachment{{fileID: message.Document.FileID, kind: kind, mimeType: mimeType, name: mediaName(message.Document.FileName, message.Document.FileID, "")}}
+	}
+	if message.VideoNote != nil && strings.TrimSpace(message.VideoNote.FileID) != "" {
+		return []telegramAttachment{{fileID: message.VideoNote.FileID, kind: attachment.KindVideo, mimeType: "video/mp4", name: message.VideoNote.FileID + ".mp4"}}
+	}
+	return nil
+}
+
+func largestPhoto(photos []models.PhotoSize) *models.PhotoSize {
+	var largest *models.PhotoSize
+	for index := range photos {
+		photo := &photos[index]
+		if strings.TrimSpace(photo.FileID) == "" {
+			continue
+		}
+		if largest == nil || photo.FileSize > largest.FileSize || photo.Width*photo.Height > largest.Width*largest.Height {
+			largest = photo
+		}
+	}
+	return largest
+}
+
+func mediaMIME(kind attachment.Kind, value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if validMIME(value) && kindSupportsMIME(kind, value) {
+		return value
+	}
+	switch kind {
+	case attachment.KindVideo:
+		return "video/mp4"
+	case attachment.KindAudio:
+		return "audio/mpeg"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func validMIME(value string) bool {
+	parsed, params, err := mime.ParseMediaType(value)
+	return err == nil && parsed == value && len(params) == 0 && strings.Contains(value, "/")
+}
+
+func kindSupportsMIME(kind attachment.Kind, value string) bool {
+	switch kind {
+	case attachment.KindImage:
+		return strings.HasPrefix(value, "image/")
+	case attachment.KindVideo:
+		return strings.HasPrefix(value, "video/")
+	case attachment.KindAudio:
+		return strings.HasPrefix(value, "audio/")
+	case attachment.KindDocument:
+		return !strings.HasPrefix(value, "image/") && !strings.HasPrefix(value, "video/") && !strings.HasPrefix(value, "audio/")
+	default:
+		return false
+	}
+}
+
+func mediaName(name, fileID, suffix string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fileID + suffix
+	}
+	for _, character := range name {
+		if character < 0x20 || character == 0x7f || character == '/' || character == '\\' {
+			return fileID + suffix
+		}
+	}
+	return name
+}
+
+func attachmentID(externalMessageID string, ordinal int, providerID string) string {
+	digest := sha256.Sum256([]byte(encodeParts(externalMessageID, strconv.Itoa(ordinal), providerID)))
+	return "att_" + hex.EncodeToString(digest[:])
 }
 
 func messageContent(message *models.Message) (string, string, bool) {
@@ -795,6 +1134,16 @@ func normalizeWorkers(value int) (int, error) {
 	}
 	if value < 1 {
 		return 0, fmt.Errorf("%w: worker count must be positive", ErrInvalid)
+	}
+	return value, nil
+}
+
+func normalizeAttachmentBytes(value int64) (int64, error) {
+	if value == 0 {
+		return defaultAttachmentBytes, nil
+	}
+	if value < 1 || value > maximumAttachmentBytes {
+		return 0, fmt.Errorf("%w: attachment size limit is outside supported bounds", ErrInvalid)
 	}
 	return value, nil
 }

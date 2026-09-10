@@ -67,10 +67,11 @@ func newFakeResolverFixture(t *testing.T, now time.Time) (*fakeCandidateConsumer
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate, err := NewCandidateBindingContext(
-		binding.Channel, binding.PublicRouteKeyDigest, binding.Version, binding.ConfigDigest,
-		PurposeWebhookVerification, "fake-candidate-token", now, now.Add(MaxCandidateLifetime),
-	)
+	candidate, err := NewCandidateBindingContextFromInput(CandidateBindingInput{
+		Channel: binding.Channel, PublicRouteKeyDigest: binding.PublicRouteKeyDigest, BindingVersion: binding.Version,
+		ConfigDigest: binding.ConfigDigest, Purpose: PurposeWebhookVerification, CandidateToken: "fake-candidate-token",
+		IssuedAt: now, ExpiresAt: now.Add(MaxCandidateLifetime),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +125,7 @@ func newFakeBoundarySetup(t *testing.T) fakeBoundarySetup {
 	repo, binding, candidate, secret, scope := newFakeResolverFixture(t, now)
 	clockNow := now
 	secrets := map[SecretScope]string{scope: secret}
-	resolver := NewFakeResolver(repo, secrets, FakeResolverOptions{
+	resolver := NewFakeCandidateResolver(repo, secrets, FakeResolverOptions{
 		Clock: func() time.Time { return clockNow }, MaxClockSkew: time.Minute, MaxHandles: 2,
 	})
 	return fakeBoundarySetup{now: now, clockNow: &clockNow, repo: repo, binding: binding, candidate: candidate, secret: secret, scope: scope, secrets: secrets, resolver: resolver}

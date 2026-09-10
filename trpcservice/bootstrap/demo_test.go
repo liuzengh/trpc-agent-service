@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	appmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -88,8 +88,8 @@ type demoBackendRepoStub struct {
 }
 
 type demoAgentRepoStub struct {
-	app            *agent.App
-	revision       *agent.Revision
+	app            *appmodel.App
+	revision       *appmodel.Revision
 	getErr         error
 	getRevisionErr error
 	createDraftErr error
@@ -97,57 +97,57 @@ type demoAgentRepoStub struct {
 	transitionErr  error
 }
 
-func demoAgentMetadata() agent.ChangeMetadata {
-	return agent.ChangeMetadata{ActorType: demoActorType, ActorID: demoActorID, Reason: demoReason, CorrelationID: demoCorrelationID}
+func demoAgentMetadata() appmodel.ChangeMetadata {
+	return appmodel.ChangeMetadata{ActorType: demoActorType, ActorID: demoActorID, Reason: demoReason, CorrelationID: demoCorrelationID}
 }
 
-func (r *demoAgentRepoStub) Create(context.Context, agent.CreateInput) (*agent.App, error) {
+func (r *demoAgentRepoStub) Create(context.Context, appmodel.CreateInput) (*appmodel.App, error) {
 	return r.app, nil
 }
-func (r *demoAgentRepoStub) Get(context.Context, string, string) (*agent.App, error) {
+func (r *demoAgentRepoStub) Get(context.Context, string, string) (*appmodel.App, error) {
 	if r.getErr != nil {
 		return nil, r.getErr
 	}
 	return r.app, nil
 }
-func (r *demoAgentRepoStub) UpdateMetadata(context.Context, agent.UpdateMetadataInput) (*agent.App, error) {
+func (r *demoAgentRepoStub) UpdateMetadata(context.Context, appmodel.UpdateMetadataInput) (*appmodel.App, error) {
 	return r.app, nil
 }
-func (r *demoAgentRepoStub) CreateDraft(context.Context, agent.CreateDraftInput) (*agent.Revision, error) {
+func (r *demoAgentRepoStub) CreateDraft(context.Context, appmodel.CreateDraftInput) (*appmodel.Revision, error) {
 	if r.createDraftErr != nil {
 		return nil, r.createDraftErr
 	}
 	return r.revision, nil
 }
-func (r *demoAgentRepoStub) UpdateDraft(context.Context, agent.UpdateDraftInput) (*agent.Revision, error) {
+func (r *demoAgentRepoStub) UpdateDraft(context.Context, appmodel.UpdateDraftInput) (*appmodel.Revision, error) {
 	return r.revision, nil
 }
-func (r *demoAgentRepoStub) GetRevision(context.Context, string, string, int64) (*agent.Revision, error) {
+func (r *demoAgentRepoStub) GetRevision(context.Context, string, string, int64) (*appmodel.Revision, error) {
 	if r.getRevisionErr != nil {
 		return nil, r.getRevisionErr
 	}
 	return r.revision, nil
 }
-func (r *demoAgentRepoStub) Publish(context.Context, agent.PublishInput) (*agent.App, *agent.Revision, agent.ChangeEvent, error) {
+func (r *demoAgentRepoStub) Publish(context.Context, appmodel.PublishInput) (*appmodel.App, *appmodel.Revision, appmodel.ChangeEvent, error) {
 	if r.publishErr != nil {
-		return nil, nil, agent.ChangeEvent{}, r.publishErr
+		return nil, nil, appmodel.ChangeEvent{}, r.publishErr
 	}
-	return r.app, r.revision, agent.ChangeEvent{}, nil
+	return r.app, r.revision, appmodel.ChangeEvent{}, nil
 }
-func (r *demoAgentRepoStub) Rollback(context.Context, agent.RollbackInput) (*agent.App, agent.ChangeEvent, error) {
-	return r.app, agent.ChangeEvent{}, nil
+func (r *demoAgentRepoStub) Rollback(context.Context, appmodel.RollbackInput) (*appmodel.App, appmodel.ChangeEvent, error) {
+	return r.app, appmodel.ChangeEvent{}, nil
 }
-func (r *demoAgentRepoStub) SetCanary(context.Context, agent.SetCanaryInput) (*agent.App, agent.ChangeEvent, error) {
-	return r.app, agent.ChangeEvent{}, nil
+func (r *demoAgentRepoStub) SetCanary(context.Context, appmodel.SetCanaryInput) (*appmodel.App, appmodel.ChangeEvent, error) {
+	return r.app, appmodel.ChangeEvent{}, nil
 }
-func (r *demoAgentRepoStub) TransitionStatus(_ context.Context, _ agent.TransitionStatusInput) (*agent.App, agent.ChangeEvent, error) {
+func (r *demoAgentRepoStub) TransitionStatus(_ context.Context, _ appmodel.TransitionStatusInput) (*appmodel.App, appmodel.ChangeEvent, error) {
 	if r.transitionErr != nil {
-		return nil, agent.ChangeEvent{}, r.transitionErr
+		return nil, appmodel.ChangeEvent{}, r.transitionErr
 	}
 	copy := r.app.Clone()
-	copy.Status = agent.StatusActive
+	copy.Status = appmodel.StatusActive
 	r.app = &copy
-	return r.app, agent.ChangeEvent{}, nil
+	return r.app, appmodel.ChangeEvent{}, nil
 }
 
 func (r *demoBackendRepoStub) Create(context.Context, backend.CreateInput) (*backend.Profile, backend.ChangeEvent, error) {
@@ -364,7 +364,7 @@ func TestEnsureDemoRevisionRejectsUnrunnableState(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
-	app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusActive}
+	app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusActive}
 	canary := int64(2)
 	app.CanaryRevision = &canary
 	if _, _, _, err := ensureDemoRevision(context.Background(), db, nil, root, app, "model"); !errors.Is(err, ErrDemoState) {
@@ -502,7 +502,7 @@ func TestDemoErrorAndValueHelpers(t *testing.T) {
 	if clone == nil || *clone != value || clone == &value {
 		t.Fatal("pointer not cloned")
 	}
-	if !emptyModelGeneration(modelprofile.GenerationConfig{}) || !emptyAgentGeneration(agent.GenerationConfig{}) {
+	if !emptyModelGeneration(modelprofile.GenerationConfig{}) || !emptyAgentGeneration(appmodel.GenerationConfig{}) {
 		t.Fatal("empty generation not detected")
 	}
 	temperature := 0.2
@@ -512,11 +512,11 @@ func TestDemoErrorAndValueHelpers(t *testing.T) {
 	if demoRevisionMatches(nil, "model") {
 		t.Fatal("nil revision should not match")
 	}
-	revision := &agent.Revision{Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "model", Runtime: agent.DefaultRuntimePolicy()}
+	revision := &appmodel.Revision{Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "model", Runtime: appmodel.DefaultRuntimePolicy()}
 	if !demoRevisionMatches(revision, "model") {
 		t.Fatal("valid revision did not match")
 	}
-	revision.Tools = []agent.ToolAuthorization{{ToolID: "tool"}}
+	revision.Tools = []appmodel.ToolAuthorization{{ToolID: "tool"}}
 	if demoRevisionMatches(revision, "model") {
 		t.Fatal("tool revision incorrectly matched")
 	}
@@ -711,12 +711,12 @@ func TestInitializeDemoEarlyReturns(t *testing.T) {
 func TestLoadDemoRootAppBranches(t *testing.T) {
 	ctx := context.Background()
 	tenants := tenantmemory.NewRepository()
-	apps := agentmemory.NewRepository()
+	apps := appmemory.NewRepository()
 	root, err := tenants.Create(ctx, tenant.CreateInput{TenantKey: "demo", DisplayName: "Demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := apps.Create(ctx, agent.CreateInput{TenantID: root.TenantID, AppKey: "assistant", DisplayName: "Assistant"})
+	app, err := apps.Create(ctx, appmodel.CreateInput{TenantID: root.TenantID, AppKey: "assistant", DisplayName: "Assistant"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,12 +737,12 @@ func TestLoadDemoRootAppBranches(t *testing.T) {
 		t.Fatalf("key mismatch error = %v", err)
 	}
 	suspendedTenants := tenantmemory.NewRepository()
-	suspendedApps := agentmemory.NewRepository()
+	suspendedApps := appmemory.NewRepository()
 	suspendedRoot, err := suspendedTenants.Create(ctx, tenant.CreateInput{TenantKey: demoTenantKey, DisplayName: "Paused", Status: tenant.StatusSuspended})
 	if err != nil {
 		t.Fatal(err)
 	}
-	suspendedApp, err := suspendedApps.Create(ctx, agent.CreateInput{TenantID: suspendedRoot.TenantID, AppKey: "assistant", DisplayName: "Assistant"})
+	suspendedApp, err := suspendedApps.Create(ctx, appmodel.CreateInput{TenantID: suspendedRoot.TenantID, AppKey: "assistant", DisplayName: "Assistant"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -753,7 +753,7 @@ func TestLoadDemoRootAppBranches(t *testing.T) {
 
 func TestPreflightDemoAppBranches(t *testing.T) {
 	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
-	app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusDraft}
+	app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusDraft}
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -764,7 +764,7 @@ func TestPreflightDemoAppBranches(t *testing.T) {
 		t.Fatalf("canary error = %v", err)
 	}
 	app.CanaryRevision = nil
-	app.Status = agent.StatusActive
+	app.Status = appmodel.StatusActive
 	mock.ExpectQuery("SELECT revision").WillReturnRows(sqlmock.NewRows([]string{"revision"}))
 	if err := preflightDemoApp(context.Background(), db, nil, root, app, demoModelProfileKey); !errors.Is(err, ErrDemoState) {
 		t.Fatalf("active without revision error = %v", err)
@@ -778,7 +778,7 @@ func TestPreflightDemoAppBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db2.Close()
-	app.Status = agent.StatusDraft
+	app.Status = appmodel.StatusDraft
 	mock2.ExpectQuery("SELECT revision").WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(int64(1)).AddRow(int64(2)))
 	if err := preflightDemoApp(context.Background(), db2, nil, root, app, demoModelProfileKey); !errors.Is(err, ErrDemoState) {
 		t.Fatalf("multiple draft error = %v", err)
@@ -790,19 +790,19 @@ func TestPreflightDemoAppBranches(t *testing.T) {
 
 func TestValidateExistingDemoRevisionBranches(t *testing.T) {
 	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
-	app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID}
-	valid := &agent.Revision{TenantID: root.TenantID, AppID: app.AppID, Revision: 1, State: agent.RevisionStatePublished, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: agent.DefaultRuntimePolicy()}
+	app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID}
+	valid := &appmodel.Revision{TenantID: root.TenantID, AppID: app.AppID, Revision: 1, State: appmodel.RevisionStatePublished, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: appmodel.DefaultRuntimePolicy()}
 	for _, test := range []struct {
 		name        string
 		profileRows *sqlmock.Rows
-		revision    *agent.Revision
+		revision    *appmodel.Revision
 		getErr      error
 		want        error
 	}{
 		{name: "unknown model", profileRows: sqlmock.NewRows([]string{"profile_id"}), want: ErrDemoState},
 		{name: "profile lookup error", profileRows: nil, want: ErrDemoInitialization},
 		{name: "get revision error", profileRows: sqlmock.NewRows([]string{"profile_id"}).AddRow("mp_demo"), getErr: sql.ErrConnDone, want: ErrDemoInitialization},
-		{name: "mismatch", profileRows: sqlmock.NewRows([]string{"profile_id"}).AddRow("mp_demo"), revision: &agent.Revision{State: agent.RevisionStatePublished}, want: ErrDemoState},
+		{name: "mismatch", profileRows: sqlmock.NewRows([]string{"profile_id"}).AddRow("mp_demo"), revision: &appmodel.Revision{State: appmodel.RevisionStatePublished}, want: ErrDemoState},
 		{name: "valid", profileRows: sqlmock.NewRows([]string{"profile_id"}).AddRow("mp_demo"), revision: valid},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -817,7 +817,7 @@ func TestValidateExistingDemoRevisionBranches(t *testing.T) {
 				mock.ExpectQuery("SELECT profile_id").WillReturnRows(test.profileRows)
 			}
 			stub := &demoAgentRepoStub{revision: test.revision, getRevisionErr: test.getErr}
-			err = validateExistingDemoRevision(context.Background(), db, stub, root, app, 1, agent.RevisionStatePublished, demoModelProfileKey)
+			err = validateExistingDemoRevision(context.Background(), db, stub, root, app, 1, appmodel.RevisionStatePublished, demoModelProfileKey)
 			if test.want == nil && err != nil || test.want != nil && !errors.Is(err, test.want) {
 				t.Fatalf("error = %v, want %v", err, test.want)
 			}
@@ -941,13 +941,13 @@ func TestDemoProfilePreflightBranches(t *testing.T) {
 func TestEnsureDemoRevisionBranches(t *testing.T) {
 	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
 	modelID := "mp_demo"
-	validRevision := &agent.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, DraftVersion: 1, State: agent.RevisionStateDraft, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: modelID, Runtime: agent.DefaultRuntimePolicy()}
+	validRevision := &appmodel.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, DraftVersion: 1, State: appmodel.RevisionStateDraft, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: modelID, Runtime: appmodel.DefaultRuntimePolicy()}
 	activeRevision := validRevision.Clone()
-	activeRevision.State = agent.RevisionStatePublished
+	activeRevision.State = appmodel.RevisionStatePublished
 
 	t.Run("published existing", func(t *testing.T) {
 		current := int64(1)
-		app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusActive, CurrentRevision: &current}
+		app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusActive, CurrentRevision: &current}
 		db, mock, err := sqlmock.New()
 		if err != nil {
 			t.Fatal(err)
@@ -965,7 +965,7 @@ func TestEnsureDemoRevisionBranches(t *testing.T) {
 	})
 
 	t.Run("draft create and publish", func(t *testing.T) {
-		app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusDraft, Version: 1}
+		app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusDraft, Version: 1}
 		draft := validRevision.Clone()
 		db, mock, err := sqlmock.New()
 		if err != nil {
@@ -984,7 +984,7 @@ func TestEnsureDemoRevisionBranches(t *testing.T) {
 	})
 
 	t.Run("existing draft", func(t *testing.T) {
-		app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusDraft, Version: 1}
+		app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusDraft, Version: 1}
 		draft := validRevision.Clone()
 		db, mock, err := sqlmock.New()
 		if err != nil {
@@ -1004,7 +1004,7 @@ func TestEnsureDemoRevisionBranches(t *testing.T) {
 
 	t.Run("dependency errors", func(t *testing.T) {
 		current := int64(1)
-		app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusActive, CurrentRevision: &current}
+		app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusActive, CurrentRevision: &current}
 		db, mock, err := sqlmock.New()
 		if err != nil {
 			t.Fatal(err)
@@ -1066,7 +1066,7 @@ func TestPreflightDemoAppCompleteBranches(t *testing.T) {
 		}
 		defer db.Close()
 		mock.ExpectQuery("SELECT revision").WillReturnError(sql.ErrConnDone)
-		app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusDraft}
+		app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusDraft}
 		if err := preflightDemoApp(context.Background(), db, nil, root, app, config.ModelProfileKey); !errors.Is(err, ErrDemoInitialization) {
 			t.Fatalf("lookup error = %v", err)
 		}
@@ -1082,7 +1082,7 @@ func TestPreflightDemoAppCompleteBranches(t *testing.T) {
 		}
 		defer db.Close()
 		mock.ExpectQuery("SELECT revision").WillReturnRows(sqlmock.NewRows([]string{"revision"}))
-		app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusDraft}
+		app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusDraft}
 		if err := preflightDemoApp(context.Background(), db, nil, root, app, config.ModelProfileKey); err != nil {
 			t.Fatalf("empty history error = %v", err)
 		}
@@ -1093,7 +1093,7 @@ func TestPreflightDemoAppCompleteBranches(t *testing.T) {
 
 	t.Run("published revision validation", func(t *testing.T) {
 		current := int64(1)
-		app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusActive, CurrentRevision: &current}
+		app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusActive, CurrentRevision: &current}
 		db, mock, err := sqlmock.New()
 		if err != nil {
 			t.Fatal(err)
@@ -1101,7 +1101,7 @@ func TestPreflightDemoAppCompleteBranches(t *testing.T) {
 		defer db.Close()
 		mock.ExpectQuery("SELECT revision").WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(int64(1)))
 		mock.ExpectQuery("SELECT profile_id").WillReturnRows(sqlmock.NewRows([]string{"profile_id"}).AddRow("mp_demo"))
-		valid := &agent.Revision{TenantID: root.TenantID, AppID: app.AppID, Revision: 1, State: agent.RevisionStatePublished, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: agent.DefaultRuntimePolicy()}
+		valid := &appmodel.Revision{TenantID: root.TenantID, AppID: app.AppID, Revision: 1, State: appmodel.RevisionStatePublished, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: appmodel.DefaultRuntimePolicy()}
 		if err := preflightDemoApp(context.Background(), db, &demoAgentRepoStub{revision: valid}, root, app, config.ModelProfileKey); err != nil {
 			t.Fatalf("published validation error = %v", err)
 		}
@@ -1111,7 +1111,7 @@ func TestPreflightDemoAppCompleteBranches(t *testing.T) {
 	})
 
 	t.Run("draft revision validation", func(t *testing.T) {
-		app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusDraft}
+		app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusDraft}
 		db, mock, err := sqlmock.New()
 		if err != nil {
 			t.Fatal(err)
@@ -1119,7 +1119,7 @@ func TestPreflightDemoAppCompleteBranches(t *testing.T) {
 		defer db.Close()
 		mock.ExpectQuery("SELECT revision").WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(int64(1)))
 		mock.ExpectQuery("SELECT profile_id").WillReturnRows(sqlmock.NewRows([]string{"profile_id"}).AddRow("mp_demo"))
-		valid := &agent.Revision{TenantID: root.TenantID, AppID: app.AppID, Revision: 1, State: agent.RevisionStateDraft, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: agent.DefaultRuntimePolicy()}
+		valid := &appmodel.Revision{TenantID: root.TenantID, AppID: app.AppID, Revision: 1, State: appmodel.RevisionStateDraft, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: appmodel.DefaultRuntimePolicy()}
 		if err := preflightDemoApp(context.Background(), db, &demoAgentRepoStub{revision: valid}, root, app, config.ModelProfileKey); err != nil {
 			t.Fatalf("draft validation error = %v", err)
 		}
@@ -1130,7 +1130,7 @@ func TestPreflightDemoAppCompleteBranches(t *testing.T) {
 
 	t.Run("current revision history mismatch", func(t *testing.T) {
 		current := int64(1)
-		app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusActive, CurrentRevision: &current}
+		app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusActive, CurrentRevision: &current}
 		db, mock, err := sqlmock.New()
 		if err != nil {
 			t.Fatal(err)
@@ -1149,10 +1149,10 @@ func TestPreflightDemoAppCompleteBranches(t *testing.T) {
 func TestEnsureDemoPublishedRevisionBranches(t *testing.T) {
 	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
 	current := int64(1)
-	newApp := func(status agent.Status) *agent.App {
-		return &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: status, CurrentRevision: &current, Version: 2}
+	newApp := func(status appmodel.Status) *appmodel.App {
+		return &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: status, CurrentRevision: &current, Version: 2}
 	}
-	valid := &agent.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, State: agent.RevisionStatePublished, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: agent.DefaultRuntimePolicy()}
+	valid := &appmodel.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, State: appmodel.RevisionStatePublished, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: appmodel.DefaultRuntimePolicy()}
 
 	t.Run("revision lookup failure", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
@@ -1161,7 +1161,7 @@ func TestEnsureDemoPublishedRevisionBranches(t *testing.T) {
 		}
 		defer db.Close()
 		mock.ExpectQuery("SELECT revision").WillReturnError(sql.ErrConnDone)
-		if _, _, _, err := ensureDemoPublishedRevision(context.Background(), db, nil, root, newApp(agent.StatusActive), "mp_demo", demoAgentMetadata()); !errors.Is(err, ErrDemoInitialization) {
+		if _, _, _, err := ensureDemoPublishedRevision(context.Background(), db, nil, root, newApp(appmodel.StatusActive), "mp_demo", demoAgentMetadata()); !errors.Is(err, ErrDemoInitialization) {
 			t.Fatalf("lookup error = %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -1176,7 +1176,7 @@ func TestEnsureDemoPublishedRevisionBranches(t *testing.T) {
 		}
 		defer db.Close()
 		mock.ExpectQuery("SELECT revision").WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(int64(1)).AddRow(int64(2)))
-		if _, _, _, err := ensureDemoPublishedRevision(context.Background(), db, nil, root, newApp(agent.StatusActive), "mp_demo", demoAgentMetadata()); !errors.Is(err, ErrDemoState) {
+		if _, _, _, err := ensureDemoPublishedRevision(context.Background(), db, nil, root, newApp(appmodel.StatusActive), "mp_demo", demoAgentMetadata()); !errors.Is(err, ErrDemoState) {
 			t.Fatalf("history mismatch error = %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -1191,7 +1191,7 @@ func TestEnsureDemoPublishedRevisionBranches(t *testing.T) {
 		}
 		defer db.Close()
 		mock.ExpectQuery("SELECT revision").WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(int64(1)))
-		if _, _, _, err := ensureDemoPublishedRevision(context.Background(), db, &demoAgentRepoStub{getRevisionErr: sql.ErrConnDone}, root, newApp(agent.StatusActive), "mp_demo", demoAgentMetadata()); !errors.Is(err, ErrDemoInitialization) {
+		if _, _, _, err := ensureDemoPublishedRevision(context.Background(), db, &demoAgentRepoStub{getRevisionErr: sql.ErrConnDone}, root, newApp(appmodel.StatusActive), "mp_demo", demoAgentMetadata()); !errors.Is(err, ErrDemoInitialization) {
 			t.Fatalf("revision dependency error = %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -1207,8 +1207,8 @@ func TestEnsureDemoPublishedRevisionBranches(t *testing.T) {
 		defer db.Close()
 		mock.ExpectQuery("SELECT revision").WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(int64(1)))
 		mismatch := valid.Clone()
-		mismatch.State = agent.RevisionStateDraft
-		if _, _, _, err := ensureDemoPublishedRevision(context.Background(), db, &demoAgentRepoStub{revision: &mismatch}, root, newApp(agent.StatusActive), "mp_demo", demoAgentMetadata()); !errors.Is(err, ErrDemoState) {
+		mismatch.State = appmodel.RevisionStateDraft
+		if _, _, _, err := ensureDemoPublishedRevision(context.Background(), db, &demoAgentRepoStub{revision: &mismatch}, root, newApp(appmodel.StatusActive), "mp_demo", demoAgentMetadata()); !errors.Is(err, ErrDemoState) {
 			t.Fatalf("graph mismatch error = %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -1220,10 +1220,10 @@ func TestEnsureDemoPublishedRevisionBranches(t *testing.T) {
 func TestEnsureDemoPublishedRevisionLifecycle(t *testing.T) {
 	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
 	current := int64(1)
-	newApp := func(status agent.Status) *agent.App {
-		return &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: status, CurrentRevision: &current, Version: 2}
+	newApp := func(status appmodel.Status) *appmodel.App {
+		return &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: status, CurrentRevision: &current, Version: 2}
 	}
-	valid := &agent.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, State: agent.RevisionStatePublished, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: agent.DefaultRuntimePolicy()}
+	valid := &appmodel.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, State: appmodel.RevisionStatePublished, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: appmodel.DefaultRuntimePolicy()}
 	t.Run("suspended app resumes", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		if err != nil {
@@ -1231,10 +1231,10 @@ func TestEnsureDemoPublishedRevisionLifecycle(t *testing.T) {
 		}
 		defer db.Close()
 		mock.ExpectQuery("SELECT revision").WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(int64(1)))
-		app := newApp(agent.StatusSuspended)
+		app := newApp(appmodel.StatusSuspended)
 		stub := &demoAgentRepoStub{app: app, revision: valid}
 		got, revision, created, err := ensureDemoPublishedRevision(context.Background(), db, stub, root, app, "mp_demo", demoAgentMetadata())
-		if err != nil || created || revision != valid || got == app || got.Status != agent.StatusActive {
+		if err != nil || created || revision != valid || got == app || got.Status != appmodel.StatusActive {
 			t.Fatalf("resumed result = %+v revision=%+v created=%v err=%v", got, revision, created, err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -1248,7 +1248,7 @@ func TestEnsureDemoPublishedRevisionLifecycle(t *testing.T) {
 		}
 		defer db.Close()
 		mock.ExpectQuery("SELECT revision").WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(int64(1)))
-		stub := &demoAgentRepoStub{app: newApp(agent.StatusSuspended), revision: valid, transitionErr: sql.ErrConnDone}
+		stub := &demoAgentRepoStub{app: newApp(appmodel.StatusSuspended), revision: valid, transitionErr: sql.ErrConnDone}
 		if _, _, _, err := ensureDemoPublishedRevision(context.Background(), db, stub, root, stub.app, "mp_demo", demoAgentMetadata()); !errors.Is(err, ErrDemoInitialization) {
 			t.Fatalf("resume failure = %v", err)
 		}
@@ -1261,10 +1261,10 @@ func TestEnsureDemoPublishedRevisionLifecycle(t *testing.T) {
 func TestEnsureDemoDraftRevisionBranches(t *testing.T) {
 	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
 	metadata := demoAgentMetadata()
-	newApp := func() *agent.App {
-		return &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusDraft, Version: 1}
+	newApp := func() *appmodel.App {
+		return &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusDraft, Version: 1}
 	}
-	valid := &agent.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, DraftVersion: 1, State: agent.RevisionStateDraft, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: agent.DefaultRuntimePolicy()}
+	valid := &appmodel.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, DraftVersion: 1, State: appmodel.RevisionStateDraft, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: appmodel.DefaultRuntimePolicy()}
 
 	t.Run("revision lookup failure", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
@@ -1350,10 +1350,10 @@ func TestEnsureDemoDraftRevisionBranches(t *testing.T) {
 func TestEnsureDemoDraftRevisionLifecycleFailures(t *testing.T) {
 	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
 	metadata := demoAgentMetadata()
-	newApp := func() *agent.App {
-		return &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusDraft, Version: 1}
+	newApp := func() *appmodel.App {
+		return &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, Status: appmodel.StatusDraft, Version: 1}
 	}
-	valid := &agent.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, DraftVersion: 1, State: agent.RevisionStateDraft, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: agent.DefaultRuntimePolicy()}
+	valid := &appmodel.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, DraftVersion: 1, State: appmodel.RevisionStateDraft, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: appmodel.DefaultRuntimePolicy()}
 	t.Run("app reload failure", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		if err != nil {
@@ -1388,8 +1388,8 @@ func TestEnsureDemoDraftRevisionLifecycleFailures(t *testing.T) {
 
 func newDemoGraphFixture() (DemoConfig, InitResult, *demoTenantRepoStub, *demoAgentRepoStub, *demoModelRepoStub, *demoBackendRepoStub) {
 	root := &tenant.Tenant{TenantID: testInitTenantID, TenantKey: demoTenantKey, Status: tenant.StatusActive, Version: 1}
-	app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, AppKey: demoAppKey, Status: agent.StatusDraft, Version: 1}
-	revision := &agent.Revision{TenantID: root.TenantID, AppID: app.AppID, Revision: 1, DraftVersion: 1, State: agent.RevisionStateDraft, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: agent.DefaultRuntimePolicy()}
+	app := &appmodel.App{TenantID: root.TenantID, AppID: testInitAppID, AppKey: demoAppKey, Status: appmodel.StatusDraft, Version: 1}
+	revision := &appmodel.Revision{TenantID: root.TenantID, AppID: app.AppID, Revision: 1, DraftVersion: 1, State: appmodel.RevisionStateDraft, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: appmodel.DefaultRuntimePolicy()}
 	model := &modelprofile.Profile{TenantID: root.TenantID, ProfileID: "mp_demo", ProfileKey: demoModelProfileKey, Configuration: modelprofile.Configuration{Provider: demoModelProvider, Model: demoModelName}, Status: modelprofile.StatusActive}
 	backendProfile := &backend.Profile{TenantID: root.TenantID, ProfileID: "bp_demo", ProfileKey: demoBackendProfileKey, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}, Status: backend.StatusActive}
 	return DefaultDemoConfig(), InitResult{TenantID: root.TenantID, AppID: app.AppID, Created: true},
@@ -1422,7 +1422,10 @@ func TestInitializeDemoGraphSuccess(t *testing.T) {
 	expectEmptyDemoProfile(mock)
 	expectEmptyDemoProfile(mock)
 	expectEmptyDemoRevision(mock)
-	result, err := initializeDemoGraph(context.Background(), db, config, initial, tenants, apps, models, backends)
+	result, err := initializeDemoGraph(demoGraphDependencies{
+		ctx: context.Background(), db: db, config: config, initial: initial,
+		tenantRepo: tenants, appRepo: apps, modelRepo: models, backendRepo: backends,
+	})
 	if err != nil {
 		t.Fatalf("graph error = %v", err)
 	}
@@ -1451,7 +1454,10 @@ func TestInitializeDemoGraphLoadFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			if _, err := initializeDemoGraph(context.Background(), db, config, initial, tenants, apps, models, backends); !errors.Is(err, sql.ErrConnDone) {
+			if _, err := initializeDemoGraph(demoGraphDependencies{
+				ctx: context.Background(), db: db, config: config, initial: initial,
+				tenantRepo: tenants, appRepo: apps, modelRepo: models, backendRepo: backends,
+			}); !errors.Is(err, sql.ErrConnDone) {
 				t.Fatalf("load error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -1489,7 +1495,10 @@ func TestInitializeDemoGraphPreflightFailures(t *testing.T) {
 			}
 			defer db.Close()
 			test.expectFunc(mock)
-			if _, err := initializeDemoGraph(context.Background(), db, config, initial, tenants, apps, models, backends); !errors.Is(err, ErrDemoInitialization) {
+			if _, err := initializeDemoGraph(demoGraphDependencies{
+				ctx: context.Background(), db: db, config: config, initial: initial,
+				tenantRepo: tenants, appRepo: apps, modelRepo: models, backendRepo: backends,
+			}); !errors.Is(err, ErrDemoInitialization) {
 				t.Fatalf("preflight error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -1541,7 +1550,10 @@ func TestInitializeDemoGraphEnsureFailures(t *testing.T) {
 			}
 			defer db.Close()
 			test.expectFunc(mock)
-			if _, err := initializeDemoGraph(context.Background(), db, config, initial, tenants, apps, models, backends); !errors.Is(err, ErrDemoInitialization) {
+			if _, err := initializeDemoGraph(demoGraphDependencies{
+				ctx: context.Background(), db: db, config: config, initial: initial,
+				tenantRepo: tenants, appRepo: apps, modelRepo: models, backendRepo: backends,
+			}); !errors.Is(err, ErrDemoInitialization) {
 				t.Fatalf("ensure error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {

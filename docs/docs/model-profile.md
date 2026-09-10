@@ -2,13 +2,13 @@
 
 > 本文是 Issue #22 的设计与实现契约：
 > [runtime: implement tenant-scoped Model Profile and minimal Runner execution spine](https://github.com/XnLemon/trpc-agent-service/issues/22)。
-> 文档先于代码提交，代码必须遵守本文的租户边界、快照和生命周期语义。
+> 本文同步记录代码、迁移、测试和部署验收，代码遵守本文的租户边界、快照和生命周期语义。
 
 ## 目标与边界
 
-Tenant、Agent App/Revision 和 Backend Profile 已经可以各自生成不可变、无密钥的运行时输入，
-但 `Revision.ModelProfileID` 还没有解析边界，也没有一次消息真正进入 tRPC-Agent-Go 的
-`runner.Runner`。本阶段补齐这条最小纵向链路：
+Tenant、Agent App/Revision 和 Backend Profile 生成不可变、无密钥的运行时输入，
+`Revision.ModelProfileID` 通过同租户 Resolver 进入 tRPC-Agent-Go 的 `runner.Runner`。
+当前交付的最小纵向链路为：
 
 ```text
 trusted Tenant snapshot
@@ -29,26 +29,26 @@ trusted Tenant snapshot
 
 本 Issue 的实现范围：
 
-- 租户级 Model Profile 根实体、配置 schema、生命周期、乐观锁版本、摘要和 InMemory Repository。
+- 租户级 Model Profile 根实体、配置 schema、生命周期、乐观锁版本、摘要和 InMemory/PostgreSQL Repository。
 - 不包含 Secret 值的 `ModelExecutionSnapshot`、可比较 `FactoryCacheKey` 和 `ModelFactoryInput`。
 - 显式携带 `tenant_id + secret_ref` 的 Secret Resolver 契约，以及脱敏的错误边界。
 - 将 Tenant、当前 published Agent Revision、active Model Profile 和 active Backend Profile
   组合成一次执行固定的 `ExecutionPlan`。
 - 固定兼容的 tRPC-Agent-Go 版本，使用其 `LLMAgent`、`Runner`、`Session` 和 `Event` 能力。
-- 离线 deterministic fake model + InMemory Session 的集成测试，以及取消和 Event channel 收尾测试。
+- deterministic fake model、OpenAI provider 配置路径、Session 集成测试，以及取消和 Event channel 收尾测试。
 
-本阶段明确不包含 Channel Binding、HTTP Gateway/Admin API、真实模型请求、生产 KMS/Vault、
-Redis/SQL/向量库/S3 adapter、OTel exporter、计费和跨节点配置缓存。Issue #37 的
+Channel Binding、HTTP Gateway/Admin API、PostgreSQL/Redis/S3 runtime capability、OTel exporter、
+计费和跨节点缓存均通过相应模块接入。Issue #37 的
 `migrations/0001_control_plane.up.sql` 与 `0002_control_plane_repository_functions.up.sql`
-已落地本页领域契约对应的无密钥表形状和受控写入口；Go 实现在
+落地本页领域契约对应的无密钥表形状和受控写入口；Go 实现在
 `trpcservice/model/postgres`，总体验证见
 [PostgreSQL 控制面与启动装配](postgresql-control-plane.md)。
 
-## 设计阶段 ledger
+## 交付 ledger
 
-文档阶段先固定以下可观察契约；代码阶段逐项实现并用测试证明：
+以下可观察契约均有代码或测试证据：
 
-| Ledger 项 | 文档阶段结论 | 代码阶段验证 |
+| Ledger 项 | 已交付契约 | 验证证据 |
 | --- | --- | --- |
 | Model Profile 身份 | `(tenant_id, model_profile_id)` 稳定；`profile_key` 仅在租户内唯一且不可变 | ID/key/时间/version/摘要边界测试 |
 | 配置 schema | provider、model、endpoint、generation、allowlisted options、opaque `secret_ref`；未知 provider/model/option 拒绝 | Catalog 与配置归一化测试 |
@@ -128,7 +128,7 @@ closed；JSON 解码使用 `DisallowUnknownFields` 或等价的显式解码逻�
 3. 物化 schema 默认值，排序稳定字段，复制所有 map/pointer。
 4. 对规范化结构做确定性序列化并计算 `content_digest`。
 
-摘要可以包含 `secret_ref`，因为切换引用必须令未来 Factory cache key 变化；摘要不能包含该引用
+摘要可以包含 `secret_ref`，因为切换引用必须令 Factory cache key 变化；摘要不能包含该引用
 解析出的值，也不能包含 client、连接池、函数指针或其他运行时对象。
 
 ### 1.3 生命周期与乐观锁
@@ -167,8 +167,8 @@ Secret 的逃生通道；Repository 必须严格解码字符串 option、已支�
 
 ## 2. Secret Resolver 边界
 
-Secret Resolver 是平台与真实 KMS/Vault/Secret Manager 之间的窄契约，本 Issue 只提供接口和 fake
-实现测试，不提供生产 Secret Manager：
+Secret Resolver 是平台与 KMS/Vault/Secret Manager 之间的窄契约，接口、fake 测试和 Vault
+适配器共同遵守以下边界：
 
 ```go
 type SecretScope struct {
@@ -231,8 +231,8 @@ Resolver 调用顺序分为两条路径：入站路径先做候选发现 → `Re
 分支处理 `secret_ref`：required 必须非空并解析一次，optional 仅在引用存在时解析，forbidden
 拒绝任何引用；没有引用时不调用租户级 Resolver，并把显式的空 `SecretValue` 直接传给 Model
 Factory → 丢弃临时值。候选 handle 也必须在 Channel Adapter 返回前销毁。
-Factory 缓存只能缓存不含 Secret 的模型配置或由 Factory 自行管理的安全 client 句柄；本阶段不实现
-client cache。空 Secret 不是全局或空引用查询。
+Factory 缓存只缓存不含 Secret 的模型配置或由 Factory 自行管理的安全 client 句柄；空 Secret
+不是全局或空引用查询。
 
 ## 3. Execution Plan
 
@@ -284,7 +284,7 @@ backend_profile_id + backend_profile_version + backend_content_digest
 
 ## 4. 最小 Runner execution spine
 
-本阶段固定 `trpc.group/trpc-go/trpc-agent-go` 的兼容版本 `v1.11.2`，版本写入根 `go.mod` 和
+当前固定 `trpc.group/trpc-go/trpc-agent-go` 的兼容版本 `v1.11.2`，版本写入根 `go.mod` 和
 `go.sum`，避免上游接口漂移影响控制面契约。
 
 Runner 装配逻辑为：
@@ -295,10 +295,13 @@ Runner 装配逻辑为：
    `llmagent.New`；`RuntimePolicy` 同步映射为上游的 LLM/tool call limits、
    `WithEnableParallelTools`、`ToolConcurrencyConfig.MaxConcurrency`，并在 Runner 边界
    固定 `WithMaxRunDuration`；不把 Revision 的未知字段或平台配置 map 直接传给上游。
-4. 将 Backend 的 Session binding 映射到已选择的 Session service；本阶段的集成测试使用
-   上游 `session/inmemory.NewSessionService()`，并在其外层包裹固定 Tenant 的
-   `TenantSessionService`，不实现真实持久化后端 adapter。
-5. 使用上游 `runner.NewRunner(appID, llmAgent, runner.WithSessionService(sessionService))`。
+4. 将 Backend 的 Session binding 映射到已选择的 Session service；集成测试覆盖上游
+   `session/inmemory.NewSessionService()` 与 PostgreSQL/Redis runtime adapter，并在其外层
+   保持固定 Tenant 的 `TenantSessionService` 边界。
+5. 由 `trpcservice/agent` 使用上游
+   `runner.NewRunner(appID, llmAgent, runner.WithSessionService(sessionService))`，
+   并由同一适配边界负责调用、错误脱敏、事件归一化和取消时的 bounded drain。
+   `runtime/execution` 不直接依赖上游 Runner 或 Event 类型。
 6. 用 `tenant.NewRunnerIdentity` 生成无歧义的 `userID`/`sessionID`，再由
    `TenantSessionService` 把所有 app/user/session/state 操作固定到 Plan 的 Tenant。Runner 的
    字符串命名空间只是第二层防碰撞，不能替代 adapter 的授权检查；双租户 conformance test
@@ -310,10 +313,11 @@ Runner 装配逻辑为：
 model.NewUserMessage("hello")
         │
         ▼
-runner.Run(ctx, userID, sessionID, message)
+agent.Invoke(ctx, runner, invocation, drainTimeout)
         │
         ├── LLMAgent 调用 deterministic fake model
-        ├── 返回 *event.Event，直至 channel close
+        ├── `agent` 将上游 Event 转为服务内 RunnerEvent
+        ├── runtime/execution 消费 RunnerEvent，直至 channel close
         └── 上游 Session service 写入有效 user/assistant event
         │
         ▼
@@ -321,10 +325,13 @@ GetSession(session.Key{AppName, UserID, SessionID})
         └── 断言最终 assistant reply 和 session.Events
 ```
 
-消费者必须完整消费 Event channel。取消时的正确顺序是：
+消费者必须完整消费服务内 RunnerEvent channel。取消时，`agent` 适配边界负责在
+有界时间内排空上游 Event channel；runtime 只需要消费并关闭自己的中立事件流：
 
 ```go
-events, err := runner.Run(ctx, userID, sessionID, message)
+events, err := agent.Invoke(ctx, runner, agent.Invocation{
+    UserID: userID, SessionID: sessionID, Message: message, RequestID: requestID,
+}, drainTimeout)
 if err != nil { return err }
 for event := range events {
     // 处理或丢弃事件，但继续 drain 到 channel 关闭。
@@ -332,7 +339,8 @@ for event := range events {
 ```
 
 不能只 `break` 然后放弃 channel，因为 Runner 可能仍在向 channel 写事件。取消由传入的
-`context.Context` 传播到模型、工具、Session 和 Runner；测试使用有界等待确认 channel 最终关闭。
+`context.Context` 传播到模型、工具、Session 和 Runner；测试使用有界等待确认上游 source
+和服务内事件 channel 最终关闭。
 Runner、外部 Session service 和任何 fake model 的资源都由创建方明确 `Close` 或等待收尾。
 
 ## 5. Deterministic fake model
@@ -345,12 +353,12 @@ fake model 只用于测试，不模拟真实 provider 认证，也不读取环�
 - 测试通过 fake factory 记录收到的 `TenantID`、`SecretRef` 和 secret 是否只出现在 Factory 调用中；
   随后检查计划、snapshot、factory input、错误和 Session state 都没有 Secret 值。
 
-该 fake 不应进入生产 provider catalog，也不应该成为真实模型 fallback。生产 provider、KMS 和模型
-客户端由后续 Issue 在相同的输入边界上实现。
+该 fake 保持在 deterministic 测试路径；生产 provider 通过同一 Model Profile、Secret Resolver
+和 Factory 输入边界装配，真实模型配置由部署文档的显式环境变量驱动。
 
 ## 6. 验证矩阵
 
-代码阶段必须至少覆盖：
+验收矩阵覆盖：
 
 ### Model Profile 与 Repository
 
@@ -386,9 +394,9 @@ mkdocs build --strict -f docs/mkdocs.yml
 git diff --check
 ```
 
-如果本地缺少 `mkdocs` 或 `golangci-lint`，PR 必须明确记录实际跳过原因；不能把未运行的检查标记为通过。
+文档与 lint 工具由 CI 固定版本提供，PR 使用统一命令记录检查结果。
 
-## 7. 后续边界
+## 7. 交付关系
 
 ```text
 Model Profile + Secret Resolver + minimal Runner spine  (#22)
@@ -398,7 +406,7 @@ Model Profile + Secret Resolver + minimal Runner spine  (#22)
                     └── persistent repositories and production adapters
 ```
 
-后续实现必须继续遵守：
+当前实现和扩展实现共同遵守：
 
 - `tenant_id` 是每个 Repository、Resolver、Factory 和持久化查询的显式边界。
 - 真实 Secret 只能在已授权的 Factory 短路径中出现。

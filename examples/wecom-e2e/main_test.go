@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -33,8 +33,9 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
@@ -76,7 +77,7 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 	providerServer := newProviderServer(t)
 	defer providerServer.Close()
 	provider := &wecom.BindingProvider{Bindings: fixture.channels, Credentials: fixture.credentials, BaseURL: providerServer.URL, HTTPClient: providerServer.Client()}
-	worker, err := outbox.New(outbox.Config{Store: fixture.store, Provider: provider, TenantID: fixture.tenant.TenantID, Owner: "wecom-example-e2e", LeaseDuration: 30 * time.Second})
+	worker, err := outbox.New(outbox.Config{Store: fixture.store, MessageStore: fixture.store, Provider: provider, TenantID: fixture.tenant.TenantID, Owner: "wecom-example-e2e", LeaseDuration: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +124,7 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 	}
 }
 
-func waitForReplyCandidates(ctx context.Context, store runtimestorage.RuntimeStore, tenantID, payload string) ([]runtimestorage.ReplyOutbox, error) {
+func waitForReplyCandidates(ctx context.Context, store runtimestorage.ReplyStore, tenantID, payload string) ([]runtimestorage.ReplyOutbox, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -186,15 +187,15 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 		t.Fatal(err)
 	}
 	appRepo := agentinmemory.NewRepository()
-	app, err := appRepo.Create(ctx, agent.CreateInput{TenantID: root.TenantID, AppKey: "wecom-e2e", DisplayName: "WeCom E2E", Description: "Deterministic WeCom callback"})
+	appRoot, err := appRepo.Create(ctx, appmodel.CreateInput{TenantID: root.TenantID, AppKey: "wecom-e2e", DisplayName: "WeCom E2E", Description: "Deterministic WeCom callback"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := appRepo.CreateDraft(ctx, agent.CreateDraftInput{TenantID: root.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Configuration: agent.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: agent.DefaultRuntimePolicy()}})
+	draft, err := appRepo.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Configuration: appmodel.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	published, _, _, err := appRepo.Publish(ctx, agent.PublishInput{TenantID: root.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: agent.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
+	published, _, _, err := appRepo.Publish(ctx, appmodel.PublishInput{TenantID: root.TenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: appmodel.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,18 +248,18 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	planResolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{Tenants: tenantRepo, Apps: appRepo, Models: modelRepo, Backends: backendRepo, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
+	planResolver, err := gateway.NewPlanResolver(runtime.PlanResolverConfig{Tenants: tenantRepo, Apps: appRepo, Models: modelRepo, Backends: backendRepo, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
 	if err != nil {
 		t.Fatal(err)
 	}
 	runner := &weComRunner{reply: "wecom-e2e-ok"}
-	registry, err := gateway.NewRunnerRegistry(gateway.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (gateway.Runner, error) { return runner, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runner, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = registry.Close() })
 	store := runtimestoragepostgres.New(db)
-	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: planResolver, Registry: registry, RuntimeStore: store})
+	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: planResolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, Attachments: store, AttachmentStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

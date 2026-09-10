@@ -19,6 +19,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	"go.uber.org/zap"
 )
 
 const (
@@ -66,13 +67,23 @@ var (
 
 var newBootstrapRuntime = bootstrap.NewFromEnvironment
 
+var exitProcess = os.Exit
+
 func main() {
+	restoreLogger, err := configureLogger(os.Stderr)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		exitProcess(1)
+		return
+	}
+	defer restoreLogger()
+
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	if err := runMain(context.Background(), os.Args[1:], os.Stdout, os.Stderr, signals); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		packageLog.Error("service command failed", zap.Error(err))
+		exitProcess(1)
 	}
 }
 
@@ -97,7 +108,7 @@ func runMain(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 	}
 	handler := bootstrapRuntime.HandlerValue()
 	server := newServiceHTTPServer(handler.Handler(), options)
-	_, _ = fmt.Fprintf(stdout, "trpc-agent-service %s listening on %s\n", trpcservice.Version, options.address)
+	packageLog.Info("service listening", zap.String("version", trpcservice.Version), zap.String("address", options.address))
 	returnErr := runService(ctx, signals, handler, options.shutdownTimeout, server.ListenAndServe, server.Shutdown)
 	return errors.Join(returnErr, bootstrapRuntime.Close())
 }
@@ -240,7 +251,7 @@ func parseInitOptions(args []string, stderr io.Writer) (initOptions, bool, error
 		return initOptions{}, false, err
 	}
 	if flags.NArg() != 0 {
-		return initOptions{}, false, errors.New("unexpected init arguments")
+		return initOptions{}, false, errUnexpectedInitArguments
 	}
 	return options, options.help, nil
 }
@@ -271,7 +282,7 @@ func parseDemoOptions(args []string, stderr io.Writer) (demoOptions, bool, error
 		return demoOptions{}, false, err
 	}
 	if flags.NArg() != 0 {
-		return demoOptions{}, false, errors.New("unexpected demo arguments")
+		return demoOptions{}, false, errUnexpectedDemoArguments
 	}
 	return options, options.help, nil
 }
@@ -285,18 +296,6 @@ func loadInitEnvironment(config bootstrap.InitConfig) (string, bootstrap.InitCon
 		return "", bootstrap.InitConfig{}, err
 	}
 	return dsn, config, nil
-}
-
-func mapInitCommandError(ctx context.Context, err error, message string) error {
-	if ctx != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	return fmt.Errorf("%w: %s", bootstrap.ErrInvalidConfig, message)
 }
 
 func parseServiceOptions(args []string, stderr io.Writer) (serviceOptions, bool, error) {
@@ -335,7 +334,7 @@ func newServiceHTTPServer(handler http.Handler, options serviceOptions) *http.Se
 
 func runService(ctx context.Context, signals <-chan os.Signal, handler *gateway.HTTPHandler, shutdownTimeout time.Duration, serve func() error, shutdown func(context.Context) error) error {
 	if ctx == nil || serve == nil || shutdown == nil || shutdownTimeout <= 0 {
-		return fmt.Errorf("invalid service supervisor configuration")
+		return errInvalidServiceSupervisorConfiguration
 	}
 	serveResult := make(chan error, 1)
 	go func() {

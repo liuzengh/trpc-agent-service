@@ -18,7 +18,7 @@ func (w *writer) Append(_ context.Context, e audit.Event) (audit.AppendResult, e
 
 func TestPolicyDecisionAuditsWithoutPayload(t *testing.T) {
 	w := &writer{}
-	p := Policy{Recorder: audit.Recorder{Writer: w, TenantID: "tenant"}, Allowed: map[string]Decision{"search": Allow, "admin": ApprovalRequired}}
+	p := Policy{Recorder: audit.NewRecorder(w, "tenant"), Allowed: map[string]Decision{"search": Allow, "admin": ApprovalRequired}}
 	if _, err := p.Decide(context.Background(), "req", "trace", "search"); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestPolicyRejectsInvalidNamesAndAuditFailures(t *testing.T) {
 		}
 	}
 	w := &failingWriter{}
-	p = Policy{Recorder: audit.Recorder{Writer: w, TenantID: "t"}, Allowed: map[string]Decision{"search": Allow}}
+	p = Policy{Recorder: audit.NewRecorder(w, "t"), Allowed: map[string]Decision{"search": Allow}}
 	if _, err := p.Decide(context.Background(), "req", "trace", "search"); !errors.Is(err, audit.ErrWriteFailed) {
 		t.Fatalf("err=%v", err)
 	}

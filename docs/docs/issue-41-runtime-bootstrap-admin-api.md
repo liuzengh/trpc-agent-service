@@ -1,6 +1,8 @@
 # Issue #41：可重启控制面与 Admin API
 
-> 本页是 Issue [#41](https://github.com/XnLemon/trpc-agent-service/issues/41) 的文档先行契约。它承接 PostgreSQL 控制面实现（Issue #37 / PR #38），先固定真实启动、readiness、管理 API 和重启恢复边界，再进入代码实现。
+> 本页是 Issue [#41](https://github.com/XnLemon/trpc-agent-service/issues/41) 的交付契约。它承接 PostgreSQL 控制面实现（Issue #37 / PR #38），记录真实启动、readiness、管理 API 和重启恢复证据。
+
+当前页面同步记录已完成的 bootstrap、readiness、Admin API、持久化 Session 和重启恢复验收。
 
 ## 目标与边界
 
@@ -21,19 +23,20 @@ PostgreSQL
 - Admin API 通过受认证、受租户约束的 HTTP 操作管理控制面；
 - 所有写入继续使用现有 Repository 的乐观锁、状态迁移、发布和 secret-free 约束。
 
-本 Issue 不实现 Session/Event/Memory/Summary 持久化、Redis/向量库/对象存储、真实 KMS/Vault、分布式幂等、Outbox 消费队列、无状态 Worker 扩展或新的 IM 通道。
+Session/Event/Memory/Summary 持久化、Redis/S3 runtime、Secret Resolver、Outbox 消费队列和
+Channel runtime 由对应模块接入 bootstrap；本页固定服务级装配、认证和恢复边界。
 
-## 当前状态与交付边界
+## 已完成能力与交付证据
 
 | 能力 | 当前基线 | Issue #41 交付 |
 | --- | --- | --- |
 | PostgreSQL migration | 已实现并合入 | 复用，不重做 schema |
 | SQL Tenant/App/Model/Backend/Binding Repository | 已实现并合入 | 复用既有契约 |
-| 显式 bootstrap graph | bootstrap.New / NewFromEnvironment 已实现 | 补齐服务级验收和重启证明 |
+| 显式 bootstrap graph | bootstrap.New / NewFromEnvironment 已实现 | 服务级启动、readiness 和双进程重启恢复验收 |
 | HTTP Gateway / readiness | 已有真实 Dispatcher、Registry 和数据库 ping gate | 保持 503/200 和摘流语义 |
-| Admin API | 尚未实现 | 新增最小控制面 HTTP API |
-| Session | 当前为 InMemory capability | 保持现状，明确不是本 Issue 目标 |
-| 重启恢复 E2E | Repository 有持久化测试，完整 fresh bootstrap 链路尚缺 | 新增跨生命周期验证 |
+| Admin API | 已实现 | 受认证、受租户约束的控制面 HTTP API |
+| Session | 已实现 | 按显式配置装配 InMemory/PostgreSQL/Redis capability |
+| 重启恢复 E2E | 已实现 | 独立 Bootstrap 读取同一 PostgreSQL 数据并恢复运行时对象 |
 
 ## Bootstrap 契约
 
@@ -50,14 +53,14 @@ PostgreSQL
 | TRPC_TENANT_ID | API token 固定的租户 | 是 |
 | TRPC_APP_ID | API token 固定的 Agent App | 是 |
 | TRPC_ADMIN_TOKEN | 独立 Admin principal 凭证；不能复用 TRPC_API_TOKEN | 是 |
-| TRPC_ADMIN_TENANTS | Admin principal 的租户范围，逗号分隔；* 仅表示受控的首租户/平台管理权限 | 是 |
+| TRPC_ADMIN_TENANTS | Admin principal 的租户范围，逗号分隔；显式 `*` 表示平台管理员全部租户权限 | 是 |
 | TRPC_MODEL_API_KEY | 仅在运行时交给 ModelFactory | 是 |
 | TRPC_MODEL_PROVIDER | 当前支持 openai | 否 |
 | TRPC_MODEL_NAMES | 受信 Model Catalog | 否 |
 | TRPC_MODEL_ENDPOINT_HOSTS | HTTPS endpoint host 白名单 | 否 |
 | TRPC_MODEL_SECRET_REF | 控制面中的 secret reference | 否 |
 
-TRPC_API_TOKEN 只用于普通对话 API，固定映射到一个已存在的 Tenant/App；它不能访问 /admin/v1/*。Admin API 必须使用独立的 TRPC_ADMIN_TOKEN，并由 Admin principal 携带 subject、role=admin 和 tenant scope。TRPC_ADMIN_TENANTS=* 只允许平台管理员创建首个 Tenant，创建后仍须通过显式租户范围校验；普通 API token 永远不能提权。所有 token 和模型 key 只能在进程启动配置或 SecretResolver 输入边界中出现，不能写入数据库、ExecutionPlan、Factory cache key、日志、trace 或错误响应。Issue #41 的 Admin API 只接收 secret_ref，不接收明文凭据。
+TRPC_API_TOKEN 只用于普通对话 API，固定映射到一个已存在的 Tenant/App；它不能访问 /admin/v1/*。Admin API 必须使用独立的 TRPC_ADMIN_TOKEN，并由 Admin principal 携带 subject、role=admin 和 tenant scope。TRPC_ADMIN_TENANTS=* 表示显式配置的平台管理员，可列出、读取和管理所有 Tenant 及其资源；首个 Tenant 创建仍通过受控的初始化门槛，普通 API token 永远不能提权。生产环境应按最小权限配置具体租户 ID。所有 token 和模型 key 只能在进程启动配置或 SecretResolver 输入边界中出现，不能写入数据库、ExecutionPlan、Factory cache key、日志、trace 或错误响应。Issue #41 的 Admin API 只接收 secret_ref，不接收明文凭据。
 
 ### 装配顺序
 
@@ -164,7 +167,11 @@ POST   /admin/v1/tenants/{tenant_id}/apps/{app_id}/rollback
 
 ## 重启恢复时序
 
-完整验收必须证明“同一 PostgreSQL 数据 + 两次独立 Bootstrap”而非仅测试 Repository。生产 Bootstrap 是 migration 唯一 owner：先取得 advisory lock，再按文件名顺序执行 0001_control_plane.up.sql、0002_control_plane_repository_functions.up.sql，在 schema_migrations 写入版本；重复启动只验证已应用版本，版本缺失、超前或内容 digest 不一致均失败。迁移事务失败时不构造可接流量的 Runtime。
+完整验收验证“同一 PostgreSQL 数据 + 两次独立 Bootstrap”，而非仅测试 Repository。生产
+Bootstrap 是 migration 唯一 owner：先取得 advisory lock，再由 `migrations.Apply` 按文件名
+顺序执行从 `0001_control_plane.up.sql` 至 `0017_agent_chain.up.sql` 的嵌入式序列，并在
+`schema_migrations` 写入版本；重复启动验证已应用版本，版本缺失、超前或内容 digest 不一致均失败。
+迁移事务失败时不构造可接流量的 Runtime。
 
 ~~~text
 Process A

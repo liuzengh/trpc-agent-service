@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
@@ -21,6 +21,7 @@ import (
 	channelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	storagemysql "github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
@@ -67,7 +68,7 @@ func TestRecordMutationAuditsRawResourceMutation(t *testing.T) {
 func TestRecordMutationUsesDraftVersionForRawRevision(t *testing.T) {
 	w := &adminAuditWriter{}
 	h := &Handler{config: Config{AuditWriter: w}}
-	revision := agent.Revision{TenantID: "tenant-a", DraftVersion: 3, Revision: 7}
+	revision := appmodel.Revision{TenantID: "tenant-a", DraftVersion: 3, Revision: 7}
 	if err := h.recordMutation(context.Background(), Principal{SubjectID: "admin-1"}, "request-draft", &revision); err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +104,36 @@ func TestAdminMapsAuditFailureToServiceUnavailable(t *testing.T) {
 	status, code := mapError(audit.ErrWriteFailed)
 	if status != http.StatusServiceUnavailable || code != "audit_unavailable" {
 		t.Fatalf("status=%d code=%q", status, code)
+	}
+}
+
+func TestAdminMapsMySQLStorageFailureToServiceUnavailable(t *testing.T) {
+	status, code := mapError(storagemysql.ErrStorage)
+	if status != http.StatusServiceUnavailable || code != "storage_unavailable" {
+		t.Fatalf("status=%d code=%q", status, code)
+	}
+}
+
+func TestAdminConnectionsRouteUsesNoStoreAndMapsServiceErrors(t *testing.T) {
+	handler, _ := testHandler(t)
+	service := &adminConnectionsStub{list: []Connection{{BindingID: "binding", Channel: channels.ChannelTelegram, BotID: "123", Ready: true}}}
+	handler.config.Connections = service
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants/tenant-a/connections", nil)
+	request.Header.Set("Authorization", "Bearer admin-token")
+	request.Header.Set("X-Request-ID", "request-connections")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || service.listTenant != "tenant-a" {
+		t.Fatalf("connection route = status:%d cache:%q tenant:%q body:%s", response.Code, response.Header().Get("Cache-Control"), service.listTenant, response.Body.String())
+	}
+
+	service.listErr = ErrConnectionUnavailable
+	response = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/admin/v1/tenants/tenant-a/connections", nil)
+	request.Header.Set("Authorization", "Bearer admin-token")
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "connections_unavailable") {
+		t.Fatalf("connection unavailable route = status:%d body:%s", response.Code, response.Body.String())
 	}
 }
 
@@ -151,8 +182,8 @@ func TestAdminTenantCreateAndReadUseIndependentPrincipal(t *testing.T) {
 		t.Fatalf("created tenant = %+v", created)
 	}
 
-	// The platform wildcard is limited to first-tenant creation; subsequent
-	// resource access requires an explicit tenant-scoped principal.
+	// A platform wildcard can continue to access the created tenant. Keep a
+	// scoped principal check here to preserve the tenant-admin boundary too.
 	scopedAuth, err := NewStaticAuthenticator("admin-token", []string{created.TenantID})
 	if err != nil {
 		t.Fatal(err)
@@ -175,6 +206,86 @@ func TestAdminTenantCreateAndReadUseIndependentPrincipal(t *testing.T) {
 	handler.ServeHTTP(response, ordinary)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("ordinary token status = %d", response.Code)
+	}
+}
+
+func TestAdminMeAndCollectionListsUseScopedStablePagination(t *testing.T) {
+	handler, _ := testHandler(t)
+	create := func(key string) string {
+		req := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", strings.NewReader(`{"tenant_key":"`+key+`","display_name":"`+key+`"}`))
+		req.Header.Set("Authorization", "Bearer admin-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create tenant status = %d", rec.Code)
+		}
+		var envelope struct {
+			Data struct{ TenantID string } `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		return envelope.Data.TenantID
+	}
+	first := create("first")
+	secondValue, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "second", DisplayName: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := secondValue.TenantID
+	hiddenValue, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "hidden", DisplayName: "hidden"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewStaticAuthenticator("admin-token", []string{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.config.Authenticator = auth
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/me", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), first) || !strings.Contains(rec.Body.String(), second) {
+		t.Fatalf("me response = %d %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/admin/v1/tenants?limit=1", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tenant list = %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"items"`) {
+		t.Fatalf("tenant list missing items: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), first) && !strings.Contains(rec.Body.String(), second) {
+		t.Fatalf("tenant list missing scoped item: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), hiddenValue.TenantID) {
+		t.Fatalf("tenant list exposed out-of-scope tenant: %s", rec.Body.String())
+	}
+	// Filtering must happen before query matching and pagination. Otherwise a
+	// scoped administrator could discover an unauthorized tenant by searching
+	// for its known display name or key.
+	req = httptest.NewRequest(http.MethodGet, "/admin/v1/tenants?q=hidden&limit=1", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scoped tenant search = %d %s", rec.Code, rec.Body.String())
+	}
+	var searchEnvelope struct {
+		Data struct {
+			Items      []struct{ TenantID string }
+			NextCursor string
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &searchEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(searchEnvelope.Data.Items) != 0 || searchEnvelope.Data.NextCursor != "" {
+		t.Fatalf("scoped tenant search returned unauthorized result: %s", rec.Body.String())
 	}
 }
 
@@ -281,7 +392,7 @@ func TestAdminInvalidatesOnlyTheMutatedRuntimeScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler.config.Authenticator = authenticator
-	app, err := handler.config.Apps.Create(context.Background(), agent.CreateInput{TenantID: tenantValue.TenantID, AppKey: "invalidate", DisplayName: "Invalidate"})
+	app, err := handler.config.Apps.Create(context.Background(), appmodel.CreateInput{TenantID: tenantValue.TenantID, AppKey: "invalidate", DisplayName: "Invalidate"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,46 +638,46 @@ func TestAdminHappyPathCoversResourceMutations(t *testing.T) {
 
 func TestAdminCanaryRouteBuildsTenantScopedMutation(t *testing.T) {
 	fixture := newAdminMutationFixture(t)
-	app := createAndPublishAdminRevision(t, fixture)
-	stored, err := fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	appRoot := createAndPublishAdminRevision(t, fixture)
+	stored, err := fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, appRoot.AppID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate, err := fixture.handler.config.Apps.CreateDraft(context.Background(), agent.CreateDraftInput{
-		TenantID: fixture.root.TenantID, AppID: app.AppID, ExpectedAppVersion: stored.Version, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1,
-		Configuration: agent.DraftConfiguration{Instruction: "candidate", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: agent.DefaultRuntimePolicy()},
+	candidate, err := fixture.handler.config.Apps.CreateDraft(context.Background(), appmodel.CreateDraftInput{
+		TenantID: fixture.root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: stored.Version, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1,
+		Configuration: appmodel.DraftConfiguration{Instruction: "candidate", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: appmodel.DefaultRuntimePolicy()},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err = fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	stored, err = fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, appRoot.AppID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, err = fixture.handler.config.Apps.Publish(context.Background(), agent.PublishInput{
-		TenantID: fixture.root.TenantID, AppID: app.AppID, Revision: candidate.Revision, ExpectedAppVersion: stored.Version, ExpectedDraftVersion: candidate.DraftVersion, TenantActive: true,
-		Metadata: agent.ChangeMetadata{ActorType: "admin", ActorID: fixture.principal.SubjectID, Reason: "publish candidate", CorrelationID: "admin-canary-publish"},
+	_, _, _, err = fixture.handler.config.Apps.Publish(context.Background(), appmodel.PublishInput{
+		TenantID: fixture.root.TenantID, AppID: appRoot.AppID, Revision: candidate.Revision, ExpectedAppVersion: stored.Version, ExpectedDraftVersion: candidate.DraftVersion, TenantActive: true,
+		Metadata: appmodel.ChangeMetadata{ActorType: "admin", ActorID: fixture.principal.SubjectID, Reason: "publish candidate", CorrelationID: "admin-canary-publish"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err = fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	stored, err = fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, appRoot.AppID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	stableRevision := int64(1)
 	body := "{\"expected_app_version\":" + strconv.FormatInt(stored.Version, 10) + ",\"candidate_revision\":" + strconv.FormatInt(stableRevision, 10) + ",\"reason\":\"start canary\",\"correlation_id\":\"admin-canary\"}"
 	request := fixture.request(http.MethodPost, body)
-	status, value, err := fixture.handler.apps(context.Background(), request, fixture.principal, fixture.root.TenantID, []string{app.AppID, "canary"})
+	status, value, err := fixture.handler.apps(context.Background(), request, fixture.principal, fixture.root.TenantID, []string{appRoot.AppID, "canary"})
 	if status != http.StatusOK || value == nil || err != nil {
 		t.Fatalf("canary route = status %d value %#v err %v", status, value, err)
 	}
-	selected, err := fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	selected, err := fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, appRoot.AppID)
 	if err != nil || selected.CanaryRevision == nil || *selected.CanaryRevision != stableRevision {
 		t.Fatalf("canary selection = app=%+v err=%v", selected, err)
 	}
 	clearBody := "{\"expected_app_version\":" + strconv.FormatInt(selected.Version, 10) + ",\"reason\":\"clear canary\",\"correlation_id\":\"admin-canary-clear\"}"
-	status, value, err = fixture.handler.apps(context.Background(), fixture.request(http.MethodPost, clearBody), fixture.principal, fixture.root.TenantID, []string{app.AppID, "canary"})
+	status, value, err = fixture.handler.apps(context.Background(), fixture.request(http.MethodPost, clearBody), fixture.principal, fixture.root.TenantID, []string{appRoot.AppID, "canary"})
 	if status != http.StatusOK || value == nil || err != nil {
 		t.Fatalf("canary clear route = status %d value %#v err %v", status, value, err)
 	}
@@ -651,30 +762,30 @@ func assertAdminBackendMutation(t *testing.T, fixture adminMutationFixture) {
 	}
 }
 
-func createAndPublishAdminRevision(t *testing.T, fixture adminMutationFixture) *agent.App {
+func createAndPublishAdminRevision(t *testing.T, fixture adminMutationFixture) *appmodel.App {
 	t.Helper()
-	app, err := fixture.handler.config.Apps.Create(context.Background(), agent.CreateInput{TenantID: fixture.root.TenantID, AppKey: "support", DisplayName: "Support"})
+	appRoot, err := fixture.handler.config.Apps.Create(context.Background(), appmodel.CreateInput{TenantID: fixture.root.TenantID, AppKey: "support", DisplayName: "Support"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	draftBody := "{\"expected_app_version\":1,\"kind\":\"llm\",\"schema_version\":1,\"configuration\":{\"instruction\":\"answer\",\"model_profile_id\":\"mp_01ARZ3NDEKTSV4RRFFQ69G5FAV\"}}"
-	status, draftValue, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPost, draftBody), fixture.principal, fixture.root.TenantID, app.AppID, nil)
+	status, draftValue, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPost, draftBody), fixture.principal, fixture.root.TenantID, appRoot.AppID, nil)
 	if err != nil || status != http.StatusCreated {
 		t.Fatalf("draft create = %d, %v", status, err)
 	}
-	draft := draftValue.(*agent.Revision)
+	draft := draftValue.(*appmodel.Revision)
 	updateBody := "{\"expected_app_version\":1,\"expected_draft_version\":1,\"configuration\":{\"instruction\":\"answer updated\",\"model_profile_id\":\"mp_01ARZ3NDEKTSV4RRFFQ69G5FAV\"}}"
-	if status, _, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPatch, updateBody), fixture.principal, fixture.root.TenantID, app.AppID, []string{strconv.FormatInt(draft.Revision, 10)}); err != nil || status != http.StatusOK {
+	if status, _, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPatch, updateBody), fixture.principal, fixture.root.TenantID, appRoot.AppID, []string{strconv.FormatInt(draft.Revision, 10)}); err != nil || status != http.StatusOK {
 		t.Fatalf("draft update = %d, %v", status, err)
 	}
 	publishBody := "{\"expected_app_version\":1,\"expected_draft_version\":2,\"reason\":\"publish\",\"correlation_id\":\"happy-publish\"}"
-	if status, _, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPost, publishBody), fixture.principal, fixture.root.TenantID, app.AppID, []string{strconv.FormatInt(draft.Revision, 10), "publish"}); err != nil || status != http.StatusOK {
+	if status, _, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPost, publishBody), fixture.principal, fixture.root.TenantID, appRoot.AppID, []string{strconv.FormatInt(draft.Revision, 10), "publish"}); err != nil || status != http.StatusOK {
 		t.Fatalf("draft publish = %d, %v", status, err)
 	}
-	return app
+	return appRoot
 }
 
-func assertAdminBindingMutation(t *testing.T, fixture adminMutationFixture, app *agent.App) {
+func assertAdminBindingMutation(t *testing.T, fixture adminMutationFixture, app *appmodel.App) {
 	t.Helper()
 	bindingBody := "{\"binding_key\":\"primary\",\"channel\":\"wecom\",\"provider_account_id\":\"corp\",\"public_route_key_digest\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"app_id\":\"" + app.AppID + "\",\"secret_ref\":\"secret/corp\",\"reason\":\"create\",\"correlation_id\":\"happy-3\",\"protocol\":{\"wecom\":{\"corp_id\":\"corp\"}}}"
 	status, bindingValue, err := fixture.handler.bindings(context.Background(), fixture.request(http.MethodPost, bindingBody), fixture.principal, fixture.root.TenantID, nil)
@@ -692,12 +803,13 @@ func TestAdminErrorMappingCategories(t *testing.T) {
 		err    error
 		status int
 	}{
+		{ErrConnectionUnavailable, http.StatusServiceUnavailable}, {ErrAgentNotReady, http.StatusConflict}, {ErrConnectionFailed, http.StatusBadGateway},
 		{ErrUnauthenticated, http.StatusUnauthorized}, {ErrForbidden, http.StatusForbidden}, {errNotFound, http.StatusNotFound},
-		{tenant.ErrConflict, http.StatusConflict}, {agent.ErrConflict, http.StatusConflict}, {modelprofile.ErrConflict, http.StatusConflict},
+		{tenant.ErrConflict, http.StatusConflict}, {appmodel.ErrConflict, http.StatusConflict}, {modelprofile.ErrConflict, http.StatusConflict},
 		{backend.ErrConflict, http.StatusConflict}, {channels.ErrConflict, http.StatusConflict}, {postgres.ErrStorage, http.StatusServiceUnavailable},
-		{tenant.ErrInvalid, http.StatusBadRequest}, {agent.ErrInvalidTransition, http.StatusBadRequest}, {modelprofile.ErrDisabled, http.StatusBadRequest},
+		{tenant.ErrInvalid, http.StatusBadRequest}, {appmodel.ErrInvalidTransition, http.StatusBadRequest}, {modelprofile.ErrDisabled, http.StatusBadRequest},
 		{backend.ErrInvalidTransition, http.StatusBadRequest}, {channels.ErrDisabled, http.StatusBadRequest}, {errInvalidRequest, http.StatusBadRequest},
-		{tenant.ErrDuplicateKey, http.StatusConflict}, {agent.ErrDuplicateKey, http.StatusConflict}, {modelprofile.ErrDuplicateKey, http.StatusConflict},
+		{tenant.ErrDuplicateKey, http.StatusConflict}, {appmodel.ErrDuplicateKey, http.StatusConflict}, {modelprofile.ErrDuplicateKey, http.StatusConflict},
 		{backend.ErrDuplicateKey, http.StatusConflict}, {channels.ErrDuplicateKey, http.StatusConflict},
 	}
 	for _, tc := range cases {
@@ -789,26 +901,45 @@ func TestAdminNormalizationAndBodyBoundaries(t *testing.T) {
 	}
 }
 
-func TestGlobalAdminIsFirstTenantOnlyAndCrossTenantReadsAreHidden(t *testing.T) {
+func TestGlobalAdminListsAndReadsAllTenants(t *testing.T) {
 	handler, _ := testHandler(t)
-	for _, key := range []string{"first", "second"} {
-		request := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", strings.NewReader(`{"tenant_key":"`+key+`","display_name":"Tenant"}`))
-		request.Header.Set("Authorization", "Bearer admin-token")
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, request)
-		want := http.StatusCreated
-		if key == "second" {
-			want = http.StatusForbidden
-		}
-		if recorder.Code != want {
-			t.Fatalf("%s tenant status = %d, want %d", key, recorder.Code, want)
-		}
-	}
-	cross := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants/t_01ARZ3NDEKTSV4RRFFQ69G5FAV", nil)
-	cross.Header.Set("Authorization", "Bearer admin-token")
+	request := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", strings.NewReader(`{"tenant_key":"first","display_name":"First"}`))
+	request.Header.Set("Authorization", "Bearer admin-token")
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, cross)
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("cross-tenant read status = %d, want 404", recorder.Code)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("first tenant status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	second, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "second", DisplayName: "Second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants", nil)
+	list.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, list)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), second.TenantID) {
+		t.Fatalf("global tenant list = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	me := httptest.NewRequest(http.MethodGet, "/admin/v1/me", nil)
+	me.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, me)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"tenant_scopes":["*"]`) {
+		t.Fatalf("global principal response = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	read := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants/"+second.TenantID, nil)
+	read.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, read)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("global tenant read = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	app := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants/"+second.TenantID+"/apps", strings.NewReader(`{"app_key":"support","display_name":"Support"}`))
+	app.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, app)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("global app create = %d, body=%s", recorder.Code, recorder.Body.String())
 	}
 }

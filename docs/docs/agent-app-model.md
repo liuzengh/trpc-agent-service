@@ -1,8 +1,12 @@
 # Agent App 模型与发布边界
 
-> 本阶段承接 Tenant 闭环，定义租户级 Agent App 的稳定身份、版本化执行配置、
+> 本文承接 Tenant 闭环，定义租户级 Agent App 的稳定身份、版本化执行配置、
 > 发布与回滚语义，以及供 Agent Factory 消费的一次执行快照。实现跟踪见
 > [Issue #17](https://github.com/XnLemon/trpc-agent-service/issues/17)。
+
+> 当前交付：schema v1 支持 `llm` 和顺序 `chain` 两种 Agent kind；
+> `trpcservice/agent/factory.go` 通过 `kind + schema_version` 注册并构造对应 Agent，
+> 发布、回滚、灰度候选、执行快照和租户工具授权均由控制面与运行时测试覆盖。
 
 ## 目标与边界
 
@@ -11,14 +15,14 @@ Agent App 是租户创建、发布和路由 Agent 的控制面对象。它必须
 - 为 Admin API、Channel Binding 和审计提供稳定的应用身份。
 - 为 Worker 和 Agent Factory 提供不可变、可复现的执行配置。
 
-因此模型不能把名称、草稿、当前配置和历史版本混成一个可覆盖的 JSON 对象。本阶段采用
+因此模型不能把名称、草稿、当前配置和历史版本混成一个可覆盖的 JSON 对象。当前采用
 “稳定根实体 + 版本化 Revision”结构：`agent_app` 保存身份、生命周期和当前发布指针，
 `agent_app_revision` 保存草稿或已发布的执行定义。
 
-本阶段覆盖领域模型、发布/回滚、InMemory Repository 和执行快照契约；不实现 Gateway、
-Worker、Admin HTTP API、具体模型客户端、Secret Manager 或跨节点缓存。Issue #37 的
-`migrations/0001_control_plane.up.sql` 复用本页 DDL，`0002` 提供受控写入口；SQL Repository
-和运行时装配仍由该 Issue 的代码阶段实现。
+当前交付覆盖领域模型、发布/回滚、候选版本、PostgreSQL/InMemory Repository、执行快照、
+Agent Factory 和服务级运行时装配。Issue #37 的 `migrations/0001_control_plane.up.sql`
+与 `0002` 受控写入口复用本页 DDL，SQL Repository、Secret Resolver、Gateway 和 Channel
+通过各自开发文档的集成测试共同验收。
 
 ## 核心决策
 
@@ -35,15 +39,16 @@ App 根实体使用乐观锁 `version`；Revision 使用 App 内单调递增的 
 发布后的 Revision 永久不可修改。更新配置必须维护草稿，再发布为新的 Revision。回滚不覆盖
 内容，只把 `current_revision` 切换到一个历史已发布 Revision。
 
-### 第一阶段只执行 LLMAgent
+### 第一阶段支持 LLMAgent 与顺序 Chain
 
-模型保留 `agent_kind` 和 `schema_version`，但第一阶段只接受 `agent_kind = 'llm'`。
-Graph、Chain、Parallel 和 Cycle 的结构与拓扑校验应在各自设计完成后显式扩展，不能先接受
-任意 kind 或把未验证配置直接交给框架。
+模型保留 `agent_kind` 和 `schema_version`。schema v1 接受 `agent_kind = 'llm'` 和
+`agent_kind = 'chain'`：Chain 由 2–32 个有序、命名且经过校验的 LLMAgent step 组成，
+每个 step 继承父 Revision 的模型、工具 allowlist、generation 和 runtime policy。
+Agent Factory 对 schema version 和 kind 做显式注册与校验，未知组合不会进入运行时。
 
 ### 引用能力，不持有运行时对象
 
-Revision 保存 `model_profile_id`、工具授权和后续 Knowledge/Backend 引用，不保存
+Revision 保存 `model_profile_id`、工具授权和 Knowledge/Backend 引用，不保存
 `model.Model`、`tool.Tool`、数据库连接、函数指针或进程内对象。
 
 模型 API key、IM token、数据库密码和 Tool 凭据只存在于 Secret Manager。Agent Factory
@@ -54,7 +59,8 @@ Revision 保存 `model_profile_id`、工具授权和后续 Knowledge/Backend 引
 
 ## PostgreSQL 数据模型
 
-以下 DDL 描述目标完整性和事务语义；本阶段 Go 实现仍使用 InMemory Repository。
+以下 DDL 与 migration 描述并落实完整性和事务语义；InMemory、PostgreSQL 和 MySQL Repository
+共享同一领域边界。
 
 ### Agent App 根表
 
@@ -102,7 +108,7 @@ CREATE TABLE agent_app_revision (
     state           TEXT NOT NULL DEFAULT 'draft'
                     CHECK (state IN ('draft', 'published')),
     draft_version   BIGINT NOT NULL DEFAULT 1 CHECK (draft_version >= 1),
-    agent_kind      TEXT NOT NULL CHECK (agent_kind = 'llm'),
+    agent_kind      TEXT NOT NULL CHECK (agent_kind IN ('llm', 'chain')),
     schema_version  INT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
 
     description        TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 2000),
@@ -245,9 +251,10 @@ ALTER TABLE tenant
     REFERENCES agent_app(tenant_id, app_id);
 ```
 
-后续 Tool Registry 落地后，`tool_id` 必须增加同租户复合外键或等价校验。数据库外键只能
-保证默认 App 的归属和存在；设置默认对象时，Admin API 还必须验证 App active 且存在有效
-当前 Revision。暂停或停用默认 App 时，不得静默回退到其他 App。
+已发布 Revision 持久化显式 `tool_id` 授权；Runner 构造时通过已安装的 `ToolRegistry`
+解析这些 ID，required 工具不可用会使构造失败。数据库外键保证默认 App 的归属和存在；
+设置默认对象时，Admin API 还验证 App active 且存在有效当前 Revision。暂停或停用默认
+App 时，不得静默回退到其他 App。
 
 生产角色不能直接修改发布表或绕过上述触发器。与 Tenant 状态变更相同，发布、回滚和状态
 迁移应通过固定 `search_path` 的受控函数完成，并先撤销 PostgreSQL 默认授予 `PUBLIC` 的
@@ -304,7 +311,7 @@ Tenant 与 App 是连续的两道门禁：只有两者都 active 才能创建新
 任一步失败都必须回滚，旧 `current_revision` 继续提供服务。
 
 摘要使用 SHA-256 小写十六进制，输入为确定性序列化后的 agent kind、schema version、
-Prompt、模型引用、排序后的工具授权、generation config 和 runtime policy。摘要不包含时间、
+Prompt、模型引用、排序后的工具授权、generation config、runtime policy 和 Chain steps。摘要不包含时间、
 actor 或 draft version。Map key、集合顺序和空值语义必须规范化。摘要用于缓存和审计，不是
 签名或授权凭据。
 
@@ -335,34 +342,37 @@ App 并写 Outbox，不能先发布成功再尽力写审计。
 
 ## Go 目录与 Repository
 
-沿用仓库现有 `trpcservice/agent` 责任域，不新增平级的 `trpcservice/agentapp`。App、Revision、
-Repository 契约和执行快照放在 `agent` 根包；单进程实现放在 `agent/inmemory`。后续 Agent
-Factory 仍由 `agent` 包负责，但领域状态、仓储和运行时装配应按文件保持清晰边界。
+`trpcservice/app` 持有 App、Revision 和 Repository；`trpcservice/agent` 持有不可变执行快照与
+Agent Factory。领域状态、仓储和运行时装配保持清晰边界。
 
 ```text
-trpcservice/agent/
-├── agent.go          # 包说明及 tRPC-Agent-Go 复用边界
+trpcservice/app/
 ├── app.go            # App 根实体、生命周期和校验
 ├── revision.go       # 草稿、发布版本及摘要
 ├── repository.go     # 控制面 Repository 契约
-├── runtime.go        # 执行快照和 Factory 输入边界
-└── inmemory/
-    └── inmemory.go   # 单进程开发/测试实现
+├── inmemory/         # 单进程开发/确定性测试实现
+├── postgres/         # PostgreSQL Repository
+└── mysql/            # MySQL Repository
+
+trpcservice/agent/
+├── execution.go      # 执行快照和 Factory 输入边界
+└── factory.go        # 按 kind + schema version 构造 Agent
 ```
 
-若后续 Graph/Chain 等实现使根包职责过大，应先通过设计 Issue 决定子包边界，不能在本阶段为
-假设性扩展创建重复的 `agentapp` 抽象。
+Agent Factory 与控制面 Repository 保持稳定的包边界，扩展实现继续通过
+`kind + schema_version` 注册，不复制同一领域抽象。
 
 ```go
 type Repository interface {
-    Create(context.Context, CreateInput) (*AgentApp, error)
-    Get(context.Context, string, string) (*AgentApp, error)
+    Create(context.Context, CreateInput) (*App, error)
+    Get(context.Context, string, string) (*App, error)
     CreateDraft(context.Context, CreateDraftInput) (*Revision, error)
     UpdateDraft(context.Context, UpdateDraftInput) (*Revision, error)
     GetRevision(context.Context, string, string, int64) (*Revision, error)
-    Publish(context.Context, PublishInput) (*AgentApp, *Revision, ChangeEvent, error)
-    Rollback(context.Context, RollbackInput) (*AgentApp, ChangeEvent, error)
-    TransitionStatus(context.Context, TransitionStatusInput) (*AgentApp, ChangeEvent, error)
+    Publish(context.Context, PublishInput) (*App, *Revision, ChangeEvent, error)
+    Rollback(context.Context, RollbackInput) (*App, ChangeEvent, error)
+    SetCanary(context.Context, SetCanaryInput) (*App, ChangeEvent, error)
+    TransitionStatus(context.Context, TransitionStatusInput) (*App, ChangeEvent, error)
 }
 ```
 
@@ -376,12 +386,13 @@ type Repository interface {
 - `app_key` 唯一索引按 tenant 分区。
 - Revision 编号只在同一 App 内单调分配。
 - version 冲突返回可识别的 sentinel 或 typed error。
-- InMemory 只用于单进程开发和测试，不承诺持久化或跨 Worker 一致性。
+- InMemory 用于单进程开发和确定性测试；PostgreSQL/MySQL Repository 持久化控制面状态，
+  Worker 通过选定的共享 runtime capability 获得跨节点执行状态。
 
 ## 执行快照与 Agent Factory
 
 `AgentExecutionSnapshot` 是一次 Worker 执行的不可变输入，至少包含 Tenant ID/version、
-App ID/key/version、固定 Revision/content digest、LLMAgent 无密钥配置及依赖引用。
+App ID/key/version、固定 Revision/content digest、无密钥 Agent 定义及依赖引用。
 
 快照构造器连续验证：
 
@@ -397,16 +408,18 @@ App ID/key/version、固定 Revision/content digest、LLMAgent 无密钥配置�
 
 | Revision 配置 | tRPC-Agent-Go 边界 |
 | --- | --- |
-| App key / 展示元数据 | LLMAgent name 与 description；稳定运行身份仍使用 App ID |
-| instruction / global instruction | LLMAgent Instruction / GlobalInstruction |
+| App key / 展示元数据 | LLMAgent 或 Chain name 与 description；稳定运行身份仍使用 App ID |
+| instruction / global instruction | LLMAgent 的 Instruction / GlobalInstruction；Chain 为父级运行说明 |
+| chain steps | `chainagent.New` 的有序 LLMAgent 子 Agent |
 | model profile ref | 同租户 Model Registry 解析为 `model.Model` |
-| tool allowlist | 同租户 Tool Registry 解析为 `tool.Tool` / `tool.ToolSet` |
+| tool allowlist | 已安装 `ToolRegistry` 按已发布 Revision 授权解析为 `tool.Tool` / `tool.ToolSet` |
 | generation config | `model.GenerationConfig` 的受支持字段 |
 | runtime policy | Tool 并行、并发、循环和有界执行选项 |
 | tenant/app/revision/digest | Factory 缓存键及 OTel attributes |
 
-Factory 复用 tRPC-Agent-Go 的 LLMAgent、Agent、Runner、Tool、Session 和 Memory。平台层只负责
-租户授权、配置解析、依赖注入、缓存和审计，不复制框架执行循环。
+Factory 复用 tRPC-Agent-Go 的 LLMAgent、Chain、Agent、Runner、Tool、Session 和 Memory。
+平台层只负责租户授权、配置解析、依赖注入、缓存和审计，不复制框架执行循环；未知的
+`kind + schema_version` 不会回退到 LLMAgent。
 
 Factory 缓存键至少包含：
 
@@ -432,16 +445,17 @@ tenant_id + app_id + revision + content_digest
 - 发布、回滚、状态事件的 actor、reason、correlation 和版本字段。
 - InMemory Repository race 测试。
 
-## 后续顺序
+## 交付关系
 
 ```text
 tenant
-  └── agent_app + revision
-        ├── backend_profile
-        ├── model/tool/knowledge references
-        └── channel_binding
-              └── Gateway / Worker 最小执行链路
+  ├── agent_app + revision
+  │     └── model/tool/knowledge references
+  ├── backend_profile
+  └── channel_binding -> agent_app
+        └── Gateway / Worker 最小执行链路
 ```
 
-Agent App 闭环后优先设计 `backend_profile`，使 Revision 的数据能力引用和 Tenant 默认后端
-可通过同租户复合约束落地；随后设计 `channel_binding`，把验签后的外部账号路由到已发布 App。
+Agent App Revision 通过同租户复合约束引用 Model Profile；ExecutionPlan 将同租户的
+App/Revision、Model Profile 和 Backend Profile 固定为一次执行快照。Channel Binding 持有
+自身的同租户 App 引用，可信 Channel 路由选定 App 后由 Gateway 使用该固定 ExecutionPlan 执行。

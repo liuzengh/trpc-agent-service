@@ -20,3 +20,6 @@ docs/site/
 # Never send populated deployment credentials to the Docker build context.
 deploy/service.env
 deploy/*.env
+
+**/node_modules/
+trpcservice/web/dist/

@@ -6,33 +6,39 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
 func TestNewRunnerMaterializesPlanStorageCapability(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
+	plan, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: fixture.tenantSnapshot, AppRoot: fixture.app, Revision: fixture.revision,
+		ModelProfile: fixture.modelProfile, ModelCatalog: fixture.modelCatalog,
+		BackendProfile: fixture.backendProfile, BackendCatalog: fixture.backendCatalog,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	sessions := inmemory.NewSessionService()
 	builds := 0
-	factory := backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+	factory := storagefactory.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 		if input.TenantID != fixture.root.TenantID {
 			t.Fatalf("storage factory tenant = %q", input.TenantID)
 		}
 		builds++
-		set, err := backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: sessions})
+		set, err := storagefactory.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: sessions})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return set, nil
 	})
-	runner, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{}, nil, factory)
+	runner, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), &runtimeModelFactory{}, nil, factory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,17 +55,21 @@ func TestNewRunnerMaterializesPlanStorageCapability(t *testing.T) {
 
 func TestNewRunnerClosesStorageCapabilityWhenModelBuildFails(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
+	plan, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: fixture.tenantSnapshot, AppRoot: fixture.app, Revision: fixture.revision,
+		ModelProfile: fixture.modelProfile, ModelCatalog: fixture.modelCatalog,
+		BackendProfile: fixture.backendProfile, BackendCatalog: fixture.backendCatalog,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	base := inmemory.NewSessionService()
 	var closes atomic.Int32
 	service := &closeCountingSession{Service: base, closes: &closes}
-	factory := backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
-		return backend.NewCapabilitySet(fixture.root.TenantID, map[backend.Capability]any{backend.CapabilitySession: service})
+	factory := storagefactory.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+		return storagefactory.NewCapabilitySet(fixture.root.TenantID, map[backend.Capability]any{backend.CapabilitySession: service})
 	})
-	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{err: errors.New("factory failed")}, nil, factory); err == nil {
+	if _, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), &runtimeModelFactory{err: errors.New("factory failed")}, nil, factory); err == nil {
 		t.Fatal("NewRunner unexpectedly succeeded")
 	}
 	if closes.Load() != 1 {
@@ -68,15 +78,18 @@ func TestNewRunnerClosesStorageCapabilityWhenModelBuildFails(t *testing.T) {
 	_ = base.Close()
 }
 
-func TestNewRunnerWithObservabilityRecordsStorageFactorySuccess(t *testing.T) {
+func TestNewRunnerWithConfigRecordsStorageFactorySuccess(t *testing.T) {
 	fixture := runtimeFixture(t)
 	plan := newExecutionPlanForRunner(t, fixture)
 	telemetry := &runtimeTelemetryProvider{}
 	sessions := inmemory.NewSessionService()
-	factory := backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
-		return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: sessions})
+	factory := storagefactory.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+		return storagefactory.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: sessions})
 	})
-	runner, err := NewRunnerWithObservability(context.Background(), plan, nil, &runtimeModelFactory{}, nil, telemetry, factory)
+	runner, err := agent.NewRunnerWithConfig(context.Background(), agent.RunnerConfig{
+		Input: agentRunnerInputForTest(t, plan), ModelFactory: &runtimeModelFactory{}, StorageFactory: factory,
+		Observability: telemetry,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,15 +102,18 @@ func TestNewRunnerWithObservabilityRecordsStorageFactorySuccess(t *testing.T) {
 	assertTelemetryMetric(t, telemetry, metrics.BackendOperationDuration, -1, map[string]string{"component": "storage", "provider": "other", "status": "success", "error_class": ""})
 }
 
-func TestNewRunnerWithObservabilityRecordsStorageFactoryFailure(t *testing.T) {
+func TestNewRunnerWithConfigRecordsStorageFactoryFailure(t *testing.T) {
 	fixture := runtimeFixture(t)
 	plan := newExecutionPlanForRunner(t, fixture)
 	telemetry := &runtimeTelemetryProvider{}
 	factoryErr := errors.New("storage unavailable")
-	factory := backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+	factory := storagefactory.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 		return nil, factoryErr
 	})
-	runner, err := NewRunnerWithObservability(context.Background(), plan, nil, &runtimeModelFactory{}, nil, telemetry, factory)
+	runner, err := agent.NewRunnerWithConfig(context.Background(), agent.RunnerConfig{
+		Input: agentRunnerInputForTest(t, plan), ModelFactory: &runtimeModelFactory{}, StorageFactory: factory,
+		Observability: telemetry,
+	})
 	if runner != nil || !errors.Is(err, factoryErr) {
 		t.Fatalf("runner = %v, err = %v", runner, err)
 	}

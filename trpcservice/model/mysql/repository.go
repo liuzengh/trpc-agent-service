@@ -6,6 +6,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 )
@@ -18,6 +20,73 @@ type ModelRepository struct {
 }
 
 var _ model.Repository = (*ModelRepository)(nil)
+
+// List returns a stable page of Model Profiles belonging to one tenant.
+func (r *ModelRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*model.Profile, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset, err := decodeListCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	rows, err := r.db.QueryContext(ctx, modelSelect+` WHERE tenant_id = ? ORDER BY profile_id`, tenantID)
+	if err != nil {
+		return nil, "", ErrStorage
+	}
+	defer rows.Close()
+	query, status = strings.ToLower(strings.TrimSpace(query)), strings.TrimSpace(status)
+	items := make([]*model.Profile, 0)
+	for rows.Next() {
+		value, err := scanModelProfile(r.catalog, rows)
+		if err != nil {
+			return nil, "", ErrStorage
+		}
+		if status != "" && string(value.Status) != status {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(value.ProfileID+" "+value.ProfileKey+" "+value.DisplayName), query) {
+			continue
+		}
+		items = append(items, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", ErrStorage
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].ProfileID < items[j].ProfileID })
+	if offset >= len(items) {
+		return []*model.Profile{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
+func decodeListCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	var offset int
+	if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	return offset, nil
+}
 
 // NewRepository creates a repository that revalidates every decoded
 // profile against the same trusted ProviderCatalog used for writes.

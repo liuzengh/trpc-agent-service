@@ -79,13 +79,13 @@ Tempo Explore 中的真实服务器 Trace ID 为 `f9a3d27f6e711ff0eba6b098ebcc7d
 ![图 3：真实 WeCom 请求的 Tempo trace 泳道](assets/issue-88/trace-explore.png)
 
 该 trace 对应的 `message_event` 已进入 `replied`，`reply_outbox` 已进入 `sent`。
-真实 WeCom/Telegram 请求需要在服务进程配置 OTLP endpoint 后，通过 Grafana Explore →
-Tempo 按时间或 Trace ID 查询；异步 Outbox channel.send 的跨进程 parent context
-持久化由 follow-up Issue #91 跟踪。
+真实 WeCom/Telegram 请求在服务进程配置 OTLP endpoint 后，可通过 Grafana Explore →
+Tempo 按时间或 Trace ID 查询；异步 Outbox `channel.send` 使用持久化的 W3C `traceparent`
+恢复 parent context，具体链路见 [Issue #91](issue-91-trace-context.md)。
 
 ## 一键化部署配置清单
 
-后续部署脚本可以直接复用 `deploy/observability/docker-compose.yml` 与同目录配置文件。
+部署脚本直接复用 `deploy/observability/docker-compose.yml` 与同目录配置文件。
 部署前只需要准备服务进程的 OTLP 环境变量：
 
 ```dotenv
@@ -127,4 +127,4 @@ Grafana 默认 datasource 会自动 provision：Prometheus 与 Tempo；dashboard
 - [x] Collector、Prometheus、Grafana 本地配置
 - [x] endpoint、配置边界和 exporter failure focused tests
 - [x] 用真实服务流量完成一次 Trace 验证（测试服务器 WeCom 请求）
-- [ ] 用真实服务流量完成一次本地 metrics/dashboard 验证（需要数据库和模型凭据）
+- [x] 用真实服务流量完成一次本地 metrics/dashboard 验证（Compose service、Collector、Prometheus 和 Grafana）

@@ -1,10 +1,11 @@
 # PostgreSQL 控制面持久化与启动装配
 
 > 本页是 Issue #37 的实现契约。它复用已经合入的 Tenant、Agent App/Revision、Backend
-> Profile 和 Channel Binding 设计，并补齐 Model Profile 的持久化形状、统一 migration 顺序、
-> Repository 事务边界和进程启动装配。控制面 DDL 与受控 Repository 写入口分别落在
-> `0001`、`0002` 两个有序 migration；Go Repository 和 bootstrap 实现在
-> `trpcservice/{tenant,agent,model,backend,channels}/postgres`；每个领域包拥有自己的
+> Profile 和 Channel Binding 设计，并记录 Model Profile 的持久化形状、统一 migration 顺序、
+> Repository 事务边界和进程启动装配。控制面 DDL 与受控 Repository 写入口分别从
+> `0001`、`0002` 开始，`migrations.Apply` 执行完整的嵌入式序列至 `0017_agent_chain.up.sql`；
+> Go Repository 和 bootstrap 实现在
+> `trpcservice/{tenant,app,model,backend,channels}/postgres`；每个领域包拥有自己的
 > SQL Repository、行解码和领域 codec。`trpcservice/storage/postgres` 只提供不依赖任何
 > 控制面领域的连接池、事务、错误映射与 JSON 基础设施；`trpcservice/bootstrap` 负责装配。
 
@@ -29,14 +30,15 @@ explicit BootstrapConfig
              └── HTTP Gateway + readiness
 ```
 
-本 Issue 只持久化当前控制面纵向链路需要的六类对象：`tenant`、`agent_app`、
+本 Issue 持久化当前控制面纵向链路的六类对象：`tenant`、`agent_app`、
 `agent_app_revision`、`model_profile`、`backend_profile` 和 `channel_binding`。当前
 `gateway.PlanResolver` 的直接 Repository 输入仍只有 Tenant、Agent App、Model Profile 和
 Backend Profile 四类，外加两个 Provider Catalog；它不读取 Channel Binding。Channel Binding
 由 Channel Adapter/Candidate Index 完成候选发现和可信路由，bootstrap 必须把它作为独立的
 Repository/候选索引依赖装配，只有形成可信 Principal 后才进入 Dispatcher → PlanResolver。
-Session、Event、Memory、Summary、Knowledge、Artifact、Redis、向量库、对象存储、真实
-KMS/Vault、Admin API 和分布式 Outbox 消费仍由后续 Issue 负责。
+Session、Event、Memory、Summary、Knowledge、Artifact、Redis、S3-compatible object、Vault、
+Admin API 和 Outbox 消费均通过对应 runtime 与 bootstrap 模块接入；本页记录它们与 PostgreSQL
+控制面的事务和启动边界。
 
 ## 既有表设计的复用关系
 
@@ -58,13 +60,27 @@ Profile 或 Binding 被另一个租户引用。key 的唯一性也都限定在�
 
 ## Migration 组织与执行前提
 
-迁移文件不依赖具体迁移工具，调用方负责按文件名顺序执行；迁移工具不是本 Issue 的范围。
-第一版使用两个有序 migration，目标目录为：
+迁移由 `migrations` 包按文件名和版本顺序执行，并通过历史摘要、连续版本和数据库锁保证可恢复；
+控制面与运行时 migration 使用同一套启动装配入口。当前嵌入式有序 migration 序列包括：
 
 ```text
-migrations/
-├── 0001_control_plane.up.sql
-└── 0002_control_plane_repository_functions.up.sql
+0001_control_plane.up.sql
+0002_control_plane_repository_functions.up.sql
+0003_runtime_storage.up.sql
+0004_runtime_session_delete_cascade.up.sql
+0005_runtime_event_history.up.sql
+0006_audit_usage.up.sql
+0007_execution_audit_handoff.up.sql
+0008_runtime_reply_target.up.sql
+0009_runtime_reply_correlation.up.sql
+0010_agent_app_canary.up.sql
+0011_reply_trace_parent.up.sql
+0012_runtime_capabilities.up.sql
+0013_execution_queue.up.sql
+0014_wecom_aibot_channel.up.sql
+0015_runtime_attachments.up.sql
+0016_runtime_reply_media.up.sql
+0017_agent_chain.up.sql
 ```
 
 执行约定如下：
@@ -189,10 +205,10 @@ provider 细节。每个方法都必须把 `context.Context` 传给 `QueryContex
 当前 `cmd/trpc-service` 的生产入口由 `bootstrap.NewFromEnvironment` 装配真实图，而不是
 启动一个永久不可用的空图。它要求 `TRPC_POSTGRES_DSN`、`TRPC_API_TOKEN`、
 `TRPC_TENANT_ID`、`TRPC_APP_ID` 和 `TRPC_MODEL_API_KEY`；可选的
-`TRPC_MODEL_PROVIDER`（当前仅支持 `openai`）、`TRPC_MODEL_NAMES`、`TRPC_MODEL_ENDPOINT_HOSTS`、
+`TRPC_MODEL_PROVIDER`、`TRPC_MODEL_NAMES`、`TRPC_MODEL_ENDPOINT_HOSTS`、
 `TRPC_MODEL_SECRET_REF` 用于建立受信 Model Catalog 和 SecretRef 映射。缺少必需配置时
-进程在绑定 HTTP 端口前失败；`NewUnavailable` 只保留给无外部依赖的测试装配。当前 Session
-capability 仍使用进程内实现，持久化 Session 属于后续 Issue。
+进程在绑定 HTTP 端口前失败；`NewUnavailable` 只用于无外部依赖的测试装配。Session capability
+根据显式配置使用 PostgreSQL、Redis 或 InMemory，并在 readiness 中报告实际后端。
 
 装配顺序固定为：
 
@@ -201,7 +217,7 @@ validate explicit config
   → verify database + required catalog/capability
   → construct SQL repositories
   → construct PlanResolver
-  → construct RunnerRegistry(runtime.NewRunner)
+  → construct agent/runnerfactory.NewRuntimeRunnerRegistry
   → construct Dispatcher
   → construct HTTPHandler with real Dispatcher/Authenticator
   → expose readiness
@@ -217,13 +233,13 @@ SecretResolver、fake ModelFactory 和 InMemory Session，不需要真实模型�
 和其他资源。借用的 Session、Resolver、Factory 由其声明的 owner 关闭；超时返回稳定的关闭
 错误并交给上层处理，不能无限等待 Runner lease 或数据库连接。
 
-## 验证矩阵与非目标
+## 验证矩阵与交付证据
 
 本页契约对应的验证入口如下；它们是 Issue #37 的纵向实现证据：
 
 - `migrations/migration_test.go`：干净 PostgreSQL migration、权限、跨租户 FK、published
   current pointer、延迟 binding 和嵌套凭据键检查；
-- `trpcservice/controlplane/postgres/integration_test.go`：五类 SQL Repository 的租户作用域、
+- `trpcservice/internal/testsupport/postgres/integration_test.go`：五类 SQL Repository 的租户作用域、
   生命周期、发布、候选消费、Outbox、Context 取消和深拷贝路径；CI 使用独立 PostgreSQL
   服务执行；
 - `scripts/coverage.sh`：使用单次原生 Go `-coverpkg` profile 执行各包单测及上述跨领域集成测试，
@@ -234,6 +250,6 @@ SecretResolver、fake ModelFactory 和 InMemory Session，不需要真实模型�
 - 生产代码中的 `codec.go`、受控 SQL 函数和稳定错误映射保证 Secret 不进入运行时对象或底层
   数据库错误。
 
-本 Issue 不实现 Session/Event/Memory 等完整持久化后端、迁移工具、真实 KMS/Vault、完整
-Admin API、分布式幂等/Outbox 消费或无状态 Worker 水平扩展。它只建立后续这些能力可以安全
-接入的共享控制面和启动边界。
+控制面迁移、Repository、bootstrap、readiness、Admin API、runtime storage、Outbox、Secret
+Resolver、Channel candidate routing 和重启恢复共同形成可运行的 PostgreSQL 纵向链路；其
+验证由本页列出的单测、live smoke、fault-injection E2E 和部署 golden path 覆盖。

@@ -10,19 +10,19 @@ Backend Profile 是租户级控制面根实体。它把一次 Agent 执行所需
 provider 配置，使 Gateway/Worker 可以固定 Session、Memory、Knowledge、Artifact 和 Audit
 后端，而不把 Secret 值或进程内客户端写入配置。
 
-本阶段交付以下边界：
+当前交付包含以下边界：
 
 - 稳定 Profile 身份、租户内唯一 key、生命周期和乐观锁版本。
-- 五种能力绑定以及严格的 provider/config 规范化契约。
+- 六种能力绑定以及严格的 provider/config 规范化契约。
 - 显式以 `tenant_id + profile_id` 为作用域的 InMemory Repository。
 - 创建、完整配置替换、暂停、恢复和停用的结构化变更事件。
 - 同时固定 Tenant/Profile 版本和配置摘要的不可变执行快照。
 - 只含 Secret 引用的 Storage Factory 输入。
 - PostgreSQL 目标 DDL、同租户默认引用和 tRPC-Agent-Go 装配映射。
 
-本阶段不创建 Redis、SQL、向量库、对象存储或审计后端客户端，不引入 tRPC-Agent-Go 依赖，
-不实现 Secret Manager、数据迁移、Gateway、Worker 或跨节点配置缓存。Issue #37 的
-`migrations/0001_control_plane.up.sql` 复用本页 DDL；SQL Repository 和运行时装配另行实现。
+本页的 Profile、Catalog、Secret Resolver、Storage Factory、migration 和 runtime adapter
+共同形成无密钥的后端装配链路。Issue #37 的 `migrations/0001_control_plane.up.sql` 复用本页
+DDL；SQL Repository、Gateway、Worker 和跨节点缓存通过对应模块接入。
 
 ## 核心模型
 
@@ -45,7 +45,7 @@ Profile 至少包含：
 | `created_at` / `updated_at` | UTC；更新时保持创建时间不变 |
 
 `profile_id` 和 `profile_key` 都不是全局授权边界。即使 ID 冲突概率可忽略，所有读取和修改仍
-必须同时携带 Tenant ID；按 key 查询若后续增加，也必须显式限定 Tenant。
+必须同时携带 Tenant ID；按 key 查询同样显式限定 Tenant。
 
 ### Capability Binding
 
@@ -77,8 +77,8 @@ type CapabilityBinding struct {
 
 ### Provider Schema Catalog
 
-租户提交的 provider 名称不能自动变成可执行插件。本阶段定义由进程启动代码构造的、只读的
-Provider Schema Catalog；Catalog 属于受信任平台代码，不属于租户配置。每条 schema 明确：
+租户提交的 provider 名称不能自动变成可执行插件。Provider Schema Catalog 由进程启动代码
+构造并保持只读；Catalog 属于受信任平台代码，不属于租户配置。每条 schema 明确：
 
 - provider 规范名以及允许绑定的 capability。
 - endpoint 是禁止、可选还是必需。
@@ -89,9 +89,8 @@ Repository 在创建和完整配置更新时必须通过同一个 Catalog 规范
 capability/provider 组合、未知 option、非法值或缺少必需字段都返回可识别的 invalid error。
 Factory 只消费已经规范化的快照，不能再次接受任意 JSON 或忽略未知字段。
 
-Catalog 允许后续适配器逐步注册 tRPC-Agent-Go 已支持的 provider，而不在本 Issue 假装已经
-实现真实客户端。单元测试使用受控 schema 覆盖 endpoint、option 和 Secret 规则；真实 adapter
-落地时必须同时增加对应 schema、Factory 映射与集成测试。
+Catalog 注册运行时允许使用的 tRPC-Agent-Go provider。单元测试使用受控 schema 覆盖 endpoint、
+option 和 Secret 规则；每个 adapter 同时提供对应 schema、Factory 映射与集成测试。
 
 ### 无密钥配置规则
 
@@ -101,7 +100,7 @@ Catalog 允许后续适配器逐步注册 tRPC-Agent-Go 已支持的 provider，
   2048 字节。百分号转义可能扩展非 ASCII path，因此两个边界都会独立校验。原始文本和解析后的 path
   都不允许控制字符。
 - URI 不允许 userinfo、query 或 fragment，因而不能携带用户名、密码或签名参数。
-- 第一版只接受单一 hostname authority；多节点/故障转移列表必须由后续 provider schema 以
+- 当前 binding 接受单一 hostname authority；多节点/故障转移列表由 provider schema 以
   结构化字段建模，不能塞入逗号分隔的 endpoint 字符串。
 - provider schema 决定 endpoint 是否必需以及允许的 scheme。
 
@@ -112,7 +111,7 @@ allowlist；`password`、`passwd`、`pwd`、`passphrase`、`token`、`api_key`�
 
 `secret_ref` 是不透明引用，trim 后为 1–256 个安全字符。它可以参与摘要，以便 Secret 引用
 切换产生新缓存键，但引用解析结果永远不能回写 Profile、事件、快照或 Factory 输入。真正的
-Secret Resolver 在后续 Issue 中以可信 Tenant 作用域解析引用，并直接把结果交给具体 adapter。
+Secret Resolver 以可信 Tenant 作用域解析引用，并直接把结果交给具体 adapter。
 
 ### 规范化与内容摘要
 
@@ -155,10 +154,9 @@ Profile version，但只有后端语义改变才改变 digest。状态转换不�
 - 暂停或停用只影响后续快照，不篡改已经创建的执行快照。
 
 Tenant 是第一道运行门禁，Backend Profile 是第二道门禁；只有二者都 active 才能创建新快照。
-本阶段唯一合法的 Profile 选择源是 `tenant.default_backend_profile_id`。它为 `NULL`、指向非
-active Profile 或与传入 Profile 不一致时，快照构造都必须失败，不得回退到平台默认、其他
-Profile 或其他租户。未来若 Agent Revision 或 Channel Binding 支持显式覆盖，必须先定义新的
-可信选择来源、同租户校验和优先级，再扩展快照构造器；不能把任意 Profile 参数当作授权。
+当前默认 Profile 选择源是 `tenant.default_backend_profile_id`。它为 `NULL`、指向非 active
+Profile 或与传入 Profile 不一致时，快照构造失败；选择始终经过可信来源、同租户校验和固定
+优先级，不能把任意 Profile 参数当作授权。
 
 ## Repository 与审计事件
 
@@ -168,7 +166,7 @@ Profile 或其他租户。未来若 Agent Revision 或 Channel Binding 支持显
 trpcservice/backend/
 ├── backend.go       # 包说明、Profile、binding、Catalog 和领域校验
 ├── repository.go    # 租户作用域 Repository、写入输入和事件
-├── runtime.go       # BackendExecutionSnapshot 与 Factory 输入
+├── execution.go      # BackendExecutionSnapshot 与 Factory 输入
 └── inmemory/
     ├── inmemory.go  # 单进程 Repository
     └── rwmutex.go   # 可响应 Context 取消的锁边界
@@ -220,7 +218,8 @@ Outbox；不能先提交配置再尽力记录事件。事件同样返回防御�
 - 可取消锁保证等待写锁时 Context 取消会及时返回；不能在锁内执行外部 I/O。
 - Repository 保存和返回时深拷贝 binding slice、options map 以及所有可选指针。
 
-InMemory 只用于单进程开发和测试，不提供持久化、跨进程一致性或 Secret 缓存。
+InMemory 用于单进程开发和确定性测试；持久化、跨进程一致性和 Secret 解析由对应 adapter
+与 bootstrap 组合提供。
 
 ## 不可变执行快照
 
@@ -243,9 +242,9 @@ InMemory 只用于单进程开发和测试，不提供持久化、跨进程一�
 tenant_id + tenant_version + profile_id + profile_version + content_digest
 ```
 
-`StorageFactoryInput` 是快照到后续运行时 adapter 的唯一输出，包含固定身份/version/digest 和
+`StorageFactoryInput` 是快照到运行时 adapter 的唯一输出，包含固定身份/version/digest 和
 规范化 bindings。它不包含 Secret 值、数据库连接、HTTP client、tRPC-Agent-Go Service、
-Factory 函数或任意 `any` 字段。其 `SecretRef` 仍只是引用；后续 Resolver 和 adapter 必须在
+Factory 函数或任意 `any` 字段。其 `SecretRef` 仍只是引用；Resolver 和 adapter 在
 可信 Tenant 作用域内完成解析与客户端构造。
 
 ## PostgreSQL 目标模型
@@ -651,9 +650,9 @@ Worker 只接收快照，不枚举控制面表。
 
 ## 与 tRPC-Agent-Go 的映射
 
-映射以 tRPC-Agent-Go `main` 在设计时的提交
+映射以 tRPC-Agent-Go 固定兼容版本
 [`0e352fd`](https://github.com/trpc-group/trpc-agent-go/commit/0e352fdd1428d30a8d978d39877f5a7b2591ccc1)
-为依据；未来 adapter 应固定兼容版本并用编译/集成测试检测上游变化。
+为依据；adapter 通过编译和集成测试检测上游变化。
 
 tRPC-Agent-Go 的 Session、Memory、Knowledge VectorStore 和 Artifact 接口没有独立
 `tenant_id` 参数。平台 adapter 必须在构造时捕获 `StorageFactoryInput.TenantID`，并在每次
@@ -670,20 +669,19 @@ Tenant 边界；框架的 AppName/UserID/SessionID 命名空间只是第二层�
 | Artifact | [`artifact.Service`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/artifact/service.go)；通过 `runner.WithArtifactService` 注入 | adapter 固定 Tenant/bucket prefix，再映射 App/User/Session 作用域 |
 | Audit | tRPC-Agent-Go 复用 OpenTelemetry，没有与上述 Service 同构的强制审计存储接口 | 平台 Audit adapter 独立持久化强制事件；OTel exporter 只负责 telemetry，采样不能代替审计 |
 
-tRPC-Agent-Go 仓库当前包含多种 Session、Memory、VectorStore 和 Artifact 实现，但“上游存在
-package”不等于平台已经允许该 provider。只有对应 adapter、Catalog schema 和测试一起落地后，
-provider 才能在租户配置中启用。
+tRPC-Agent-Go 仓库提供 Session、Memory、VectorStore 和 Artifact 接口；平台通过对应 adapter、
+Catalog schema 和 conformance test 控制每个 provider 的租户启用边界。
 
-Knowledge 的 embedder/model 引用不属于 Backend Profile。它必须来自后续发布且不可变的
-Agent/Knowledge 配置与同租户 Model Profile，并与 Backend snapshot 一起固定后再调用
-`knowledge.New`。在该可信依赖来源落地前，配置了 Knowledge binding 的运行时 Factory 必须
-fail closed，不能借用聊天模型、进程环境变量或全局默认 embedder。
+Knowledge 的 embedder/model 引用不属于 Backend Profile。它来自已发布且不可变的 Agent/Knowledge
+配置与同租户 Model Profile，并与 Backend snapshot 一起固定后再调用 `knowledge.New`。运行时
+Factory 对 Knowledge binding 使用同租户已发布依赖快照，不能借用聊天模型、进程环境变量或全局
+默认 embedder。
 
 Storage Factory 的构造顺序是：校验快照 → 读取已注册 adapter → 按 Tenant 授权解析
 `secret_ref` → 构造客户端/Service → 注入 Agent/Runner。Secret Resolver 失败必须令本次构造
 失败，不能使用空密码、环境变量全局默认值或另一个租户的缓存项降级。
 
-## 验证与分阶段交付
+## 验证证据
 
 实现测试至少覆盖：
 
@@ -699,18 +697,10 @@ Storage Factory 的构造顺序是：校验快照 → 读取已注册 adapter �
 - 快照固定 Tenant/Profile version/digest 且不可能携带 Secret 值或 live client。
 - 每个真实 adapter 以相同框架 ID 做双租户 conformance test，证明底层查询/分区显式隔离。
 
-交付顺序固定为：
+验收使用 `trpcservice/backend` 领域/Catalog/Repository 测试、执行快照与 Storage Factory
+边界测试，以及全量 `go test`、race、format、lint、build、MkDocs strict 和 diff check。
 
-1. 本设计文档、导航和数据模型交叉引用，独立审查通过。
-2. `trpcservice/backend` 领域模型、Catalog、规范化、摘要和边界测试。
-3. `trpcservice/backend/inmemory` Repository、事件、并发/Context/深拷贝测试。
-4. 执行快照、Storage Factory 输入和运行时边界测试。
-5. 全量 `go test`、race、format、lint、build、MkDocs strict、diff check 和最终审查。
-
-每个阶段都在同一功能分支和 PR 中提交，并在进入下一阶段前完成独立审查。代码阶段不能在
-文档审查通过前开始。
-
-## 后续依赖顺序
+## 交付依赖顺序
 
 ```text
 Backend Profile
@@ -719,5 +709,5 @@ Backend Profile
               └── Gateway / Worker 最小执行链路
 ```
 
-真实 provider adapter、Secret 解析和数据迁移分别由后续 Issue 落地；本控制面契约只为它们
-提供可审计、可冻结且不会泄露凭据的配置输入。
+运行时 adapter、Secret 解析和数据迁移均遵循本控制面契约；每个运行时输入保持可审计、
+可冻结且不会泄露凭据。

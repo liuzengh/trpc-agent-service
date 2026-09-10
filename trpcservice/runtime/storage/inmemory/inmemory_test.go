@@ -2,13 +2,17 @@ package inmemory_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 )
 
 func seedEvent(t *testing.T, store *inmemory.Store, tenantID, sessionID, eventID string) {
@@ -126,6 +130,36 @@ func TestStoreReplyCorrelationNormalizesTraceParentAtPersistenceBoundary(t *test
 	}
 }
 
+func TestStorePersistsMediaReplyContractAndDetectsConflicts(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-media-reply", "event-media-reply")
+	reference := mediaReplyReference(t, attachment.KindImage, "image/png", []byte("png"))
+	reply := runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", ReplyID: "reply-media", EventID: "event-media-reply", SegmentIndex: 0, SegmentCount: 1,
+		Kind: runtimestorage.ReplyKindImage, Payload: "caption", Attachment: reference, Fallback: "[image attachment: chart.png]",
+	}
+	first, err := store.EnqueueReply(context.Background(), reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Kind != runtimestorage.ReplyKindImage || first.Attachment != reference || first.Fallback != reply.Fallback {
+		t.Fatalf("stored media reply = %+v", first)
+	}
+	if second, err := store.EnqueueReply(context.Background(), reply); err != nil || second.Attachment != reference {
+		t.Fatalf("idempotent media reply = %+v err=%v", second, err)
+	}
+	conflict := reply
+	conflict.Fallback = "[image attachment: changed]"
+	if _, err := store.EnqueueReply(context.Background(), conflict); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("media conflict = %v", err)
+	}
+	invalid := reply
+	invalid.Fallback = ""
+	if _, err := store.EnqueueReply(context.Background(), invalid); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid media fallback = %v", err)
+	}
+}
+
 func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
 	store := inmemory.New()
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {
@@ -163,6 +197,16 @@ func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
 	if len(seq) != 2 || seq[0] == seq[1] {
 		t.Fatalf("concurrent sequences = %v", seq)
 	}
+}
+
+func mediaReplyReference(t *testing.T, kind attachment.Kind, contentType string, data []byte) attachment.Reference {
+	t.Helper()
+	digest := sha256.Sum256(data)
+	reference := attachment.Reference{ID: "attachment-media", Kind: kind, MIMEType: contentType, Name: "chart.png", Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:])}
+	if _, err := reference.Normalize(); err != nil {
+		t.Fatalf("test attachment = %v", err)
+	}
+	return reference
 }
 
 func TestStorePersistsFirstReplyTargetForDuplicateMessage(t *testing.T) {
@@ -377,6 +421,43 @@ func TestStoreReplyStateMachineAndFencing(t *testing.T) {
 	}
 }
 
+func TestStoreRecordsReplyReceiptWithinCurrentLease(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-receipt", "event-receipt")
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-receipt", EventID: "event-receipt", SegmentIndex: 0, SegmentCount: 1, Payload: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimReply(context.Background(), "tenant-a", "reply-receipt", 0, "worker-a", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken, ProviderID: "provider-1"})
+	if err != nil || recorded.Status != runtimestorage.ReplySending || recorded.ProviderMessageID != "provider-1" || recorded.FencingToken != claimed.FencingToken || recorded.LeaseOwner != claimed.LeaseOwner {
+		t.Fatalf("recorded receipt = %+v, %v", recorded, err)
+	}
+	if repeated, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken, ProviderID: "provider-1"}); err != nil || repeated.ProviderMessageID != "provider-1" {
+		t.Fatalf("repeated receipt = %+v, %v", repeated, err)
+	}
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken, ProviderID: "other-provider"}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("conflicting receipt = %v", err)
+	}
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: "tenant-a", ReplyID: "missing", Owner: "worker-a", FencingToken: 1, ProviderID: "provider-1"}); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing receipt = %v", err)
+	}
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: "tenant-a", ReplyID: "reply-receipt", Owner: "worker-a", FencingToken: 1}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid receipt = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.RecordReplyReceipt(canceled, runtimestorage.ReplyReceipt{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken, ProviderID: "provider-1"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled receipt = %v", err)
+	}
+	retry, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: runtimestorage.ReplyRetryable, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken})
+	if err != nil || retry.ProviderMessageID != "provider-1" {
+		t.Fatalf("retry preserves receipt = %+v, %v", retry, err)
+	}
+}
+
 func TestStoreListReplyCandidatesReturnsTenantRows(t *testing.T) {
 	store := inmemory.New()
 	seedEvent(t, store, "tenant-a", "candidate-event", "candidate-event")
@@ -498,19 +579,19 @@ func TestStoreEventHistoryAndMessageLifecycle(t *testing.T) {
 	store := inmemory.New()
 	seedEvent(t, store, "tenant-a", "session-history", "inbound-1")
 	payload := []byte("{\"ID\":\"runner-1\"}")
-	first, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: payload})
+	first, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: payload})
 	if err != nil || first.HistorySeq != 1 {
 		t.Fatalf("append = %+v err=%v", first, err)
 	}
 	first.Payload[0] = 'x'
-	replay, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: payload})
+	replay, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: payload})
 	if err != nil || string(replay.Payload) != string(payload) {
 		t.Fatalf("idempotent append = %+v err=%v", replay, err)
 	}
-	if _, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: []byte("{ \"ID\": \"runner-1\" }")}); err != nil {
+	if _, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: []byte("{ \"ID\": \"runner-1\" }")}); err != nil {
 		t.Fatalf("semantic JSON duplicate = %v", err)
 	}
-	if _, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: []byte("{\"ID\":\"changed\"}")}); !errors.Is(err, runtimestorage.ErrConflict) {
+	if _, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: []byte("{\"ID\":\"changed\"}")}); !errors.Is(err, runtimestorage.ErrConflict) {
 		t.Fatalf("payload conflict = %v", err)
 	}
 	items, err := store.ListEventPayloads(context.Background(), "tenant-a", "session-history")

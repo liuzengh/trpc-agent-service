@@ -16,4 +16,4 @@ resources:
 # tag with the promoted tag or an image digest before applying the resources.
 images:
   - name: ghcr.io/xnlemon/trpc-agent-service
-    newTag: 0.1.0
+    newTag: 0.1.1

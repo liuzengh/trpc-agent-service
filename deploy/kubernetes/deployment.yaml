@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: service
-          image: ghcr.io/xnlemon/trpc-agent-service:0.1.0
+          image: ghcr.io/xnlemon/trpc-agent-service:0.1.1
           imagePullPolicy: IfNotPresent
           args: ["-addr", "0.0.0.0:8080"]
           ports:

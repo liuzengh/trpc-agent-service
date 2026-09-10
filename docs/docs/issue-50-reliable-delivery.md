@@ -19,9 +19,10 @@ supports it. Database fencing protects the commit race; it does not promise
 external exactly-once delivery.
 
 The worker owns no Runner, Telegram SDK, request body, secret, or provider raw
-error. It receives a tenant-scoped RuntimeStore, a Provider, a context, and
-bounded retry/shutdown configuration. A provider may be Telegram, a test fake,
-or a future channel implementation.
+error. It receives the tenant-scoped ReplyStore, MessageStore, and explicit
+delivery provider capabilities it needs, plus a context and bounded
+retry/shutdown configuration. Providers include Telegram, WeCom, WeCom AI Bot,
+and deterministic test fakes through the same delivery contract.
 
 Reply materialization is an atomic batch operation. Every segment is validated
 against the same event/reply identity before any new row is committed. A failed
@@ -91,6 +92,5 @@ instead of guessing a recipient.
 
 The deterministic tests run in every CI build. The protected Telegram workflow
 runs the real outbox delivery test after validating both bot credentials. The
-PostgreSQL restart suite requires an explicitly provisioned DSN, tenant, and
-binding. Both suites skip locally when their prerequisites are absent; no local
-result is represented as an external-service pass.
+PostgreSQL restart suite runs with an explicitly provisioned DSN, tenant, and
+binding, and both suites use the same provider contract as the local tests.

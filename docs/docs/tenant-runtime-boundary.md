@@ -1,6 +1,7 @@
 # Tenant 运行时边界
 
-本页描述 issue #5 的第三个小 scope：怎样把 tenant 包的配置快照交给未来的 Gateway 和 Worker。它不实现 Gateway、Worker、IM Channel 或 tRPC-Agent-Go 的 Runner；这些能力应直接复用框架而不是由平台层重写。
+本页描述 issue #5 的租户运行时边界：怎样把 tenant 包的配置快照交给 Gateway、Worker、IM
+Channel 和 tRPC-Agent-Go Runner。平台层负责可信租户快照和身份隔离，执行循环继续复用上游框架。
 
 ## 一次执行的边界
 
@@ -29,15 +30,18 @@ Tenant、用户和外部 Session 在不同 Binding 下生成不同的 Runner Use
 重放保持稳定。无论 Runner 使用什么字符串，平台的持久化查询仍必须将独立的 `tenant_id` 和
 `binding_id` 作为条件，不能把 key 前缀视为唯一授权隔离手段。
 
-## 可直接复用与当前限制
+## 已交付运行时边界
 
-| 需求 | 直接复用 tRPC-Agent-Go | 本阶段平台代码 |
+| 需求 | 直接复用 tRPC-Agent-Go | 平台实现 |
 | --- | --- | --- |
 | 执行取消和链路传递 | context.Context 与 runner.Runner | 将可信配置快照附加到 context |
 | 用户/会话命名空间 | Runner 的 userID / sessionID | 生成无歧义的租户前缀身份 |
 | 开发期会话/记忆 | InMemory Session / Memory 能力 | InMemoryRepository 保存 tenant 控制面数据 |
-| Agent、Tool、Channel | Runner、Agent 编排、Tool/MCP、OpenClaw Channel | 未实现 |
+| Agent、Tool、Channel | Runner、Agent 编排、Tool/MCP、OpenClaw Channel | Gateway、Channel Adapter 与 binding-aware dispatch |
 
-InMemoryRepository 只适用于单进程开发和测试：数据不持久化，也不会跨 Worker 同步。Redis、SQL、向量库、对象存储、数据迁移和跨节点一致性仍由后续 issue 单独定义和实现。
+InMemoryRepository 用于开发和确定性测试；PostgreSQL、Redis、S3-compatible capability、队列和
+Outbox 通过各自 runtime adapter 提供持久化与跨节点协作路径。所有实现继续以显式 tenant 条件
+和双租户 conformance test 验证隔离。
 
-状态迁移在 InMemory 闭环中要求非空的 actor、reason 与 correlation ID；reason 最长 1000 个字符。返回的 StatusChangeEvent 是后续审计/Outbox 适配器的输入，不等同于完整 audit_log 实现。
+状态迁移要求非空的 actor、reason 与 correlation ID；reason 最长 1000 个字符。返回的
+StatusChangeEvent 会进入审计与 Outbox 记录，形成控制面变更的可追踪事件。

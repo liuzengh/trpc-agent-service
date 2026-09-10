@@ -61,14 +61,18 @@ func TestMySQLMigrationSetUsesBinaryIdentityAndRecoveryMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 2 || files[0].version != 1 || files[1].version != 2 {
+	if len(files) != 4 || files[0].version != 1 || files[1].version != 2 || files[2].version != 3 || files[3].version != 4 {
 		t.Fatalf("MySQL files = %#v", files)
 	}
 	script := files[0].statements
 	joined := strings.Join(script, "\n")
 	canaryScript := strings.Join(files[1].statements, "\n")
+	aibotScript := strings.Join(files[2].statements, "\n")
 	if !strings.Contains(canaryScript, "ADD COLUMN canary_revision") || len(files[1].statements) != 4 {
 		t.Fatalf("canary migration is not checkpointed for replay: %q", canaryScript)
+	}
+	if !strings.Contains(aibotScript, "wecom_aibot") || len(files[2].statements) != 2 {
+		t.Fatalf("AI Bot migration is not checkpointed for replay: %q", aibotScript)
 	}
 	for _, fragment := range []string{"utf8mb4_bin", "active_provider_account_id", "channel_binding_candidate_idx", "ENGINE=InnoDB"} {
 		if !strings.Contains(joined, fragment) {
@@ -91,7 +95,7 @@ func TestMySQLHistoryAndArgumentHelpers(t *testing.T) {
 	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{0: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("zero history version error = %v", err)
 	}
-	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{3: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
+	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{5: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("future history version error = %v", err)
 	}
 	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{1: {status: "unknown"}}, files); !errors.Is(err, ErrInvalidHistory) {

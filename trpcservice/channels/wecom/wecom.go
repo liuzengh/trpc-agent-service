@@ -1,5 +1,5 @@
-// Package wecom implements the text-only HTTPS callback for WeCom self-built
-// application Bindings.
+// Package wecom implements HTTPS callbacks for WeCom self-built application
+// Bindings.
 package wecom
 
 import (
@@ -8,6 +8,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha1" // #nosec G505 -- WeCom requires SHA-1 callback signatures.
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
@@ -17,16 +18,19 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/google/uuid"
 )
@@ -36,9 +40,21 @@ var (
 	ErrInvalid = errors.New("invalid wecom callback")
 	// ErrVerification reports a failed WeCom callback signature or decryption check.
 	ErrVerification = errors.New("wecom callback verification failed")
+	// ErrAttachment reports a redacted WeCom media ingestion failure.
+	ErrAttachment = errors.New("wecom attachment processing failed")
 )
 
-const wecomBlockSize = 32
+const (
+	wecomBlockSize          = 32
+	defaultAttachmentBytes  = 64 << 20
+	maximumAttachmentBytes  = 64 << 20
+	wecomMediaContentRunes  = 128
+	wecomDefaultFileMIME    = "application/octet-stream"
+	wecomDefaultImageMIME   = "image/jpeg"
+	wecomDefaultVideoMIME   = "video/mp4"
+	wecomDefaultVoiceMIME   = "audio/amr"
+	wecomDefaultVoiceSuffix = ".amr"
+)
 
 // Credentials is the private credential bundle for one Binding SecretRef.
 type Credentials struct {
@@ -53,6 +69,27 @@ type CredentialResolver interface {
 	Resolve(context.Context, channels.SecretScope) (Credentials, error)
 }
 
+// MediaDownloadRequest carries the verified Binding context required to fetch
+// one WeCom media object. It stays inside the channel boundary and is never
+// passed to Runner.
+type MediaDownloadRequest struct {
+	TenantID     string
+	BindingID    string
+	CorpID       string
+	AgentID      string
+	AppSecret    string
+	MediaID      string
+	Kind         attachment.Kind
+	MIMEType     string
+	MaximumBytes int64
+}
+
+// MediaDownloader downloads one authenticated WeCom media object into the
+// handler-owned attachment store. It must not expose provider URLs or tokens.
+type MediaDownloader interface {
+	Download(context.Context, MediaDownloadRequest) (io.ReadCloser, error)
+}
+
 // Config contains either a static callback target or the dependencies required
 // to resolve a current trusted Binding for each callback.
 type Config struct {
@@ -60,15 +97,25 @@ type Config struct {
 	EncodingAESKey   string
 	ReceiveID        string
 	AgentID          string
+	AppSecret        string
 	RouteKey         string
 	Target           channels.RoutingTarget
 	Dispatcher       gateway.DispatchService
 	MaxBodyBytes     int64
 	ExecutionTimeout time.Duration
+	// Attachments is the explicit durable boundary for native inbound media.
+	// When nil, media callback types are rejected fail-closed.
+	Attachments runtimestorage.AttachmentStore
+	// MediaDownloader performs authenticated provider media downloads before
+	// bytes enter the protocol-neutral attachment store.
+	MediaDownloader MediaDownloader
+	// MaxAttachmentBytes bounds each downloaded media object. Zero defaults to
+	// the protocol-neutral attachment limit.
+	MaxAttachmentBytes int64
 
 	Candidates  channels.CandidateConsumer
 	Tenants     tenant.Repository
-	Apps        agent.Repository
+	Apps        appmodel.Repository
 	Credentials CredentialResolver
 	// AuditWriter receives mandatory accepted and duplicate ingress facts.
 	AuditWriter audit.Writer
@@ -80,6 +127,8 @@ type callbackState struct {
 	token     string
 	receiveID string
 	agentID   string
+	corpID    string
+	appSecret string
 	key       []byte
 	principal gateway.Principal
 }
@@ -91,20 +140,23 @@ type Handler struct {
 	// These retained fields preserve the package's focused cryptographic tests
 	// and are populated together with static. Dynamic callbacks use a local
 	// verified state instead.
-	token, receiveID string
-	key              []byte
-	routeKey         string
-	dynamic          bool
-	candidates       channels.CandidateConsumer
-	tenants          tenant.Repository
-	apps             agent.Repository
-	credentials      CredentialResolver
-	dispatcher       gateway.DispatchService
-	maxBodyBytes     int64
-	executionTimeout time.Duration
-	auditWriter      audit.Writer
-	telemetry        observability.Provider
-	metrics          metrics.Catalog
+	token, receiveID   string
+	key                []byte
+	routeKey           string
+	dynamic            bool
+	candidates         channels.CandidateConsumer
+	tenants            tenant.Repository
+	apps               appmodel.Repository
+	credentials        CredentialResolver
+	dispatcher         gateway.DispatchService
+	maxBodyBytes       int64
+	executionTimeout   time.Duration
+	attachments        runtimestorage.AttachmentStore
+	mediaDownloader    MediaDownloader
+	maxAttachmentBytes int64
+	auditWriter        audit.Writer
+	telemetry          observability.Provider
+	metrics            metrics.Catalog
 
 	mu      sync.Mutex
 	closing bool
@@ -115,7 +167,7 @@ type Handler struct {
 
 var _ channels.WebhookAdapter = (*Handler)(nil)
 
-// New validates a text callback Handler. Dynamic mode receives the complete
+// New validates a callback Handler. Dynamic mode receives the complete
 // trusted target only after protocol verification.
 //
 //nolint:gocyclo
@@ -135,11 +187,20 @@ func New(config Config) (*Handler, error) {
 	if config.ExecutionTimeout < 1 {
 		return nil, ErrInvalid
 	}
+	maxAttachmentBytes, err := normalizeAttachmentBytes(config.MaxAttachmentBytes)
+	if err != nil || (config.Attachments == nil) != (config.MediaDownloader == nil) {
+		return nil, ErrInvalid
+	}
 	baseCtx, cancel := context.WithCancel(context.Background())
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
-	handler := &Handler{routeKey: strings.Trim(config.RouteKey, "/"), dispatcher: config.Dispatcher, maxBodyBytes: config.MaxBodyBytes, executionTimeout: config.ExecutionTimeout, auditWriter: config.AuditWriter, baseCtx: baseCtx, cancel: cancel}
+	handler := &Handler{
+		routeKey: strings.Trim(config.RouteKey, "/"), dispatcher: config.Dispatcher,
+		maxBodyBytes: config.MaxBodyBytes, executionTimeout: config.ExecutionTimeout,
+		attachments: config.Attachments, mediaDownloader: config.MediaDownloader, maxAttachmentBytes: maxAttachmentBytes,
+		auditWriter: config.AuditWriter, baseCtx: baseCtx, cancel: cancel,
+	}
 	handler.telemetry, handler.metrics = config.Observability, metrics.New(config.Observability)
 	if config.Candidates != nil || config.Tenants != nil || config.Apps != nil || config.Credentials != nil {
 		if config.Candidates == nil || config.Tenants == nil || config.Apps == nil || config.Credentials == nil || handler.routeKey != "" {
@@ -151,6 +212,10 @@ func New(config Config) (*Handler, error) {
 		return handler, nil
 	}
 	if strings.TrimSpace(config.Token) == "" || strings.TrimSpace(config.ReceiveID) == "" || strings.TrimSpace(config.AgentID) == "" {
+		cancel()
+		return nil, ErrInvalid
+	}
+	if config.Attachments != nil && strings.TrimSpace(config.AppSecret) == "" {
 		cancel()
 		return nil, ErrInvalid
 	}
@@ -168,7 +233,11 @@ func New(config Config) (*Handler, error) {
 		cancel()
 		return nil, ErrInvalid
 	}
-	handler.static = &callbackState{token: config.Token, receiveID: config.ReceiveID, agentID: strings.TrimSpace(config.AgentID), key: key, principal: principal}
+	handler.static = &callbackState{
+		token: config.Token, receiveID: config.ReceiveID, agentID: strings.TrimSpace(config.AgentID),
+		corpID: config.Target.ProviderAccountID, appSecret: strings.TrimSpace(config.AppSecret),
+		key: key, principal: principal,
+	}
 	handler.token, handler.receiveID, handler.key = config.Token, config.ReceiveID, key
 	return handler, nil
 }
@@ -265,7 +334,7 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var message inboundXML
-	if err := xml.Unmarshal(plain, &message); err != nil || message.MsgType != "text" || strings.TrimSpace(message.Content) == "" || strings.TrimSpace(message.MsgID) == "" || strings.TrimSpace(message.FromUserName) == "" || strings.TrimSpace(message.AgentID) != state.agentID {
+	if err := xml.Unmarshal(plain, &message); err != nil || !validInboundEnvelope(message, state.agentID) || h.validateInboundMessage(message) != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -280,13 +349,11 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer h.drains.Done()
 		defer cancel()
-		inbound := gateway.InboundMessage{Content: message.Content, ContentType: gateway.ContentTypeText, ExternalMessageID: message.MsgID, ExternalUserID: message.FromUserName}
-		if strings.TrimSpace(message.ChatID) != "" {
-			inbound.ConversationKind = channels.ConversationGroup
-			inbound.ExternalChatID = strings.TrimSpace(message.ChatID)
-		} else {
-			inbound.ConversationKind = channels.ConversationDirect
-			inbound.ExternalPeerID = message.FromUserName
+		inbound, buildErr := h.buildInboundMessage(executionCtx, state, message)
+		if buildErr != nil {
+			logIngressBuildFailure(requestID, traceID, buildErr)
+			result <- buildErr
+			return
 		}
 		stream, dispatchErr := h.dispatcher.Dispatch(executionCtx, gateway.DispatchRequest{Accepted: accepted, Principal: state.principal, RequestID: requestID, TraceID: traceID, Message: inbound})
 		if dispatchErr == nil && stream != nil {
@@ -319,6 +386,207 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func validInboundEnvelope(message inboundXML, agentID string) bool {
+	return strings.TrimSpace(message.MsgID) != "" && strings.TrimSpace(message.FromUserName) != "" && strings.TrimSpace(message.AgentID) == strings.TrimSpace(agentID)
+}
+
+func (h *Handler) validateInboundMessage(message inboundXML) error {
+	switch normalizedMessageType(message.MsgType) {
+	case "text":
+		if strings.TrimSpace(message.Content) == "" {
+			return ErrInvalid
+		}
+		return nil
+	case "image", "file", "voice", "video":
+		if h == nil || h.attachments == nil || h.mediaDownloader == nil {
+			return ErrInvalid
+		}
+		_, err := wecomAttachmentDescriptor(message)
+		return err
+	default:
+		return ErrInvalid
+	}
+}
+
+func (h *Handler) buildInboundMessage(ctx context.Context, state callbackState, message inboundXML) (gateway.InboundMessage, error) {
+	inbound := gateway.InboundMessage{
+		ExternalMessageID: strings.TrimSpace(message.MsgID),
+		ExternalUserID:    strings.TrimSpace(message.FromUserName),
+	}
+	if chatID := strings.TrimSpace(message.ChatID); chatID != "" {
+		inbound.ConversationKind = channels.ConversationGroup
+		inbound.ExternalChatID = chatID
+	} else {
+		inbound.ConversationKind = channels.ConversationDirect
+		inbound.ExternalPeerID = strings.TrimSpace(message.FromUserName)
+	}
+	if normalizedMessageType(message.MsgType) == "text" {
+		inbound.Content = message.Content
+		inbound.ContentType = gateway.ContentTypeText
+		return inbound.Normalize()
+	}
+	reference, err := h.ingestAttachment(ctx, state, message)
+	if err != nil {
+		return gateway.InboundMessage{}, err
+	}
+	inbound.Content = wecomMediaContent(reference)
+	inbound.ContentType = gateway.ContentTypeMedia
+	inbound.Attachments = []attachment.Reference{reference}
+	return inbound.Normalize()
+}
+
+type wecomAttachment struct {
+	mediaID  string
+	kind     attachment.Kind
+	mimeType string
+	name     string
+}
+
+func (h *Handler) ingestAttachment(ctx context.Context, state callbackState, message inboundXML) (attachment.Reference, error) {
+	descriptor, err := wecomAttachmentDescriptor(message)
+	if err != nil {
+		return attachment.Reference{}, ErrAttachment
+	}
+	if err := ctx.Err(); err != nil {
+		return attachment.Reference{}, err
+	}
+	download := MediaDownloadRequest{
+		TenantID:     state.principal.TenantID(),
+		CorpID:       state.corpID,
+		AgentID:      state.agentID,
+		AppSecret:    state.appSecret,
+		MediaID:      descriptor.mediaID,
+		Kind:         descriptor.kind,
+		MIMEType:     descriptor.mimeType,
+		MaximumBytes: h.maxAttachmentBytes,
+	}
+	if target, ok := state.principal.RoutingTarget(); ok {
+		download.BindingID = target.BindingID
+		if download.CorpID == "" {
+			download.CorpID = target.ProviderAccountID
+		}
+	}
+	reader, err := h.mediaDownloader.Download(ctx, download)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return attachment.Reference{}, err
+		}
+		return attachment.Reference{}, ErrAttachment
+	}
+	if reader == nil {
+		return attachment.Reference{}, ErrAttachment
+	}
+	data, readErr := io.ReadAll(io.LimitReader(reader, h.maxAttachmentBytes+1))
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return attachment.Reference{}, contextErr
+		}
+		return attachment.Reference{}, ErrAttachment
+	}
+	if int64(len(data)) == 0 || int64(len(data)) > h.maxAttachmentBytes {
+		return attachment.Reference{}, ErrAttachment
+	}
+	bindingID := download.BindingID
+	upload := attachment.Upload{
+		ID:         attachmentID(bindingID, strings.TrimSpace(message.MsgID), 0, descriptor.mediaID),
+		Kind:       descriptor.kind,
+		MIMEType:   descriptor.mimeType,
+		Name:       descriptor.name,
+		Size:       int64(len(data)),
+		Provider:   "wecom",
+		ProviderID: descriptor.mediaID,
+	}
+	reference, err := h.attachments.PutAttachment(ctx, state.principal.TenantID(), upload, bytes.NewReader(data))
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return attachment.Reference{}, err
+		}
+		return attachment.Reference{}, ErrAttachment
+	}
+	return reference, nil
+}
+
+func wecomAttachmentDescriptor(message inboundXML) (wecomAttachment, error) {
+	mediaID := strings.TrimSpace(message.MediaID)
+	if mediaID == "" {
+		return wecomAttachment{}, ErrInvalid
+	}
+	switch normalizedMessageType(message.MsgType) {
+	case "image":
+		return wecomAttachment{mediaID: mediaID, kind: attachment.KindImage, mimeType: wecomDefaultImageMIME, name: mediaName("", mediaID, ".jpg")}, nil
+	case "file":
+		return wecomAttachment{mediaID: mediaID, kind: attachment.KindDocument, mimeType: wecomDefaultFileMIME, name: mediaName(message.FileName, mediaID, "")}, nil
+	case "voice":
+		mimeType, suffix := voiceMIME(message.Format)
+		return wecomAttachment{mediaID: mediaID, kind: attachment.KindAudio, mimeType: mimeType, name: mediaName("", mediaID, suffix)}, nil
+	case "video":
+		return wecomAttachment{mediaID: mediaID, kind: attachment.KindVideo, mimeType: wecomDefaultVideoMIME, name: mediaName("", mediaID, ".mp4")}, nil
+	default:
+		return wecomAttachment{}, ErrInvalid
+	}
+}
+
+func normalizedMessageType(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func voiceMIME(format string) (string, string) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "mp3":
+		return "audio/mpeg", ".mp3"
+	case "wav":
+		return "audio/wav", ".wav"
+	case "m4a":
+		return "audio/mp4", ".m4a"
+	case "ogg":
+		return "audio/ogg", ".ogg"
+	case "speex":
+		return "audio/speex", ".speex"
+	default:
+		return wecomDefaultVoiceMIME, wecomDefaultVoiceSuffix
+	}
+}
+
+func mediaName(name, providerID, suffix string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return providerID + suffix
+	}
+	for _, character := range name {
+		if character < 0x20 || character == 0x7f || character == '/' || character == '\\' {
+			return providerID + suffix
+		}
+	}
+	return name
+}
+
+func wecomMediaContent(reference attachment.Reference) string {
+	base := "[wecom " + string(reference.Kind) + " attachment"
+	if reference.Name != "" {
+		withName := base + ": " + reference.Name + "]"
+		if len([]rune(withName)) <= wecomMediaContentRunes {
+			return withName
+		}
+	}
+	return base + "]"
+}
+
+func attachmentID(bindingID, externalMessageID string, ordinal int, providerID string) string {
+	digest := sha256.Sum256([]byte(encodeParts(bindingID, externalMessageID, strconv.Itoa(ordinal), providerID)))
+	return "att_" + hex.EncodeToString(digest[:])
+}
+
+func encodeParts(parts ...string) string {
+	var builder strings.Builder
+	for _, part := range parts {
+		builder.WriteString(strconv.Itoa(len([]byte(part))))
+		builder.WriteByte(':')
+		builder.WriteString(part)
+	}
+	return builder.String()
+}
+
 func (h *Handler) tryAcceptedIngress(accepted <-chan struct{}, w http.ResponseWriter, ctx context.Context, principal gateway.Principal, message inboundXML, requestID, traceID string) bool {
 	select {
 	case <-accepted:
@@ -349,7 +617,8 @@ func (w *statusCaptureWriter) Write(body []byte) (int, error) {
 }
 
 func (h *Handler) writeIngressSuccess(w http.ResponseWriter, ctx context.Context, principal gateway.Principal, message inboundXML, requestID, traceID string, eventType audit.EventType, decision audit.Decision, errorType string) {
-	if h.recordIngress(ctx, principal, message, requestID, traceID, eventType, decision, errorType) != nil {
+	if err := h.recordIngress(ctx, principal, message, requestID, traceID, eventType, decision, errorType); err != nil {
+		logIngressAuditFailure(requestID, traceID, err)
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -461,7 +730,11 @@ func (h *Handler) verify(r *http.Request, ciphertext string) ([]byte, callbackSt
 			if decryptErr != nil {
 				return decryptErr
 			}
-			verifiedState = callbackState{token: credentials.CallbackToken, receiveID: binding.Protocol.WeCom.ReceiveID, agentID: binding.Protocol.WeCom.AgentID, key: key}
+			verifiedState = callbackState{
+				token: credentials.CallbackToken, receiveID: binding.Protocol.WeCom.ReceiveID,
+				agentID: binding.Protocol.WeCom.AgentID, corpID: binding.Protocol.WeCom.CorpID,
+				appSecret: credentials.AppSecret, key: key,
+			}
 			verifiedPlain = plain
 			return nil
 		})
@@ -504,6 +777,26 @@ func validSignature(token, signature, timestamp, nonce, ciphertext string) bool 
 	want := hex.EncodeToString(sum[:])
 	return subtle.ConstantTimeCompare([]byte(signature), []byte(want)) == 1
 }
+
+func normalizeAttachmentBytes(value int64) (int64, error) {
+	if value == 0 {
+		return defaultAttachmentBytes, nil
+	}
+	if value < 1 || value > maximumAttachmentBytes {
+		return 0, ErrInvalid
+	}
+	return value, nil
+}
+
+func hasControl(value string) bool {
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 func decodeAESKey(value string) ([]byte, error) {
 	key, err := base64.StdEncoding.DecodeString(value + "=")
 	if err != nil || len(key) != 32 {
@@ -564,6 +857,10 @@ type inboundXML struct {
 	MsgType      string `xml:"MsgType"`
 	AgentID      string `xml:"AgentID"`
 	Content      string `xml:"Content"`
+	MediaID      string `xml:"MediaId"`
+	PicURL       string `xml:"PicUrl"`
+	Format       string `xml:"Format"`
+	FileName     string `xml:"FileName"`
 }
 
 var _ http.Handler = (*Handler)(nil)

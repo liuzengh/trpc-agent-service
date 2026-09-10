@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 )
 
@@ -48,9 +49,10 @@ const (
 	// ConversationGroup identifies a group conversation.
 	ConversationGroup = channels.ConversationGroup
 
-	maxPrincipalIDRunes = 256
-	maxMessageRunes     = 64 * 1024
-	maxExternalIDRunes  = 1024
+	maxPrincipalIDRunes   = 256
+	maxMessageRunes       = 64 * 1024
+	maxExternalIDRunes    = 1024
+	maxInboundAttachments = 10
 )
 
 // PrincipalKind distinguishes the two independent authentication paths.
@@ -72,7 +74,7 @@ type Principal struct {
 // an APIAuthenticator can cross this boundary into a trusted Principal.
 func newAPIPrincipal(authenticated AuthenticatedAPI) (Principal, error) {
 	if err := authenticated.Validate(); err != nil {
-		return Principal{}, fmt.Errorf("%w: API authentication result: %v", ErrUnauthenticated, err)
+		return Principal{}, fmt.Errorf("%w: invalid authentication result", ErrUnauthenticated)
 	}
 	identity := authenticated.identity
 	return Principal{
@@ -101,7 +103,7 @@ func (p Principal) Validate() error {
 	switch p.kind {
 	case PrincipalAPI:
 		if p.apiProof == nil || p.apiProof.identity.TenantID != p.tenantID || p.apiProof.identity.AppID != p.appID || p.apiProof.identity.SubjectID != p.subjectID {
-			return fmt.Errorf("%w: API principal proof is missing or inconsistent", ErrInvalid)
+			return fmt.Errorf("%w: principal proof is missing or inconsistent", ErrInvalid)
 		}
 		if err := p.apiProof.validate(); err != nil {
 			return err
@@ -152,22 +154,42 @@ type InboundMessage struct {
 	ExternalPeerID    string
 	ExternalChatID    string
 	ExternalThreadID  string
+	// Attachments contains verified, tenant-owned media references. It never
+	// contains provider URLs, credentials, or direct fetch instructions.
+	Attachments []attachment.Reference
 }
 
 // Normalize validates the message without consulting untrusted route hints.
 func (m InboundMessage) Normalize() (InboundMessage, error) {
 	clone := m
 	clone.Content = strings.TrimSpace(clone.Content)
+	clone.Attachments = append([]attachment.Reference(nil), clone.Attachments...)
 	if clone.ContentType == "" {
 		clone.ContentType = ContentTypeText
+		if len(clone.Attachments) > 0 {
+			clone.ContentType = ContentTypeMedia
+		}
 	}
 	switch clone.ContentType {
 	case ContentTypeText, ContentTypeMedia, ContentTypeRich:
 	default:
 		return InboundMessage{}, fmt.Errorf("%w: unsupported content type", ErrInvalid)
 	}
-	if n := len([]rune(clone.Content)); n < 1 || n > maxMessageRunes {
-		return InboundMessage{}, fmt.Errorf("%w: content must contain 1-%d characters", ErrInvalid, maxMessageRunes)
+	if n := len([]rune(clone.Content)); n > maxMessageRunes {
+		return InboundMessage{}, fmt.Errorf("%w: content must contain at most %d characters", ErrInvalid, maxMessageRunes)
+	}
+	if clone.Content == "" && len(clone.Attachments) == 0 {
+		return InboundMessage{}, fmt.Errorf("%w: content or attachment is required", ErrInvalid)
+	}
+	if len(clone.Attachments) > maxInboundAttachments {
+		return InboundMessage{}, fmt.Errorf("%w: too many attachments", ErrInvalid)
+	}
+	for index, value := range clone.Attachments {
+		normalized, err := value.Normalize()
+		if err != nil {
+			return InboundMessage{}, fmt.Errorf("%w: attachment %d: %v", ErrInvalid, index, err)
+		}
+		clone.Attachments[index] = normalized
 	}
 	if clone.ExternalMessageID != "" {
 		if err := validateExternalID(clone.ExternalMessageID, "external message ID"); err != nil {

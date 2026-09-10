@@ -89,6 +89,94 @@ func TestTenantRepositoryWritesCompleteReadback(t *testing.T) {
 	})
 }
 
+func TestTenantRepositoryListsOnlyRequestedTenantScopes(t *testing.T) {
+	visible, err := tenant.NewTenant(tenant.CreateInput{
+		TenantKey: "visible-list", DisplayName: "Visible List", Status: tenant.StatusActive,
+		AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`tenant_id IN \(\$1\).*ORDER BY tenant_id LIMIT \$2 OFFSET \$3`).WithArgs(visible.TenantID, 51, 0).WillReturnRows(testTenantRows(visible))
+
+	items, next, err := NewRepository(db).List(context.Background(), []string{visible.TenantID}, "", "", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].TenantID != visible.TenantID || next != "" {
+		t.Fatalf("scoped tenant list = items=%+v next=%q", items, next)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	empty, next, err := NewRepository(nil).List(context.Background(), nil, "", "", "", 50)
+	if err != nil || len(empty) != 0 || next != "" {
+		t.Fatalf("empty scope list = items=%+v next=%q err=%v", empty, next, err)
+	}
+}
+
+func TestTenantScopeClauseAndListInputBoundaries(t *testing.T) {
+	clause, arguments, allowed := tenantScopeClause([]string{"", "tenant-b", "tenant-a", "tenant-a"})
+	if !allowed || clause != " WHERE tenant_id IN ($1, $2) " || len(arguments) != 2 || arguments[0] != "tenant-a" || arguments[1] != "tenant-b" {
+		t.Fatalf("tenant scope clause = %q %#v", clause, arguments)
+	}
+	if clause, arguments, allowed := tenantScopeClause(nil); clause != "" || arguments != nil || allowed {
+		t.Fatalf("empty tenant scope clause = %q %#v", clause, arguments)
+	}
+	if clause, arguments, allowed := tenantScopeClause([]string{"tenant-a", "*"}); clause != "" || arguments != nil || !allowed {
+		t.Fatalf("wildcard tenant scope clause = %q %#v allowed=%v", clause, arguments, allowed)
+	}
+	visible, err := tenant.NewTenant(tenant.CreateInput{
+		TenantKey: "filter-list", DisplayName: "Filter List", Status: tenant.StatusActive,
+		AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`tenant_id IN \(\$1\).*STRPOS\(LOWER\(.*\), \$2\) > 0 ORDER BY tenant_id LIMIT \$3 OFFSET \$4`).WithArgs(visible.TenantID, "absent", 51, 0).WillReturnRows(testTenantRows())
+	items, next, err := NewRepository(db).List(context.Background(), []string{visible.TenantID}, "absent", "", "", 0)
+	if err != nil || len(items) != 0 || next != "" {
+		t.Fatalf("filtered tenant list = items=%+v next=%q err=%v", items, next, err)
+	}
+	if _, _, err := NewRepository(db).List(context.Background(), []string{visible.TenantID}, "", "", "bad", 50); err == nil {
+		t.Fatal("invalid tenant cursor was accepted")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTenantRepositoryListsAllTenantsForWildcardScope(t *testing.T) {
+	value, err := tenant.NewTenant(tenant.CreateInput{TenantKey: "wildcard", DisplayName: "Wildcard", Status: tenant.StatusActive, AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`.*`).WillReturnRows(testTenantRows(value))
+	items, next, err := NewRepository(db).List(context.Background(), []string{"*"}, "", "", "", 50)
+	if err != nil || len(items) != 1 || items[0].TenantID != value.TenantID || next != "" {
+		t.Fatalf("wildcard tenant list = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTenantRepositoryCreatesAndGetsTenant(t *testing.T) {
 	input := tenant.CreateInput{
 		TenantKey: "create-and-get", DisplayName: "Create and Get", Status: tenant.StatusActive,
@@ -294,13 +382,17 @@ func TestTenantRepositoryCreateFirstRejectsLockAndContextFailures(t *testing.T) 
 	}
 }
 
-func testTenantRows(value *tenant.Tenant) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{
+func testTenantRows(values ...*tenant.Tenant) *sqlmock.Rows {
+	rows := sqlmock.NewRows([]string{
 		"tenant_id", "tenant_key", "display_name", "status", "rate_limit_rpm", "max_concurrent_executions", "monthly_token_budget",
 		"monthly_spend_limit_minor", "billing_currency", "audit_retention_days", "log_masking_level", "trace_sampling_rate", "default_agent_app_id",
 		"default_backend_profile_id", "version", "created_at", "updated_at",
-	}).AddRow(
-		value.TenantID, value.TenantKey, value.DisplayName, string(value.Status), nil, nil, nil, nil, nil,
-		value.AuditRetentionDays, string(value.LogMaskingLevel), value.TraceSamplingRate, nil, nil, value.Version, value.CreatedAt, value.UpdatedAt,
-	)
+	})
+	for _, value := range values {
+		rows.AddRow(
+			value.TenantID, value.TenantKey, value.DisplayName, string(value.Status), nil, nil, nil, nil, nil,
+			value.AuditRetentionDays, string(value.LogMaskingLevel), value.TraceSamplingRate, nil, nil, value.Version, value.CreatedAt, value.UpdatedAt,
+		)
+	}
+	return rows
 }

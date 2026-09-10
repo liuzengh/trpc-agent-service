@@ -8,7 +8,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
@@ -105,7 +105,7 @@ func Initialize(ctx context.Context, db *sql.DB, config InitConfig) (InitResult,
 	return completeInitialization(ctx, tx, state, tenantRoot, app)
 }
 
-func completeInitialization(ctx context.Context, tx *sql.Tx, state initialState, tenantRoot *tenant.Tenant, app *agent.App) (InitResult, error) {
+func completeInitialization(ctx context.Context, tx *sql.Tx, state initialState, tenantRoot *tenant.Tenant, app *appmodel.App) (InitResult, error) {
 	if len(state.tenants) > 1 || len(state.apps) > 1 {
 		return InitResult{}, initializationStateError(ErrInitializationAmbiguous)
 	}
@@ -127,7 +127,7 @@ func completeInitialization(ctx context.Context, tx *sql.Tx, state initialState,
 	return InitResult{TenantID: state.tenants[0], AppID: state.apps[0].appID}, nil
 }
 
-func createInitialPair(ctx context.Context, tx *sql.Tx, tenantRoot *tenant.Tenant, app *agent.App) (InitResult, error) {
+func createInitialPair(ctx context.Context, tx *sql.Tx, tenantRoot *tenant.Tenant, app *appmodel.App) (InitResult, error) {
 	if err := createInitialTenant(ctx, tx, tenantRoot); err != nil {
 		return InitResult{}, mapInitializationDBError(ctx, err)
 	}
@@ -143,7 +143,7 @@ func createInitialPair(ctx context.Context, tx *sql.Tx, tenantRoot *tenant.Tenan
 	return InitResult{TenantID: tenantRoot.TenantID, AppID: app.AppID, Created: true}, nil
 }
 
-func newInitialEntities(config InitConfig) (*tenant.Tenant, *agent.App, error) {
+func newInitialEntities(config InitConfig) (*tenant.Tenant, *appmodel.App, error) {
 	tenantRoot, err := tenant.NewTenant(tenant.CreateInput{
 		TenantKey:          config.TenantKey,
 		DisplayName:        config.TenantDisplayName,
@@ -155,7 +155,7 @@ func newInitialEntities(config InitConfig) (*tenant.Tenant, *agent.App, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: invalid tenant initialization configuration", ErrInvalidConfig)
 	}
-	app, err := agent.NewApp(agent.CreateInput{
+	app, err := appmodel.NewApp(appmodel.CreateInput{
 		TenantID:    tenantRoot.TenantID,
 		AppKey:      config.AppKey,
 		DisplayName: config.AppDisplayName,
@@ -234,7 +234,7 @@ func createInitialTenant(ctx context.Context, tx *sql.Tx, value *tenant.Tenant) 
 	return err
 }
 
-func createInitialApp(ctx context.Context, tx *sql.Tx, value *agent.App) error {
+func createInitialApp(ctx context.Context, tx *sql.Tx, value *appmodel.App) error {
 	_, err := tx.ExecContext(ctx, `
 		SELECT public.control_plane_create_agent_app(
 			$1, $2, $3, $4, $5, $6, $7, $8, $9

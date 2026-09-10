@@ -320,7 +320,7 @@ func validGroup(group audit.GroupBy) bool {
 }
 func validEventType(value audit.EventType) bool {
 	switch value {
-	case audit.EventControlPlaneChanged, audit.EventExecutionStarted, audit.EventExecutionCompleted, audit.EventExecutionFailed, audit.EventExecutionCanceled, audit.EventExecutionTimedOut, audit.EventExecutionFallback, audit.EventCanarySelected, audit.EventToolAllowed, audit.EventToolDenied, audit.EventToolApprovalRequired, audit.EventIMAuthorizationAllowed, audit.EventIMAuthorizationDenied, audit.EventIMIngressAccepted, audit.EventIMIngressDuplicate, audit.EventIMDeliverySent, audit.EventIMDeliveryRetryScheduled, audit.EventIMDeliveryDeadLettered, audit.EventIMDeliveryReconciled, audit.EventBudgetRejected, audit.EventContentRedacted, audit.EventAuditIncomplete:
+	case audit.EventControlPlaneChanged, audit.EventExecutionStarted, audit.EventExecutionCompleted, audit.EventExecutionFailed, audit.EventExecutionCanceled, audit.EventExecutionTimedOut, audit.EventExecutionFallback, audit.EventCanarySelected, audit.EventToolAllowed, audit.EventToolDenied, audit.EventToolApprovalRequired, audit.EventToolExecuted, audit.EventIMAuthorizationAllowed, audit.EventIMAuthorizationDenied, audit.EventIMIngressAccepted, audit.EventIMIngressDuplicate, audit.EventIMDeliverySent, audit.EventIMDeliveryRetryScheduled, audit.EventIMDeliveryDeadLettered, audit.EventIMDeliveryReconciled, audit.EventBudgetRejected, audit.EventContentRedacted, audit.EventAuditIncomplete:
 		return true
 	}
 	return false

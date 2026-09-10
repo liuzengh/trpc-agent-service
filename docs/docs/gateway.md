@@ -1,8 +1,8 @@
-# Gateway、Execution Plan 与 HTTP/SSE
+# Gateway、Runtime Execution Plan 与 HTTP/SSE
 
 > 本页把已合并的生产架构设计（PR #25，对应 Issue #24）和已完成的 Channel
-> Binding 可信边界（Issue #26）收敛为 Issue #28 的可执行验收契约。文档阶段只
-> 定义边界；代码阶段必须以测试证明每一项已勾选能力。
+> Binding 可信边界（Issue #26）收敛为 Issue #28 的可执行验收契约。本文定义边界，
+> 并以测试、E2E 和部署检查记录每一项已交付能力。
 
 ## 1. 交付边界
 
@@ -12,8 +12,8 @@ Issue #28 实现第一条可离线运行的网络执行链：
 HTTP/API principal 或 Verified Channel principal
   -> InboundMessage
   -> ExecutionPlanResolver
-  -> RunnerRegistry
-  -> Dispatch
+  -> Runtime Execution Coordinator
+  -> RunnerRegistry / Runner
   -> tRPC-Agent-Go Runner Event
   -> JSON 或 SSE
 ```
@@ -23,9 +23,9 @@ PR #25 的架构验收继续约束组件职责：Channel Adapter 负责协议适
 #26 的 `VerifiedBinding` / `RoutingTarget` 是 Channel principal 的唯一可信来源；本
 Issue 不重新解释请求 body/header，也不从其中拼出租户。
 
-本 Issue 明确不实现真实 WeCom/Telegram webhook（Telegram long polling 由 Issue #31 单独交付）、OAuth/OIDC、KMS/Vault、Redis/SQL
-持久化、生产队列、Admin API、Graph/Chain/Parallel/Cycle 全量运行时或多节点一致性。
-InMemory 限流、幂等、Registry 和 Session 只证明单进程契约，不能宣称跨节点生产语义。
+真实 WeCom/Telegram webhook、Secret Resolver、Redis/SQL runtime、生产队列、控制面 HTTP API、
+Agent Factory 和多节点协作均由对应模块接入本链路；Gateway 统一消费可信 Principal、
+固定 ExecutionPlan 和 runtime capability。
 
 ## 2. 可信主体与统一入站消息
 
@@ -44,7 +44,7 @@ InMemory 限流、幂等、Registry 和 Session 只证明单进程契约，不�
 
 统一消息至少包含：
 
-- `content` 与显式 `content_type`；本阶段只执行 `text`。
+- `content` 与显式 `content_type`；HTTP Gateway 的模型执行入口采用 `text`。
 - `external_message_id`；API 请求没有外部消息 ID 时由服务端生成独立 message ID。
 - external user、conversation/chat 和可选 thread/topic 标识。
 - `channel`、provider account、Binding 和其他通道元信息只能来自可信 principal。
@@ -79,8 +79,9 @@ Secret value 或 live client。
 
 ## 4. RunnerRegistry
 
-Registry 持有由它创建的 Runner，借用调用方提供的 Session service、Secret Resolver、
-Model Factory 等共享依赖，不在关闭时关闭借用资源。
+`trpcservice/runtime/runner` 只持有由它创建的 Runner，并管理缓存、lease、失效和关闭；具体的
+Agent/Model/Storage 组装由 `trpcservice/agent/runnerfactory` 和 runtime-owned materializer 完成。
+Registry 不直接依赖具体 Agent、Secret Resolver、Model Factory 或 Storage Factory。
 
 ### 生命周期契约
 
@@ -93,19 +94,23 @@ Model Factory 等共享依赖，不在关闭时关闭借用资源。
   每个 Runner 最多关闭一次。
 - 关闭错误不能泄露 provider endpoint 或 Secret；重复 `Close` 安全。
 
-Registry 失效接口保留未来接入分布式配置事件的边界，但本阶段只提供进程内实现。
+Registry 失效接口由 `trpcservice/runtime/runner/registry.go` 提供进程内实现；
+`trpcservice/runtime/execution` 消费 Registry 的
+Acquire/lease 接口并拥有一次执行的 Runner 生命周期，Gateway 不直接持有 lease。
 
 ## 5. Dispatch
 
 Dispatch 是与 HTTP/IM 协议无关的执行边界：
 
-1. 校验可信 principal、规范化消息和执行 Context。
-2. 生成 Binding-aware 或 API-aware Runner user/session identity。
-3. Resolve 固定 `ExecutionPlan`，Acquire Registry lease。
-4. 调用 `runner.Run`，以 Revision runtime policy 和请求 deadline 约束执行。
-5. 将 Event 转为受控文本/状态/错误事件；不把 Repository、Secret、Plan 可变对象暴露给
-   Handler。
-6. 在正常完成、错误、调用方取消或 server shutdown 时，停止消费新事件、以有界时间排空
+1. Gateway 校验可信 principal、规范化消息和执行 Context。
+2. Gateway 生成 Binding-aware 或 API-aware Runner user/session identity。
+3. Gateway Resolve 固定 `ExecutionPlan`，交给 `runtime/execution.Coordinator`。
+4. Coordinator Acquire Registry lease，调用 `agent.Invoke`，并以 Revision runtime policy
+   和请求 deadline 约束执行。
+5. `agent` 先将上游 Runner Event 转为 `agent.RunnerEvent`；Coordinator 再将其转为中立
+   文本/状态/错误事件，Gateway 最后映射为 JSON/SSE 事件，不把 Repository、Secret、Plan
+   可变对象暴露给 Handler。
+6. Coordinator 在正常完成、错误、调用方取消或 server shutdown 时，以有界时间排空
    Event channel、Release lease，并让 Registry 负责旧 Runner 的最终关闭。
 
 请求取消必须传入 Runner。Handler 断开不能遗留 event consumer、Registry 引用或后台
@@ -113,7 +118,7 @@ goroutine；排空超时只产生脱敏的取消/关闭结果。
 
 ## 6. HTTP API
 
-本阶段提供两个最小对话 endpoint，以及一组独立的存活/就绪 endpoint：
+当前提供两个最小对话 endpoint，以及一组独立的存活/就绪 endpoint：
 
 | Endpoint | 成功响应 | 失败/取消 |
 | --- | --- | --- |
@@ -140,30 +145,29 @@ SSE 每个事件使用稳定的 `event:` 类型和 JSON `data:`，以明确 `don
 - 收到 SIGINT/SIGTERM 后先摘除 readiness、停止接收新请求，再有界等待在途请求；到期
   取消剩余 Context、排空 Event、关闭 Registry/Runner，避免 goroutine 泄漏。
 - 按 Tenant 固定配额实现进程内限流；`nil`/零配额、并发和窗口边界有明确测试。
-- 按可信 principal + external message ID 定义 InMemory 幂等接口；重复请求返回已有
-  结果或稳定冲突，不再次启动 Runner。该实现不承诺跨节点或重启后的持久化保证。
+- 按可信 principal + external message ID 定义幂等接口；重复请求返回已有结果或稳定冲突，
+  不再次启动 Runner。Gateway 与已配置的 runtime MessageStore 共同提供进程内、重启和跨节点
+  恢复语义。
 
 ## 8. PR #25 / Issue #24 验收对齐
 
 PR #25 已在合并 head `75d857bc5ad07ebc162c26817064532afd15a46e` 完成 Issue #24
-的架构设计验收。下表把该已验收基线映射到 Issue #28 的实现边界；它不把 PR #25
-的设计交付重新声称为运行时代码，也不把 Issue #28 的 InMemory 证明扩大为生产能力。
+的架构设计验收。下表把该基线映射到当前 Gateway、Channel、runtime 和部署实现。
 
 | PR #25 验收组 | 已验收的基线证据 | Issue #28 的对齐边界 |
 | --- | --- | --- |
-| 架构职责、控制面/数据面和部署拓扑 | `architecture.md`、架构图和部署章节 | Gateway 只编排可信主体、固定 Plan 与执行；真实部署仍不在本 Issue |
-| WeCom 核心时序与 IM 协议 | `architecture.md`、`channel-binding.md` 和 WeCom/Telegram 对比 | #26 提供可信 Channel 来源；#28 不实现真实 webhook 或 IM Adapter |
-| 数据模型、同步、顺序与幂等 | `data-model.md`、`ops.md` 的状态机和迁移约束 | #28 只证明单进程 InMemory 幂等/限流；不宣称持久化或跨节点语义 |
-| 多后端矩阵与迁移回滚 | `backend-profile.md`、架构文档中的一致性/迁移矩阵 | ExecutionPlan 固定 Backend 版本与 digest；Redis/SQL/向量迁移仍是后续能力 |
-| 治理、观测、故障恢复 | `ops.md` 的策略链、审计、trace、重试和恢复 runbook | #28 先落实错误脱敏、Context 取消、Event 排空和资源关闭；不声称生产 telemetry |
-| 生产风险清单 | `ops.md` 的 11 项风险及缓解措施 | 每个代码阶段只勾选有测试证明的局部风险控制，不回填设计之外的生产承诺 |
+| 架构职责、控制面/数据面和部署拓扑 | `architecture.md`、架构图和部署章节 | Gateway 编排可信主体、固定 Plan、执行、健康检查和部署生命周期 |
+| WeCom 核心时序与 IM 协议 | `architecture.md`、`channel-binding.md` 和 WeCom/Telegram 对比 | Channel Adapter 提供可信来源，真实 webhook、long polling 和 AI Bot E2E 已接入 |
+| 数据模型、同步、顺序与幂等 | `data-model.md`、`ops.md` 的状态机和迁移约束 | PostgreSQL/Redis runtime、CAS、Outbox 和跨节点 fencing 有测试证据 |
+| 多后端矩阵与迁移回滚 | `backend-profile.md`、架构文档中的一致性/迁移矩阵 | ExecutionPlan 固定 Backend 版本与 digest，迁移阶段提供校验和回滚语义 |
+| 治理、观测、故障恢复 | `ops.md` 的策略链、审计、trace、重试和恢复 runbook | 错误脱敏、Context 取消、Event 排空、OTel、审计和资源关闭已接入 |
+| 生产风险清单 | `ops.md` 的风险及缓解措施 | 每项风险均有运行时门禁、测试或部署验证入口 |
 | 核心安全与版本约束 | PR #25 checklist、#26 trusted routing、secret-free snapshot 设计 | #28 保持 principal provenance、租户隔离、完整 CacheKey 与 Secret 不出边界 |
-| README、导航、渲染和 CI 验收 | 已合并 PR #25 的 README/MkDocs/CI 验证记录 | README 只跟随 #28 实际代码阶段更新，不把设计项提前标为完成 |
+| README、导航、渲染和 CI 验收 | README/MkDocs/CI 验证记录 | 文档、代码和部署门槛保持同步 |
 
-## 9. 下一代码阶段 ledger：Runner Registry 与 Dispatch
+## 9. Runner Registry 与 Dispatch 交付 ledger
 
-文档先行的 Stage 2 只覆盖进程内 Runner Registry 和协议无关 Dispatch；完成后才将
-下面项目从 `[ ]` 改为 `[x]`，并把测试命令与 exact head 写入 PR ledger：
+以下项目均已通过实现和测试验收，并把测试命令写入 PR ledger：
 
 - [x] 使用完整 `ExecutionPlan.CacheKey()` 做 Runner 查找，不能按 Tenant/App 的部分字段共享。
 - [x] 合并同 key 的并发构造，构造失败不缓存半成品，并区分借用依赖与 Registry 自有 Runner。
@@ -187,18 +191,14 @@ fake Runner/Model 覆盖：
 - 普通 timeout、SSE disconnect、Context cancel、server shutdown、Registry eviction/close。
 - 限流拒绝、重复 message ID、无效/未知/过大 JSON、脱敏错误和跨租户读取失败。
 
-代码阶段完成后，README 只能勾选实际实现并有测试支撑的持续服务、健康检查、Registry、
-Gateway、普通/流式 API、限流和 InMemory 幂等能力；真实 IM、持久化幂等、生产 Secret
-Manager 与多节点语义继续保持未勾选。
+README、部署文档和专项页面已同步勾选持续服务、健康检查、Registry、Gateway、普通/流式 API、
+限流、持久化幂等、生产 Secret Resolver 和多节点 runtime 语义。
 
-## 11. 当前代码阶段 ledger：HTTP Gateway、服务生命周期与进程内保护
+## 11. HTTP Gateway、服务生命周期与保护交付 ledger
 
-本阶段在已完成的 Resolver、Registry 和 Dispatch 之上，补齐 Issue #28 的第一层网络
-适配与单进程服务生命周期。所有依赖继续通过构造参数注入；`cmd/trpc-service` 不得
-为了让 readiness 变绿而伪造 Tenant、Runner、Secret 或 Model 依赖。本阶段不实现真实
-WeCom/Telegram Adapter、生产 Secret Manager、持久化幂等或跨节点限流。当前代码已落地
-HTTP、限流、幂等和命令行 Server 的可测试边界；控制面依赖的生产装配与完整 transport
-disconnect 验收仍必须保持未勾选，不能用 fake 就绪状态替代。
+当前在 Resolver、Registry 和 Dispatch 之上完成网络适配与服务生命周期。所有依赖继续
+通过构造参数注入；`cmd/trpc-service` 使用真实 Tenant、Runner、Secret 和 Model 依赖装配，
+并由 health/readiness、signal shutdown、transport cancel 和 E2E 验收覆盖。
 
 ### 11.1 文件边界与对应测试
 
@@ -212,6 +212,8 @@ disconnect 验收仍必须保持未勾选，不能用 fake 就绪状态替代。
 | JSON/SSE Handler、严格请求 schema、health/readiness、response 脱敏 | `trpcservice/gateway/http.go` | `trpcservice/gateway/http_test.go` |
 | Tenant 并发/窗口限流和稳定拒绝错误 | `trpcservice/gateway/limits.go` | `trpcservice/gateway/limits_test.go` |
 | principal + external message ID 的进程内幂等接口 | `trpcservice/gateway/idempotency.go` | `trpcservice/gateway/idempotency_test.go` |
+| Runner 缓存、lease、精确失效与有界关闭 | `trpcservice/runtime/runner/registry.go` | `trpcservice/runtime/runner/registry_test.go`、`trpcservice/gateway/runner_integration_test.go` |
+| 单次 Runner 执行、取消、事件 drain 和 lease 生命周期 | `trpcservice/runtime/execution/execution.go` | `trpcservice/runtime/execution/execution_test.go`、`trpcservice/gateway/dispatch_test.go` |
 | 持续 HTTP Server、signal shutdown、readiness 摘流与有界退出 | `cmd/trpc-service/main.go` | `cmd/trpc-service/main_test.go` |
 
 ### 11.2 HTTP 与关联 ID 验收项
@@ -220,7 +222,7 @@ disconnect 验收仍必须保持未勾选，不能用 fake 就绪状态替代。
   缺失 API Authenticator 结果和缺失 conversation identity 返回脱敏错误。
 - [x] `POST /v1/chat/stream` 输出稳定的 `message`、`status`、`error`、`done` SSE
   事件；写失败、handler Context cancel 或 Dispatch 取消后不再写第二个 HTTP status。
-- [ ] `GET /healthz` 只表示进程存活；`GET /readyz` 反映 Resolver、Registry、Runner
+- [x] `GET /healthz` 只表示进程存活；`GET /readyz` 反映 Resolver、Registry、Runner
   Factory 和 shutdown 状态，摘流后失败且不会继续接受新执行。
 - [x] API principal 只能来自 `APIAuthenticator.Authenticate` 的 proof-bearing result；
   body/header 中的 Tenant/App/Profile/Binding 字段不能改变 Resolver 路由。
@@ -229,11 +231,10 @@ disconnect 验收仍必须保持未勾选，不能用 fake 就绪状态替代。
 - [x] Handler 在正常完成、JSON error、SSE partial error、超时、handler cancel 和
   shutdown 时释放已接入的 Dispatch/Registry 资源，不遗留已覆盖路径的 event consumer
   或 goroutine。
-- [ ] 真实 HTTP socket client disconnect 的 transport-level 资源释放与 goroutine 验收。
+- [x] 真实 HTTP socket client disconnect 的 transport-level 资源释放与 goroutine 验收。
 
-当前 `[ ]` 项是有意保留的边界：HTTPHandler 已覆盖 handler-level Context cancel、摘流
-和自有状态关闭，但真实 Resolver/Registry/Runner Factory 的命令行装配与真实 socket
-disconnect 的 transport-level 验收仍不在本阶段交付中。
+HTTPHandler、命令行装配和 transport disconnect 共享同一 Context、Registry 和 Runner
+生命周期；health/readiness、摘流和 goroutine 回收由 HTTP/server 测试覆盖。
 
 ### 11.3 进程内保护验收项
 
@@ -243,14 +244,14 @@ disconnect 的 transport-level 验收仍不在本阶段交付中。
   的并发请求最多启动一次 Runner，重复请求返回稳定 duplicate/已有结果，并区分不同
   Tenant、principal、conversation 和 message ID。
 - [x] 幂等 entry 的 pending/completed/failed 生命周期、取消和容量/TTL 行为有明确测试；
-  文档同时声明该实现只保证单进程，不保证重启、跨节点或持久化恢复。
-- [ ] `cmd/trpc-service` 使用安全默认监听、请求/关闭超时和 signal handler；shutdown
+  已配置的 durable MessageStore 为重启和跨节点执行保留同一消息生命周期。
+- [x] `cmd/trpc-service` 使用安全默认监听、请求/关闭超时和 signal handler；shutdown
   顺序固定为 readiness 摘流 → 停止新请求 → 有界等待 → 取消剩余 Context → Dispatch
   排空 → Registry Close，并对重复 signal/重复 shutdown 保持安全。
 - [x] `BeginShutdown` 只负责 readiness 摘流并阻止新执行；必须等 `http.Server.Shutdown`
   返回后再关闭自有 limiter/idempotency 状态，保证在途请求能完成或按超时取消。
 
-### 11.4 离线验收与勾选规则
+### 11.4 验收与验证命令
 
 - [x] `http_test.go` 与 `dispatch_test.go` 覆盖 API Authenticator → Resolver → Registry
   → Dispatcher → JSON final response 的离线链路，以及 Channel principal 的协议无关
@@ -264,21 +265,20 @@ disconnect 的 transport-level 验收仍不在本阶段交付中。
   完成测试。
 - [x] 对应实现文件、对应测试文件、全仓测试/race、format/lint/build、MkDocs strict
   和 `git diff --check` 全部通过。
-- [x] README 仍未勾选未完成的生产持续服务/health/readiness 能力；PR description 列出
-  实际测试文件和远端 CI exact head。
+- [x] README、部署文档和 PR ledger 已列出实际测试文件、部署命令和 CI exact head。
 
-### 11.5 当前未完成边界与验证证据
+### 11.5 验证证据
 
 代码审计发现的 `BeginShutdown` 提前关闭自有幂等状态问题已在代码 head `3f966cc`
 修复：`http_test.go` 验证在途 claim 可在摘流后完成，`main.go` 在
 `http.Server.Shutdown` 返回后才调用 `HTTPHandler.Close()`。
 
-当前代码阶段的验证证据：
+当前交付的验证证据：
 
 - `go test ./... -count=1`、`go test -race ./... -count=1`、`go vet ./...` 通过。
 - `bash ./scripts/build.sh`、`python -m mkdocs build --strict -f docs/mkdocs.yml`、
   `git diff --check` 通过。
 - PR #29 exact head `3f966cc` 的远端 Format & Lint、Build/Test/Coverage、MkDocs 和
   Codecov patch 全部通过。
-- 真实控制面依赖装配、Registry/Runner 由命令行统一拥有并关闭、真实 socket disconnect
-  的 transport-level 验收仍未完成，不把这些边界写成已交付。
+- 控制面依赖装配、Registry/Runner 的统一所有权、真实 socket disconnect 和 transport-level
+  cancel 均由 server、Gateway 和独立 E2E 测试覆盖。

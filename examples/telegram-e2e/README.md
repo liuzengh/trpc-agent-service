@@ -37,7 +37,7 @@ go run ./examples/telegram-e2e
 
 The command prints a unique ordinary-text marker. Open the receiver Bot in
 Telegram, send that marker, and confirm the `telegram-e2e-ok:<run-correlation>` reply. Commands,
-media, and rich updates are intentionally outside this first E2E. Press
+media, and rich updates are intentionally outside this live E2E; media behavior is covered by deterministic fake tests. Press
 `Ctrl+C` to stop the local polling process cleanly.
 
 If PowerShell can reach `api.telegram.org` but this command reports

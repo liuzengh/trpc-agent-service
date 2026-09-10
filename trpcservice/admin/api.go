@@ -14,11 +14,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	storagemysql "github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/google/uuid"
@@ -27,7 +28,7 @@ import (
 // Config supplies the repositories and authentication policy for an admin handler.
 type Config struct {
 	Tenants        tenant.Repository
-	Apps           agent.Repository
+	Apps           appmodel.Repository
 	Models         modelprofile.Repository
 	Backends       backend.Repository
 	Bindings       channels.Repository
@@ -40,6 +41,8 @@ type Config struct {
 	// It is intentionally best-effort during shutdown: a closed runtime cannot
 	// admit a new execution with a stale Runner.
 	CacheInvalidator CacheInvalidator
+	// Connections owns live, tenant-scoped channel sessions.
+	Connections ChannelConnections
 }
 
 // CacheInvalidator receives the smallest control-plane scope whose future
@@ -109,6 +112,7 @@ func NewHandler(config Config) (*Handler, error) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
 	if requestID == "" {
 		requestID = uuid.NewString()
@@ -123,7 +127,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := splitPath(strings.TrimPrefix(r.URL.Path, "/admin/v1"))
-	if len(parts) == 0 || parts[0] != "tenants" {
+	if len(parts) == 0 {
+		writeError(w, requestID, http.StatusNotFound, "not_found")
+		return
+	}
+	if parts[0] == "me" {
+		if r.Method != http.MethodGet {
+			writeError(w, requestID, http.StatusNotFound, "not_found")
+			return
+		}
+		writeJSON(w, requestID, http.StatusOK, map[string]any{
+			"subject_id":        principal.SubjectID,
+			"global":            principal.Global,
+			"tenant_scopes":     principal.ScopeIDs(),
+			"can_create_tenant": principal.Global,
+		})
+		return
+	}
+	if parts[0] != "tenants" {
 		writeError(w, requestID, http.StatusNotFound, "not_found")
 		return
 	}
@@ -256,7 +277,7 @@ func (h *Handler) recordMutation(ctx context.Context, principal Principal, reque
 	}
 	tenants := fieldString("TenantID")
 	_ = principal
-	return (audit.Recorder{Writer: h.config.AuditWriter, TenantID: tenants}).Record(ctx, audit.Event{
+	return audit.NewRecorder(h.config.AuditWriter, tenants).Record(ctx, audit.Event{
 		EventID:   audit.NewEventID(requestID, tenants, fieldString("CorrelationID"), fieldString("EventType")),
 		EventType: audit.EventControlPlaneChanged, TenantID: tenants,
 		ActorType: fieldString("ActorType"), ActorID: fieldString("ActorID"),
@@ -300,7 +321,7 @@ func (h *Handler) recordRawMutation(ctx context.Context, principal Principal, re
 	if actorID == "" {
 		actorID = "admin"
 	}
-	return (audit.Recorder{Writer: h.config.AuditWriter, TenantID: tenantID}).Record(ctx, audit.Event{
+	return audit.NewRecorder(h.config.AuditWriter, tenantID).Record(ctx, audit.Event{
 		EventID:   audit.NewEventID(requestID, tenantID, fieldString("Version"), "raw"),
 		EventType: audit.EventControlPlaneChanged, TenantID: tenantID,
 		ActorType: "admin", ActorID: actorID, Reason: "admin mutation", CorrelationID: requestID,
@@ -312,6 +333,22 @@ var errNotFound = errors.New("admin route not found")
 var errInvalidRequest = errors.New("invalid admin request")
 
 func (h *Handler) tenants(ctx context.Context, r *http.Request, p Principal) (int, any, error) {
+	if r.Method == http.MethodGet {
+		lister, ok := h.config.Tenants.(TenantLister)
+		if !ok {
+			return 0, nil, errListUnsupported
+		}
+		o, err := repositoryListOptions(r)
+		if err != nil {
+			return 0, nil, err
+		}
+		items, next, err := lister.List(ctx, p.ScopeIDs(), o.Query, o.Status, o.Cursor, o.Limit)
+		if err != nil {
+			return 0, nil, err
+		}
+		value, err := newListEnvelope(items, next)
+		return http.StatusOK, value, err
+	}
 	if r.Method != http.MethodPost || !p.Allows("", true) {
 		return 0, nil, ErrForbidden
 	}
@@ -325,23 +362,27 @@ func (h *Handler) tenants(ctx context.Context, r *http.Request, p Principal) (in
 			if err != nil {
 				return 0, nil, err
 			}
-			if !allowed {
+			if allowed {
+				return http.StatusCreated, created, nil
+			}
+			// The first-tenant gate only protects an empty control plane. Once
+			// an initial tenant exists, a global platform admin may create
+			// additional tenants through the regular repository path.
+		}
+		if _, ok := h.config.Tenants.(firstTenantCreator); !ok {
+			h.firstTenantMu.Lock()
+			defer h.firstTenantMu.Unlock()
+			counter, counterOK := h.config.Tenants.(tenantCounter)
+			if !counterOK {
 				return 0, nil, ErrForbidden
 			}
-			return http.StatusCreated, created, nil
-		}
-		h.firstTenantMu.Lock()
-		defer h.firstTenantMu.Unlock()
-		counter, ok := h.config.Tenants.(tenantCounter)
-		if !ok {
-			return 0, nil, ErrForbidden
-		}
-		count, err := counter.Count(ctx)
-		if err != nil {
-			return 0, nil, err
-		}
-		if count > 0 {
-			return 0, nil, ErrForbidden
+			count, err := counter.Count(ctx)
+			if err != nil {
+				return 0, nil, err
+			}
+			if count > 0 {
+				return 0, nil, ErrForbidden
+			}
 		}
 	}
 	created, err := h.config.Tenants.Create(ctx, input)
@@ -374,6 +415,8 @@ func (h *Handler) tenantRoute(ctx context.Context, r *http.Request, p Principal,
 		}
 	}
 	switch parts[1] {
+	case "connections":
+		return h.connections(r, p, tenantID, parts[2:])
 	case "status":
 		if len(parts) != 2 || r.Method != http.MethodPost {
 			return 0, nil, errNotFound
@@ -405,10 +448,26 @@ func (h *Handler) tenantRoute(ctx context.Context, r *http.Request, p Principal,
 //nolint:gocyclo // App routes coordinate several independently authorized mutations.
 func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
+		if r.Method == http.MethodGet {
+			lister, ok := h.config.Apps.(AppLister)
+			if !ok {
+				return 0, nil, errListUnsupported
+			}
+			o, err := repositoryListOptions(r)
+			if err != nil {
+				return 0, nil, err
+			}
+			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
+			if err != nil {
+				return 0, nil, err
+			}
+			value, err := newListEnvelope(items, next)
+			return http.StatusOK, value, err
+		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
-		var input agent.CreateInput
+		var input appmodel.CreateInput
 		if err := decodeBody(r, &input); err != nil {
 			return 0, nil, err
 		}
@@ -423,7 +482,7 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 			value, err := h.config.Apps.Get(ctx, tenantID, appID)
 			return http.StatusOK, value, err
 		case http.MethodPatch:
-			var body agent.UpdateMetadataInput
+			var body appmodel.UpdateMetadataInput
 			if err := decodeBody(r, &body); err != nil {
 				return 0, nil, err
 			}
@@ -441,14 +500,14 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 		}
 		var body struct {
 			ExpectedVersion int64
-			NextStatus      agent.Status
+			NextStatus      appmodel.Status
 			Reason          string
 			CorrelationID   string
 		}
 		if err := decodeBody(r, &body); err != nil {
 			return 0, nil, err
 		}
-		value, event, err := h.config.Apps.TransitionStatus(ctx, agent.TransitionStatusInput{TenantID: tenantID, AppID: appID, ExpectedVersion: body.ExpectedVersion, NextStatus: body.NextStatus, Metadata: agent.ChangeMetadata{ActorType: "admin", ActorID: p.SubjectID, Reason: body.Reason, CorrelationID: body.CorrelationID}})
+		value, event, err := h.config.Apps.TransitionStatus(ctx, appmodel.TransitionStatusInput{TenantID: tenantID, AppID: appID, ExpectedVersion: body.ExpectedVersion, NextStatus: body.NextStatus, Metadata: appmodel.ChangeMetadata{ActorType: "admin", ActorID: p.SubjectID, Reason: body.Reason, CorrelationID: body.CorrelationID}})
 		return http.StatusOK, map[string]any{"app": value, "event": event}, err
 	case "revisions":
 		return h.revisions(ctx, r, p, tenantID, appID, parts[2:])
@@ -456,7 +515,7 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 		if len(parts) != 2 || r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
-		var body agent.RollbackInput
+		var body appmodel.RollbackInput
 		if err := decodeBody(r, &body); err != nil {
 			return 0, nil, err
 		}
@@ -481,10 +540,10 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 		if err != nil {
 			return 0, nil, err
 		}
-		bodyInput := agent.SetCanaryInput{
+		bodyInput := appmodel.SetCanaryInput{
 			TenantID: tenantID, AppID: appID, CandidateRevision: body.CandidateRevision,
 			ExpectedAppVersion: body.ExpectedAppVersion, TenantActive: tenantRoot.Status == tenant.StatusActive,
-			Metadata: agent.ChangeMetadata{ActorType: "admin", ActorID: p.SubjectID, Reason: body.Reason, CorrelationID: body.CorrelationID},
+			Metadata: appmodel.ChangeMetadata{ActorType: "admin", ActorID: p.SubjectID, Reason: body.Reason, CorrelationID: body.CorrelationID},
 		}
 		value, event, err := h.config.Apps.SetCanary(ctx, bodyInput)
 		return http.StatusOK, map[string]any{"app": value, "event": event}, err
@@ -495,10 +554,26 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 
 func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, tenantID, appID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
+		if r.Method == http.MethodGet {
+			lister, ok := h.config.Apps.(RevisionLister)
+			if !ok {
+				return 0, nil, errListUnsupported
+			}
+			o, err := repositoryListOptions(r)
+			if err != nil {
+				return 0, nil, err
+			}
+			items, next, err := lister.ListRevisions(ctx, tenantID, appID, o.Query, o.Status, o.Cursor, o.Limit)
+			if err != nil {
+				return 0, nil, err
+			}
+			value, err := newListEnvelope(items, next)
+			return http.StatusOK, value, err
+		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
-		var body agent.CreateDraftInput
+		var body appmodel.CreateDraftInput
 		if err := decodeBody(r, &body); err != nil {
 			return 0, nil, err
 		}
@@ -514,7 +589,7 @@ func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, t
 		if r.Method != http.MethodPatch {
 			return 0, nil, errNotFound
 		}
-		var body agent.UpdateDraftInput
+		var body appmodel.UpdateDraftInput
 		if err := decodeBody(r, &body); err != nil {
 			return 0, nil, err
 		}
@@ -525,7 +600,7 @@ func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, t
 	if len(parts) != 2 || parts[1] != "publish" || r.Method != http.MethodPost {
 		return 0, nil, errNotFound
 	}
-	var body agent.PublishInput
+	var body appmodel.PublishInput
 	if err := decodeBody(r, &body); err != nil {
 		return 0, nil, err
 	}
@@ -542,6 +617,22 @@ func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, t
 
 func (h *Handler) models(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
+		if r.Method == http.MethodGet {
+			lister, ok := h.config.Models.(ModelLister)
+			if !ok {
+				return 0, nil, errListUnsupported
+			}
+			o, err := repositoryListOptions(r)
+			if err != nil {
+				return 0, nil, err
+			}
+			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
+			if err != nil {
+				return 0, nil, err
+			}
+			value, err := newListEnvelope(items, next)
+			return http.StatusOK, value, err
+		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
@@ -584,6 +675,22 @@ func (h *Handler) models(ctx context.Context, r *http.Request, p Principal, tena
 
 func (h *Handler) backends(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
+		if r.Method == http.MethodGet {
+			lister, ok := h.config.Backends.(BackendLister)
+			if !ok {
+				return 0, nil, errListUnsupported
+			}
+			o, err := repositoryListOptions(r)
+			if err != nil {
+				return 0, nil, err
+			}
+			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
+			if err != nil {
+				return 0, nil, err
+			}
+			value, err := newListEnvelope(items, next)
+			return http.StatusOK, value, err
+		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
@@ -626,6 +733,22 @@ func (h *Handler) backends(ctx context.Context, r *http.Request, p Principal, te
 
 func (h *Handler) bindings(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
+		if r.Method == http.MethodGet {
+			lister, ok := h.config.Bindings.(BindingLister)
+			if !ok {
+				return 0, nil, errListUnsupported
+			}
+			o, err := repositoryListOptions(r)
+			if err != nil {
+				return 0, nil, err
+			}
+			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
+			if err != nil {
+				return 0, nil, err
+			}
+			value, err := newListEnvelope(items, next)
+			return http.StatusOK, value, err
+		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
@@ -787,6 +910,7 @@ func writeError(w http.ResponseWriter, requestID string, status int, category st
 
 func writeMappedError(w http.ResponseWriter, requestID string, err error) {
 	status, category := mapError(err)
+	logRequestFailure(requestID, status, category, err)
 	writeError(w, requestID, status, category)
 }
 
@@ -797,21 +921,27 @@ func mapError(err error) (int, string) {
 	switch {
 	case errors.Is(err, errInvalidRequest):
 		return http.StatusBadRequest, "invalid_request"
+	case errors.Is(err, ErrConnectionUnavailable):
+		return http.StatusServiceUnavailable, "connections_unavailable"
+	case errors.Is(err, ErrAgentNotReady):
+		return http.StatusConflict, "agent_not_ready"
+	case errors.Is(err, ErrConnectionFailed):
+		return http.StatusBadGateway, "connection_failed"
 	case errors.Is(err, ErrUnauthenticated):
 		return http.StatusUnauthorized, "unauthorized"
 	case errors.Is(err, ErrForbidden):
 		return http.StatusForbidden, "forbidden"
 	case errors.Is(err, audit.ErrWriteFailed):
 		return http.StatusServiceUnavailable, "audit_unavailable"
-	case matchesAny(err, errNotFound, tenant.ErrNotFound, agent.ErrNotFound, modelprofile.ErrNotFound, backend.ErrNotFound, channels.ErrNotFound):
+	case matchesAny(err, errNotFound, tenant.ErrNotFound, appmodel.ErrNotFound, modelprofile.ErrNotFound, backend.ErrNotFound, channels.ErrNotFound):
 		return http.StatusNotFound, "not_found"
-	case matchesAny(err, tenant.ErrConflict, agent.ErrConflict, modelprofile.ErrConflict, backend.ErrConflict, channels.ErrConflict, tenant.ErrDuplicateKey, agent.ErrDuplicateKey, modelprofile.ErrDuplicateKey, backend.ErrDuplicateKey, channels.ErrDuplicateKey):
+	case matchesAny(err, tenant.ErrConflict, appmodel.ErrConflict, modelprofile.ErrConflict, backend.ErrConflict, channels.ErrConflict, tenant.ErrDuplicateKey, appmodel.ErrDuplicateKey, modelprofile.ErrDuplicateKey, backend.ErrDuplicateKey, channels.ErrDuplicateKey):
 		return http.StatusConflict, "conflict"
-	case errors.Is(err, postgres.ErrStorage):
+	case errors.Is(err, postgres.ErrStorage), errors.Is(err, storagemysql.ErrStorage):
 		return http.StatusServiceUnavailable, "storage_unavailable"
-	case matchesAny(err, tenant.ErrInvalid, agent.ErrInvalid, modelprofile.ErrInvalid, backend.ErrInvalid, channels.ErrInvalid):
+	case matchesAny(err, tenant.ErrInvalid, appmodel.ErrInvalid, modelprofile.ErrInvalid, backend.ErrInvalid, channels.ErrInvalid):
 		return http.StatusBadRequest, "invalid_request"
-	case matchesAny(err, tenant.ErrInvalidTransition, agent.ErrInvalidTransition, modelprofile.ErrInvalidTransition, backend.ErrInvalidTransition, channels.ErrInvalidTransition, tenant.ErrDisabled, agent.ErrDisabled, modelprofile.ErrDisabled, backend.ErrDisabled, channels.ErrDisabled, agent.ErrImmutableRevision):
+	case matchesAny(err, tenant.ErrInvalidTransition, appmodel.ErrInvalidTransition, modelprofile.ErrInvalidTransition, backend.ErrInvalidTransition, channels.ErrInvalidTransition, tenant.ErrDisabled, appmodel.ErrDisabled, modelprofile.ErrDisabled, backend.ErrDisabled, channels.ErrDisabled, appmodel.ErrImmutableRevision):
 		return http.StatusBadRequest, "invalid_request"
 	default:
 		return http.StatusInternalServerError, "internal_error"

@@ -52,7 +52,7 @@ var allowedValues = map[string]map[string]struct{}{
 	"operation":    {observability.OperationHTTPRequest: {}, observability.OperationGatewayDispatch: {}, observability.OperationRunnerExecution: {}, observability.OperationModelCall: {}, observability.OperationToolCall: {}, observability.OperationStorageOperation: {}, observability.OperationChannelReceive: {}, observability.OperationChannelSend: {}},
 	"status":       {"started": {}, "active": {}, "complete": {}, "ok": {}, "error": {}, "success": {}, "failure": {}, "canceled": {}, "timeout": {}, "retry": {}, "dead_letter": {}},
 	"provider":     {"openai": {}, "postgres": {}, "inmemory": {}, "other": {}},
-	"channel":      {"api": {}, "telegram": {}, "wecom": {}, "outbox": {}, "other": {}},
+	"channel":      {"api": {}, "telegram": {}, "wecom": {}, "wecom_aibot": {}, "outbox": {}, "other": {}},
 	"model_family": {"gpt": {}, "claude": {}, "gemini": {}, "other": {}},
 	"error_class":  {"": {}, "error": {}, "canceled": {}, "timeout": {}, "invalid": {}, "unauthenticated": {}, "not_ready": {}, "rate_limited": {}, "duplicate": {}, "unavailable": {}, "storage": {}, "model": {}, "tool": {}},
 }
@@ -145,6 +145,8 @@ func normalizeChannel(value string) string {
 		return "telegram"
 	case "wecom", "we_chat_work", "wechat_work":
 		return "wecom"
+	case "wecom_aibot", "wecom-ai-bot":
+		return "wecom_aibot"
 	case "outbox":
 		return "outbox"
 	default:

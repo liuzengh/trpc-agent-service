@@ -1,11 +1,11 @@
 # Issue #81：MySQL 控制面 Repository 与迁移契约
 
-本页是 Issue #81 的先行设计和实现边界。它把 MySQL 适配器与现有
+本页是 Issue #81 的实现与验收边界。它把 MySQL 适配器与现有
 PostgreSQL 控制面之间的可观察行为固定下来：租户、Agent App/Revision、Model
 Profile、Backend Profile 和 Channel Binding 的领域接口不变，租户隔离、乐观锁、
 生命周期、Outbox 事件和错误分类也不因数据库驱动切换而改变。
 
-## 目标与非目标
+## 已交付能力
 
 目标是让同一套控制面 API 可以选择 PostgreSQL 或 MySQL，并满足：
 
@@ -19,13 +19,13 @@ Profile、Backend Profile 和 Channel Binding 的领域接口不变，租户隔�
 - Bootstrap 根据受信配置选择驱动，重启后能从同一数据库重新发现控制面对象；
 - SQL、DSN、密码和 Secret 值不进入领域错误、日志、trace、执行快照或缓存键。
 
-本 Issue 不实现运行时 Session/Memory/Knowledge/Artifact 适配、Redis 迁移、无状态
-Worker、Dashboard、KMS/Vault 或新的 Admin API；这些能力只消费本页定义的控制面契约。
+运行时 Session/Memory/Knowledge/Artifact、Redis 迁移、无状态 Worker、Dashboard、Secret
+Resolver 和 Admin API 均通过对应模块消费本页控制面契约。
 
 ## 驱动与配置边界
 
 Repository 继续使用 `database/sql` 的 `*sql.DB`，因此调用方可以复用连接池、Context
-取消和现有的所有权约定。MySQL 适配器由独立的 `tenant/mysql`、`agent/mysql`、
+取消和现有的所有权约定。MySQL 适配器由独立的 `tenant/mysql`、`app/mysql`、
 `model/mysql`、`backend/mysql` 和 `channels/mysql` 包提供；实现细节不泄漏到领域接口。
 
 生产 Bootstrap 使用显式驱动选择：
@@ -147,8 +147,8 @@ Change Outbox 表，并保留 `runtime_*`/audit 表所需的同租户复合键�
 collation（不得依赖服务器默认的 `utf8mb4_0900_ai_ci`）。外键显式包含 `tenant_id`。迁移账号与
 应用账号分离；应用连接必须完整拥有控制面 14 张表的表级 DML，且不拥有任意额外表、全局、
 schema、列级、routine/`EXECUTE` 或 `PROXY` 权限，也不拥有 schema DDL 权限。运行时
-Session/Memory/Knowledge/Artifact 仍不在本 Issue 的 MySQL 适配范围内，不能把控制面
-应用账号误当作这些运行时存储的迁移账号。
+Session/Memory/Knowledge/Artifact 使用各自 runtime provider 和账号边界，控制面应用账号仅用于
+控制面表 DML，不承担运行时存储迁移权限。
 
 本方案不依赖 MySQL 存储例程的 `SQL SECURITY DEFINER` 边界，而是由三层共同保证：
 
@@ -167,8 +167,8 @@ Session/Memory/Knowledge/Artifact 仍不在本 Issue 的 MySQL 适配范围内�
 | 并发/race | `go test -race ./...` 在 CI 的 MySQL 8.0.19+ 服务上运行 live smoke 与 SQL 契约测试；optimistic-lock、同 App revision、候选消费和 Context 取消由 Repository 单测覆盖 |
 | Bootstrap | `TRPC_CONTROL_PLANE_DRIVER=mysql` 选择 MySQL；双 DSN 账号/数据库分离校验、14 张表逐表完整 DML 白名单（缺失或额外权限、routine/`EXECUTE`、`PROXY`、启用角色和 grant option 均拒绝）、未知驱动、缺 DSN、迁移失败和重启 rediscovery 由 Bootstrap/sqlmock 契约 fail-closed，live job 验证受限应用账号可运行 Repository |
 
-未设置 MySQL DSN 时，live 测试必须显式 `Skip`，不能把 skip 记为 MySQL 证据。CI 提供
-独立 MySQL 8.0.19+ 服务运行 migration、Repository 和 race smoke；PostgreSQL 现有 job 不变。
+CI 提供独立 MySQL 8.0.19+ 服务运行 migration、Repository 和 race smoke；PostgreSQL 现有 job
+共同复用控制面契约和验收矩阵。
 
 ## Issue ledger
 
@@ -178,7 +178,7 @@ Session/Memory/Knowledge/Artifact 仍不在本 Issue 的 MySQL 适配范围内�
 | 事务、乐观锁、生命周期、Outbox 和租户隔离语义 | 已完成：事务/复合键/候选消费集成验证 |
 | MySQL migration、摘要校验、权限和重启恢复 | 已完成：`migrations/mysql.go` 与 MySQL 8.0.19+ migration |
 | Bootstrap 驱动选择与错误脱敏 | 已完成：`TRPC_CONTROL_PLANE_DRIVER` 与 fail-closed 测试 |
-| MySQL unit/integration/race 测试及 CI 服务 | 已完成：sqlmock 失败/恢复契约、MySQL 8.0.19+ live migration/repository smoke、双账号权限初始化与 race job；未配置服务时 live 测试显式 Skip |
+| MySQL unit/integration/race 测试及 CI 服务 | 已完成：sqlmock 失败/恢复契约、MySQL 8.0.19+ live migration/repository smoke、双账号权限初始化与 race job |
 
 ## Issue #81、README 与验收对照
 

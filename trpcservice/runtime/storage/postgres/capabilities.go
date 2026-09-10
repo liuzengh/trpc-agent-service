@@ -70,7 +70,7 @@ func (s *Store) PutMemory(ctx context.Context, input runtimestorage.MemoryInput)
 	var embeddingRaw []byte
 	err = s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_memory (tenant_id,memory_id,user_id,session_id,content,topics,metadata,embedding,version,deleted_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,NULL) ON CONFLICT (tenant_id,memory_id) DO UPDATE SET user_id=EXCLUDED.user_id,session_id=EXCLUDED.session_id,content=EXCLUDED.content,topics=EXCLUDED.topics,metadata=EXCLUDED.metadata,embedding=EXCLUDED.embedding,version=public.runtime_memory.version+1,deleted_at=NULL,updated_at=now() RETURNING tenant_id,memory_id,user_id,session_id,content,topics,metadata,embedding,version,deleted_at,created_at,updated_at", input.TenantID, input.MemoryID, input.UserID, input.SessionID, input.Content, topics, metadata, embedding).Scan(&value.TenantID, &value.MemoryID, &value.UserID, &value.SessionID, &value.Content, &topicsRaw, &metadataRaw, &embeddingRaw, &value.Version, &value.DeletedAt, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
-		return runtimestorage.MemoryRecord{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.MemoryRecord{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if json.Unmarshal(topicsRaw, &value.Topics) != nil || pgstorage.DecodeJSON(metadataRaw, &value.Metadata) != nil || pgstorage.DecodeJSON(embeddingRaw, &value.Embedding) != nil {
 		return runtimestorage.MemoryRecord{}, runtimestorage.ErrStorage
@@ -92,7 +92,7 @@ func (s *Store) GetMemory(ctx context.Context, tenantID, memoryID string) (runti
 	}
 	value, err := scanMemory(s.db.QueryRowContext(ctx, "SELECT tenant_id,memory_id,user_id,session_id,content,topics,metadata,embedding,version,deleted_at,created_at,updated_at FROM public.runtime_memory WHERE tenant_id=$1 AND memory_id=$2 AND deleted_at IS NULL", tenantID, memoryID))
 	if err != nil {
-		return runtimestorage.MemoryRecord{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.MemoryRecord{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return value, nil
 }
@@ -107,7 +107,7 @@ func (s *Store) ListMemories(ctx context.Context, tenantID, userID string, limit
 	}
 	rows, err := s.db.QueryContext(ctx, "SELECT tenant_id,memory_id,user_id,session_id,content,topics,metadata,embedding,version,deleted_at,created_at,updated_at FROM public.runtime_memory WHERE tenant_id=$1 AND user_id=$2 AND deleted_at IS NULL ORDER BY updated_at DESC,memory_id LIMIT NULLIF($3,0)", tenantID, userID, limit)
 	if err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer rows.Close()
 	values := make([]runtimestorage.MemoryRecord, 0)
@@ -134,7 +134,7 @@ func (s *Store) SearchMemories(ctx context.Context, tenantID, userID, query stri
 	}
 	rows, err := s.db.QueryContext(ctx, "SELECT tenant_id,memory_id,user_id,session_id,content,topics,metadata,embedding,version,deleted_at,created_at,updated_at FROM public.runtime_memory WHERE tenant_id=$1 AND user_id=$2 AND deleted_at IS NULL", tenantID, userID)
 	if err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer rows.Close()
 	terms := strings.Fields(strings.ToLower(query))
@@ -185,14 +185,14 @@ func (s *Store) DeleteMemory(ctx context.Context, tenantID, memoryID string) err
 	defer func() { _ = tx.Rollback() }()
 	result, err := tx.ExecContext(ctx, "UPDATE public.runtime_memory SET deleted_at=now(),version=version+1,updated_at=now() WHERE tenant_id=$1 AND memory_id=$2 AND deleted_at IS NULL", tenantID, memoryID)
 	if err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	count, _ := result.RowsAffected()
 	if count == 0 {
 		return runtimestorage.ErrNotFound
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM public.runtime_vector_index WHERE tenant_id=$1 AND source=$2 AND document_id=$3", tenantID, runtimestorage.VectorSourceMemory, memoryID); err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if err := tx.Commit(); err != nil {
 		return runtimestorage.ErrStorage
@@ -210,7 +210,7 @@ func (s *Store) EnqueueMemoryIndex(ctx context.Context, value runtimestorage.Mem
 	}
 	result, err := s.db.ExecContext(ctx, "INSERT INTO public.runtime_vector_index (tenant_id,source,document_id,content,metadata,embedding,version) SELECT tenant_id,'memory',memory_id,content,metadata,embedding,version FROM public.runtime_memory WHERE tenant_id=$1 AND memory_id=$2 AND version=$3 AND deleted_at IS NULL AND embedding <> '[]'::jsonb ON CONFLICT (tenant_id,source,document_id) DO UPDATE SET content=EXCLUDED.content,metadata=EXCLUDED.metadata,embedding=EXCLUDED.embedding,version=EXCLUDED.version,updated_at=now() WHERE EXCLUDED.version >= public.runtime_vector_index.version", value.TenantID, value.MemoryID, value.Version)
 	if err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if count, _ := result.RowsAffected(); count > 0 {
 		return nil
@@ -231,7 +231,7 @@ func (s *Store) EnqueueMemoryIndex(ctx context.Context, value runtimestorage.Mem
 	// any projection left by an earlier version so reads remain monotonic.
 	_, err = s.db.ExecContext(ctx, "DELETE FROM public.runtime_vector_index WHERE tenant_id=$1 AND source=$2 AND document_id=$3", value.TenantID, runtimestorage.VectorSourceMemory, value.MemoryID)
 	if err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return nil
 }
@@ -266,7 +266,7 @@ func (s *Store) GetSummary(ctx context.Context, tenantID, sessionID, filterKey s
 	var value runtimestorage.SummaryRecord
 	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,session_id,filter_key,text,event_seq,version,created_at,updated_at FROM public.runtime_summary WHERE tenant_id=$1 AND session_id=$2 AND filter_key=$3", tenantID, sessionID, filterKey).Scan(&value.TenantID, &value.SessionID, &value.FilterKey, &value.Text, &value.EventSeq, &value.Version, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
-		return runtimestorage.SummaryRecord{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.SummaryRecord{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return value, nil
 }
@@ -371,7 +371,7 @@ func (s *Store) PutKnowledge(ctx context.Context, value runtimestorage.Knowledge
 	var metaRaw, embRaw []byte
 	err = s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_knowledge (tenant_id,document_id,content,metadata,embedding,digest,version) VALUES ($1,$2,$3,$4,$5,$6,1) ON CONFLICT (tenant_id,document_id) DO UPDATE SET content=EXCLUDED.content,metadata=EXCLUDED.metadata,embedding=EXCLUDED.embedding,digest=EXCLUDED.digest,version=public.runtime_knowledge.version+1,updated_at=now() RETURNING tenant_id,document_id,content,metadata,embedding,digest,version,created_at,updated_at", value.TenantID, value.DocumentID, value.Content, metadata, embedding, value.Digest).Scan(&out.TenantID, &out.DocumentID, &out.Content, &metaRaw, &embRaw, &out.Digest, &out.Version, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
-		return runtimestorage.KnowledgeDocument{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.KnowledgeDocument{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if pgstorage.DecodeJSON(metaRaw, &out.Metadata) != nil || pgstorage.DecodeJSON(embRaw, &out.Embedding) != nil {
 		return runtimestorage.KnowledgeDocument{}, runtimestorage.ErrStorage
@@ -383,7 +383,7 @@ func (s *Store) PutKnowledge(ctx context.Context, value runtimestorage.Knowledge
 		_, projectionErr = s.db.ExecContext(ctx, "DELETE FROM public.runtime_vector_index WHERE tenant_id=$1 AND source=$2 AND document_id=$3", out.TenantID, runtimestorage.VectorSourceKnowledge, out.DocumentID)
 	}
 	if projectionErr != nil {
-		return runtimestorage.KnowledgeDocument{}, pgstorage.MapError(ctx, projectionErr, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.KnowledgeDocument{}, mapError(ctx, projectionErr, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return out, nil
 }
@@ -400,7 +400,7 @@ func (s *Store) GetKnowledge(ctx context.Context, tenantID, documentID string) (
 	var metaRaw, embRaw []byte
 	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,document_id,content,metadata,embedding,digest,version,created_at,updated_at FROM public.runtime_knowledge WHERE tenant_id=$1 AND document_id=$2", tenantID, documentID).Scan(&out.TenantID, &out.DocumentID, &out.Content, &metaRaw, &embRaw, &out.Digest, &out.Version, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
-		return runtimestorage.KnowledgeDocument{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.KnowledgeDocument{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if pgstorage.DecodeJSON(metaRaw, &out.Metadata) != nil || pgstorage.DecodeJSON(embRaw, &out.Embedding) != nil {
 		return runtimestorage.KnowledgeDocument{}, runtimestorage.ErrStorage
@@ -418,7 +418,7 @@ func (s *Store) SearchKnowledge(ctx context.Context, tenantID string, embedding 
 	}
 	rows, err := s.db.QueryContext(ctx, "SELECT tenant_id,document_id,content,metadata,embedding,digest,version,created_at,updated_at FROM public.runtime_knowledge WHERE tenant_id=$1 AND embedding <> '[]'::jsonb", tenantID)
 	if err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer rows.Close()
 	values := make([]runtimestorage.KnowledgeSearchResult, 0)
@@ -463,14 +463,14 @@ func (s *Store) DeleteKnowledge(ctx context.Context, tenantID, documentID string
 	defer func() { _ = tx.Rollback() }()
 	result, err := tx.ExecContext(ctx, "DELETE FROM public.runtime_knowledge WHERE tenant_id=$1 AND document_id=$2", tenantID, documentID)
 	if err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	count, _ := result.RowsAffected()
 	if count == 0 {
 		return runtimestorage.ErrNotFound
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM public.runtime_vector_index WHERE tenant_id=$1 AND source=$2 AND document_id=$3", tenantID, runtimestorage.VectorSourceKnowledge, documentID); err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if err := tx.Commit(); err != nil {
 		return runtimestorage.ErrStorage
@@ -489,7 +489,7 @@ func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRe
 	var out runtimestorage.ArtifactRecord
 	err := s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_artifact (tenant_id,artifact_id,session_id,name,mime_type,content,version) VALUES ($1,$2,$3,$4,$5,$6,1) ON CONFLICT (tenant_id,artifact_id) DO UPDATE SET session_id=EXCLUDED.session_id,name=EXCLUDED.name,mime_type=EXCLUDED.mime_type,content=EXCLUDED.content,version=public.runtime_artifact.version+1,updated_at=now() RETURNING tenant_id,artifact_id,session_id,name,mime_type,content,version,created_at,updated_at", value.TenantID, value.ArtifactID, value.SessionID, value.Name, value.MimeType, value.Content).Scan(&out.TenantID, &out.ArtifactID, &out.SessionID, &out.Name, &out.MimeType, &out.Content, &out.Version, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
-		return runtimestorage.ArtifactRecord{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.ArtifactRecord{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return out, nil
 }
@@ -505,7 +505,7 @@ func (s *Store) GetArtifact(ctx context.Context, tenantID, artifactID string) (r
 	var value runtimestorage.ArtifactRecord
 	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,artifact_id,session_id,name,mime_type,content,version,created_at,updated_at FROM public.runtime_artifact WHERE tenant_id=$1 AND artifact_id=$2", tenantID, artifactID).Scan(&value.TenantID, &value.ArtifactID, &value.SessionID, &value.Name, &value.MimeType, &value.Content, &value.Version, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
-		return runtimestorage.ArtifactRecord{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.ArtifactRecord{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return value, nil
 }
@@ -520,7 +520,7 @@ func (s *Store) ListArtifacts(ctx context.Context, tenantID, sessionID string) (
 	}
 	rows, err := s.db.QueryContext(ctx, "SELECT tenant_id,artifact_id,session_id,name,mime_type,content,version,created_at,updated_at FROM public.runtime_artifact WHERE tenant_id=$1 AND ($2='' OR session_id=$2) ORDER BY artifact_id", tenantID, sessionID)
 	if err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer rows.Close()
 	values := make([]runtimestorage.ArtifactRecord, 0)
@@ -542,7 +542,7 @@ func mapSummaryError(ctx context.Context, err error) error {
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
 		return runtimestorage.ErrNotFound
 	}
-	return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 }
 
 // DeleteArtifact implements the tenant-scoped runtime storage contract.
@@ -555,7 +555,7 @@ func (s *Store) DeleteArtifact(ctx context.Context, tenantID, artifactID string)
 	}
 	result, err := s.db.ExecContext(ctx, "DELETE FROM public.runtime_artifact WHERE tenant_id=$1 AND artifact_id=$2", tenantID, artifactID)
 	if err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	count, _ := result.RowsAffected()
 	if count == 0 {
@@ -598,7 +598,7 @@ func (s *Store) AppendAudit(ctx context.Context, value runtimestorage.AuditRecor
 		if errors.Is(err, sql.ErrNoRows) {
 			return runtimestorage.AuditRecord{}, runtimestorage.ErrConflict
 		}
-		return runtimestorage.AuditRecord{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.AuditRecord{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if pgstorage.DecodeJSON(raw, &out.Payload) != nil {
 		return runtimestorage.AuditRecord{}, runtimestorage.ErrStorage
@@ -616,7 +616,7 @@ func (s *Store) ListAudit(ctx context.Context, tenantID string, since time.Time,
 	}
 	rows, err := s.db.QueryContext(ctx, "SELECT tenant_id,audit_id,event_type,payload,occurred_at FROM public.runtime_audit_log WHERE tenant_id=$1 AND ($2::timestamptz IS NULL OR occurred_at >= $2) ORDER BY occurred_at,audit_id LIMIT NULLIF($3,0)", tenantID, nullTime(since), limit)
 	if err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer rows.Close()
 	values := make([]runtimestorage.AuditRecord, 0)
@@ -665,7 +665,7 @@ func (s *Store) UpsertVector(ctx context.Context, value runtimestorage.VectorRec
 	}
 	result, err := s.db.ExecContext(ctx, "INSERT INTO public.runtime_vector_index (tenant_id,source,document_id,content,metadata,embedding,version) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (tenant_id,source,document_id) DO UPDATE SET content=EXCLUDED.content,metadata=EXCLUDED.metadata,embedding=EXCLUDED.embedding,version=EXCLUDED.version,updated_at=now() WHERE EXCLUDED.version >= public.runtime_vector_index.version", value.TenantID, value.Source, value.DocumentID, value.Content, metadata, embedding, value.Version)
 	if err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if count, err := result.RowsAffected(); err == nil && count == 0 {
 		return runtimestorage.ErrConflict
@@ -683,7 +683,7 @@ func (s *Store) SearchVectors(ctx context.Context, tenantID string, embedding []
 	}
 	rows, err := s.db.QueryContext(ctx, "SELECT tenant_id,source,document_id,content,metadata,embedding,version,updated_at FROM public.runtime_vector_index WHERE tenant_id=$1", tenantID)
 	if err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer rows.Close()
 	values := make([]runtimestorage.VectorSearchResult, 0)
@@ -728,7 +728,7 @@ func (s *Store) DeleteVector(ctx context.Context, tenantID, documentID string) e
 	}
 	result, err := s.db.ExecContext(ctx, "DELETE FROM public.runtime_vector_index WHERE tenant_id=$1 AND document_id=$2", tenantID, documentID)
 	if err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	count, _ := result.RowsAffected()
 	if count == 0 {
@@ -753,7 +753,7 @@ func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, conte
 	var value runtimestorage.ObjectInfo
 	err = s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_object (tenant_id,object_key,content_type,content,size,etag) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,object_key) DO UPDATE SET content_type=EXCLUDED.content_type,content=EXCLUDED.content,size=EXCLUDED.size,etag=EXCLUDED.etag,updated_at=now() RETURNING tenant_id,object_key,content_type,size,etag,created_at", tenantID, objectKey, contentType, data, len(data), hex.EncodeToString(sum[:])).Scan(&value.TenantID, &value.ObjectKey, &value.ContentType, &value.Size, &value.ETag, &value.CreatedAt)
 	if err != nil {
-		return runtimestorage.ObjectInfo{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.ObjectInfo{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return value, nil
 }
@@ -770,7 +770,7 @@ func (s *Store) GetObject(ctx context.Context, tenantID, objectKey string) (io.R
 	var data []byte
 	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,object_key,content_type,content,size,etag,created_at FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2", tenantID, objectKey).Scan(&value.TenantID, &value.ObjectKey, &value.ContentType, &data, &value.Size, &value.ETag, &value.CreatedAt)
 	if err != nil {
-		return nil, runtimestorage.ObjectInfo{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, runtimestorage.ObjectInfo{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return io.NopCloser(bytes.NewReader(data)), value, nil
 }
@@ -785,7 +785,7 @@ func (s *Store) DeleteObject(ctx context.Context, tenantID, objectKey string) er
 	}
 	result, err := s.db.ExecContext(ctx, "DELETE FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2", tenantID, objectKey)
 	if err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	count, _ := result.RowsAffected()
 	if count == 0 {
@@ -804,4 +804,3 @@ func nullTime(value time.Time) any {
 var _ runtimestorage.AuditStore = (*Store)(nil)
 var _ runtimestorage.VectorStore = (*Store)(nil)
 var _ runtimestorage.ObjectStore = (*Store)(nil)
-var _ runtimestorage.RuntimeCapabilities = (*Store)(nil)

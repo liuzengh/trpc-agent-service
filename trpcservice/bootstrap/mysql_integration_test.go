@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/agent/mysql"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	appmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmysql "github.com/XnLemon/trpc-agent-service/trpcservice/backend/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -76,15 +76,15 @@ func TestMySQLControlPlaneRepositoriesLive(t *testing.T) {
 		t.Fatalf("backend resume = %+v, err=%v", resumedBackend, err)
 	}
 
-	app, draft := createMySQLTestDraft(t, ctx, db, first.TenantID, profile.ProfileID, suffix)
-	publishedApp, publishedRevision := publishMySQLTestDraft(t, ctx, db, first.TenantID, app, draft, suffix)
+	appRoot, draft := createMySQLTestDraft(t, ctx, db, first.TenantID, profile.ProfileID, suffix)
+	publishedApp, publishedRevision := publishMySQLTestDraft(t, ctx, db, first.TenantID, appRoot, draft, suffix)
 
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelTelegram, "route-"+suffix)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertMySQLTestChannel(t, ctx, db, first.TenantID, app.AppID, routeDigest, suffix)
-	if publishedApp.CurrentRevision == nil || publishedRevision.State != agent.RevisionStatePublished {
+	assertMySQLTestChannel(t, ctx, db, first.TenantID, appRoot.AppID, routeDigest, suffix)
+	if publishedApp.CurrentRevision == nil || publishedRevision.State != appmodel.RevisionStatePublished {
 		t.Fatalf("publish = app=%+v revision=%+v", publishedApp, publishedRevision)
 	}
 }
@@ -216,30 +216,30 @@ func createMySQLTestBackend(t *testing.T, ctx context.Context, db *sql.DB, tenan
 	return profile
 }
 
-func createMySQLTestDraft(t *testing.T, ctx context.Context, db *sql.DB, tenantID, profileID, suffix string) (*agent.App, *agent.Revision) {
+func createMySQLTestDraft(t *testing.T, ctx context.Context, db *sql.DB, tenantID, profileID, suffix string) (*appmodel.App, *appmodel.Revision) {
 	t.Helper()
-	repo := agentmysql.NewRepository(db)
-	app, err := repo.Create(ctx, agent.CreateInput{TenantID: tenantID, AppKey: "assistant-" + suffix, DisplayName: "Assistant"})
+	repo := appmysql.NewAppRepository(db)
+	appRoot, err := repo.Create(ctx, appmodel.CreateInput{TenantID: tenantID, AppKey: "assistant-" + suffix, DisplayName: "Assistant"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := repo.CreateDraft(ctx, agent.CreateDraftInput{
-		TenantID: tenantID, AppID: app.AppID, ExpectedAppVersion: app.Version,
-		Configuration: agent.DraftConfiguration{Description: "draft", Instruction: "Answer clearly.", ModelProfileID: profileID},
+	draft, err := repo.CreateDraft(ctx, appmodel.CreateDraftInput{
+		TenantID: tenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version,
+		Configuration: appmodel.DraftConfiguration{Description: "draft", Instruction: "Answer clearly.", ModelProfileID: profileID},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return app, draft
+	return appRoot, draft
 }
 
-func publishMySQLTestDraft(t *testing.T, ctx context.Context, db *sql.DB, tenantID string, app *agent.App, draft *agent.Revision, suffix string) (*agent.App, *agent.Revision) {
+func publishMySQLTestDraft(t *testing.T, ctx context.Context, db *sql.DB, tenantID string, appRoot *appmodel.App, draft *appmodel.Revision, suffix string) (*appmodel.App, *appmodel.Revision) {
 	t.Helper()
-	repo := agentmysql.NewRepository(db)
-	publishedApp, publishedRevision, _, err := repo.Publish(ctx, agent.PublishInput{
-		TenantID: tenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version,
+	repo := appmysql.NewAppRepository(db)
+	publishedApp, publishedRevision, _, err := repo.Publish(ctx, appmodel.PublishInput{
+		TenantID: tenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version,
 		ExpectedDraftVersion: draft.DraftVersion, TenantActive: true,
-		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "integration", Reason: "publish", CorrelationID: suffix},
+		Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "integration", Reason: "publish", CorrelationID: suffix},
 	})
 	if err != nil {
 		t.Fatal(err)

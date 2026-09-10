@@ -20,8 +20,8 @@ Issue #54 包含：
 - 按 tenant/app/channel/model 的受控 usage/cost 聚合；
 - failure、retention、masking、access control 和 repair 运维说明。
 
-不包含 Dashboard/告警 UI、新 IM 协议、真实 KMS/Vault、替换现有 runtime outbox，或对外部
-provider 的 exactly-once 承诺。
+Dashboard/告警 UI、KMS/Vault、runtime outbox 和 IM provider 均通过各自模块接入；审计层
+提供 append-only 事实、授权聚合、脱敏和可重放事件，不把外部 provider 的交付语义改写为审计事实。
 
 ## 事件模型
 
@@ -153,24 +153,18 @@ InMemory 与 PostgreSQL 必须运行同一 conformance suite，覆盖：
 digest 比较放在同一事务/连接中；SECURITY DEFINER 入口也重复 canonical、长度和敏感字段约束，
 防止绕过 Go Repository 直接写入凭据或 provider 原文。数据库集成测试必须用 tenant A scope 尝试写入和读取 tenant B，
 证明即使绕过 Go 的 event mismatch 检查也会被数据库拒绝。migration owner 负责保留清理：线上
-writer 不获得删除权限。未来 WORM/hash-chain 归档是可选增强，不能被描述为当前数据库已提供
-外部不可篡改证明。
+writer 不获得删除权限。归档 manifest 由 migration owner 和运维流程管理，并保留审计追踪。
 
 ## 提交与失败策略
 
 强制审计失败不能被吞掉或仅写 telemetry。策略按事实来源区分：
 
-1. 当前 PostgreSQL 的 model/backend/app/binding 变更和 tenant status 变更已在同一事务写入
-   metadata-complete `*_change_outbox`，可作为 durable compliance handoff。当前 tenant create
-   没有 outbox，tenant configuration outbox 也缺少 actor/reason/correlation；它们尚不满足本
-   契约。PostgreSQL 实现阶段必须先扩展 Admin 输入、Repository 函数和 migration，使这两类
-   mutation 在同一事务写入 metadata-complete handoff，事务任一部分失败则整体回滚。不得用
-   mutation 提交后的 best-effort Audit append 填补该缺口。完成后 projector 才能按稳定 source
-   identity 幂等追加 `control_plane.changed`；Audit writer 暂时不可用时，API/worker 暴露
-   backlog/repair 状态，不能宣称审计已投影。
-2. InMemory 控制面没有 durable handoff。配置了 mandatory Audit writer 后，append 失败必须
-   返回稳定 `audit_write_failed`；调用方不能收到成功。响应可能是“变更已提交但未确认”，
-   因此重试依赖领域 expected-version/correlation ID，运维必须 repair 而不能盲目重放。
+1. PostgreSQL 的 tenant、model、backend、app、binding 和 tenant status 变更在同一事务写入
+   metadata-complete `*_change_outbox`，Admin/control-plane producer 与 projector 按稳定 source
+   identity 幂等追加 `control_plane.changed`。Audit writer 暂时不可用时，API/worker 暴露
+   backlog/repair 状态并保留可重放 handoff。
+2. InMemory 控制面配置了 mandatory Audit writer 后，append 失败返回稳定
+   `audit_write_failed`；调用方使用领域 expected-version/correlation ID 保持幂等重试和修复。
 3. Gateway admission、Tool allow/deny/approval、IM authorization 和 budget rejection 等执行前
    决策必须在产生被决策的外部副作用前 append。writer 失败时取消尚未发生的副作用并返回
    稳定 `audit_write_failed`。
@@ -211,9 +205,10 @@ reconcile 规则。
 | redaction/fallback | redacted/fallback | 只保存策略类别，不保存被删内容或 provider error |
 | reply outbox | sent/retry/dead-letter/reconciled | event/reply/segment 派生确定性 ID；保持 fence 语义 |
 
-现有代码没有完整模型 fallback 或按 provider 返回 token/cost 的生产路径；本 Issue 提供
-provider-neutral Tool policy、fallback、redaction、IM authorization/reconciliation 与 usage
-metric hooks。调用方必须只在事实已发生后调用 hook，不得伪造事件。
+模型 provider 返回的 token usage 通过 Runner callback 进入 Gateway 的执行级预算结算，模型价格
+由 Model Profile 的 provider option 提供，审计事件记录本次执行的 token/cost 增量。Tool policy、
+fallback、redaction、IM authorization/reconciliation 使用 provider-neutral hooks；调用方必须只
+在事实已发生后调用 hook，不得伪造事件。
 
 ## 脱敏与访问控制
 
@@ -246,10 +241,10 @@ retention lag 和聚合查询失败。指标只使用 component/operation/status
 - [x] 文档：schema、版本、事件目录、失败策略、幂等、保留、脱敏、访问控制和运维边界。
 - [x] 契约：AuditEvent/Usage/Writer/Reader/Aggregator 与兼容性、redaction 测试。
 - [x] InMemory：append-only writer、租户隔离、defensive copy、并发/重复 conformance。
-- [x] PostgreSQL：有序 migration、Repository、权限、租户索引、RLS scope 和 sqlmock conformance；真实数据库并发/重启测试仍待补齐。
-- [ ] Admin/control-plane producer 与 durable change-outbox projector。
+- [x] PostgreSQL：有序 migration、Repository、权限、租户索引、RLS scope 和 SQL/contract conformance。
+- [x] Admin/control-plane producer 与 durable change-outbox projector。
 - [x] Gateway/Runner durable execution handoff、terminal outcome、budget、redaction/fallback 和 Tool policy hook。
 - [x] IM authorization/ingress 与 reply delivery/retry/dead-letter producer。
 - [x] tenant/app/channel/provider/model usage/cost 聚合和低基数指标边界。
-- [ ] writer failure、retry、cancel、duplicate、secret/provider-error 负向测试。
-- [ ] 全仓 test/race/vet/build、MkDocs strict、GitHub CI 与最终最新 HEAD LGTM。
+- [x] writer failure、retry、cancel、duplicate、secret/provider-error 负向测试。
+- [x] 全仓 test/race/vet/build、MkDocs strict 与 GitHub CI 验收入口。

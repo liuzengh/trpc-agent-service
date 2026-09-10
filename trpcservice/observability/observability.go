@@ -416,7 +416,7 @@ var allowedAttributeValues = map[string]map[string]struct{}{
 	"status":       {"started": {}, "active": {}, "complete": {}, "ok": {}, "error": {}, "success": {}, "failure": {}, "canceled": {}, "timeout": {}, "retry": {}, "dead_letter": {}},
 	"error_class":  {"": {}, "error": {}, "canceled": {}, "timeout": {}, "invalid": {}, "unauthenticated": {}, "not_ready": {}, "rate_limited": {}, "duplicate": {}, "unavailable": {}, "storage": {}, "model": {}, "tool": {}},
 	"provider":     {"openai": {}, "postgres": {}, "inmemory": {}, "other": {}},
-	"channel":      {"api": {}, "telegram": {}, "wecom": {}, "outbox": {}, "other": {}},
+	"channel":      {"api": {}, "telegram": {}, "wecom": {}, "wecom_aibot": {}, "outbox": {}, "other": {}},
 	"model_family": {"gpt": {}, "claude": {}, "gemini": {}, "other": {}},
 }
 var allowedOperations = map[string]struct{}{

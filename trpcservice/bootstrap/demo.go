@@ -8,8 +8,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -111,20 +111,42 @@ func initializeDemoAfterInit(ctx context.Context, db *sql.DB, config DemoConfig,
 	if err != nil {
 		return DemoResult{}, err
 	}
-	return initializeDemoGraph(ctx, db, config, initial, tenantRepo, appRepo, modelRepo, backendRepo)
+	return initializeDemoGraph(demoGraphDependencies{
+		ctx: ctx, db: db, config: config, initial: initial,
+		tenantRepo: tenantRepo, appRepo: appRepo, modelRepo: modelRepo, backendRepo: backendRepo,
+	})
 }
 
-func newDemoRepositories(db *sql.DB, loadCatalogs demoCatalogLoader) (tenant.Repository, agent.Repository, modelprofile.Repository, backend.Repository, error) {
+func newDemoRepositories(db *sql.DB, loadCatalogs demoCatalogLoader) (tenant.Repository, appmodel.Repository, modelprofile.Repository, backend.Repository, error) {
 	modelCatalog, backendCatalog, err := loadCatalogs(environmentConfig{
 		demoMode: true, modelProvider: demoModelProvider, modelNames: []string{demoModelName},
 	})
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("%w: demo catalogs", ErrDemoInitialization)
 	}
-	return tenantpostgres.NewRepository(db), agentpostgres.NewRepository(db), modelpostgres.NewRepository(db, modelCatalog), backendpostgres.NewRepository(db, backendCatalog), nil
+	return tenantpostgres.NewRepository(db), apppostgres.NewAppRepository(db), modelpostgres.NewRepository(db, modelCatalog), backendpostgres.NewRepository(db, backendCatalog), nil
 }
 
-func initializeDemoGraph(ctx context.Context, db *sql.DB, config DemoConfig, initial InitResult, tenantRepo tenant.Repository, appRepo agent.Repository, modelRepo modelprofile.Repository, backendRepo backend.Repository) (DemoResult, error) {
+type demoGraphDependencies struct {
+	ctx         context.Context
+	db          *sql.DB
+	config      DemoConfig
+	initial     InitResult
+	tenantRepo  tenant.Repository
+	appRepo     appmodel.Repository
+	modelRepo   modelprofile.Repository
+	backendRepo backend.Repository
+}
+
+func initializeDemoGraph(dependencies demoGraphDependencies) (DemoResult, error) {
+	ctx := dependencies.ctx
+	db := dependencies.db
+	config := dependencies.config
+	initial := dependencies.initial
+	tenantRepo := dependencies.tenantRepo
+	appRepo := dependencies.appRepo
+	modelRepo := dependencies.modelRepo
+	backendRepo := dependencies.backendRepo
 	tenantRoot, app, err := loadDemoRootApp(ctx, tenantRepo, appRepo, initial, config)
 	if err != nil {
 		return DemoResult{}, err
@@ -162,7 +184,7 @@ func initializeDemoGraph(ctx context.Context, db *sql.DB, config DemoConfig, ini
 	return DemoResult{TenantID: tenantRoot.TenantID, AppID: app.AppID, ModelProfileID: modelID, BackendProfileID: backendID, Revision: revision.Revision, Created: created}, nil
 }
 
-func loadDemoRootApp(ctx context.Context, tenants tenant.Repository, apps agent.Repository, initial InitResult, config DemoConfig) (*tenant.Tenant, *agent.App, error) {
+func loadDemoRootApp(ctx context.Context, tenants tenant.Repository, apps appmodel.Repository, initial InitResult, config DemoConfig) (*tenant.Tenant, *appmodel.App, error) {
 	tenantRoot, err := tenants.Get(ctx, initial.TenantID)
 	if err != nil {
 		return nil, nil, demoStepError("tenant lookup", err)
@@ -213,21 +235,21 @@ func preflightDemoBackend(ctx context.Context, db *sql.DB, repo backend.Reposito
 // preflightDemoApp checks all existing app/revision state before the demo flow
 // creates model or backend profiles. This keeps an incompatible database
 // unchanged when the operator has to resolve an existing revision manually.
-func preflightDemoApp(ctx context.Context, db *sql.DB, apps agent.Repository, root *tenant.Tenant, app *agent.App, modelKey string) error {
-	if app.CanaryRevision != nil {
+func preflightDemoApp(ctx context.Context, db *sql.DB, apps appmodel.Repository, root *tenant.Tenant, appRoot *appmodel.App, modelKey string) error {
+	if appRoot.CanaryRevision != nil {
 		return fmt.Errorf("%w: canary revision is not supported by offline demo", ErrDemoState)
 	}
-	revisions, err := findRevisionNumbers(ctx, db, root.TenantID, app.AppID)
+	revisions, err := findRevisionNumbers(ctx, db, root.TenantID, appRoot.AppID)
 	if err != nil {
 		return err
 	}
-	if app.CurrentRevision != nil {
-		if len(revisions) != 1 || revisions[0] != *app.CurrentRevision {
+	if appRoot.CurrentRevision != nil {
+		if len(revisions) != 1 || revisions[0] != *appRoot.CurrentRevision {
 			return fmt.Errorf("%w: app has unexpected revision history", ErrDemoState)
 		}
-		return validateExistingDemoRevision(ctx, db, apps, root, app, *app.CurrentRevision, agent.RevisionStatePublished, modelKey)
+		return validateExistingDemoRevision(ctx, db, apps, root, appRoot, *appRoot.CurrentRevision, appmodel.RevisionStatePublished, modelKey)
 	}
-	if app.Status != agent.StatusDraft {
+	if appRoot.Status != appmodel.StatusDraft {
 		return fmt.Errorf("%w: app has no published revision", ErrDemoState)
 	}
 	if len(revisions) == 0 {
@@ -236,10 +258,10 @@ func preflightDemoApp(ctx context.Context, db *sql.DB, apps agent.Repository, ro
 	if len(revisions) != 1 {
 		return fmt.Errorf("%w: app has multiple unpublished revisions", ErrDemoState)
 	}
-	return validateExistingDemoRevision(ctx, db, apps, root, app, revisions[0], agent.RevisionStateDraft, modelKey)
+	return validateExistingDemoRevision(ctx, db, apps, root, appRoot, revisions[0], appmodel.RevisionStateDraft, modelKey)
 }
 
-func validateExistingDemoRevision(ctx context.Context, db *sql.DB, apps agent.Repository, root *tenant.Tenant, app *agent.App, revisionNumber int64, state agent.RevisionState, modelKey string) error {
+func validateExistingDemoRevision(ctx context.Context, db *sql.DB, apps appmodel.Repository, root *tenant.Tenant, appRoot *appmodel.App, revisionNumber int64, state appmodel.RevisionState, modelKey string) error {
 	modelID, found, err := findProfileID(ctx, db, "model_profile", root.TenantID, modelKey)
 	if err != nil {
 		return err
@@ -247,7 +269,7 @@ func validateExistingDemoRevision(ctx context.Context, db *sql.DB, apps agent.Re
 	if !found {
 		return fmt.Errorf("%w: existing revision references an unknown demo model", ErrDemoState)
 	}
-	revision, err := apps.GetRevision(ctx, root.TenantID, app.AppID, revisionNumber)
+	revision, err := apps.GetRevision(ctx, root.TenantID, appRoot.AppID, revisionNumber)
 	if err != nil {
 		return demoDependencyError(err)
 	}
@@ -399,61 +421,61 @@ func ensureDemoDefaults(ctx context.Context, repo tenant.Repository, root *tenan
 	return updated, true, nil
 }
 
-func ensureDemoRevision(ctx context.Context, db *sql.DB, apps agent.Repository, root *tenant.Tenant, app *agent.App, modelID string) (*agent.App, *agent.Revision, bool, error) {
+func ensureDemoRevision(ctx context.Context, db *sql.DB, apps appmodel.Repository, root *tenant.Tenant, appRoot *appmodel.App, modelID string) (*appmodel.App, *appmodel.Revision, bool, error) {
 	if root == nil || root.Status != tenant.StatusActive {
 		return nil, nil, false, fmt.Errorf("%w: tenant is not active", ErrDemoState)
 	}
-	if app == nil {
+	if appRoot == nil {
 		return nil, nil, false, fmt.Errorf("%w: app is missing", ErrDemoState)
 	}
-	if app.CanaryRevision != nil {
+	if appRoot.CanaryRevision != nil {
 		return nil, nil, false, fmt.Errorf("%w: canary revision is not supported by offline demo", ErrDemoState)
 	}
-	metadata := agent.ChangeMetadata{ActorType: demoActorType, ActorID: demoActorID, Reason: demoReason, CorrelationID: demoCorrelationID}
-	if app.CurrentRevision != nil {
-		return ensureDemoPublishedRevision(ctx, db, apps, root, app, modelID, metadata)
+	metadata := appmodel.ChangeMetadata{ActorType: demoActorType, ActorID: demoActorID, Reason: demoReason, CorrelationID: demoCorrelationID}
+	if appRoot.CurrentRevision != nil {
+		return ensureDemoPublishedRevision(ctx, db, apps, root, appRoot, modelID, metadata)
 	}
-	if app.Status != agent.StatusDraft {
+	if appRoot.Status != appmodel.StatusDraft {
 		return nil, nil, false, fmt.Errorf("%w: app has no published revision", ErrDemoState)
 	}
-	return ensureDemoDraftRevision(ctx, db, apps, root, app, modelID, metadata)
+	return ensureDemoDraftRevision(ctx, db, apps, root, appRoot, modelID, metadata)
 }
 
-func ensureDemoPublishedRevision(ctx context.Context, db *sql.DB, apps agent.Repository, root *tenant.Tenant, app *agent.App, modelID string, metadata agent.ChangeMetadata) (*agent.App, *agent.Revision, bool, error) {
-	revisions, err := findRevisionNumbers(ctx, db, root.TenantID, app.AppID)
+func ensureDemoPublishedRevision(ctx context.Context, db *sql.DB, apps appmodel.Repository, root *tenant.Tenant, appRoot *appmodel.App, modelID string, metadata appmodel.ChangeMetadata) (*appmodel.App, *appmodel.Revision, bool, error) {
+	revisions, err := findRevisionNumbers(ctx, db, root.TenantID, appRoot.AppID)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	if len(revisions) != 1 || revisions[0] != *app.CurrentRevision {
+	if len(revisions) != 1 || revisions[0] != *appRoot.CurrentRevision {
 		return nil, nil, false, fmt.Errorf("%w: app has unexpected revision history", ErrDemoState)
 	}
-	revision, err := apps.GetRevision(ctx, root.TenantID, app.AppID, *app.CurrentRevision)
+	revision, err := apps.GetRevision(ctx, root.TenantID, appRoot.AppID, *appRoot.CurrentRevision)
 	if err != nil {
 		return nil, nil, false, demoDependencyError(err)
 	}
-	if revision.State != agent.RevisionStatePublished || !demoRevisionMatches(revision, modelID) || app.Status == agent.StatusDisabled {
+	if revision.State != appmodel.RevisionStatePublished || !demoRevisionMatches(revision, modelID) || appRoot.Status == appmodel.StatusDisabled {
 		return nil, nil, false, fmt.Errorf("%w: published app graph does not match offline demo", ErrDemoState)
 	}
-	if app.Status == agent.StatusSuspended {
-		active, _, err := apps.TransitionStatus(ctx, agent.TransitionStatusInput{TenantID: root.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: agent.StatusActive, Metadata: metadata})
+	if appRoot.Status == appmodel.StatusSuspended {
+		active, _, err := apps.TransitionStatus(ctx, appmodel.TransitionStatusInput{TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedVersion: appRoot.Version, NextStatus: appmodel.StatusActive, Metadata: metadata})
 		if err != nil {
 			return nil, nil, false, demoDependencyError(err)
 		}
-		app = active
+		appRoot = active
 	}
-	return app, revision, false, nil
+	return appRoot, revision, false, nil
 }
 
-func ensureDemoDraftRevision(ctx context.Context, db *sql.DB, apps agent.Repository, root *tenant.Tenant, app *agent.App, modelID string, metadata agent.ChangeMetadata) (*agent.App, *agent.Revision, bool, error) {
-	revisions, err := findRevisionNumbers(ctx, db, root.TenantID, app.AppID)
+func ensureDemoDraftRevision(ctx context.Context, db *sql.DB, apps appmodel.Repository, root *tenant.Tenant, appRoot *appmodel.App, modelID string, metadata appmodel.ChangeMetadata) (*appmodel.App, *appmodel.Revision, bool, error) {
+	revisions, err := findRevisionNumbers(ctx, db, root.TenantID, appRoot.AppID)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	var draft *agent.Revision
+	var draft *appmodel.Revision
 	created := false
 	switch len(revisions) {
 	case 0:
-		createdDraft, createErr := apps.CreateDraft(ctx, agent.CreateDraftInput{TenantID: root.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Configuration: agent.DraftConfiguration{Instruction: demoInstruction, ModelProfileID: modelID, Runtime: agent.DefaultRuntimePolicy()}})
+		createdDraft, createErr := apps.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Configuration: appmodel.DraftConfiguration{Instruction: demoInstruction, ModelProfileID: modelID, Runtime: appmodel.DefaultRuntimePolicy()}})
 		if createErr != nil {
 			return nil, nil, false, demoDependencyError(createErr)
 		}
@@ -462,19 +484,19 @@ func ensureDemoDraftRevision(ctx context.Context, db *sql.DB, apps agent.Reposit
 		if len(revisions) != 1 {
 			return nil, nil, false, fmt.Errorf("%w: app has multiple unpublished revisions", ErrDemoState)
 		}
-		draft, err = apps.GetRevision(ctx, root.TenantID, app.AppID, revisions[0])
+		draft, err = apps.GetRevision(ctx, root.TenantID, appRoot.AppID, revisions[0])
 		if err != nil {
 			return nil, nil, false, demoDependencyError(err)
 		}
-		if draft.State != agent.RevisionStateDraft || !demoRevisionMatches(draft, modelID) {
+		if draft.State != appmodel.RevisionStateDraft || !demoRevisionMatches(draft, modelID) {
 			return nil, nil, false, fmt.Errorf("%w: draft revision does not match offline demo", ErrDemoState)
 		}
 	}
-	app, err = apps.Get(ctx, root.TenantID, app.AppID)
+	appRoot, err = apps.Get(ctx, root.TenantID, appRoot.AppID)
 	if err != nil {
 		return nil, nil, false, demoDependencyError(err)
 	}
-	activeApp, published, _, err := apps.Publish(ctx, agent.PublishInput{TenantID: root.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: root.Status == tenant.StatusActive, Metadata: metadata})
+	activeApp, published, _, err := apps.Publish(ctx, appmodel.PublishInput{TenantID: root.TenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: root.Status == tenant.StatusActive, Metadata: metadata})
 	if err != nil {
 		return nil, nil, false, demoDependencyError(err)
 	}
@@ -575,14 +597,14 @@ func emptyModelGeneration(generation modelprofile.GenerationConfig) bool {
 	return generation.Temperature == nil && generation.TopP == nil && generation.MaxOutputTokens == nil
 }
 
-func demoRevisionMatches(revision *agent.Revision, modelID string) bool {
-	return revision != nil && revision.Kind == agent.KindLLM && revision.SchemaVersion == agent.SchemaVersionV1 &&
+func demoRevisionMatches(revision *appmodel.Revision, modelID string) bool {
+	return revision != nil && revision.Kind == appmodel.KindLLM && revision.SchemaVersion == appmodel.SchemaVersionV1 &&
 		revision.Description == "" && revision.Instruction == demoInstruction && revision.GlobalInstruction == "" &&
 		revision.ModelProfileID == modelID && emptyAgentGeneration(revision.Generation) &&
-		revision.Runtime == agent.DefaultRuntimePolicy() && len(revision.Tools) == 0
+		revision.Runtime == appmodel.DefaultRuntimePolicy() && len(revision.Tools) == 0
 }
 
-func emptyAgentGeneration(generation agent.GenerationConfig) bool {
+func emptyAgentGeneration(generation appmodel.GenerationConfig) bool {
 	return generation.Temperature == nil && generation.TopP == nil && generation.MaxOutputTokens == nil
 }
 

@@ -4,11 +4,91 @@ package inmemory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
+
+// List returns a stable page of only the requested tenant scopes, ordered by
+// tenant ID. Scope filtering happens before pagination.
+//
+//nolint:gocyclo // Collection listing coordinates scope, filter, and paging boundaries.
+func (r *InMemoryRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, "", err
+	}
+	visible := make(map[string]struct{}, len(scopes))
+	all := false
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "*" {
+			all = true
+		} else if scope != "" {
+			visible[scope] = struct{}{}
+		}
+	}
+	if !all && len(visible) == 0 {
+		return []*tenant.Tenant{}, "", nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset, err := decodeListCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := r.rLock(ctx); err != nil {
+		return nil, "", err
+	}
+	defer r.rUnlock()
+	items := make([]*tenant.Tenant, 0, len(r.byID))
+	query = strings.ToLower(strings.TrimSpace(query))
+	status = strings.TrimSpace(status)
+	for _, value := range r.byID {
+		if !all {
+			if _, ok := visible[value.TenantID]; !ok {
+				continue
+			}
+		}
+		if status != "" && string(value.Status) != status {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(value.TenantID+" "+value.TenantKey+" "+value.DisplayName), query) {
+			continue
+		}
+		items = append(items, cloneTenant(value))
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].TenantID < items[j].TenantID })
+	if offset >= len(items) {
+		return []*tenant.Tenant{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = encodeListCursor(end)
+	}
+	return items[offset:end], next, nil
+}
+
+func encodeListCursor(offset int) string { return fmt.Sprintf("%d", offset) }
+func decodeListCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	var offset int
+	if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	return offset, nil
+}
 
 // InMemoryRepository is a single-process repository for development and
 // tests. It does not provide cross-node sharing or durability.

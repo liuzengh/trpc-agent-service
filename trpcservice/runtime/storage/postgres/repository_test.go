@@ -2,20 +2,24 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var eventColumns = []string{"tenant_id", "event_id", "session_id", "binding_id", "external_message_id", "idempotency_key", "event_seq", "status", "fencing_token", "lease_owner", "lease_expires_at", "reply_id", "segment_count", "reply_conversation_kind", "reply_receiver_id", "reply_thread_id", "created_at", "updated_at"}
-var replyColumns = []string{"tenant_id", "reply_id", "event_id", "segment_index", "segment_count", "payload", "reply_binding_id", "reply_conversation_kind", "reply_receiver_id", "reply_thread_id", "status", "attempts", "fencing_token", "lease_owner", "lease_expires_at", "provider_message_id", "last_error_class", "created_at", "updated_at"}
+var replyColumns = []string{"tenant_id", "reply_id", "event_id", "segment_index", "segment_count", "payload", "reply_kind", "attachment_id", "attachment_kind", "attachment_mime_type", "attachment_name", "attachment_size", "attachment_sha256", "attachment_provider", "attachment_provider_id", "fallback", "reply_binding_id", "reply_conversation_kind", "reply_receiver_id", "reply_thread_id", "status", "attempts", "fencing_token", "lease_owner", "lease_expires_at", "provider_message_id", "last_error_class", "created_at", "updated_at"}
 var historyColumns = []string{"tenant_id", "session_id", "event_id", "payload", "history_seq", "created_at"}
 
 func eventRow(when time.Time) *sqlmock.Rows {
@@ -23,7 +27,25 @@ func eventRow(when time.Time) *sqlmock.Rows {
 }
 
 func replyRow(when time.Time) *sqlmock.Rows {
-	return sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-1", "event-1", 0, 1, "payload", "", "", "", "", "pending", 0, int64(0), "", nil, "", "", when, when)
+	return sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-1", "event-1", 0, 1, "payload", "pending", 0, int64(0), "", nil, "", "", when)...)
+}
+
+func replyValues(replyID, eventID string, segmentIndex, segmentCount int, payload, status string, attempts, fencingToken any, leaseOwner string, leaseExpiresAt any, providerID, errorClass string, when time.Time) []driver.Value {
+	return []driver.Value{"tenant-a", replyID, eventID, segmentIndex, segmentCount, payload, "text", "", "", "", "", int64(0), "", "", "", "", "", "", "", "", status, attempts, fencingToken, leaseOwner, leaseExpiresAt, providerID, errorClass, when, when}
+}
+
+func replyInsertArgs(replyID, eventID string, segmentIndex, segmentCount int, payload string) []driver.Value {
+	return []driver.Value{"tenant-a", replyID, eventID, segmentIndex, segmentCount, payload, "text", "", "", "", "", int64(0), "", "", "", "", "", "", "", ""}
+}
+
+func mediaReplyReference(t *testing.T, kind attachment.Kind, contentType string, data []byte) attachment.Reference {
+	t.Helper()
+	digest := sha256.Sum256(data)
+	reference := attachment.Reference{ID: "attachment-media", Kind: kind, MIMEType: contentType, Name: "chart.png", Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), Provider: "telegram", ProviderID: "file-id"}
+	if _, err := reference.Normalize(); err != nil {
+		t.Fatalf("test attachment = %v", err)
+	}
+	return reference
 }
 
 func TestGetSessionUsesExplicitTenantPredicateAndDefensiveState(t *testing.T) {
@@ -76,6 +98,38 @@ func TestMethodsRespectCanceledContextBeforeDatabaseCall(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNilStoreReturnsStorageError(t *testing.T) {
+	var store *runtimepostgres.Store
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{name: "correlation", call: func() error { _, err := store.GetReplyCorrelation(ctx, "tenant-a", "event-1"); return err }},
+		{name: "get session", call: func() error { _, err := store.GetSession(ctx, "tenant-a", "session-1"); return err }},
+		{name: "create session", call: func() error { _, err := store.CreateSession(ctx, "tenant-a", "session-1", nil); return err }},
+		{name: "message", call: func() error { _, err := store.GetMessage(ctx, "tenant-a", "event-1"); return err }},
+		{name: "record message", call: func() error {
+			_, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-1", SessionID: "session-1", BindingID: "binding-1", ExternalMessageID: "external-1", IdempotencyKey: "idempotency-1"})
+			return err
+		}},
+		{name: "append event", call: func() error {
+			_, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-1", EventID: "event-1", Payload: []byte(`{}`)})
+			return err
+		}},
+		{name: "list events", call: func() error { _, err := store.ListEventPayloads(ctx, "tenant-a", "session-1"); return err }},
+		{name: "reply", call: func() error { _, err := store.GetReply(ctx, "tenant-a", "reply-1", 0); return err }},
+		{name: "list replies", call: func() error { _, err := store.ListReplyCandidates(ctx, "tenant-a"); return err }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(); !errors.Is(err, runtimestorage.ErrStorage) {
+				t.Fatalf("error = %v, want %v", err, runtimestorage.ErrStorage)
+			}
+		})
 	}
 }
 
@@ -158,7 +212,7 @@ func TestRuntimeStoreCoversMessageAndReplyLifecycle(t *testing.T) {
 	if _, err := store.GetMessage(context.Background(), "tenant-a", "event-1"); err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-1", "event-1", 0, 1, "payload", "", "", "", "").WillReturnRows(replyRow(when))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply-1", "event-1", 0, 1, "payload")...).WillReturnRows(replyRow(when))
 	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-1", EventID: "event-1", SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}); err != nil {
 		t.Fatal(err)
 	}
@@ -166,11 +220,11 @@ func TestRuntimeStoreCoversMessageAndReplyLifecycle(t *testing.T) {
 	if _, err := store.GetReply(context.Background(), "tenant-a", "reply-1", 0); err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectQuery("UPDATE public.reply_outbox SET status='sending'").WithArgs("tenant-a", "reply-1", 0, "worker-a", int64(3)).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-1", "event-1", 0, 1, "payload", "", "", "", "", "sending", 1, int64(1), "worker-a", when.Add(time.Minute), "", "", when, when))
+	mock.ExpectQuery("UPDATE public.reply_outbox SET status='sending'").WithArgs("tenant-a", "reply-1", 0, "worker-a", int64(3)).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-1", "event-1", 0, 1, "payload", "sending", 1, int64(1), "worker-a", when.Add(time.Minute), "", "", when)...))
 	if _, err := store.ClaimReply(context.Background(), "tenant-a", "reply-1", 0, "worker-a", 3*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectQuery("UPDATE public.reply_outbox SET status=\\$5").WithArgs("tenant-a", "reply-1", 0, "sending", "sent", "worker-a", int64(0), "provider-1", "", int64(1)).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-1", "event-1", 0, 1, "payload", "", "", "", "", "sent", 2, int64(2), "worker-a", nil, "provider-1", "", when, when))
+	mock.ExpectQuery("UPDATE public.reply_outbox SET status=\\$5").WithArgs("tenant-a", "reply-1", 0, "sending", "sent", "worker-a", int64(0), "provider-1", "", int64(1)).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-1", "event-1", 0, 1, "payload", "sent", 2, int64(2), "worker-a", nil, "provider-1", "", when)...))
 	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply-1", SegmentIndex: 0, From: "sending", To: "sent", Owner: "worker-a", FencingToken: 1, ProviderID: "provider-1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -207,11 +261,44 @@ func TestEnqueueReplyRejectsLegacyTargetForRoutedEvent(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	when := time.Now().UTC()
-	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-1", "event-1", 0, 1, "payload", "", "", "", "").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply-1", "event-1", 0, 1, "payload")...).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery("SELECT tenant_id,event_id,session_id,binding_id,external_message_id").WithArgs("tenant-a", "event-1").WillReturnRows(sqlmock.NewRows(eventColumns).AddRow("tenant-a", "event-1", "session-1", "binding-1", "external-1", "", int64(2), "completed", int64(1), "", nil, "reply-1", 1, "direct", "user-1", "", when, when))
 	_, err = runtimepostgres.New(db).EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-1", EventID: "event-1", SegmentCount: 1, Payload: "payload"})
 	if !errors.Is(err, runtimestorage.ErrConflict) {
 		t.Fatalf("legacy target for routed event = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnqueueReplyPersistsMediaReplyContract(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	when := time.Now().UTC()
+	reference := mediaReplyReference(t, attachment.KindImage, "image/png", []byte("png"))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(
+		"tenant-a", "reply-media", "event-media", 0, 1, "caption",
+		runtimestorage.ReplyKindImage, reference.ID, reference.Kind, reference.MIMEType, reference.Name,
+		reference.Size, reference.SHA256, reference.Provider, reference.ProviderID, "[image attachment: chart.png]",
+		"", "", "", "",
+	).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(
+		"tenant-a", "reply-media", "event-media", 0, 1, "caption",
+		"image", reference.ID, reference.Kind, reference.MIMEType, reference.Name, reference.Size, reference.SHA256, reference.Provider, reference.ProviderID, "[image attachment: chart.png]",
+		"", "", "", "", "pending", 0, int64(0), "", nil, "", "", when, when,
+	))
+	got, err := runtimepostgres.New(db).EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", ReplyID: "reply-media", EventID: "event-media", SegmentIndex: 0, SegmentCount: 1,
+		Kind: runtimestorage.ReplyKindImage, Payload: "caption", Attachment: reference, Fallback: "[image attachment: chart.png]",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != runtimestorage.ReplyKindImage || got.Attachment != reference || got.Fallback != "[image attachment: chart.png]" {
+		t.Fatalf("media reply = %+v", got)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -228,7 +315,7 @@ func TestRuntimeStoreCoversEventHistoryAndMessageLifecycle(t *testing.T) {
 	when := time.Now().UTC()
 	payload := []byte("{\"ID\":\"runner-1\"}")
 	mock.ExpectQuery("INSERT INTO public.runtime_event_history").WithArgs("tenant-a", "session-1", "runner-1", payload).WillReturnRows(sqlmock.NewRows(historyColumns).AddRow("tenant-a", "session-1", "runner-1", string(payload), int64(1), when))
-	value, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-1", EventID: "runner-1", Payload: payload})
+	value, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-1", EventID: "runner-1", Payload: payload})
 	if err != nil || value.HistorySeq != 1 {
 		t.Fatalf("append = %+v err=%v", value, err)
 	}
@@ -320,7 +407,7 @@ func TestRuntimeStoreListReplyCandidates(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	store := runtimepostgres.New(db)
 	when := time.Now().UTC()
-	mock.ExpectQuery("SELECT tenant_id,reply_id,event_id,segment_index").WithArgs("tenant-a").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-1", "event-1", 0, 1, "payload", "", "", "", "", "pending", 0, int64(0), "", nil, "", "", when, when))
+	mock.ExpectQuery("SELECT tenant_id,reply_id,event_id,segment_index").WithArgs("tenant-a").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-1", "event-1", 0, 1, "payload", "pending", 0, int64(0), "", nil, "", "", when)...))
 	values, err := store.ListReplyCandidates(context.Background(), "tenant-a")
 	if err != nil || len(values) != 1 || values[0].ReplyID != "reply-1" {
 		t.Fatalf("reply candidates = %+v err=%v", values, err)
@@ -394,6 +481,37 @@ func TestRuntimeStoreMapsCASAndClaimConflicts(t *testing.T) {
 	mock.ExpectQuery("SELECT tenant_id,reply_id,event_id,segment_index").WithArgs("tenant-a", "reply-1", 0).WillReturnRows(replyRow(when))
 	if _, err := store.ClaimReply(context.Background(), "tenant-a", "reply-1", 0, "worker-a", time.Second); !errors.Is(err, runtimestorage.ErrConflict) {
 		t.Fatalf("claim error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStoreRecordsReplyReceiptWithinCurrentLease(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	when := time.Now().UTC()
+	lease := when.Add(time.Minute)
+	mock.ExpectQuery("UPDATE public.reply_outbox SET provider_message_id=\\$6").WithArgs("tenant-a", "reply-1", 0, "worker-a", int64(7), "provider-1").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-1", "event-1", 0, 1, "payload", "sending", 1, int64(7), "worker-a", lease, "provider-1", "", when)...))
+	recorded, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: "tenant-a", ReplyID: "reply-1", SegmentIndex: 0, Owner: "worker-a", FencingToken: 7, ProviderID: "provider-1"})
+	if err != nil || recorded.Status != runtimestorage.ReplySending || recorded.ProviderMessageID != "provider-1" || recorded.FencingToken != 7 || recorded.LeaseOwner != "worker-a" {
+		t.Fatalf("recorded receipt = %+v, %v", recorded, err)
+	}
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid receipt = %v", err)
+	}
+	mock.ExpectQuery("UPDATE public.reply_outbox SET provider_message_id=\\$6").WithArgs("tenant-a", "reply-error", 0, "worker-a", int64(7), "provider-1").WillReturnError(errors.New("database unavailable"))
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: "tenant-a", ReplyID: "reply-error", Owner: "worker-a", FencingToken: 7, ProviderID: "provider-1"}); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("receipt storage error = %v", err)
+	}
+	mock.ExpectQuery("UPDATE public.reply_outbox SET provider_message_id=\\$6").WithArgs("tenant-a", "reply-stale", 0, "worker-a", int64(7), "provider-1").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT tenant_id,reply_id,event_id,segment_index").WithArgs("tenant-a", "reply-stale", 0).WillReturnRows(replyRow(when))
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: "tenant-a", ReplyID: "reply-stale", Owner: "worker-a", FencingToken: 7, ProviderID: "provider-1"}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("stale receipt = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -515,7 +633,7 @@ func TestRuntimeStorePostgresErrorBranches(t *testing.T) {
 	if _, err := store.GetMessage(ctx, "tenant-a", "event-error"); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("get message error = %v", err)
 	}
-	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-error", "event", 0, 1, "", "", "", "", "").WillReturnError(errors.New("enqueue failed"))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply-error", "event", 0, 1, "")...).WillReturnError(errors.New("enqueue failed"))
 	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-error", EventID: "event", SegmentIndex: 0, SegmentCount: 1}); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("enqueue error = %v", err)
 	}
@@ -569,7 +687,7 @@ func TestRuntimeStoreTransitionValidationAndLease(t *testing.T) {
 		t.Fatalf("illegal transition = %v", err)
 	}
 	when := time.Now().UTC()
-	mock.ExpectQuery("UPDATE public.reply_outbox SET status=\\$5").WithArgs("tenant-a", "reply-lease", 0, "pending", "sending", "worker", int64(2), "", "", int64(0)).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-lease", "event", 0, 1, "payload", "", "", "", "", "sending", 1, int64(1), "worker", when.Add(time.Minute), "", "", when, when))
+	mock.ExpectQuery("UPDATE public.reply_outbox SET status=\\$5").WithArgs("tenant-a", "reply-lease", 0, "pending", "sending", "worker", int64(2), "", "", int64(0)).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-lease", "event", 0, 1, "payload", "sending", 1, int64(1), "worker", when.Add(time.Minute), "", "", when)...))
 	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply-lease", SegmentIndex: 0, From: "pending", To: "sending", Owner: "worker", LeaseDuration: 2 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
@@ -587,8 +705,8 @@ func TestRuntimeStoreEnqueueRepliesRollsBackPartialMaterialization(t *testing.T)
 	store := runtimepostgres.New(db)
 	when := time.Now().UTC()
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 0, 2, "first", "", "", "", "").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-batch", "event", 0, 2, "first", "", "", "", "", "pending", 0, int64(0), "", nil, "", "", when, when))
-	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 1, 2, "second", "", "", "", "").WillReturnError(errors.New("second insert failed"))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply-batch", "event", 0, 2, "first")...).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-batch", "event", 0, 2, "first", "pending", 0, int64(0), "", nil, "", "", when)...))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply-batch", "event", 1, 2, "second")...).WillReturnError(errors.New("second insert failed"))
 	mock.ExpectRollback()
 	_, err = store.EnqueueReplies(context.Background(), []runtimestorage.ReplyOutbox{
 		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event", SegmentIndex: 0, SegmentCount: 2, Payload: "first"},
@@ -611,7 +729,7 @@ func TestRuntimeStoreEnqueueRepliesMapsMissingEvent(t *testing.T) {
 	db.SetMaxOpenConns(1)
 	store := runtimepostgres.New(db)
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-missing-event", "event-missing", 0, 1, "payload", "", "", "", "").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply-missing-event", "event-missing", 0, 1, "payload")...).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery("SELECT tenant_id,event_id,session_id,binding_id,external_message_id").WithArgs("tenant-a", "event-missing").WillReturnError(sql.ErrNoRows)
 	mock.ExpectRollback()
 	_, err = store.EnqueueReplies(context.Background(), []runtimestorage.ReplyOutbox{{
@@ -634,8 +752,8 @@ func TestRuntimeStoreEnqueueRepliesCommitsCompleteBatch(t *testing.T) {
 	store := runtimepostgres.New(db)
 	when := time.Now().UTC()
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 0, 2, "first", "", "", "", "").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-batch", "event", 0, 2, "first", "", "", "", "", "pending", 0, int64(0), "", nil, "", "", when, when))
-	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 1, 2, "second", "", "", "", "").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-batch", "event", 1, 2, "second", "", "", "", "", "pending", 0, int64(0), "", nil, "", "", when, when))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply-batch", "event", 0, 2, "first")...).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-batch", "event", 0, 2, "first", "pending", 0, int64(0), "", nil, "", "", when)...))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply-batch", "event", 1, 2, "second")...).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-batch", "event", 1, 2, "second", "pending", 0, int64(0), "", nil, "", "", when)...))
 	mock.ExpectCommit()
 	rows, err := store.EnqueueReplies(context.Background(), []runtimestorage.ReplyOutbox{
 		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event", SegmentIndex: 0, SegmentCount: 2, Payload: "first"},
@@ -659,7 +777,7 @@ func TestRuntimeStoreEnqueueRepliesWithCorrelationIsAtomic(t *testing.T) {
 	when := time.Now().UTC()
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace", "").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
-	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "").WillReturnRows(replyRow(when))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply", "event", 0, 1, "payload")...).WillReturnRows(replyRow(when))
 	mock.ExpectCommit()
 	rows, err := store.EnqueueRepliesWithCorrelation(context.Background(), runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event", RequestID: "request", TraceID: "trace"}, []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}})
 	if err != nil || len(rows) != 1 {
@@ -680,7 +798,7 @@ func TestRuntimeStoreEnqueueRepliesWithCorrelationNormalizesTraceParent(t *testi
 	when := time.Now().UTC()
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace", "").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
-	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "").WillReturnRows(replyRow(when))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply", "event", 0, 1, "payload")...).WillReturnRows(replyRow(when))
 	mock.ExpectCommit()
 	correlation := runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event", RequestID: "request", TraceID: "trace", TraceParent: "malformed"}
 	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), correlation, []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}}); err != nil {
@@ -738,14 +856,14 @@ func TestRuntimeStoreEnqueueRepliesWithCorrelationFailureBoundaries(t *testing.T
 		{name: "segment failure", setup: func(mock sqlmock.Sqlmock, when time.Time) {
 			mock.ExpectBegin()
 			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace", "").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
-			mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "").WillReturnError(errors.New("segment failed"))
+			mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply", "event", 0, 1, "payload")...).WillReturnError(errors.New("segment failed"))
 			mock.ExpectRollback()
 			_ = when
 		}},
 		{name: "commit failure", setup: func(mock sqlmock.Sqlmock, when time.Time) {
 			mock.ExpectBegin()
 			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace", "").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
-			mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "").WillReturnRows(replyRow(when))
+			mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs(replyInsertArgs("reply", "event", 0, 1, "payload")...).WillReturnRows(replyRow(when))
 			mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
 		}},
 	} {
@@ -875,7 +993,7 @@ func TestRuntimeStoreAppendEventPayloadValidationAndErrors(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	store := runtimepostgres.New(db)
 	ctx := context.Background()
-	invalid := []runtimestorage.EventPayload{
+	invalid := []sessionstorage.EventPayload{
 		{TenantID: "", SessionID: "session", EventID: "event", Payload: []byte("{}")},
 		{TenantID: "tenant-a", SessionID: "", EventID: "event", Payload: []byte("{}")},
 		{TenantID: "tenant-a", SessionID: "session", EventID: "", Payload: []byte("{}")},
@@ -889,16 +1007,16 @@ func TestRuntimeStoreAppendEventPayloadValidationAndErrors(t *testing.T) {
 	}
 	payload := []byte("{\"ok\":true}")
 	mock.ExpectQuery("INSERT INTO public.runtime_event_history").WithArgs("tenant-a", "session", "event", payload).WillReturnError(sql.ErrNoRows)
-	if _, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: payload}); !errors.Is(err, runtimestorage.ErrConflict) {
+	if _, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: payload}); !errors.Is(err, runtimestorage.ErrConflict) {
 		t.Fatalf("duplicate payload = %v", err)
 	}
 	mock.ExpectQuery("INSERT INTO public.runtime_event_history").WithArgs("tenant-a", "session", "error", payload).WillReturnError(errors.New("insert failed"))
-	if _, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "error", Payload: payload}); !errors.Is(err, runtimestorage.ErrStorage) {
+	if _, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "error", Payload: payload}); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("insert error = %v", err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := store.AppendEventPayload(canceled, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: payload}); !errors.Is(err, context.Canceled) {
+	if _, err := store.AppendEventPayload(canceled, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: payload}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled append = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -949,11 +1067,11 @@ func TestRuntimeStoreListReplyCandidatesErrorBranches(t *testing.T) {
 		t.Fatalf("candidate query error = %v", err)
 	}
 	when := time.Now().UTC()
-	mock.ExpectQuery("SELECT tenant_id,reply_id,event_id,segment_index").WithArgs("tenant-scan-error").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "", "pending", "bad-attempts", int64(0), "", nil, "", "", when, when))
+	mock.ExpectQuery("SELECT tenant_id,reply_id,event_id,segment_index").WithArgs("tenant-scan-error").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply", "event", 0, 1, "payload", "text", "", "", "", "", int64(0), "", "", "", "", "", "", "", "", "pending", "bad-attempts", int64(0), "", nil, "", "", when, when))
 	if _, err := store.ListReplyCandidates(context.Background(), "tenant-scan-error"); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("candidate scan error = %v", err)
 	}
-	mock.ExpectQuery("SELECT tenant_id,reply_id,event_id,segment_index").WithArgs("tenant-rows-error").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "", "pending", 0, int64(0), "", nil, "", "", when, when).AddRow("tenant-a", "reply-2", "event", 0, 1, "payload", "", "", "", "", "pending", 0, int64(0), "", nil, "", "", when, when).RowError(1, errors.New("candidate rows failed")))
+	mock.ExpectQuery("SELECT tenant_id,reply_id,event_id,segment_index").WithArgs("tenant-rows-error").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(replyValues("reply", "event", 0, 1, "payload", "pending", 0, int64(0), "", nil, "", "", when)...).AddRow(replyValues("reply-2", "event", 0, 1, "payload", "pending", 0, int64(0), "", nil, "", "", when)...).RowError(1, errors.New("candidate rows failed")))
 	if _, err := store.ListReplyCandidates(context.Background(), "tenant-rows-error"); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("candidate rows error = %v", err)
 	}

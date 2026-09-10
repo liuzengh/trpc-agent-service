@@ -7,8 +7,10 @@ import (
 
 // Adapter is the lifecycle boundary shared by every tenant-scoped IM channel
 // implementation. Protocol authentication and transport ownership stay with
-// the concrete adapter; all accepted messages use gateway.InboundMessage and
-// durable replies use runtime/outbox.Provider.
+// the concrete adapter; all accepted messages use the gateway's
+// protocol-neutral InboundMessage contract. Delivery providers are kept in the
+// composition-only channels/provider package so the channel domain itself does
+// not depend on the runtime outbox.
 type Adapter interface {
 	Channel() Channel
 	Close() error

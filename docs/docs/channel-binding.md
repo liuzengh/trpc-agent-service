@@ -1,14 +1,14 @@
 # Channel Binding 与可信入站路由
 
-> 本页是 Issue #26 的实现契约。它先固定控制面模型、候选路由和可信边界，随后由
+> 本页是 Issue #26 的实现契约，固定控制面模型、候选路由和可信边界，并由
 > `trpcservice/channels` 的领域模型、InMemory Repository 和 fake verifier 实现。Telegram
 > long polling 的适配器契约见 [Telegram 长轮询 Adapter](telegram.md)；本页仍只定义控制面和
 > trusted routing，不把协议运行时细节混入 Binding 领域模型。
 
 ## 目标与边界
 
-Channel Binding 把一个外部 IM 账号绑定到同一租户的 Agent App。它解决的是“公开回调信息
-如何发现候选，以及验签成功后如何建立可信租户上下文”，不是完整的 IM 协议栈。
+Channel Binding 把一个外部 IM 账号绑定到同一租户的 Agent App，负责公开回调候选发现、
+验签后的可信租户上下文和 runtime identity；协议适配器在此边界上完成收发、幂等和可靠投递。
 
 本 Issue 交付：
 
@@ -23,9 +23,9 @@ Channel Binding 把一个外部 IM 账号绑定到同一租户的 Agent App。�
   和无拼接碰撞的单聊/群聊/线程 Runner identity；
 - 使用 fake resolver/verifier 的离线集成测试。
 
-明确不在范围内：真实供应商 SDK、企业微信 AES 解密、Telegram webhook、HTTP Gateway、KMS/
-Vault、消息去重/回复 Outbox、队列和生产审计持久化。Issue #37 的控制面 migration 已落地
-本页的 `channel_binding` 表；SQL Repository 与运行时 bootstrap 仍由该 Issue 的代码阶段实现。
+控制面 migration 已落地本页的 `channel_binding` 表；企业微信 AES 解密、Telegram webhook、
+HTTP Gateway、Secret Resolver、消息去重、回复 Outbox、队列和审计持久化由对应 Adapter、
+runtime 和 bootstrap 共同接入，并以 deterministic/live E2E 验收。
 Telegram long
 polling 运行时契约见 [Telegram 长轮询 Adapter](telegram.md)，不属于本 Binding 领域模型。
 
@@ -39,9 +39,10 @@ Issue #60 在控制面模型之上定义了窄的运行时边界：`channels.Ada
 
 该边界不把 Telegram long polling 和 WeCom HTTP callback 伪装成相同的传输协议。
 验签、解密、供应商 SDK、poll loop 和 HTTP 生命周期继续由具体 Adapter 负责；
-Gateway 的 `InboundMessage` 是共享入站契约，`runtime/outbox.Provider` 是共享的
-持久化出站回复契约。Telegram 与 WeCom Provider 都以稳定的 reply/segment identity
-实现该后者。
+Gateway 的 `InboundMessage` 是共享入站契约，`outbox.Provider` 是由
+Channel Provider 适配到的协议中立出站回复契约。Binding 根包只定义候选、验证和
+可信路由；Provider 与回复渲染分别由 `channels/provider` 和 `gateway/replies`
+拥有。Telegram 与 WeCom Provider 都以稳定的 reply/segment identity 实现出站交付。
 
 ## 控制面模型
 
@@ -51,7 +52,7 @@ Gateway 的 `InboundMessage` 是共享入站契约，`runtime/outbox.Provider` �
 | --- | --- |
 | `tenant_id`、`binding_id` | 不可变稳定身份；所有 Admin 操作显式携带二者 |
 | `binding_key` | 租户内唯一、规范化的小写机器键；不可变，不参与跨租户路由 |
-| `channel` | 只接受 `wecom`、`telegram`；协议类型不能由入站 payload 覆盖 |
+| `channel` | 只接受 `wecom`、`wecom_aibot`、`telegram`；协议类型不能由入站 payload 覆盖 |
 | `provider_account_id` | 外部 corp/bot/account 的稳定规范身份；不使用昵称 |
 | `public_route_key_digest` | route key 的 SHA-256 摘要；只用于候选发现，不保存明文 |
 | `app_id` | 同租户 Agent App 引用；可信路由固定它，payload/header 不能覆盖 |
@@ -76,7 +77,7 @@ CREATE TABLE channel_binding (
     binding_id                TEXT NOT NULL,
     binding_key               TEXT NOT NULL,
     channel                   TEXT NOT NULL
-                              CHECK (channel IN ('wecom', 'telegram')),
+                              CHECK (channel IN ('wecom', 'wecom_aibot', 'telegram')),
     provider_account_id       TEXT NOT NULL
                               CHECK (length(btrim(provider_account_id)) BETWEEN 1 AND 256),
     public_route_key_digest   TEXT NOT NULL
@@ -226,7 +227,7 @@ group   = Encode(channel, binding_id, "group", external_chat_id, thread_id)
 2. 用 Target 的 App ID 读取同租户 active App 和当前 published Revision；
 3. 由现有 `runtime.NewExecutionPlan` 固定 Agent、Model、Backend 的版本和摘要；
 4. 由 Binding-scoped identity 创建 Runner `userID/sessionID`；
-5. 后续 Gateway/Worker 才按 Tenant-scoped Secret Resolver 获取出站或模型凭据。
+5. Gateway/Worker 按 Tenant-scoped Secret Resolver 获取出站或模型凭据。
 
 Tenant、App、Binding 任一状态不是 active 时，Target 构造失败并拒绝新消息。已创建的执行
 继续使用自己的固定 plan；暂停或停用不篡改进行中的快照。
@@ -244,5 +245,5 @@ fake resolver/verifier 不连接外部 IM，也不把 fake secret 写进 Binding
 - 更新和候选消费响应 Context 取消，读写返回防御性副本，竞争更新只有一个 expected version 获胜；
 - direct/group/thread identity 在不同 Binding、会话和线程之间无碰撞且同一输入稳定。
 
-这些测试只证明平台安全边界和领域闭环；真实协议验签、解密、消息幂等、出站重试和持久化
-一致性由后续 Gateway/Adapter issue 负责。
+测试覆盖平台安全边界和领域闭环；WeCom、Telegram 与 WeCom AI Bot 的真实协议验签、解密、
+消息幂等、出站重试和持久化一致性分别由对应 Adapter E2E 与 runtime conformance 共同验证。

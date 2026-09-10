@@ -5,8 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	agentruntime "github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -23,32 +24,32 @@ func TestPublishedRepositoryStateBuildsExecutionSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := inmemory.NewRepository()
-	app, err := repository.Create(context.Background(), agent.CreateInput{
+	appRoot, err := repository.Create(context.Background(), appmodel.CreateInput{
 		TenantID: tenantRoot.TenantID, AppKey: "support", DisplayName: "Support",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := repository.CreateDraft(context.Background(), agent.CreateDraftInput{
-		TenantID: tenantRoot.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version,
-		Configuration: agent.DraftConfiguration{
+	draft, err := repository.CreateDraft(context.Background(), appmodel.CreateDraftInput{
+		TenantID: tenantRoot.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version,
+		Configuration: appmodel.DraftConfiguration{
 			Description: "Support Agent", Instruction: "Answer accurately.", ModelProfileID: "model-primary",
-			Generation: agent.GenerationConfig{Temperature: externalFloat64Pointer(0.2)},
-			Runtime:    agent.DefaultRuntimePolicy(), Tools: []agent.ToolAuthorization{{ToolID: "search"}},
+			Generation: appmodel.GenerationConfig{Temperature: externalFloat64Pointer(0.2)},
+			Runtime:    appmodel.DefaultRuntimePolicy(), Tools: []appmodel.ToolAuthorization{{ToolID: "search"}},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	publishedApp, publishedRevision, _, err := repository.Publish(context.Background(), agent.PublishInput{
-		TenantID: tenantRoot.TenantID, AppID: app.AppID, Revision: draft.Revision,
-		ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true,
-		Metadata: agent.ChangeMetadata{ActorType: "admin", ActorID: "user-1", Reason: "release", CorrelationID: "corr-1"},
+	publishedApp, publishedRevision, _, err := repository.Publish(context.Background(), appmodel.PublishInput{
+		TenantID: tenantRoot.TenantID, AppID: appRoot.AppID, Revision: draft.Revision,
+		ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true,
+		Metadata: appmodel.ChangeMetadata{ActorType: "admin", ActorID: "user-1", Reason: "release", CorrelationID: "corr-1"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execution, err := agent.NewAgentExecutionSnapshot(tenantSnapshot, publishedApp, publishedRevision)
+	execution, err := agentruntime.NewAgentExecutionSnapshot(tenantSnapshot, publishedApp, publishedRevision)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,19 +57,19 @@ func TestPublishedRepositoryStateBuildsExecutionSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if factoryInput.TenantID != tenantRoot.TenantID || factoryInput.AppID != app.AppID || factoryInput.Revision != draft.Revision || factoryInput.ContentDigest != publishedRevision.ContentDigest || factoryInput.Name != "support" {
+	if factoryInput.TenantID != tenantRoot.TenantID || factoryInput.AppID != appRoot.AppID || factoryInput.Revision != draft.Revision || factoryInput.ContentDigest != publishedRevision.ContentDigest || factoryInput.Name != "support" {
 		t.Fatalf("closed loop lost fixed execution identity: %+v", factoryInput)
 	}
 
-	suspended, _, err := repository.TransitionStatus(context.Background(), agent.TransitionStatusInput{
-		TenantID: tenantRoot.TenantID, AppID: app.AppID, ExpectedVersion: publishedApp.Version,
-		NextStatus: agent.StatusSuspended,
-		Metadata:   agent.ChangeMetadata{ActorType: "admin", ActorID: "user-1", Reason: "pause", CorrelationID: "corr-2"},
+	suspended, _, err := repository.TransitionStatus(context.Background(), appmodel.TransitionStatusInput{
+		TenantID: tenantRoot.TenantID, AppID: appRoot.AppID, ExpectedVersion: publishedApp.Version,
+		NextStatus: appmodel.StatusSuspended,
+		Metadata:   appmodel.ChangeMetadata{ActorType: "admin", ActorID: "user-1", Reason: "pause", CorrelationID: "corr-2"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := agent.NewAgentExecutionSnapshot(tenantSnapshot, suspended, publishedRevision); !errors.Is(err, agent.ErrInvalid) {
+	if _, err := agentruntime.NewAgentExecutionSnapshot(tenantSnapshot, suspended, publishedRevision); !errors.Is(err, agentruntime.ErrInvalid) {
 		t.Fatalf("suspended App admitted a new execution: %v", err)
 	}
 }

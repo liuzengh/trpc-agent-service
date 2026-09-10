@@ -90,7 +90,7 @@ func TestRunTimeoutCoversBlockingPreflight(t *testing.T) {
 		return nil, errPreflightGetMeTimeout
 	}
 
-	err := runWithPreflight(context.Background(), func(name string) string { return values[name] }, io.Discard, io.Discard, prepare)
+	err := runWithPreflight(context.Background(), func(name string) string { return values[name] }, io.Discard, prepare)
 	if !errors.Is(err, errRunTimeout) {
 		t.Fatalf("runWithPreflight() error = %v, want run timeout", err)
 	}
@@ -110,7 +110,7 @@ func TestRunWithPreflightTreatsParentCancellationAsClean(t *testing.T) {
 			return "receiver-token"
 		}
 		return ""
-	}, io.Discard, io.Discard, prepare); err != nil {
+	}, io.Discard, prepare); err != nil {
 		t.Fatalf("runWithPreflight() error = %v, want clean cancellation", err)
 	}
 }
@@ -333,6 +333,22 @@ func TestPreflightHTTPClientUsesPollTimeoutBudget(t *testing.T) {
 	client := preflightHTTPClient(3 * time.Second)
 	if client.Timeout != 8*time.Second {
 		t.Fatalf("preflight HTTP timeout = %s, want 8s", client.Timeout)
+	}
+}
+
+func TestReportTelegramErrorUsesStructuredFields(t *testing.T) {
+	var output strings.Builder
+	restoreLogger, err := configureLogger(&output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restoreLogger)
+
+	reportTelegramError(telegram.ErrorEvent{Operation: telegram.ErrorOperationPolling, Err: telegram.ErrPolling})
+
+	logged := output.String()
+	if !strings.Contains(logged, "[telegram-e2e] telegram operation failed") || !strings.Contains(logged, "polling") || !strings.Contains(logged, "telegram polling failed") {
+		t.Fatalf("structured Telegram error = %q", logged)
 	}
 }
 

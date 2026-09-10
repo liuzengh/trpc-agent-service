@@ -12,6 +12,7 @@ TRPC_API_IDENTITIES=token-a|t_<tenant-a>|app_<app-a>|service-a,token-b|t_<tenant
 
 `TRPC_API_IDENTITIES` 与旧的 `TRPC_API_TOKEN`/`TRPC_TENANT_ID`/`TRPC_APP_ID` 互斥：未设置 identity 列表时继续使用旧字段。单租户兼容路径继续使用 `TRPC_MODEL_API_KEY`；多租户部署使用 `TRPC_MODEL_API_KEYS=t_<tenant-a>=<key-a>,t_<tenant-b>=<key-b>`，每个 key 只在对应 `(tenant_id, secret_ref)` 的受信任 Factory 路径中注入 SecretRegistry，绝不会写入计划、缓存或数据库。
 
-多租户 audit writer 按事件 `tenant_id` 懒加载 tenant-bound PostgreSQL store，并为每次写入设置对应的 RLS scope。WeCom 的真实多账户凭据仍需要后续 channel provider 配置；本阶段不扩大协议能力。
+多租户 audit writer 按事件 `tenant_id` 懒加载 tenant-bound PostgreSQL store，并为每次写入设置对应的 RLS scope。WeCom channel runtime 使用按 `(tenant_id, account_id)` 作用域的 credential registry 与有界 worker group；对应注册、解析、关闭和并发调度均由 Channel 测试覆盖。
 
-当前 `WECOM_CALLBACK_TOKEN` 等单套 WeCom 环境凭据只能和一个 API identity 一起使用。若同时配置多条 `TRPC_API_IDENTITIES` 与 WeCom 凭据，bootstrap 会 fail closed；它不会任意挑选一个租户来验签或运行 outbox worker。多账号 WeCom credential registry/worker group 是独立的 channel 配置工作。
+`WECOM_CALLBACK_TOKEN` 等单套 WeCom 环境凭据绑定一个 API identity。多 identity 配置对共享
+WeCom 凭据执行显式校验，确保验签与 outbox worker 始终在确定的 tenant/account scope 内运行。

@@ -8,7 +8,8 @@ import (
 	"strings"
 	"time"
 
-	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 )
 
 // ValidateText enforces the same character bounds used by the runtime DDL.
@@ -32,6 +33,23 @@ func ValidateEmbedding(values []float64) bool {
 
 const maxReplyTargetIDRunes = 1024
 
+// ReplyKind identifies the durable representation a channel provider should
+// attempt before falling back to text.
+type ReplyKind string
+
+const (
+	// ReplyKindText identifies the legacy text reply path.
+	ReplyKindText ReplyKind = "text"
+	// ReplyKindImage identifies an image attachment reply.
+	ReplyKindImage ReplyKind = "image"
+	// ReplyKindVideo identifies a video attachment reply.
+	ReplyKindVideo ReplyKind = "video"
+	// ReplyKindAudio identifies an audio attachment reply.
+	ReplyKindAudio ReplyKind = "audio"
+	// ReplyKindDocument identifies a document attachment reply.
+	ReplyKindDocument ReplyKind = "document"
+)
+
 // ReplyTarget is the trusted, durable destination for a channel reply. A zero
 // target is retained only for rows created before per-message routing existed.
 type ReplyTarget struct {
@@ -43,17 +61,19 @@ type ReplyTarget struct {
 
 var (
 	// ErrNotFound reports a missing tenant-scoped runtime record.
-	ErrNotFound = errors.New("runtime record not found")
+	ErrNotFound = sessionstorage.ErrNotFound
 	// ErrDuplicate reports an existing runtime record with the same identity.
-	ErrDuplicate = errors.New("runtime record already exists")
+	ErrDuplicate = sessionstorage.ErrDuplicate
 	// ErrConflict reports an optimistic-concurrency conflict.
 	ErrConflict = errors.New("runtime version conflict")
 	// ErrInvalid reports malformed runtime input.
-	ErrInvalid = errors.New("invalid runtime record")
+	ErrInvalid = sessionstorage.ErrInvalid
 	// ErrIllegalTransition reports a disallowed runtime lifecycle change.
 	ErrIllegalTransition = errors.New("illegal runtime state transition")
-	// ErrStorage reports unavailable runtime persistence.
-	ErrStorage = pgstorage.ErrStorage
+	// ErrStorage reports unavailable runtime persistence without coupling the
+	// runtime contract to a particular database adapter. The legacy error text is
+	// retained for callers that expose it in diagnostics.
+	ErrStorage = sessionstorage.ErrStorage
 )
 
 const (
@@ -89,17 +109,6 @@ const (
 	ReplyDeadLetter = "dead_letter"
 )
 
-// Session is the durable tenant-scoped conversation state.
-type Session struct {
-	TenantID  string
-	SessionID string
-	Status    string
-	Version   int64
-	State     map[string]any
-	CreatedAt time.Time
-	UpdatedAt time.Time
-}
-
 // MessageEvent is the durable inbound message lifecycle record.
 type MessageEvent struct {
 	TenantID          string
@@ -131,18 +140,6 @@ type MessageEventInput struct {
 	ReplyTarget       ReplyTarget
 }
 
-// EventPayload is one immutable upstream Runner event retained for durable
-// session recovery. Payload is JSON and must never be included in logs or
-// returned through an unauthorised HTTP surface.
-type EventPayload struct {
-	TenantID   string
-	SessionID  string
-	EventID    string
-	Payload    []byte
-	HistorySeq int64
-	CreatedAt  time.Time
-}
-
 // MessageTransition advances a persisted inbound message through its execution
 // lifecycle. Transitions out of running require the current owner and fence.
 type MessageTransition struct {
@@ -166,7 +163,10 @@ type ReplyOutbox struct {
 	EventID           string
 	SegmentIndex      int
 	SegmentCount      int
+	Kind              ReplyKind
 	Payload           string
+	Attachment        attachment.Reference
+	Fallback          string
 	ReplyTarget       ReplyTarget
 	Status            string
 	Attempts          int
@@ -190,6 +190,17 @@ type ReplyCorrelation struct {
 	TraceParent string
 }
 
+// ReplyReceipt records a provider acknowledgement without advancing the reply
+// lifecycle. The outbox worker owns the subsequent sending-to-sent transition.
+type ReplyReceipt struct {
+	TenantID     string
+	ReplyID      string
+	SegmentIndex int
+	Owner        string
+	FencingToken int64
+	ProviderID   string
+}
+
 // ReplyTransition requests a fenced reply lifecycle transition.
 type ReplyTransition struct {
 	TenantID      string
@@ -204,29 +215,29 @@ type ReplyTransition struct {
 	ProviderID    string
 }
 
-// RuntimeStore is the tenant-scoped persistence contract used by Runner.
-type RuntimeStore interface {
-	GetSession(context.Context, string, string) (Session, error)
-	CreateSession(context.Context, string, string, map[string]any) (Session, error)
-	UpdateSessionState(context.Context, string, string, int64, map[string]any) (Session, error)
-	DeleteSession(context.Context, string, string) error
+// MessageStore is the durable inbound message lifecycle contract. It owns
+// idempotency, execution leases, and fenced message transitions.
+type MessageStore interface {
 	RecordMessage(context.Context, MessageEventInput) (MessageEvent, bool, error)
 	GetMessage(context.Context, string, string) (MessageEvent, error)
 	TransitionMessage(context.Context, MessageTransition) (MessageEvent, error)
-	AppendEventPayload(context.Context, EventPayload) (EventPayload, error)
-	ListEventPayloads(context.Context, string, string) ([]EventPayload, error)
+}
+
+// ReplyStore is the durable reply-segment lifecycle contract. Atomic batch
+// materialization and optional correlation/receipt capabilities remain
+// separate interfaces because not every legacy store provides them.
+type ReplyStore interface {
 	EnqueueReply(context.Context, ReplyOutbox) (ReplyOutbox, error)
 	ListReplyCandidates(context.Context, string) ([]ReplyOutbox, error)
 	GetReply(context.Context, string, string, int) (ReplyOutbox, error)
 	ClaimReply(context.Context, string, string, int, string, time.Duration) (ReplyOutbox, error)
 	TransitionReply(context.Context, ReplyTransition) (ReplyOutbox, error)
-	Close() error
 }
 
 // ReplyBatchEnqueuer is the atomic reply-materialization capability. A batch
 // either makes every segment durable or makes none of its new segments visible
-// to a delivery worker. It remains separate from RuntimeStore so existing
-// readers can keep a narrow dependency surface.
+// to a delivery worker. It remains separate from the segment lifecycle
+// capabilities so consumers can keep a narrow dependency surface.
 type ReplyBatchEnqueuer interface {
 	EnqueueReplies(context.Context, []ReplyOutbox) ([]ReplyOutbox, error)
 }
@@ -241,6 +252,13 @@ type ReplyBatchCorrelationEnqueuer interface {
 // audit and recovery. It is optional for legacy runtime stores.
 type ReplyCorrelationStore interface {
 	GetReplyCorrelation(context.Context, string, string) (ReplyCorrelation, error)
+}
+
+// ReplyReceiptRecorder persists an acknowledged provider receipt while the
+// caller still owns the sending lease. It lets a replacement worker reconcile
+// a reply after a process restart before the normal sent transition commits.
+type ReplyReceiptRecorder interface {
+	RecordReplyReceipt(context.Context, ReplyReceipt) (ReplyOutbox, error)
 }
 
 // ValidateTenant checks the required tenant identity.
@@ -289,6 +307,56 @@ func validReplyTargetID(value string) bool {
 		}
 	}
 	return true
+}
+
+// NormalizeReplyOutbox validates a reply's protocol-neutral media contract and
+// returns a canonical copy. A zero Kind preserves the historical text-only path.
+func NormalizeReplyOutbox(value ReplyOutbox) (ReplyOutbox, error) {
+	value.Kind = normalizedReplyKind(value.Kind)
+	switch value.Kind {
+	case ReplyKindText:
+		if value.Attachment != (attachment.Reference{}) || value.Fallback != "" {
+			return ReplyOutbox{}, ErrInvalid
+		}
+		return value, nil
+	case ReplyKindImage, ReplyKindVideo, ReplyKindAudio, ReplyKindDocument:
+		reference, err := value.Attachment.Normalize()
+		if err != nil {
+			return ReplyOutbox{}, err
+		}
+		if replyKindForAttachment(reference.Kind) != value.Kind {
+			return ReplyOutbox{}, ErrInvalid
+		}
+		if !ValidateText(value.Fallback, 4096, true) {
+			return ReplyOutbox{}, ErrInvalid
+		}
+		value.Attachment = reference
+		return value, nil
+	default:
+		return ReplyOutbox{}, ErrInvalid
+	}
+}
+
+func normalizedReplyKind(kind ReplyKind) ReplyKind {
+	if kind == "" {
+		return ReplyKindText
+	}
+	return ReplyKind(strings.ToLower(strings.TrimSpace(string(kind))))
+}
+
+func replyKindForAttachment(kind attachment.Kind) ReplyKind {
+	switch kind {
+	case attachment.KindImage:
+		return ReplyKindImage
+	case attachment.KindVideo:
+		return ReplyKindVideo
+	case attachment.KindAudio:
+		return ReplyKindAudio
+	case attachment.KindDocument:
+		return ReplyKindDocument
+	default:
+		return ""
+	}
 }
 
 // ValidateTransition reports whether a reply transition is legal.

@@ -1,9 +1,9 @@
 # Issue #76：无状态 Worker、共享队列与迁移切换
 
-本页是 Issue #76 的 docs-first 合约和实现 ledger。目标是让 Gateway 只负责鉴权、
+本页是 Issue #76 的实现合约和验收 ledger。目标是让 Gateway 只负责鉴权、
 限流和投递，Worker 只消费不可变执行任务；所有跨节点状态都落在共享的耐久后端。
-本 Issue 不改变已有 `RuntimeStore`/Reply Outbox 状态机，也不把 InMemory 声称为生产
-耐久存储。
+本 Issue 保持运行时存储能力与 Reply Outbox 状态机兼容；`runtime/queue` 是可注入的异步
+执行边界，Bootstrap 按显式配置接管 Worker 生命周期，并保留同步 Gateway 入口。
 
 ## 边界与角色
 
@@ -29,7 +29,8 @@ Gateway 不保存 session 粘性，也不能由请求体选择租户；它把已
 
 ## 执行队列契约
 
-`trpcservice/runtime/queue` 提供协议中立的 `Store` 和 `Worker`：
+`trpcservice/runtime/queue` 提供协议中立的 `Store` 和 `Worker`；耐久回复由
+`trpcservice/outbox` 独立拥有：
 
 - `Enqueue` 以 `(tenant_id, task_id)` 幂等；相同 payload 返回已有任务，冲突返回
   `ErrConflict`。
@@ -59,8 +60,9 @@ leased (lease expired) -> leased  (new fencing token)
 
 ## 迁移、双写与切换
 
-`trpcservice/runtime/migration` 将迁移拆成可重放阶段，每一步都按租户隔离并产生
-`Report`：
+`trpcservice/internal/migration` 将迁移拆成可重放阶段，每一步都按租户隔离并产生
+`Report`。阶段状态通过 `StateStore` 持久化；默认的 `MemoryStateStore` 只用于测试和
+dry-run，生产部署必须注入共享实现：
 
 1. **dual-write barrier**：先在源端记录初始 watermark，再启用应用的
    source/destination 双写；在屏障建立前拒绝（或短暂排队）不可追踪的写入。
@@ -81,22 +83,21 @@ ETag，元数据事务仍由 SQL 负责。迁移工具不会把 secret、原始�
 
 ## 容量与故障验收
 
-容量模型使用可观测的队列深度、claim 延迟、每租户并发和 Session/IM QPS。上线前至少
-验证：两个 Worker 并发领取同一租户任务只有一个有效 fence；持有旧 lease 的 Worker
-提交被拒；取消和 `Close` 不泄漏 goroutine；IM 重复投递只产生一个 task；迁移 checksum
-失败不切换，切换后 rollback 恢复原路由。压测应覆盖峰值 callback、慢模型和 SQL 短暂
-不可用，记录 p95/p99 延迟与恢复时间。
+容量与故障验收使用队列深度、claim 延迟、每租户并发和 Session/IM QPS 作为运行信号。
+队列、迁移和故障注入测试覆盖两个 Worker 对同一租户任务的单一有效 fence、旧 lease
+提交拒绝、取消与 `Close` 的 goroutine 回收、IM 重复投递的单一 task，以及 checksum、
+cutover 与 rollback 的恢复语义。
 
 ## Issue ledger
 
 | 项目 | 阶段 | 证据 | 状态 |
 | --- | --- | --- | --- |
-| 无状态 Gateway/Worker 角色和共享后端边界 | 文档 | 本页角色与拓扑 | ✅ |
+| 无状态 Gateway/Worker 角色和共享后端边界 | 文档/组合入口 | 本页角色、Bootstrap 可选 Worker | ✅ |
 | Durable queue lease/fencing/retry/shutdown | 代码 | `runtime/queue` 契约与测试 | ✅ |
-| Redis/SQL 与向量迁移、校验、切换、回滚 | 代码 | `runtime/migration` 契约与测试 | ✅ |
+| 可恢复的迁移阶段状态 | 代码 | `internal/migration.StateStore` 与重建测试 | ✅ |
 | copy、dual-write、catch-up、checksum 工具 | 代码 | 迁移报告和阶段测试 | ✅ |
 | Session/IM 容量与故障测试 | 代码 | 队列/迁移并发、取消测试 | ✅ |
 | migration DDL 与权限 | 代码 | `0013_execution_queue.up.sql` 和 migration 测试 | ✅ |
 
-完成代码阶段后，本表与 PR 描述同步；未实现的生产 provider、分布式锁和压测环境不
-会被标记为已交付。
+本表与 CI queue/migration 测试和 fault-injection E2E 同步；lease/fencing、迁移阶段状态、
+取消和恢复语义均由代码测试与 workflow 验收入口记录。

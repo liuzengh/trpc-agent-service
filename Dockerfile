@@ -1,5 +1,15 @@
 # syntax=docker/dockerfile:1
 
+FROM node:22-bookworm-slim AS web-build
+
+WORKDIR /src/trpcservice/web
+
+COPY trpcservice/web/package.json trpcservice/web/package-lock.json ./
+RUN npm ci
+
+COPY trpcservice/web/ ./
+RUN npm run build
+
 FROM golang:1.21-bookworm AS build
 
 ARG TARGETARCH
@@ -18,6 +28,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 COPY --from=build /out/trpc-service /app/trpc-service
 COPY --from=build /out/trpc-healthcheck /app/trpc-healthcheck
+COPY --from=web-build /src/trpcservice/web/dist /app/web
 
 USER nonroot:nonroot
 EXPOSE 8080

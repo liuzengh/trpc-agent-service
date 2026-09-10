@@ -11,6 +11,77 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 )
 
+// List returns a stable page of Backend Profiles belonging to one tenant.
+func (r *BackendRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*backend.Profile, string, error) {
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := 0
+	if cursor != "" {
+		if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT profile_id FROM public.backend_profile WHERE tenant_id=$1 ORDER BY profile_id`, tenantID)
+	if err != nil {
+		return nil, "", ErrStorage
+	}
+	profileIDs, err := scanProfileIDs(rows)
+	if err != nil {
+		return nil, "", ErrStorage
+	}
+	items := make([]*backend.Profile, 0)
+	q := strings.ToLower(strings.TrimSpace(query))
+	for _, id := range profileIDs {
+		value, err := loadBackendProfile(ctx, r.db, r.catalog, tenantID, id, false)
+		if err != nil {
+			return nil, "", ErrStorage
+		}
+		if status != "" && string(value.Status) != status {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(value.ProfileID+" "+value.ProfileKey+" "+value.DisplayName), q) {
+			continue
+		}
+		items = append(items, value)
+	}
+	if offset >= len(items) {
+		return []*backend.Profile{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
+func scanProfileIDs(rows *sql.Rows) ([]string, error) {
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	return ids, rows.Close()
+}
+
 // BackendRepository persists Backend Profiles and their capability bindings.
 type BackendRepository struct {
 	db      *sql.DB

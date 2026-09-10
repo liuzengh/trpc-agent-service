@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -65,6 +65,33 @@ func TestBindingDomainInvariantsAndDefensiveConfiguration(t *testing.T) {
 	}
 	if _, exists := reflectField(CandidateBindingContext{}, "TenantID"); exists {
 		t.Fatal("candidate context contains a tenant identity field")
+	}
+}
+
+func TestWeComAIBotBindingSeparatesCredentialsAndNormalizesEndpoint(t *testing.T) {
+	routeDigest, err := DigestPublicRouteKey(ChannelWeComAIBot, "bot-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := NewBinding(CreateInput{TenantID: testTenantID, BindingKey: "aibot", Channel: ChannelWeComAIBot, ProviderAccountID: "bot-account", PublicRouteKeyDigest: routeDigest, AppID: testAppID, SecretRef: "secret/aibot", Protocol: ProtocolConfiguration{WeComAIBot: &WeComAIBotProtocolConfiguration{BotID: "bot-1"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.Protocol.WeComAIBot == nil || binding.Protocol.WeComAIBot.WSURL != "wss://openws.work.weixin.qq.com" {
+		t.Fatalf("AI Bot endpoint = %+v", binding.Protocol.WeComAIBot)
+	}
+	invalid := binding.Clone()
+	invalid.Protocol.WeComAIBot.WSURL = "ws://insecure.example.com"
+	if err := invalid.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("insecure AI Bot URL accepted: %v", err)
+	}
+	missingBot := binding.Clone()
+	missingBot.Protocol.WeComAIBot.BotID = ""
+	if err := missingBot.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing AI Bot ID accepted: %v", err)
+	}
+	if err := json.Unmarshal([]byte(`{"wecom_aibot":{"bot_id":"bot-1","secret":"must-not-be-stored"}}`), &ProtocolConfiguration{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("credential-shaped protocol JSON accepted: %v", err)
 	}
 }
 
@@ -256,7 +283,7 @@ func TestRoutingAndScopeValidationBoundaries(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		binding  *Binding
-		app      *agent.App
+		app      *appmodel.App
 		verified VerifiedBinding
 		snapshot tenant.ConfigurationSnapshot
 	}{
@@ -272,7 +299,7 @@ func TestRoutingAndScopeValidationBoundaries(t *testing.T) {
 			value.BindingID = "cb_00000000000000000000000000"
 			return value
 		}(), snapshot: validSnapshot},
-		{name: "app tenant mismatch", binding: binding, app: func() *agent.App {
+		{name: "app tenant mismatch", binding: binding, app: func() *appmodel.App {
 			value := validApp.Clone()
 			value.TenantID = "t_00000000000000000000000001"
 			return &value
@@ -328,7 +355,10 @@ func TestProtocolJSONAndCandidateValidationErrors(t *testing.T) {
 	}
 	valid := time.Now().UTC()
 	digest := strings.Repeat("a", 64)
-	candidate, err := NewCandidateBindingContext(ChannelWeCom, digest, 1, digest, PurposeWebhookVerification, "token", valid, valid.Add(time.Second))
+	candidate, err := NewCandidateBindingContextFromInput(CandidateBindingInput{
+		Channel: ChannelWeCom, PublicRouteKeyDigest: digest, BindingVersion: 1, ConfigDigest: digest,
+		Purpose: PurposeWebhookVerification, CandidateToken: "token", IssuedAt: valid, ExpiresAt: valid.Add(time.Second),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +413,10 @@ func TestCandidateLifetimePurposeAndOpaqueHandleBoundaries(t *testing.T) {
 	routeDigest, _ := DigestPublicRouteKey(ChannelWeCom, "route")
 	configDigest := strings.Repeat("a", 64)
 	now := time.Now().UTC()
-	candidate, err := NewCandidateBindingContext(ChannelWeCom, routeDigest, 1, configDigest, PurposeWebhookVerification, "opaque-token", now, now.Add(time.Second))
+	candidate, err := NewCandidateBindingContextFromInput(CandidateBindingInput{
+		Channel: ChannelWeCom, PublicRouteKeyDigest: routeDigest, BindingVersion: 1, ConfigDigest: configDigest,
+		Purpose: PurposeWebhookVerification, CandidateToken: "opaque-token", IssuedAt: now, ExpiresAt: now.Add(time.Second),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,10 +426,16 @@ func TestCandidateLifetimePurposeAndOpaqueHandleBoundaries(t *testing.T) {
 	if err := candidate.Validate(now.Add(time.Second)); !errors.Is(err, ErrCandidateUnavailable) {
 		t.Fatalf("expired candidate was accepted: %v", err)
 	}
-	if _, err := NewCandidateBindingContext(ChannelWeCom, routeDigest, 1, configDigest, VerificationPurpose(""), "opaque-token", now, now.Add(time.Second)); !errors.Is(err, ErrInvalid) {
+	if _, err := NewCandidateBindingContextFromInput(CandidateBindingInput{
+		Channel: ChannelWeCom, PublicRouteKeyDigest: routeDigest, BindingVersion: 1, ConfigDigest: configDigest,
+		Purpose: VerificationPurpose(""), CandidateToken: "opaque-token", IssuedAt: now, ExpiresAt: now.Add(time.Second),
+	}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("empty candidate purpose was accepted: %v", err)
 	}
-	if _, err := NewCandidateBindingContext(ChannelWeCom, routeDigest, 1, configDigest, PurposeWebhookVerification, "opaque-token", now, now.Add(MaxCandidateLifetime+time.Nanosecond)); !errors.Is(err, ErrInvalid) {
+	if _, err := NewCandidateBindingContextFromInput(CandidateBindingInput{
+		Channel: ChannelWeCom, PublicRouteKeyDigest: routeDigest, BindingVersion: 1, ConfigDigest: configDigest,
+		Purpose: PurposeWebhookVerification, CandidateToken: "opaque-token", IssuedAt: now, ExpiresAt: now.Add(MaxCandidateLifetime + time.Nanosecond),
+	}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unbounded candidate lifetime was accepted: %v", err)
 	}
 
@@ -568,22 +607,22 @@ func testConfigurationSnapshot(t *testing.T, tenantID string) tenant.Configurati
 	return snapshot
 }
 
-func testActiveApp(t *testing.T, tenantID, appID string) *agent.App {
+func testActiveApp(t *testing.T, tenantID, appID string) *appmodel.App {
 	t.Helper()
-	app, err := agent.NewApp(agent.CreateInput{TenantID: tenantID, AppKey: "snapshot-app", DisplayName: "Snapshot App", Description: "test"})
+	appRoot, err := appmodel.NewApp(appmodel.CreateInput{TenantID: tenantID, AppKey: "snapshot-app", DisplayName: "Snapshot App", Description: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.AppID = appID
+	appRoot.AppID = appID
 	revision := int64(1)
-	app.Status = agent.StatusActive
-	app.CurrentRevision = &revision
-	app.Version = 2
-	app.UpdatedAt = app.CreatedAt.Add(time.Second)
-	if err := app.Validate(); err != nil {
+	appRoot.Status = appmodel.StatusActive
+	appRoot.CurrentRevision = &revision
+	appRoot.Version = 2
+	appRoot.UpdatedAt = appRoot.CreatedAt.Add(time.Second)
+	if err := appRoot.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	return app
+	return appRoot
 }
 
 func validChangeMetadata() ChangeMetadata {

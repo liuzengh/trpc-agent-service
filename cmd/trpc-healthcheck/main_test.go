@@ -1,14 +1,17 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+
+	servicelog "github.com/XnLemon/trpc-agent-service/trpcservice/log"
+	"go.uber.org/zap"
 )
 
 func TestCheckAcceptsSuccessfulEndpoint(t *testing.T) {
@@ -55,6 +58,30 @@ func TestCheckRejectsInvalidInputsAndUnhealthyResponses(t *testing.T) {
 	}
 }
 
+func TestPackageLogAddsPrefix(t *testing.T) {
+	var output strings.Builder
+	restoreLogger, err := configureLogger(&output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restoreLogger)
+
+	packageLog.Info("info message")
+	packageLog.Warn("warn message")
+	packageLog.Error("error message", zap.String("operation", "check"))
+
+	logged := output.String()
+	for _, message := range []string{
+		"[trpc-healthcheck] info message",
+		"[trpc-healthcheck] warn message",
+		"[trpc-healthcheck] error message",
+	} {
+		if !strings.Contains(logged, message) {
+			t.Errorf("package logger did not log %q: %s", message, logged)
+		}
+	}
+}
+
 func TestRunAcceptsExplicitHealthyURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/readyz" {
@@ -64,12 +91,8 @@ func TestRunAcceptsExplicitHealthyURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	var stderr bytes.Buffer
-	if err := run([]string{server.URL + "/readyz"}, &stderr); err != nil {
+	if err := run([]string{server.URL + "/readyz"}); err != nil {
 		t.Fatal(err)
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
 }
 
@@ -79,13 +102,9 @@ func TestRunReportsUnhealthyEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	var stderr bytes.Buffer
-	err := run([]string{server.URL}, &stderr)
+	err := run([]string{server.URL})
 	if !errors.Is(err, errUnhealthy) {
 		t.Fatalf("error = %v, want errUnhealthy", err)
-	}
-	if got, want := stderr.String(), "health check failed\n"; got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 }
 
@@ -120,6 +139,29 @@ func TestMainExitsNonZeroOnFailure(t *testing.T) {
 	exitProcess = func(code int) { exitCode = code }
 	main()
 
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+}
+
+func TestMainExitsWhenLoggerConfigurationFails(t *testing.T) {
+	originalLogger := newLogger
+	originalArgs := os.Args
+	originalExit := exitProcess
+	t.Cleanup(func() {
+		newLogger = originalLogger
+		os.Args = originalArgs
+		exitProcess = originalExit
+	})
+
+	newLogger = func(servicelog.Config) (*zap.Logger, error) {
+		return nil, errors.New("logger unavailable")
+	}
+	exitCode := 0
+	exitProcess = func(code int) { exitCode = code }
+	os.Args = []string{"trpc-healthcheck"}
+
+	main()
 	if exitCode != 1 {
 		t.Fatalf("exit code = %d, want 1", exitCode)
 	}

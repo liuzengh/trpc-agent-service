@@ -62,7 +62,10 @@ func (p Policy) Decide(ctx context.Context, requestID, traceID, toolName string)
 	case ApprovalRequired:
 		eventType = audit.EventToolApprovalRequired
 	}
-	if auditErr := p.Recorder.ToolDecision(ctx, eventType, requestID, traceID, toolName, audit.Decision(decision), ""); auditErr != nil {
+	if auditErr := p.Recorder.Record(ctx, audit.Event{
+		EventType: eventType, RequestID: requestID, TraceID: traceID,
+		ToolName: toolName, Decision: audit.Decision(decision),
+	}); auditErr != nil {
 		return "", audit.ErrWriteFailed
 	}
 	return decision, err

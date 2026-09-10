@@ -8,11 +8,15 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
+	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
-	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	trpcrunner "trpc.group/trpc-go/trpc-agent-go/runner"
@@ -22,9 +26,21 @@ import (
 
 func TestExecutionPlanFreezesAllTenantScopedInputs(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
+	plan, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: fixture.tenantSnapshot,
+		AppRoot:        fixture.app,
+		Revision:       fixture.revision,
+		ModelProfile:   fixture.modelProfile,
+		ModelCatalog:   fixture.modelCatalog,
+		BackendProfile: fixture.backendProfile,
+		BackendCatalog: fixture.backendCatalog,
+	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	runnerInput := agentRunnerInputForTest(t, plan)
+	if runnerInput.Tenant.TenantID != fixture.root.TenantID || runnerInput.Agent.AppID != fixture.app.AppID || runnerInput.Model.ProfileID != fixture.modelProfile.ProfileID || len(runnerInput.Storage.Bindings) != 1 {
+		t.Fatalf("unexpected runner input projection: %+v", runnerInput)
 	}
 	key, err := plan.CacheKey()
 	if err != nil {
@@ -84,14 +100,22 @@ func TestExecutionPlanRejectsRevisionFromDifferentAppInSameTenant(t *testing.T) 
 	if otherApp.TenantID != fixture.app.TenantID || otherRevision.AppID != otherApp.AppID {
 		t.Fatal("test fixture did not create a same-tenant distinct App")
 	}
-	if _, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, otherRevision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog); err == nil || (!errors.Is(err, agent.ErrInvalid) && !strings.Contains(err.Error(), "does not belong to App")) {
+	if _, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: fixture.tenantSnapshot, AppRoot: fixture.app, Revision: otherRevision,
+		ModelProfile: fixture.modelProfile, ModelCatalog: fixture.modelCatalog,
+		BackendProfile: fixture.backendProfile, BackendCatalog: fixture.backendCatalog,
+	}); err == nil || (!errors.Is(err, agent.ErrInvalid) && !strings.Contains(err.Error(), "does not belong to App")) {
 		t.Fatalf("different-App revision error = %v", err)
 	}
 }
 
 func TestExecutionPlanContextAndInvalidBoundaries(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
+	plan, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: fixture.tenantSnapshot, AppRoot: fixture.app, Revision: fixture.revision,
+		ModelProfile: fixture.modelProfile, ModelCatalog: fixture.modelCatalog,
+		BackendProfile: fixture.backendProfile, BackendCatalog: fixture.backendCatalog,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,14 +177,22 @@ func TestExecutionPlanContextAndInvalidBoundaries(t *testing.T) {
 	if err := invalidBackendPlan.validate(); err == nil {
 		t.Fatal("invalid backend plan unexpectedly validated")
 	}
-	if _, err := NewExecutionPlan(tenant.ConfigurationSnapshot{}, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog); err == nil {
+	if _, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		AppRoot: fixture.app, Revision: fixture.revision, ModelProfile: fixture.modelProfile,
+		ModelCatalog: fixture.modelCatalog, BackendProfile: fixture.backendProfile,
+		BackendCatalog: fixture.backendCatalog,
+	}); err == nil {
 		t.Fatal("invalid tenant snapshot unexpectedly built a plan")
 	}
 }
 
 func TestNewRunnerRejectsInvalidInputsAndFactoryFailures(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
+	plan, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: fixture.tenantSnapshot, AppRoot: fixture.app, Revision: fixture.revision,
+		ModelProfile: fixture.modelProfile, ModelCatalog: fixture.modelCatalog,
+		BackendProfile: fixture.backendProfile, BackendCatalog: fixture.backendCatalog,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,24 +203,24 @@ func TestNewRunnerRejectsInvalidInputsAndFactoryFailures(t *testing.T) {
 		}
 	}()
 	var nilContext context.Context
-	if _, err := NewRunner(nilContext, plan, nil, &runtimeModelFactory{}, sessions); err == nil {
+	if _, err := newRunnerWithConfigForTest(nilContext, agentRunnerInputForTest(t, plan), &runtimeModelFactory{}, sessions, nil); err == nil {
 		t.Fatal("nil runner context unexpectedly succeeded")
 	}
-	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{}, nil); err == nil {
+	if _, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), &runtimeModelFactory{}, nil, nil); err == nil {
 		t.Fatal("nil session service unexpectedly succeeded")
 	}
-	if _, err := NewRunner(context.Background(), ExecutionPlan{}, nil, &runtimeModelFactory{}, sessions); err == nil {
-		t.Fatal("zero execution plan unexpectedly succeeded")
+	if _, err := (ExecutionPlan{}).AgentFactoryInput(); err == nil {
+		t.Fatal("zero execution plan unexpectedly projected agent input")
 	}
 	invalidStorage := plan
 	invalidStorage.backend = backend.BackendExecutionSnapshot{}
-	if _, err := NewRunner(context.Background(), invalidStorage, nil, &runtimeModelFactory{}, sessions); err == nil {
-		t.Fatal("invalid storage plan unexpectedly succeeded")
+	if _, err := invalidStorage.StorageFactoryInput(); err == nil {
+		t.Fatal("invalid storage plan unexpectedly projected storage input")
 	}
-	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{err: errors.New("provider failure")}, sessions); err == nil || !strings.Contains(err.Error(), "build runner: model") {
+	if _, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), &runtimeModelFactory{err: errors.New("provider failure")}, sessions, nil); err == nil || !strings.Contains(err.Error(), "build runner: model") {
 		t.Fatalf("factory failure = %v", err)
 	}
-	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{returnNil: true}, sessions); err == nil || !strings.Contains(err.Error(), "build runner: model") {
+	if _, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), &runtimeModelFactory{returnNil: true}, sessions, nil); err == nil || !strings.Contains(err.Error(), "build runner: model") {
 		t.Fatalf("nil model failure = %v", err)
 	}
 }
@@ -196,98 +228,100 @@ func TestNewRunnerRejectsInvalidInputsAndFactoryFailures(t *testing.T) {
 func TestNewRunnerValidatesAndClosesStorageCapabilities(t *testing.T) {
 	fixture := runtimeFixture(t)
 	plan := newExecutionPlanForRunner(t, fixture)
-	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{}, nil, nil); err == nil {
+	if _, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), &runtimeModelFactory{}, nil, nil); err == nil {
 		t.Fatal("nil storage factory unexpectedly succeeded")
-	}
-	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{}, nil, backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) { return nil, nil }), backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) { return nil, nil })); err == nil {
-		t.Fatal("multiple storage factories unexpectedly succeeded")
 	}
 
 	closed := &runtimeCloseTrackingSession{Service: inmemory.NewSessionService()}
-	factory := backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+	factory := storagefactory.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 		if input.TenantID != fixture.root.TenantID {
 			t.Fatalf("storage input tenant = %q", input.TenantID)
 		}
-		return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: closed})
+		return storagefactory.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: closed})
 	})
-	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{err: errors.New("model unavailable")}, nil, factory); err == nil {
+	if _, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), &runtimeModelFactory{err: errors.New("model unavailable")}, nil, factory); err == nil {
 		t.Fatal("model setup failure unexpectedly succeeded")
 	}
 	if closed.calls != 1 {
 		t.Fatalf("storage capability close calls = %d", closed.calls)
 	}
-	missingSession := backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
-		return backend.NewCapabilitySet(fixture.root.TenantID, map[backend.Capability]any{backend.CapabilityMemory: struct{}{}})
+	missingSession := storagefactory.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+		return storagefactory.NewCapabilitySet(fixture.root.TenantID, map[backend.Capability]any{backend.CapabilityMemory: struct{}{}})
 	})
-	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{}, nil, missingSession); err == nil || !strings.Contains(err.Error(), "session capability") {
+	if _, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), &runtimeModelFactory{}, nil, missingSession); err == nil || !strings.Contains(err.Error(), "session capability") {
 		t.Fatalf("missing session capability error = %v", err)
 	}
 }
 
-func TestPolicyRunnerCloseReleasesDelegateAndCapabilities(t *testing.T) {
-	delegate := &runtimeClosingRunner{err: errors.New("delegate close failure")}
-	capability := &runtimeCloseTrackingSession{Service: inmemory.NewSessionService(), err: errors.New("capability close failure")}
-	set, err := backend.NewCapabilitySet("t_00000000000000000000000000", map[backend.Capability]any{backend.CapabilitySession: capability})
+func TestRunnerExecutesRevisionAuthorizedMediaTool(t *testing.T) {
+	fixture := runtimeFixture(t)
+	app, revision := runtimeAgentFixtureWithTools(t, fixture.root.TenantID, fixture.modelProfile.ProfileID, "media-tool-app", appmodel.DefaultRuntimePolicy(), []appmodel.ToolAuthorization{{ToolID: servicetool.SendTestImageID, Required: true}})
+	plan, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: fixture.tenantSnapshot, AppRoot: app, Revision: revision,
+		ModelProfile: fixture.modelProfile, ModelCatalog: fixture.modelCatalog,
+		BackendProfile: fixture.backendProfile, BackendCatalog: fixture.backendCatalog,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := &policyRunner{delegate: delegate, capabilities: set}
-	if err := runner.Close(); err == nil || !strings.Contains(err.Error(), "delegate close failure") || !strings.Contains(err.Error(), "backend storage factory failed") {
-		t.Fatalf("Close() = %v", err)
-	}
-	if delegate.calls != 1 || capability.calls != 1 {
-		t.Fatalf("close calls delegate=%d capability=%d", delegate.calls, capability.calls)
-	}
-	var nilRunner *policyRunner
-	if err := nilRunner.Close(); err != nil {
+	store := runtimestorageinmemory.New()
+	if _, err := store.CreateSession(context.Background(), fixture.root.TenantID, "tool-session", nil); err != nil {
 		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: fixture.root.TenantID, EventID: "tool-event", SessionID: "tool-session", BindingID: "tool-binding", ExternalMessageID: "tool-message"}); err != nil {
+		t.Fatal(err)
+	}
+	model := &runtimeToolCallingModel{}
+	sessions := inmemory.NewSessionService()
+	runner, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), &runtimeModelFactory{model: model}, sessions, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = runner.Close()
+		_ = sessions.Close()
+	})
+	collector := servicetool.NewReplyCollector()
+	ctx := servicetool.WithExecutionContext(context.Background(), servicetool.ExecutionContext{TenantID: fixture.root.TenantID, EventID: "tool-event", RequestID: "tool-request", TraceID: "tool-trace", Attachments: store, Replies: collector})
+	events, err := runner.Run(ctx, "user", "tool-session", trpcmodel.NewUserMessage("send me a test image"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	if !model.calledTool(servicetool.SendTestImageID) {
+		t.Fatalf("model tool surface = %v", model.toolNames)
+	}
+	intents := collector.Intents()
+	if len(intents) != 1 || intents[0].Kind != runtimestorage.ReplyKindImage || intents[0].Attachment.Provider != "tool" || intents[0].Attachment.ProviderID != servicetool.SendTestImageID {
+		t.Fatalf("media intents = %+v", intents)
+	}
+	if _, err := store.Load(context.Background(), fixture.root.TenantID, "tool-event", intents[0].Attachment); err != nil {
+		t.Fatalf("tool attachment was not event-bound: %v", err)
 	}
 }
 
-func TestNewRunnerCarriesPublishedRuntimePolicy(t *testing.T) {
+func TestRunnerDoesNotExposeUnapprovedTools(t *testing.T) {
 	fixture := runtimeFixture(t)
-	policy := agent.DefaultRuntimePolicy()
-	policy.EnableParallelTools = true
-	policy.MaxParallelTools = 7
-	policy.ExecutionTimeoutSeconds = 9
-	app, revision := runtimeAgentFixtureWithPolicy(t, fixture.root.TenantID, fixture.modelProfile.ProfileID, "policy-app", policy)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, app, revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	agentInput, err := plan.AgentFactoryInput()
-	if err != nil {
-		t.Fatal(err)
-	}
-	options := llmagent.Options{}
-	for _, option := range llmAgentOptions(agentInput, runtimeFakeModel{}) {
-		option(&options)
-	}
-	if !options.EnableParallelTools || options.ToolConcurrencyConfig.MaxConcurrency != policy.MaxParallelTools || options.MaxLLMCalls != policy.MaxLLMCalls || options.MaxToolIterations != policy.MaxToolCalls {
-		t.Fatalf("LLMAgent runtime options = %+v", options)
-	}
+	plan := newExecutionPlanForRunner(t, fixture)
+	model := &runtimeToolCallingModel{respondText: true}
 	sessions := inmemory.NewSessionService()
-	defer func() {
-		if err := sessions.Close(); err != nil {
-			t.Errorf("sessions.Close() error = %v", err)
-		}
-	}()
-	runner, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{}, sessions)
+	runner, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), &runtimeModelFactory{model: model}, sessions, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		if err := runner.Close(); err != nil {
-			t.Errorf("runner.Close() error = %v", err)
-		}
-	}()
-	policyRunner, ok := runner.(*policyRunner)
-	if !ok {
-		t.Fatalf("NewRunner returned %T, want policyRunner", runner)
+	t.Cleanup(func() {
+		_ = runner.Close()
+		_ = sessions.Close()
+	})
+	events, err := runner.Run(context.Background(), "user", "session", trpcmodel.NewUserMessage("hello"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	runOptions := trpcagent.NewRunOptions(policyRunner.runOptions...)
-	if runOptions.MaxRunDuration != time.Duration(policy.ExecutionTimeoutSeconds)*time.Second {
-		t.Fatalf("MaxRunDuration = %v, want %v", runOptions.MaxRunDuration, time.Duration(policy.ExecutionTimeoutSeconds)*time.Second)
+	for range events {
+	}
+	if len(model.toolNames) != 0 {
+		t.Fatalf("unapproved tool surface = %v", model.toolNames)
 	}
 }
 
@@ -309,20 +343,47 @@ func TestRunnerExecutesFakeModelAndPersistsTenantScopedSession(t *testing.T) {
 
 func newExecutionPlanForRunner(t *testing.T, fixture runtimeFixtureData) ExecutionPlan {
 	t.Helper()
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
+	plan, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: fixture.tenantSnapshot, AppRoot: fixture.app, Revision: fixture.revision,
+		ModelProfile: fixture.modelProfile, ModelCatalog: fixture.modelCatalog,
+		BackendProfile: fixture.backendProfile, BackendCatalog: fixture.backendCatalog,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return plan
 }
 
+func agentRunnerInputForTest(t *testing.T, plan ExecutionPlan) agent.RunnerInput {
+	t.Helper()
+	agentInput, err := plan.AgentFactoryInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelInput, err := plan.ModelFactoryInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	storageInput, err := plan.StorageFactoryInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agent.RunnerInput{Tenant: plan.Tenant(), Agent: agentInput, Model: modelInput, Storage: storageInput}
+}
+
 func newRunnerForExecution(t *testing.T, plan ExecutionPlan, factory *runtimeModelFactory, sessions session.Service) trpcrunner.Runner {
 	t.Helper()
-	runner, err := NewRunner(context.Background(), plan, nil, factory, sessions)
+	runner, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), factory, sessions, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return runner
+}
+
+func newRunnerWithConfigForTest(ctx context.Context, input agent.RunnerInput, factory modelprofile.ModelFactory, sessions session.Service, storageFactory storagefactory.StorageFactory) (trpcrunner.Runner, error) {
+	return agent.NewRunnerWithConfig(ctx, agent.RunnerConfig{
+		Input: input, ModelFactory: factory, Sessions: sessions, StorageFactory: storageFactory,
+	})
 }
 
 func closeRunnerDependencies(t *testing.T, runner trpcrunner.Runner, sessions session.Service) {
@@ -368,7 +429,7 @@ func runAndCollectAssistantReply(t *testing.T, runner trpcrunner.Runner, identit
 
 func assertPersistedRunnerSession(t *testing.T, fixture runtimeFixtureData, sessions session.Service, identity tenant.RunnerIdentity) {
 	t.Helper()
-	inspector, err := NewTenantSessionService(*fixture.root, sessions)
+	inspector, err := agent.NewTenantSessionService(*fixture.root, sessions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,12 +465,16 @@ func assertRunnerFactoryBoundary(t *testing.T, fixture runtimeFixtureData, facto
 
 func TestRunnerCancellationDrainsAndClosesEventChannel(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
+	plan, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: fixture.tenantSnapshot, AppRoot: fixture.app, Revision: fixture.revision,
+		ModelProfile: fixture.modelProfile, ModelCatalog: fixture.modelCatalog,
+		BackendProfile: fixture.backendProfile, BackendCatalog: fixture.backendCatalog,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	sessions := inmemory.NewSessionService()
-	runner, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{block: true}, sessions)
+	runner, err := newRunnerWithConfigForTest(context.Background(), agentRunnerInputForTest(t, plan), &runtimeModelFactory{block: true}, sessions, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,11 +520,11 @@ func TestTenantSessionServiceRejectsCrossTenantGetAndAppend(t *testing.T) {
 			t.Errorf("delegate.Close() error = %v", err)
 		}
 	}()
-	serviceOne, err := NewTenantSessionService(*rootOne, delegate)
+	serviceOne, err := agent.NewTenantSessionService(*rootOne, delegate)
 	if err != nil {
 		t.Fatal(err)
 	}
-	serviceTwo, err := NewTenantSessionService(*rootTwo, delegate)
+	serviceTwo, err := agent.NewTenantSessionService(*rootTwo, delegate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +540,7 @@ func TestTenantSessionServiceRejectsCrossTenantGetAndAppend(t *testing.T) {
 	if other != nil {
 		t.Fatal("tenant two read tenant one session")
 	}
-	if err := serviceTwo.AppendEvent(context.Background(), stored, &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.NewAssistantMessage("cross-tenant")}}, Done: true}}); !errors.Is(err, ErrTenantSessionScope) {
+	if err := serviceTwo.AppendEvent(context.Background(), stored, &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.NewAssistantMessage("cross-tenant")}}, Done: true}}); !errors.Is(err, agent.ErrTenantSessionScope) {
 		t.Fatalf("cross-tenant AppendEvent error = %v", err)
 	}
 	if err := serviceOne.UpdateUserState(context.Background(), session.UserKey{AppName: "shared-app", UserID: "same-user"}, session.StateMap{"visible": []byte("one")}); err != nil {
@@ -513,7 +578,7 @@ func TestTenantSessionServiceDelegatesEveryOperationAndScopesKeys(t *testing.T) 
 
 type tenantSessionOperationsSetup struct {
 	root     *tenant.Tenant
-	service  *TenantSessionService
+	service  *agent.TenantSessionService
 	delegate session.Service
 	key      session.Key
 }
@@ -522,7 +587,7 @@ func setupTenantSessionOperations(t *testing.T) tenantSessionOperationsSetup {
 	t.Helper()
 	root := runtimeTenant(t, "all-session-operations")
 	delegate := inmemory.NewSessionService()
-	service, err := NewTenantSessionService(*root, delegate)
+	service, err := agent.NewTenantSessionService(*root, delegate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +607,7 @@ func assertTenantSessionLifecycleOperations(t *testing.T, setup tenantSessionOpe
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created == nil || !service.isScoped(created.AppName) || !service.isScoped(created.UserID) {
+	if created == nil || created.AppName == key.AppName || created.UserID == key.UserID {
 		t.Fatalf("created session was not tenant scoped: %+v", created)
 	}
 	if sessions, err := service.ListSessions(context.Background(), session.UserKey{AppName: key.AppName, UserID: key.UserID}); err != nil || len(sessions) != 1 {
@@ -603,10 +668,10 @@ func assertTenantSessionValidationBoundaries(t *testing.T, setup tenantSessionOp
 	service := setup.service
 	delegate := setup.delegate
 	root := setup.root
-	if _, err := NewTenantSessionService(tenant.Tenant{}, delegate); !errors.Is(err, ErrTenantSessionScope) {
+	if _, err := agent.NewTenantSessionService(tenant.Tenant{}, delegate); !errors.Is(err, agent.ErrTenantSessionScope) {
 		t.Fatalf("invalid tenant constructor error = %v", err)
 	}
-	if _, err := NewTenantSessionService(*root, nil); !errors.Is(err, ErrTenantSessionScope) {
+	if _, err := agent.NewTenantSessionService(*root, nil); !errors.Is(err, agent.ErrTenantSessionScope) {
 		t.Fatalf("nil delegate constructor error = %v", err)
 	}
 	if _, err := service.GetSession(context.Background(), session.Key{UserID: "user", SessionID: "session"}); !errors.Is(err, session.ErrAppNameRequired) {
@@ -615,25 +680,25 @@ func assertTenantSessionValidationBoundaries(t *testing.T, setup tenantSessionOp
 	if _, err := service.GetSession(context.Background(), session.Key{AppName: "app", UserID: "user"}); !errors.Is(err, session.ErrSessionIDRequired) {
 		t.Fatalf("missing session ID error = %v", err)
 	}
-	if _, err := service.GetSession(context.Background(), session.Key{AppName: service.prefix + "one", UserID: "user", SessionID: "session"}); !errors.Is(err, ErrTenantSessionScope) {
+	if _, err := service.GetSession(context.Background(), session.Key{AppName: "tenant:partial", UserID: "user", SessionID: "session"}); !errors.Is(err, agent.ErrTenantSessionScope) {
 		t.Fatalf("partially scoped session key error = %v", err)
 	}
-	if _, err := service.ListSessions(context.Background(), session.UserKey{AppName: "tenant:foreign", UserID: "user"}); !errors.Is(err, ErrTenantSessionScope) {
+	if _, err := service.ListSessions(context.Background(), session.UserKey{AppName: "tenant:foreign", UserID: "user"}); !errors.Is(err, agent.ErrTenantSessionScope) {
 		t.Fatalf("foreign scoped user key error = %v", err)
 	}
 	if err := service.UpdateAppState(context.Background(), "", nil); !errors.Is(err, session.ErrAppNameRequired) {
 		t.Fatalf("empty app state key error = %v", err)
 	}
-	if err := service.UpdateAppState(context.Background(), "tenant:foreign", nil); !errors.Is(err, ErrTenantSessionScope) {
+	if err := service.UpdateAppState(context.Background(), "tenant:foreign", nil); !errors.Is(err, agent.ErrTenantSessionScope) {
 		t.Fatalf("foreign app state key error = %v", err)
 	}
-	if err := service.AppendEvent(context.Background(), nil, &trpcevent.Event{}); !errors.Is(err, ErrTenantSessionScope) {
+	if err := service.AppendEvent(context.Background(), nil, &trpcevent.Event{}); !errors.Is(err, agent.ErrTenantSessionScope) {
 		t.Fatalf("nil session append error = %v", err)
 	}
-	if err := service.CreateSessionSummary(context.Background(), nil, "", false); !errors.Is(err, ErrTenantSessionScope) {
+	if err := service.CreateSessionSummary(context.Background(), nil, "", false); !errors.Is(err, agent.ErrTenantSessionScope) {
 		t.Fatalf("nil session summary error = %v", err)
 	}
-	if err := service.EnqueueSummaryJob(context.Background(), nil, "", false); !errors.Is(err, ErrTenantSessionScope) {
+	if err := service.EnqueueSummaryJob(context.Background(), nil, "", false); !errors.Is(err, agent.ErrTenantSessionScope) {
 		t.Fatalf("nil summary enqueue error = %v", err)
 	}
 	if summary, ok := service.GetSessionSummaryText(context.Background(), nil); ok || summary != "" {
@@ -644,8 +709,8 @@ func assertTenantSessionValidationBoundaries(t *testing.T, setup tenantSessionOp
 type runtimeFixtureData struct {
 	root           *tenant.Tenant
 	tenantSnapshot tenant.ConfigurationSnapshot
-	app            *agent.App
-	revision       *agent.Revision
+	app            *appmodel.App
+	revision       *appmodel.Revision
 	modelProfile   *modelprofile.Profile
 	modelCatalog   *modelprofile.ProviderCatalog
 	backendProfile *backend.Profile
@@ -683,19 +748,23 @@ func runtimeFixture(t *testing.T) runtimeFixtureData {
 	return runtimeFixtureData{root: root, tenantSnapshot: tenantSnapshot, app: app, revision: revision, modelProfile: modelProfile, modelCatalog: modelCatalog, backendProfile: backendProfile, backendCatalog: backendCatalog}
 }
 
-func runtimeAgentFixture(t *testing.T, tenantID, modelProfileID, appKey string) (*agent.App, *agent.Revision) {
-	return runtimeAgentFixtureWithPolicy(t, tenantID, modelProfileID, appKey, agent.DefaultRuntimePolicy())
+func runtimeAgentFixture(t *testing.T, tenantID, modelProfileID, appKey string) (*appmodel.App, *appmodel.Revision) {
+	return runtimeAgentFixtureWithPolicy(t, tenantID, modelProfileID, appKey, appmodel.DefaultRuntimePolicy())
 }
 
-func runtimeAgentFixtureWithPolicy(t *testing.T, tenantID, modelProfileID, appKey string, policy agent.RuntimePolicy) (*agent.App, *agent.Revision) {
+func runtimeAgentFixtureWithPolicy(t *testing.T, tenantID, modelProfileID, appKey string, policy appmodel.RuntimePolicy) (*appmodel.App, *appmodel.Revision) {
+	return runtimeAgentFixtureWithTools(t, tenantID, modelProfileID, appKey, policy, nil)
+}
+
+func runtimeAgentFixtureWithTools(t *testing.T, tenantID, modelProfileID, appKey string, policy appmodel.RuntimePolicy, tools []appmodel.ToolAuthorization) (*appmodel.App, *appmodel.Revision) {
 	t.Helper()
-	app, err := agent.NewApp(agent.CreateInput{TenantID: tenantID, AppKey: appKey, DisplayName: "Support App", Description: "Support"})
+	app, err := appmodel.NewApp(appmodel.CreateInput{TenantID: tenantID, AppKey: appKey, DisplayName: "Support App", Description: "Support"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := agent.NewRevision(agent.CreateRevisionInput{
+	draft, err := appmodel.NewRevision(appmodel.CreateRevisionInput{
 		TenantID: tenantID, AppID: app.AppID, Revision: 1,
-		Configuration: agent.DraftConfiguration{Description: "Support revision", Instruction: "Answer accurately.", GlobalInstruction: "Follow policy.", ModelProfileID: modelProfileID, Runtime: policy},
+		Configuration: appmodel.DraftConfiguration{Description: "Support revision", Instruction: "Answer accurately.", GlobalInstruction: "Follow policy.", ModelProfileID: modelProfileID, Runtime: policy, Tools: tools},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -705,7 +774,7 @@ func runtimeAgentFixtureWithPolicy(t *testing.T, tenantID, modelProfileID, appKe
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.Status = agent.StatusActive
+	app.Status = appmodel.StatusActive
 	app.CurrentRevision = int64Pointer(published.Revision)
 	app.Version++
 	app.UpdatedAt = publishedAt
@@ -753,6 +822,7 @@ type runtimeModelFactory struct {
 	secret    modelprofile.SecretValue
 	err       error
 	returnNil bool
+	model     trpcmodel.Model
 }
 
 type runtimeCloseTrackingSession struct {
@@ -792,7 +862,49 @@ func (factory *runtimeModelFactory) New(_ context.Context, input modelprofile.Mo
 	if factory.returnNil {
 		return nil, nil
 	}
+	if factory.model != nil {
+		return factory.model, nil
+	}
 	return runtimeFakeModel{response: factory.response, block: factory.block}, nil
+}
+
+type runtimeToolCallingModel struct {
+	toolNames   []string
+	calls       int
+	respondText bool
+}
+
+func (model *runtimeToolCallingModel) Info() trpcmodel.Info {
+	return trpcmodel.Info{Name: "tool-calling"}
+}
+
+func (model *runtimeToolCallingModel) GenerateContent(ctx context.Context, request *trpcmodel.Request) (<-chan *trpcmodel.Response, error) {
+	for name := range request.Tools {
+		model.toolNames = append(model.toolNames, name)
+	}
+	model.calls++
+	responses := make(chan *trpcmodel.Response, 1)
+	response := &trpcmodel.Response{Done: true, Choices: []trpcmodel.Choice{{Message: trpcmodel.NewAssistantMessage("done")}}}
+	if !model.respondText && model.calls == 1 {
+		response.Choices[0].Message = trpcmodel.Message{Role: trpcmodel.RoleAssistant, ToolCalls: []trpcmodel.ToolCall{{Type: "function", ID: "tool-call", Function: trpcmodel.FunctionDefinitionParam{Name: servicetool.SendTestImageID, Arguments: []byte("{}")}}}}
+	}
+	go func() {
+		defer close(responses)
+		select {
+		case responses <- response:
+		case <-ctx.Done():
+		}
+	}()
+	return responses, nil
+}
+
+func (model *runtimeToolCallingModel) calledTool(name string) bool {
+	for _, value := range model.toolNames {
+		if value == name {
+			return true
+		}
+	}
+	return false
 }
 
 type runtimeFakeModel struct {

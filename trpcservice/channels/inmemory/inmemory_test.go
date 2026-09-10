@@ -129,7 +129,10 @@ func assertRepositoryReturnsDefensiveBindingCopies(t *testing.T, repo *InMemoryR
 func TestRepositoryCreateUsesInjectedClockForLifecycle(t *testing.T) {
 	base := time.Date(2020, time.January, 2, 3, 4, 5, 0, time.UTC)
 	clock := &testClock{now: base}
-	repo := NewInMemoryRepository(Options{Clock: clock.Now})
+	repo := NewInMemoryRepository(
+		Options{Clock: func() time.Time { return base.Add(-time.Hour) }},
+		Options{Clock: clock.Now}, Options{},
+	)
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "injected-clock")
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +155,10 @@ func TestRepositoryCreateUsesInjectedClockForLifecycle(t *testing.T) {
 func TestCandidateStorePrunesAndBoundsAbandonedLookups(t *testing.T) {
 	base := time.Date(2020, time.January, 2, 3, 4, 5, 0, time.UTC)
 	clock := &testClock{now: base}
-	repo := NewInMemoryRepository(Options{Clock: clock.Now, CandidateTTL: 2 * time.Second, MaxCandidates: 2})
+	repo := NewInMemoryRepository(
+		Options{Clock: clock.Now, CandidateTTL: time.Minute, MaxCandidates: 1},
+		Options{CandidateTTL: 2 * time.Second, MaxCandidates: 2}, Options{},
+	)
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "candidate-capacity")
 	if err != nil {
 		t.Fatal(err)

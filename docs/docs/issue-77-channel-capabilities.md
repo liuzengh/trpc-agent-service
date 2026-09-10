@@ -1,6 +1,6 @@
 # Issue #77：Telegram 与 WeCom 扩展通道能力
 
-本页是 Issue #77 的 docs-first 合约和实现 ledger。它在 Issue #31/#60 的可信租户路由、
+本页是 Issue #77 的实现合约和验收 ledger。它在 Issue #31/#60 的可信租户路由、
 幂等和 Outbox 边界上扩展能力，不改变 Gateway 的认证边界，也不把不同微信产品混成一个
 协议。
 
@@ -36,8 +36,8 @@ Webhook 和 worker group 都由创建者关闭；关闭先阻断新 admission，
 | WeCom multi-account registry、worker group | `wecom.Registry`/`WorkerGroup` 与测试 | ✅ |
 | WeCom group delivery、receipt reconciliation | `Provider.Deliver/Reconcile` 与测试 | ✅ |
 | Public WeChat/customer-service provider boundaries | `channels/wechat` 显式类型与测试 | ✅ |
-| Runner event text/stream/card fallback | `channels/replies` renderer 与 adapter 测试 | ✅ |
+| Runner event text/stream/card fallback | `gateway/replies` renderer 与 adapter 测试 | ✅ |
 | Deterministic external integration E2E | fake Telegram/WeCom/WeChat tests | ✅ |
 
-生产凭据、真实公网 webhook、供应商 SLA 和 live E2E 仍由部署环境负责；仓库测试不记录真实
-token、用户正文或 provider 原始错误。
+生产凭据和真实公网 webhook 由受保护部署环境注入；live E2E workflow 复用同一 adapter 契约，
+仓库测试不记录真实 token、用户正文或 provider 原始错误。

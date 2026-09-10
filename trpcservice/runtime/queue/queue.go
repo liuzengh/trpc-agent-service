@@ -212,19 +212,25 @@ func (w *Worker) Start(ctx context.Context) error {
 	workerCtx, cancel := context.WithCancel(ctx)
 	w.cancel = cancel
 	w.started = true
-	go w.loop(workerCtx)
+	go func() {
+		if err := w.loop(workerCtx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrClosed) {
+			logWorkerStopped(w, err)
+		}
+	}()
 	return nil
 }
 
-func (w *Worker) loop(ctx context.Context) {
+func (w *Worker) loop(ctx context.Context) error {
 	defer close(w.done)
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 	for {
-		_, _ = w.RunOnce(ctx)
+		if _, err := w.RunOnce(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrClosed) {
+			return err
+		}
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-ticker.C:
 		}
 	}

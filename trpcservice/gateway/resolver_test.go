@@ -6,20 +6,42 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	serviceruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
+
+func TestMapPlanResolverErrorKeepsGatewayErrorBoundary(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "resolver not ready", err: serviceruntime.ErrPlanResolverNotReady, want: ErrNotReady},
+		{name: "invalid request", err: serviceruntime.ErrInvalidPlanRequest, want: ErrInvalid},
+		{name: "canceled", err: context.Canceled, want: context.Canceled},
+		{name: "dependency failure", err: errors.New("repository detail"), want: ErrPlanUnavailable},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := mapPlanResolverError(test.err); !errors.Is(got, test.want) {
+				t.Fatalf("mapPlanResolverError(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
 
 func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 	tests := []struct {
 		name  string
-		setup func(gatewayFixture) PlanResolverConfig
+		setup func(gatewayFixture) serviceruntime.PlanResolverConfig
 	}{
 		{
 			name: "tenant repository error",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Tenants = resolverTenantRepository{
 					Repository: fixture.tenants,
@@ -32,7 +54,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "tenant repository returns nil",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Tenants = resolverTenantRepository{
 					Repository: fixture.tenants,
@@ -43,7 +65,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "invalid tenant snapshot",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Tenants = resolverTenantRepository{
 					Repository: fixture.tenants,
@@ -54,11 +76,11 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "app repository error",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Apps = resolverAgentRepository{
 					Repository: fixture.apps,
-					getFn: func(context.Context, string, string) (*agent.App, error) {
+					getFn: func(context.Context, string, string) (*appmodel.App, error) {
 						return nil, errors.New("app-secret-provider-detail")
 					},
 				}
@@ -67,22 +89,22 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "app repository returns nil",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Apps = resolverAgentRepository{
 					Repository: fixture.apps,
-					getFn:      func(context.Context, string, string) (*agent.App, error) { return nil, nil },
+					getFn:      func(context.Context, string, string) (*appmodel.App, error) { return nil, nil },
 				}
 				return config
 			},
 		},
 		{
 			name: "app has no current revision",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Apps = resolverAgentRepository{
 					Repository: fixture.apps,
-					getFn: func(ctx context.Context, tenantID, appID string) (*agent.App, error) {
+					getFn: func(ctx context.Context, tenantID, appID string) (*appmodel.App, error) {
 						appValue, err := fixture.apps.Get(ctx, tenantID, appID)
 						if err != nil {
 							return nil, err
@@ -97,11 +119,11 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "revision repository error",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Apps = resolverAgentRepository{
 					Repository: fixture.apps,
-					getRevisionFn: func(context.Context, string, string, int64) (*agent.Revision, error) {
+					getRevisionFn: func(context.Context, string, string, int64) (*appmodel.Revision, error) {
 						return nil, errors.New("revision-secret-provider-detail")
 					},
 				}
@@ -110,11 +132,11 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "revision repository returns nil",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Apps = resolverAgentRepository{
 					Repository: fixture.apps,
-					getRevisionFn: func(context.Context, string, string, int64) (*agent.Revision, error) {
+					getRevisionFn: func(context.Context, string, string, int64) (*appmodel.Revision, error) {
 						return nil, nil
 					},
 				}
@@ -123,7 +145,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "model repository error",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Models = resolverModelRepository{
 					Repository: fixture.models,
@@ -136,7 +158,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "model repository returns nil",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Models = resolverModelRepository{
 					Repository: fixture.models,
@@ -147,7 +169,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "tenant has no default backend",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Tenants = resolverTenantRepository{
 					Repository: fixture.tenants,
@@ -166,7 +188,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "backend repository error",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Backends = resolverBackendRepository{
 					Repository: fixture.backends,
@@ -179,7 +201,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "backend repository returns nil",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Backends = resolverBackendRepository{
 					Repository: fixture.backends,
@@ -190,7 +212,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 		},
 		{
 			name: "invalid execution plan snapshot",
-			setup: func(fixture gatewayFixture) PlanResolverConfig {
+			setup: func(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Models = resolverModelRepository{
 					Repository: fixture.models,
@@ -222,11 +244,11 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 func TestPlanResolverReturnsCancellationAfterRepositorySteps(t *testing.T) {
 	tests := []struct {
 		name  string
-		setup func(gatewayFixture, context.CancelFunc) PlanResolverConfig
+		setup func(gatewayFixture, context.CancelFunc) serviceruntime.PlanResolverConfig
 	}{
 		{
 			name: "tenant get",
-			setup: func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
+			setup: func(fixture gatewayFixture, cancel context.CancelFunc) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Tenants = cancelAfterTenantGet{Repository: fixture.tenants, cancel: cancel}
 				return config
@@ -234,7 +256,7 @@ func TestPlanResolverReturnsCancellationAfterRepositorySteps(t *testing.T) {
 		},
 		{
 			name: "app get",
-			setup: func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
+			setup: func(fixture gatewayFixture, cancel context.CancelFunc) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Apps = cancelAfterAppGet{Repository: fixture.apps, cancel: cancel}
 				return config
@@ -242,7 +264,7 @@ func TestPlanResolverReturnsCancellationAfterRepositorySteps(t *testing.T) {
 		},
 		{
 			name: "revision get",
-			setup: func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
+			setup: func(fixture gatewayFixture, cancel context.CancelFunc) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Apps = cancelAfterRevisionGet{Repository: fixture.apps, cancel: cancel}
 				return config
@@ -250,7 +272,7 @@ func TestPlanResolverReturnsCancellationAfterRepositorySteps(t *testing.T) {
 		},
 		{
 			name: "model get",
-			setup: func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
+			setup: func(fixture gatewayFixture, cancel context.CancelFunc) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Models = cancelAfterModelGet{Repository: fixture.models, cancel: cancel}
 				return config
@@ -258,7 +280,7 @@ func TestPlanResolverReturnsCancellationAfterRepositorySteps(t *testing.T) {
 		},
 		{
 			name: "backend get",
-			setup: func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
+			setup: func(fixture gatewayFixture, cancel context.CancelFunc) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Backends = cancelAfterBackendGet{Repository: fixture.backends, cancel: cancel}
 				return config
@@ -266,7 +288,7 @@ func TestPlanResolverReturnsCancellationAfterRepositorySteps(t *testing.T) {
 		},
 		{
 			name: "dependency error after cancellation",
-			setup: func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
+			setup: func(fixture gatewayFixture, cancel context.CancelFunc) serviceruntime.PlanResolverConfig {
 				config := resolverTestConfig(fixture)
 				config.Tenants = resolverTenantRepository{
 					Repository: fixture.tenants,
@@ -309,19 +331,19 @@ func (repository resolverTenantRepository) Get(ctx context.Context, tenantID str
 }
 
 type resolverAgentRepository struct {
-	agent.Repository
-	getFn         func(context.Context, string, string) (*agent.App, error)
-	getRevisionFn func(context.Context, string, string, int64) (*agent.Revision, error)
+	appmodel.Repository
+	getFn         func(context.Context, string, string) (*appmodel.App, error)
+	getRevisionFn func(context.Context, string, string, int64) (*appmodel.Revision, error)
 }
 
-func (repository resolverAgentRepository) Get(ctx context.Context, tenantID, appID string) (*agent.App, error) {
+func (repository resolverAgentRepository) Get(ctx context.Context, tenantID, appID string) (*appmodel.App, error) {
 	if repository.getFn != nil {
 		return repository.getFn(ctx, tenantID, appID)
 	}
 	return repository.Repository.Get(ctx, tenantID, appID)
 }
 
-func (repository resolverAgentRepository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*agent.Revision, error) {
+func (repository resolverAgentRepository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*appmodel.Revision, error) {
 	if repository.getRevisionFn != nil {
 		return repository.getRevisionFn(ctx, tenantID, appID, revision)
 	}
@@ -364,29 +386,29 @@ func (repository cancelAfterTenantGet) Get(ctx context.Context, tenantID string)
 }
 
 type cancelAfterAppGet struct {
-	agent.Repository
+	appmodel.Repository
 	cancel context.CancelFunc
 }
 
-func (repository cancelAfterAppGet) Get(ctx context.Context, tenantID, appID string) (*agent.App, error) {
+func (repository cancelAfterAppGet) Get(ctx context.Context, tenantID, appID string) (*appmodel.App, error) {
 	appValue, err := repository.Repository.Get(ctx, tenantID, appID)
 	repository.cancel()
 	return appValue, err
 }
 
 type cancelAfterRevisionGet struct {
-	agent.Repository
+	appmodel.Repository
 	cancel context.CancelFunc
 }
 
-func (repository cancelAfterRevisionGet) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*agent.Revision, error) {
+func (repository cancelAfterRevisionGet) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*appmodel.Revision, error) {
 	revisionValue, err := repository.Repository.GetRevision(ctx, tenantID, appID, revision)
 	repository.cancel()
 	return revisionValue, err
 }
 
-func resolverTestConfig(fixture gatewayFixture) PlanResolverConfig {
-	return PlanResolverConfig{
+func resolverTestConfig(fixture gatewayFixture) serviceruntime.PlanResolverConfig {
+	return serviceruntime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	}

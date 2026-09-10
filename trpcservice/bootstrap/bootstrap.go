@@ -13,10 +13,13 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
-	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/agent/mysql"
-	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
+	agentrunnerfactory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/runnerfactory"
+	agentsessionstore "github.com/XnLemon/trpc-agent-service/trpcservice/agent/sessionstore"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	appmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
+	appmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
+	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
@@ -33,16 +36,24 @@ import (
 	modelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/model/mysql"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
-	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
+	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
+	runtimebudgetinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget/inmemory"
+	runtimebudgetpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget/postgres"
+	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
+	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
@@ -82,38 +93,74 @@ type Config struct {
 	// supplied and repositories are not injected. Empty means PostgreSQL.
 	ControlPlaneDriver ControlPlaneDriver
 	Tenants            tenant.Repository
-	Apps               agent.Repository
+	Apps               appmodel.Repository
 	Models             modelprofile.Repository
 	Backends           backend.Repository
 	Channels           channels.CandidateConsumer
 
 	ModelCatalog   *modelprofile.ProviderCatalog
 	BackendCatalog *backend.ProviderCatalog
+	// TenantRuntime lazily materializes tenant-scoped runtime capabilities.
+	// When provided, newly created tenants can execute without a restart.
+	TenantRuntime  runtime.TenantRuntime
 	SecretResolver modelprofile.SecretResolver
 	ModelFactory   modelprofile.ModelFactory
-	StorageFactory backend.StorageFactory
+	StorageFactory storagefactory.StorageFactory
 	Sessions       session.Service
-	// RuntimeStore is the tenant-scoped Session/Event/Outbox capability. It is
-	// separate from upstream session.Service while the runtime adapter evolves.
-	RuntimeStore runtimestorage.RuntimeStore
+	// ToolRegistry resolves published revision authorizations to installed,
+	// context-bound platform tools. A nil value uses the built-in registry.
+	ToolRegistry *servicetool.Registry
+	// SessionStore is the session-state capability used by durable dispatch.
+	SessionStore sessionstorage.SessionStateStore
+	// EventHistoryStore is the immutable upstream event history capability used
+	// when Bootstrap wraps an upstream Session service for durable recovery.
+	EventHistoryStore sessionstorage.EventHistoryStore
+	// MessageStore is the inbound message lifecycle capability used by durable
+	// dispatch.
+	MessageStore runtimestorage.MessageStore
+	// ReplyBatchStore is the atomic reply materialization capability used by the
+	// outbox materializer.
+	ReplyBatchStore runtimestorage.ReplyBatchEnqueuer
+	// BudgetStore is the atomic monthly token/cost ledger. A nil value selects
+	// the PostgreSQL ledger when DB is configured, otherwise an in-memory
+	// ledger for local/single-process deployments.
+	BudgetStore runtimebudget.Store
+	// Attachments loads verified tenant-owned media during Gateway dispatch.
+	// It is kept separate from the session/message/reply capabilities.
+	Attachments attachment.Reader
+	// AttachmentStore binds and stores verified tenant-owned media.
+	AttachmentStore runtimestorage.AttachmentStore
 	// RuntimeTenantID fixes the tenant scope when Bootstrap wraps Sessions with
-	// the RuntimeStore-backed capability. It must come from trusted config.
+	// the explicitly supplied session persistence capabilities. It must come
+	// from trusted config.
 	RuntimeTenantID string
 	// OutboxWorker is constructed from trusted provider routing configuration.
 	// Bootstrap owns its lifecycle but never derives a recipient from HTTP.
-	OutboxWorker       *outbox.Worker
-	OutboxPollInterval time.Duration
+	OutboxWorker *outbox.Worker
+	// OutboxWorkerFactory creates the owned worker after AI Bot factories have
+	// produced their managers. It is mutually exclusive with OutboxWorker.
+	OutboxWorkerFactory func([]channels.PollingAdapter) (*outbox.Worker, error)
+	OutboxPollInterval  time.Duration
+	// ExecutionQueue is an optional generic durable execution worker. The
+	// caller constructs its task handler; Bootstrap only owns its lifecycle and
+	// closes it before the Runner Registry.
+	ExecutionQueue *runtimequeue.Worker
 	// AuditWriter receives execution and configured channel delivery facts.
 	AuditWriter        audit.Writer
 	Authenticator      gateway.APIAuthenticator
 	AdminAuthenticator admin.Authenticator
-	AdminHandler       http.Handler
-	WeComHandler       http.Handler
+	// EnableWebConnections enables process-owned channel onboarding through Admin.
+	EnableWebConnections bool
+	AdminHandler         http.Handler
+	WeComHandler         http.Handler
 	// WeComHandlerFactory is called after Dispatcher construction so a callback
 	// handler cannot receive an uninitialized execution dependency.
 	WeComHandlerFactory func(gateway.DispatchService) (http.Handler, error)
+	// WeComAIBotFactories constructs every configured AI Bot connection after
+	// Dispatcher construction. Returned adapters are owned by Runtime.
+	WeComAIBotFactories []func(gateway.DispatchService) (channels.PollingAdapter, error)
 
-	Registry          gateway.RunnerRegistryConfig
+	Registry          runtimerunner.RunnerRegistryConfig
 	HTTP              gateway.HTTPConfig
 	DrainTimeout      time.Duration
 	ReadyGate         func() bool
@@ -127,13 +174,19 @@ type Config struct {
 // before the HTTP server is drained; Close then closes the Runner Registry and
 // only after that resources explicitly owned by this graph.
 type Runtime struct {
-	Handler        *gateway.HTTPHandler
-	Resolver       *gateway.PlanResolver
-	Registry       *gateway.RunnerRegistry
-	Dispatcher     *gateway.Dispatcher
-	OutboxWorker   *outbox.Worker
-	wecomLifecycle callbackLifecycle
-	wecomHandler   http.Handler
+	Handler          *gateway.HTTPHandler
+	Resolver         *gateway.PlanResolver
+	Registry         *runtimerunner.RunnerRegistry
+	Dispatcher       *gateway.Dispatcher
+	OutboxWorker     *outbox.Worker
+	ExecutionQueue   *runtimequeue.Worker
+	wecomLifecycle   callbackLifecycle
+	wecomHandler     http.Handler
+	wecomAIBots      []channels.PollingAdapter
+	connections      admin.ChannelConnections
+	connectionsClose func() error
+	aiBotDone        []chan struct{}
+	aiBotCancel      context.CancelFunc
 
 	db               *sql.DB
 	ownDB            bool
@@ -151,6 +204,13 @@ type callbackLifecycle interface {
 	BeginShutdown()
 	Close() error
 }
+
+type bootstrapSessionPersistence struct {
+	sessionstorage.SessionStateStore
+	sessionstorage.EventHistoryStore
+}
+
+type pollingHealth interface{ Ready() bool }
 
 // NewWithDatabase is the normal constructor for a real PostgreSQL bootstrap.
 // A concrete *sql.DB is accepted here while Config keeps the remainder of the
@@ -192,7 +252,13 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := configureAdmin(&config, runtimeGraph.Registry); err != nil {
+	committed := false
+	defer func() {
+		if !committed {
+			_ = runtimeGraph.Close()
+		}
+	}()
+	if err := configureAdmin(&config, runtimeGraph.Registry, runtimeGraph.connections); err != nil {
 		return nil, err
 	}
 	if err := configureHandler(runtimeGraph, config); err != nil {
@@ -201,6 +267,13 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if err := startOutboxWorker(runtimeGraph, config.OutboxPollInterval); err != nil {
 		return nil, err
 	}
+	if err := startExecutionQueue(runtimeGraph); err != nil {
+		return nil, err
+	}
+	if err := startAIBots(runtimeGraph); err != nil {
+		return nil, err
+	}
+	committed = true
 	return runtimeGraph, nil
 }
 
@@ -254,7 +327,7 @@ func prepareMySQLDatabaseConfig(ctx context.Context, config *Config) error {
 		config.Tenants = tenantmysql.NewRepository(config.DB)
 	}
 	if config.Apps == nil {
-		config.Apps = agentmysql.NewRepository(config.DB)
+		config.Apps = appmysql.NewAppRepository(config.DB)
 	}
 	if config.Models == nil {
 		config.Models = modelmysql.NewRepository(config.DB, config.ModelCatalog)
@@ -278,7 +351,7 @@ func preparePostgresDatabaseConfig(ctx context.Context, config *Config) error {
 		config.Tenants = tenantpostgres.NewRepository(config.DB)
 	}
 	if config.Apps == nil {
-		config.Apps = agentpostgres.NewRepository(config.DB)
+		config.Apps = apppostgres.NewAppRepository(config.DB)
 	}
 	if config.Models == nil {
 		config.Models = modelpostgres.NewRepository(config.DB, config.ModelCatalog)
@@ -310,13 +383,40 @@ func validateConfig(config Config) error {
 }
 
 func prepareRuntimeConfig(config *Config) error {
-	if config.RuntimeStore == nil {
-		config.RuntimeStore = runtimestorageinmemory.New()
+	if err := prepareBudgetConfig(config); err != nil {
+		return err
+	}
+	if config.BudgetStore == nil {
+		config.BudgetStore = runtimebudgetinmemory.New()
+	}
+	if config.SessionStore == nil && config.EventHistoryStore == nil && config.MessageStore == nil && config.ReplyBatchStore == nil {
+		store := runtimestorageinmemory.New()
+		config.SessionStore = store
+		config.EventHistoryStore = store
+		config.MessageStore = store
+		config.ReplyBatchStore = store
+		if config.Attachments == nil {
+			config.Attachments = store
+		}
+		if config.AttachmentStore == nil {
+			config.AttachmentStore = store
+		}
+		previousClose := config.CloseDependencies
+		config.CloseDependencies = func() error {
+			if previousClose == nil {
+				return store.Close()
+			}
+			return errors.Join(previousClose(), store.Close())
+		}
 	}
 	if config.RuntimeTenantID == "" {
 		return nil
 	}
-	wrapped, err := runtimesessionpostgres.NewWithObservability(config.RuntimeTenantID, config.Sessions, config.RuntimeStore, config.Observability)
+	if config.Sessions == nil || config.SessionStore == nil || config.EventHistoryStore == nil {
+		return ErrInvalidConfig
+	}
+	persistence := bootstrapSessionPersistence{SessionStateStore: config.SessionStore, EventHistoryStore: config.EventHistoryStore}
+	wrapped, err := agentsessionstore.NewWithObservability(config.RuntimeTenantID, config.Sessions, persistence, config.Observability)
 	if err != nil {
 		return ErrInvalidConfig
 	}
@@ -324,39 +424,51 @@ func prepareRuntimeConfig(config *Config) error {
 	return nil
 }
 
+func prepareBudgetConfig(config *Config) error {
+	if config.BudgetStore != nil || config.DB == nil || config.ControlPlaneDriver != ControlPlaneDriverPostgres {
+		return nil
+	}
+	store, err := runtimebudgetpostgres.New(config.DB)
+	if err != nil {
+		return ErrInvalidConfig
+	}
+	config.BudgetStore = store
+	return nil
+}
+
 func newRuntimeGraph(config Config) (*Runtime, error) {
-	resolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{
+	resolver, err := gateway.NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: config.Tenants, Apps: config.Apps, Models: config.Models, Backends: config.Backends,
 		ModelCatalog: config.ModelCatalog, BackendCatalog: config.BackendCatalog,
+		TenantRuntime: config.TenantRuntime,
 	})
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
-	registry, err := gateway.NewRuntimeRunnerRegistry(gateway.RuntimeRunnerRegistryConfig{
+	registry, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
-		Observability: config.Observability,
+		Observability: config.Observability, ToolRegistry: config.ToolRegistry, EnableUsageCallbacks: config.BudgetStore != nil,
 	})
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
 	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{
-		Resolver: resolver, Registry: registry, RuntimeStore: config.RuntimeStore, DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter, Observability: config.Observability,
+		Resolver: resolver, Registry: registry,
+		SessionStore: config.SessionStore,
+		MessageStore: config.MessageStore, ReplyBatchStore: config.ReplyBatchStore,
+		Attachments: config.Attachments, AttachmentStore: config.AttachmentStore,
+		DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter, Observability: config.Observability,
+		Budget: runtimebudget.NewController(config.BudgetStore),
 	})
 	if err != nil {
 		_ = registry.Close()
 		return nil, ErrInvalidConfig
 	}
-	if config.WeComHandler != nil && config.WeComHandlerFactory != nil {
+	aiBots, err := configureRuntimeChannels(&config, dispatcher)
+	if err != nil {
 		_ = registry.Close()
 		return nil, ErrInvalidConfig
-	}
-	if config.WeComHandlerFactory != nil {
-		config.WeComHandler, err = config.WeComHandlerFactory(dispatcher)
-		if err != nil || config.WeComHandler == nil {
-			_ = registry.Close()
-			return nil, ErrInvalidConfig
-		}
 	}
 	readyGate := config.ReadyGate
 	if readyGate == nil {
@@ -368,11 +480,24 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	}
 	runtimeGraph := &Runtime{
 		Resolver: resolver, Registry: registry, Dispatcher: dispatcher,
-		OutboxWorker: config.OutboxWorker,
-		wecomHandler: config.WeComHandler,
-		db:           config.DB, ownDB: config.OwnDB, readyGate: readyGate,
+		OutboxWorker:   config.OutboxWorker,
+		ExecutionQueue: config.ExecutionQueue,
+		wecomHandler:   config.WeComHandler,
+		db:             config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
-		telemetry: config.Observability,
+		telemetry:   config.Observability,
+		wecomAIBots: aiBots,
+	}
+	if config.EnableWebConnections && config.AdminAuthenticator != nil {
+		connections, factoryErr := newWebChannelConnections(config, runtimeGraph)
+		if factoryErr != nil || connections == nil {
+			_ = runtimeGraph.Close()
+			return nil, ErrInvalidConfig
+		}
+		runtimeGraph.connections = connections
+		if lifecycle, ok := connections.(interface{ Close() error }); ok {
+			runtimeGraph.connectionsClose = lifecycle.Close
+		}
 	}
 	if lifecycle, ok := config.WeComHandler.(callbackLifecycle); ok {
 		runtimeGraph.wecomLifecycle = lifecycle
@@ -380,33 +505,133 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	return runtimeGraph, nil
 }
 
-func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
+func configureRuntimeChannels(config *Config, dispatcher gateway.DispatchService) ([]channels.PollingAdapter, error) {
+	if config.WeComHandler != nil && config.WeComHandlerFactory != nil {
+		return nil, ErrInvalidConfig
+	}
+	if config.WeComHandlerFactory != nil {
+		handler, err := config.WeComHandlerFactory(dispatcher)
+		if err != nil || handler == nil {
+			return nil, ErrInvalidConfig
+		}
+		config.WeComHandler = handler
+	}
+	aiBots, err := newWeComAIBots(config.WeComAIBotFactories, dispatcher)
+	if err != nil {
+		closeCallbackHandler(config.WeComHandler)
+		return nil, err
+	}
+	if config.OutboxWorker != nil && config.OutboxWorkerFactory != nil {
+		closePollingAdapters(aiBots)
+		closeCallbackHandler(config.WeComHandler)
+		return nil, ErrInvalidConfig
+	}
+	if config.OutboxWorkerFactory == nil {
+		return aiBots, nil
+	}
+	worker, err := config.OutboxWorkerFactory(aiBots)
+	if err != nil || worker == nil {
+		if worker != nil {
+			_ = worker.Close()
+		}
+		closePollingAdapters(aiBots)
+		closeCallbackHandler(config.WeComHandler)
+		return nil, ErrInvalidConfig
+	}
+	config.OutboxWorker = worker
+	return aiBots, nil
+}
+
+func newWeComAIBots(factories []func(gateway.DispatchService) (channels.PollingAdapter, error), dispatcher gateway.DispatchService) ([]channels.PollingAdapter, error) {
+	aiBots := make([]channels.PollingAdapter, 0, len(factories))
+	invalid := func(err error) ([]channels.PollingAdapter, error) {
+		closePollingAdapters(aiBots)
+		return nil, err
+	}
+	for _, factory := range factories {
+		if factory == nil {
+			return invalid(ErrInvalidConfig)
+		}
+		aiBot, err := factory(dispatcher)
+		if err != nil || aiBot == nil || aiBot.Channel() != channels.ChannelWeComAIBot {
+			return invalid(ErrInvalidConfig)
+		}
+		if _, ok := aiBot.(pollingHealth); !ok {
+			return invalid(ErrInvalidConfig)
+		}
+		aiBots = append(aiBots, aiBot)
+	}
+	return aiBots, nil
+}
+
+func closePollingAdapters(adapters []channels.PollingAdapter) {
+	for _, adapter := range adapters {
+		if adapter != nil {
+			_ = adapter.Close()
+		}
+	}
+}
+
+func closeCallbackHandler(handler http.Handler) {
+	if lifecycle, ok := handler.(callbackLifecycle); ok {
+		_ = lifecycle.Close()
+	}
+}
+
+func startAIBots(runtimeGraph *Runtime) error {
+	if runtimeGraph == nil || len(runtimeGraph.wecomAIBots) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runtimeGraph.aiBotCancel = cancel
+	runtimeGraph.aiBotDone = make([]chan struct{}, 0, len(runtimeGraph.wecomAIBots))
+	for _, adapter := range runtimeGraph.wecomAIBots {
+		done := make(chan struct{})
+		runtimeGraph.aiBotDone = append(runtimeGraph.aiBotDone, done)
+		go func(adapter channels.PollingAdapter, done chan struct{}) {
+			defer close(done)
+			if err := adapter.Run(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				logPollingAdapterStopped(adapter, err)
+			}
+		}(adapter, done)
+	}
+	return nil
+}
+
+func configureAdmin(config *Config, registry *runtimerunner.RunnerRegistry, connections admin.ChannelConnections) error {
 	if config.AdminAuthenticator == nil {
+		config.HTTP.AdminAuth = nil
 		return nil
 	}
 	bindingRepository, ok := config.Channels.(channels.Repository)
 	if !ok {
-		_ = registry.Close()
 		return ErrInvalidConfig
 	}
 	adminHandler, err := admin.NewHandler(admin.Config{
 		Tenants: config.Tenants, Apps: config.Apps, Models: config.Models,
 		Backends: config.Backends, Bindings: bindingRepository,
 		Authenticator: config.AdminAuthenticator,
+		Connections:   connections,
 		ModelCatalog:  config.ModelCatalog, BackendCatalog: config.BackendCatalog,
 		CacheInvalidator: admin.CacheInvalidatorFunc(func(change admin.CacheInvalidation) {
-			invalidateRuntimeCache(registry, change)
+			invalidateRuntimeCacheWithTenant(registry, config.TenantRuntime, change)
 		}),
 	})
 	if err != nil {
-		_ = registry.Close()
 		return ErrInvalidConfig
 	}
 	config.AdminHandler = adminHandler
+	if sessionAuthenticator, ok := config.AdminAuthenticator.(*admin.SessionAuthenticator); ok {
+		config.HTTP.AdminAuth = sessionAuthenticator
+	}
 	return nil
 }
 
-func invalidateRuntimeCache(registry *gateway.RunnerRegistry, change admin.CacheInvalidation) {
+func invalidateRuntimeCache(registry *runtimerunner.RunnerRegistry, change admin.CacheInvalidation) {
+	invalidateRuntimeCacheWithTenant(registry, nil, change)
+}
+
+func invalidateRuntimeCacheWithTenant(registry *runtimerunner.RunnerRegistry, tenantRuntime runtime.TenantRuntime, change admin.CacheInvalidation) {
 	// A closed registry cannot admit a future execution. Other errors are
 	// impossible for Admin-derived non-empty IDs, so a committed control-
 	// plane mutation remains successful during shutdown.
@@ -423,16 +648,23 @@ func invalidateRuntimeCache(registry *gateway.RunnerRegistry, change admin.Cache
 		// Bindings are resolved and verified on every channel request. They
 		// do not key a Runner or provider cache in this process.
 	}
+	if invalidator, ok := tenantRuntime.(runtime.TenantRuntimeInvalidator); ok {
+		invalidator.InvalidateTenant(change.TenantID)
+	}
 }
 
 func configureHandler(runtimeGraph *Runtime, config Config) error {
+	adminHandler := config.AdminHandler
+	if adminHandler == nil {
+		adminHandler = config.HTTP.Admin
+	}
 	handler, err := gateway.NewHTTPHandler(gateway.HTTPConfig{
-		Dispatcher: runtimeGraph.Dispatcher, Authenticator: config.Authenticator, Admin: config.AdminHandler, WeCom: runtimeGraph.wecomHandler,
+		Dispatcher: runtimeGraph.Dispatcher, Authenticator: config.Authenticator, Admin: adminHandler, AdminAuth: config.HTTP.AdminAuth, WeCom: runtimeGraph.wecomHandler,
+		Web:   config.HTTP.Web,
 		Ready: runtimeGraph.Ready, Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
 		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout, Observability: config.Observability,
 	})
 	if err != nil {
-		_ = runtimeGraph.Registry.Close()
 		return ErrInvalidConfig
 	}
 	runtimeGraph.Handler = handler
@@ -444,8 +676,16 @@ func startOutboxWorker(runtimeGraph *Runtime, pollInterval time.Duration) error 
 		return nil
 	}
 	if err := runtimeGraph.OutboxWorker.Start(context.Background(), pollInterval); err != nil {
-		_ = runtimeGraph.Handler.Close()
-		_ = runtimeGraph.Registry.Close()
+		return ErrInvalidConfig
+	}
+	return nil
+}
+
+func startExecutionQueue(runtimeGraph *Runtime) error {
+	if runtimeGraph == nil || runtimeGraph.ExecutionQueue == nil {
+		return nil
+	}
+	if err := runtimeGraph.ExecutionQueue.Start(context.Background()); err != nil {
 		return ErrInvalidConfig
 	}
 	return nil
@@ -474,6 +714,11 @@ func (graph *Runtime) Ready() bool {
 			return false
 		}
 	}
+	for _, adapter := range graph.wecomAIBots {
+		if !adapter.(pollingHealth).Ready() {
+			return false
+		}
+	}
 	return graph.Resolver != nil && graph.Resolver.Ready() && graph.Registry != nil && graph.Registry.Ready() && graph.Dispatcher != nil && graph.Dispatcher.Ready() && graph.Handler != nil
 }
 
@@ -489,6 +734,11 @@ func (graph *Runtime) BeginShutdown() {
 	}
 	if graph.wecomLifecycle != nil {
 		graph.wecomLifecycle.BeginShutdown()
+	}
+	for _, adapter := range graph.wecomAIBots {
+		if lifecycle, ok := adapter.(interface{ BeginShutdown() }); ok {
+			lifecycle.BeginShutdown()
+		}
 	}
 }
 
@@ -506,6 +756,21 @@ func (graph *Runtime) Close() error {
 		}
 		if graph.wecomLifecycle != nil {
 			closeErr = errors.Join(closeErr, graph.wecomLifecycle.Close())
+		}
+		if graph.connectionsClose != nil {
+			closeErr = errors.Join(closeErr, graph.connectionsClose())
+		}
+		if graph.aiBotCancel != nil {
+			graph.aiBotCancel()
+		}
+		for _, adapter := range graph.wecomAIBots {
+			closeErr = errors.Join(closeErr, adapter.Close())
+		}
+		for _, done := range graph.aiBotDone {
+			<-done
+		}
+		if graph.ExecutionQueue != nil {
+			closeErr = errors.Join(closeErr, graph.ExecutionQueue.Close())
 		}
 		if graph.Registry != nil {
 			closeErr = errors.Join(closeErr, graph.Registry.Close())
@@ -563,7 +828,7 @@ func NewUnavailable() (*Runtime, error) {
 	}
 	sessions := inmemory.NewSessionService()
 	config := Config{
-		Tenants: tenantmemory.NewRepository(), Apps: agentmemory.NewRepository(),
+		Tenants: tenantmemory.NewRepository(), Apps: appmemory.NewRepository(),
 		Models: modelmemory.NewRepository(modelCatalog), Backends: backendmemory.NewRepository(backendCatalog),
 		Channels: channelmemory.NewRepository(), ModelCatalog: modelCatalog, BackendCatalog: backendCatalog,
 		SecretResolver: unavailableSecretResolver{}, ModelFactory: unavailableModelFactory{},

@@ -8,6 +8,8 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +39,83 @@ type ChannelRepository struct {
 var _ channels.Repository = (*ChannelRepository)(nil)
 var _ channels.CandidateIndex = (*ChannelRepository)(nil)
 var _ channels.CandidateConsumer = (*ChannelRepository)(nil)
+
+// List returns a stable page of Channel Bindings belonging to one tenant.
+func (r *ChannelRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*channels.Binding, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset, err := decodeListCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT binding_id FROM channel_binding WHERE tenant_id = ? ORDER BY binding_id`, tenantID)
+	if err != nil {
+		return nil, "", ErrStorage
+	}
+	var bindingIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, "", ErrStorage
+		}
+		bindingIDs = append(bindingIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, "", ErrStorage
+	}
+	_ = rows.Close()
+	query, status = strings.ToLower(strings.TrimSpace(query)), strings.TrimSpace(status)
+	items := make([]*channels.Binding, 0)
+	for _, id := range bindingIDs {
+		value, err := r.Get(ctx, tenantID, id)
+		if err != nil {
+			return nil, "", ErrStorage
+		}
+		if status != "" && string(value.Status) != status {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(value.BindingID+" "+value.BindingKey+" "+string(value.Channel)+" "+value.ProviderAccountID), query) {
+			continue
+		}
+		items = append(items, value)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].BindingID < items[j].BindingID })
+	if offset >= len(items) {
+		return []*channels.Binding{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
+func decodeListCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	var offset int
+	if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	return offset, nil
+}
 
 // NewRepository creates a Binding repository and candidate index.
 func NewRepository(db *sql.DB) *ChannelRepository {
@@ -328,8 +407,11 @@ func (r *ChannelRepository) LookupCandidates(ctx context.Context, channel channe
 		if err != nil {
 			return nil, channels.ErrCandidateUnavailable
 		}
-		candidate, err := channels.NewCandidateBindingContext(channel, routeDigest, value.version, value.digest,
-			channels.PurposeWebhookVerification, token, now, now.Add(mysqlCandidateTTL))
+		candidate, err := channels.NewCandidateBindingContextFromInput(channels.CandidateBindingInput{
+			Channel: channel, PublicRouteKeyDigest: routeDigest, BindingVersion: value.version,
+			ConfigDigest: value.digest, Purpose: channels.PurposeWebhookVerification,
+			CandidateToken: token, IssuedAt: now, ExpiresAt: now.Add(mysqlCandidateTTL),
+		})
 		if err != nil {
 			return nil, channels.ErrCandidateUnavailable
 		}

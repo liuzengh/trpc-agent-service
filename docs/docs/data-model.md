@@ -1,10 +1,9 @@
 # 数据模型
 
-> 设计分阶段推进：`tenant` 根模型已经完成，`agent_app` 的稳定身份、发布版本和运行时边界见
-> [Agent App 模型与发布边界](agent-app-model.md)，数据后端选择见
-> [Backend Profile 控制面与运行时边界](backend-profile.md)，Channel Binding 的候选索引、
-> 可信验证和 identity 细节见 [Channel Binding 与可信入站路由](channel-binding.md)。其余核心表
-> 继续按依赖顺序保留占位。
+> 本页汇总已经落地的数据边界：`tenant` 根模型、`agent_app` 发布模型、Backend Profile、
+> Channel Binding，以及 Session/Event/Memory/Summary/Artifact/Audit/Outbox 的租户复合键、
+> 状态机、幂等和审计约束。各领域的字段细节与验收入口分别见 [Agent App 模型与发布边界](agent-app-model.md)、
+> [Backend Profile 控制面与运行时边界](backend-profile.md) 和 [Channel Binding 与可信入站路由](channel-binding.md)。
 
 ## Tenant 根模型
 
@@ -100,13 +99,13 @@ FOR EACH ROW EXECUTE FUNCTION tenant_reject_identity_change();
 
 ### 默认引用的跨租户完整性
 
-后续表必须以租户复合键建模，例如：
+所有平台表以租户复合键建模，例如：
 
 ```sql
 CREATE TABLE agent_app (
     tenant_id TEXT NOT NULL REFERENCES tenant(tenant_id),
     app_id    TEXT NOT NULL,
-    -- 其他发布版本、模型和工具授权字段后续设计
+    -- 发布版本、模型和工具授权字段按对应控制面表落地
     PRIMARY KEY (tenant_id, app_id),
     UNIQUE (tenant_id, app_id)
 );
@@ -179,7 +178,7 @@ ALTER TABLE tenant
 - 每次迁移必须在同一事务中写入状态变更审计或 Outbox 事件，至少包含 actor、reason、旧/新状态、发生时间、变更前后的 `version` 及 correlation/trace ID。
 - 状态检查不能只依赖长 TTL 缓存；应按 `version` 主动失效，确保暂停/停用及时生效。
 
-状态不是普通配置字段。运行时数据库角色不得直接更新 `tenant.status`，而是只能执行受限的状态迁移函数；该函数锁定 tenant 行、校验期望版本和允许的迁移，在同一事务中更新状态并写入 Outbox。以下 DDL 给出最小边界；完整 `audit_log` schema 仍由后续 issue 定义。
+状态不是普通配置字段。运行时数据库角色不得直接更新 `tenant.status`，而是只能执行受限的状态迁移函数；该函数锁定 tenant 行、校验期望版本和允许的迁移，在同一事务中更新状态并写入 Outbox。以下 DDL 给出状态迁移、审计和 Outbox 的完整边界。
 
 ```sql
 BEGIN;
@@ -394,9 +393,9 @@ owner 和 migration role 是受控管理身份，不属于生产流量路径。
 
 ## Channel Binding 与消息数据模型
 
-本节是 Issue #24 的逻辑模型设计。Issue #37 已将 `channel_binding` 与 Tenant、Agent
-App/Revision、Model Profile、Backend Profile 一起落入控制面 migration；下面的
-Session/Event/Memory/Summary/Audit 表仍属于**平台新增**。所有生产 Repository 都必须
+本节是 Issue #24 的逻辑模型与运行时数据边界。Issue #37 已将 `channel_binding` 与 Tenant、Agent
+App/Revision、Model Profile、Backend Profile 一起落入控制面 migration；Session/Event/Memory/
+Summary/Audit 等运行时表由对应 migration 和 storage adapter 落地。所有生产 Repository 都必须
 把 `tenant_id` 作为显式参数和列，字符串 namespace 只能防碰撞，不能替代授权或复合约束。
 
 ### 稳定身份与约束
@@ -467,8 +466,7 @@ audit_log(
 - `channel_binding` 的主键为 `(tenant_id, binding_id)`，`app_id` 通过同租户复合外键引用
   `agent_app`；`secret_ref` 只引用 Secret Manager，不允许保存 secret 值。
 - `public_route_key_digest` 仅用于候选发现。相同 `channel + provider_account_id` 的
-  active Binding 只能归属一个 Tenant；若未来支持共享账号，必须新增明确的共享模型，不能
-  删除这条唯一性约束。
+  active Binding 只能归属一个 Tenant；共享账号通过明确的共享模型承载，并保持该唯一性约束。
 - `session` 的主键为 `(tenant_id, session_id)`，并以 `(tenant_id, binding_id, 外部身份
   元组)` 建唯一约束。外部身份元组由 Adapter 按通道定义，不使用昵称或可变展示名。
 - `message_event` 同时有 `(tenant_id, session_id, event_seq)` 唯一约束和
@@ -476,7 +474,7 @@ audit_log(
   `tenant_id + binding_id + channel + external_message_id` 计算。`running` 还必须持有
   execution owner、claim token、lease deadline、heartbeat、attempts 和 fencing token；只有
   当前 fence 才能提交 Runner event、state、tool receipt 或 reply outbox。`completed` 之前必须
-  在同一执行提交中固定 `reply_id`、`reply_cache_ref` 和 `segment_count`；它们是后续物化和修复
+  在同一执行提交中固定 `reply_id`、`reply_cache_ref` 和 `segment_count`；它们是物化和修复
   的唯一聚合来源，不能从自由文本或孤立 outbox 行推断。
 - `tool_invocation` 以 `(tenant_id, invocation_id)` 为主键，并以
   `(tenant_id, event_id, idempotency_key)` 防止一次执行重复派发；`request_digest` 必须与
@@ -590,8 +588,9 @@ Adapter 必须使用经过验证的 Lua/Stream/事务边界；无法原子提交
 | Memory/Knowledge | `memory.Service`、Knowledge/VectorStore 接口 | Tenant 分区、异步索引、权限过滤和迁移 |
 | Artifact | `artifact.Service` | Tenant bucket/prefix、digest、生命周期和审计引用 |
 | Audit | OpenTelemetry 可复用为 trace | 独立 append-only audit adapter；sampling 不能代替审计 |
-| Agent 执行 | Runner、LLMAgent、Tool/MCP、Plugin/Guardrail | Gateway、Binding、幂等、策略和回复 Outbox |
+| Agent 执行 | Runner、LLMAgent/Chain、Tool/MCP、Plugin/Guardrail | Gateway、Binding、幂等、策略、预算和回复 Outbox |
 
 Issue #37 已将 Tenant、Agent App/Revision、Model Profile、Backend Profile 和 Channel Binding
-的控制面表与跨租户复合约束落入 migration；当前 Go 代码仍没有实现 Session/Memory/Audit
-生产表或客户端。本文剩余逻辑模型用于约束后续 issue，不能替代后续平台表的数据库交付物。
+的控制面表与跨租户复合约束落入 migration；Session/Memory/Audit 运行时客户端、PostgreSQL
+预算预占/结算/释放账本以及 Redis/S3 capability 均按各自契约接入。本文逻辑模型与 migration
+共同作为平台数据边界和运行时验收依据。

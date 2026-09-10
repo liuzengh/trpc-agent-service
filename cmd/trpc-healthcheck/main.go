@@ -6,12 +6,12 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 const (
@@ -19,24 +19,28 @@ const (
 	healthTimeout    = 2 * time.Second
 )
 
-var errUnhealthy = errors.New("health check failed")
 var exitProcess = os.Exit
 
 func main() {
-	if err := run(os.Args[1:], os.Stderr); err != nil {
+	restoreLogger, err := configureLogger(os.Stderr)
+	if err != nil {
+		exitProcess(1)
+		return
+	}
+	defer restoreLogger()
+
+	if err := run(os.Args[1:]); err != nil {
+		packageLog.Error("health check failed", zap.Error(err))
 		exitProcess(1)
 	}
 }
 
-func run(args []string, stderr io.Writer) error {
+func run(args []string) error {
 	url := defaultHealthURL
 	if len(args) > 0 {
 		url = args[0]
 	}
 	if err := check(context.Background(), http.DefaultClient, url); err != nil {
-		if stderr != nil {
-			_, _ = fmt.Fprintln(stderr, err)
-		}
 		return err
 	}
 	return nil

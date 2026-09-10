@@ -81,6 +81,39 @@ func TestBackendRepositoryRejectsInvalidCreationMetadata(t *testing.T) {
 	}
 }
 
+func TestBackendRepositoryListsProfiles(t *testing.T) {
+	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
+		Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden,
+		SecretRefPolicy: backend.FieldForbidden, Options: map[string]backend.OptionSpec{"namespace": {Kind: backend.OptionString}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := backend.NewProfile(backend.CreateInput{
+		TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", ProfileKey: "primary", DisplayName: "Primary", Status: backend.StatusActive,
+		SchemaVersion: 1, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", Options: map[string]string{"namespace": "safe"}}},
+	}, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT profile_id FROM public\.backend_profile WHERE tenant_id=\$1`).WithArgs(profile.TenantID).WillReturnRows(sqlmock.NewRows([]string{"profile_id"}).AddRow(profile.ProfileID))
+	mock.ExpectQuery(".*").WithArgs(profile.TenantID, profile.ProfileID).WillReturnRows(testBackendRootRows(t, profile))
+	mock.ExpectQuery(".*").WithArgs(profile.TenantID, profile.ProfileID).WillReturnRows(testBackendBindingRows(t, profile))
+
+	items, next, err := NewRepository(db, catalog).List(context.Background(), profile.TenantID, "primary", string(profile.Status), "", 50)
+	if err != nil || len(items) != 1 || items[0].ProfileID != profile.ProfileID || next != "" {
+		t.Fatalf("listed backend profiles = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBackendRepositoryUpdatesConfigurationAndReturnsEvent(t *testing.T) {
 	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
 		Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden,
@@ -194,6 +227,9 @@ func TestBackendRepositoryRequiresStorage(t *testing.T) {
 	}
 	if _, err := repository.Get(ctx, "tenant", "profile"); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Get nil-storage error = %v", err)
+	}
+	if _, _, err := repository.List(ctx, "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("List nil-storage error = %v", err)
 	}
 	if _, _, err := repository.UpdateConfiguration(ctx, backend.UpdateConfigurationInput{}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("UpdateConfiguration nil-storage error = %v", err)

@@ -11,6 +11,60 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 )
 
+// List returns a stable page of Model Profiles belonging to one tenant.
+func (r *ModelRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*model.Profile, string, error) {
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := 0
+	if cursor != "" {
+		if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+	}
+	rows, err := r.db.QueryContext(ctx, modelSelect+` WHERE tenant_id=$1 ORDER BY profile_id`, tenantID)
+	if err != nil {
+		return nil, "", ErrStorage
+	}
+	defer rows.Close()
+	items := make([]*model.Profile, 0)
+	q := strings.ToLower(strings.TrimSpace(query))
+	for rows.Next() {
+		v, err := scanModelProfile(r.catalog, rows)
+		if err != nil {
+			return nil, "", ErrStorage
+		}
+		if status != "" && string(v.Status) != status {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(v.ProfileID+" "+v.ProfileKey+" "+v.DisplayName), q) {
+			continue
+		}
+		items = append(items, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", ErrStorage
+	}
+	if offset >= len(items) {
+		return []*model.Profile{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
 // ModelRepository persists secret-free Model Profiles and their change
 // outbox events.
 type ModelRepository struct {

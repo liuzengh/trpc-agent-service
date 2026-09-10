@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -25,7 +25,7 @@ func TestFakeTrustedInboundRouteAndBindingAwareIdentity(t *testing.T) {
 type trustedInboundSetup struct {
 	root        *tenant.Tenant
 	snapshot    tenant.ConfigurationSnapshot
-	app         *agent.App
+	app         *appmodel.App
 	repo        *inmemory.InMemoryRepository
 	binding     *channels.Binding
 	routeDigest string
@@ -128,7 +128,7 @@ func assertRunnerIdentityBoundaries(t *testing.T, setup trustedInboundSetup, tar
 func assertTrustedTargetRejectsInvalidStates(t *testing.T, setup trustedInboundSetup, verified channels.VerifiedBinding, direct tenant.RunnerIdentity) {
 	t.Helper()
 	suspendedApp := setup.app.Clone()
-	suspendedApp.Status = agent.StatusSuspended
+	suspendedApp.Status = appmodel.StatusSuspended
 	if _, err := channels.NewRoutingTarget(setup.snapshot, setup.binding, &suspendedApp, verified); !errors.Is(err, channels.ErrVerificationFailed) {
 		t.Fatalf("suspended App was accepted by trusted target: %v", err)
 	}
@@ -198,9 +198,9 @@ func TestResolveCandidateRoutingTargetFailureBoundaries(t *testing.T) {
 		{name: "app lookup failure", prepare: func(f *routingTargetFixture) { f.appRepo.err = errors.New("app lookup failed") }, want: channels.ErrVerificationFailed},
 		{name: "app lookup cancellation", prepare: func(f *routingTargetFixture) { f.appRepo.err = context.Canceled }, cancellation: true},
 		{name: "invalid routing target", prepare: func(f *routingTargetFixture) {
-			app := f.app.Clone()
-			app.Status = agent.StatusSuspended
-			f.appRepo.value = &app
+			appValue := f.app.Clone()
+			appValue.Status = appmodel.StatusSuspended
+			f.appRepo.value = &appValue
 		}, want: channels.ErrVerificationFailed},
 	}
 
@@ -225,18 +225,32 @@ func TestResolveCandidateRoutingTargetFailureBoundaries(t *testing.T) {
 	}
 }
 
+func TestResolveConfiguredRoutingTargetSealsCurrentBinding(t *testing.T) {
+	fixture := newRoutingTargetFixture(t)
+	target, err := channels.ResolveConfiguredRoutingTarget(fixture.ctx, fixture.consumer, fixture.tenants, fixture.apps, fixture.consumerStub.binding.TenantID, fixture.consumerStub.binding.BindingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.TenantID != fixture.consumerStub.binding.TenantID || target.BindingID != fixture.consumerStub.binding.BindingID || target.Channel != fixture.consumerStub.binding.Channel {
+		t.Fatalf("configured target = %+v", target)
+	}
+	if _, err := channels.ResolveConfiguredRoutingTarget(fixture.ctx, fixture.consumer, fixture.tenants, fixture.apps, fixture.consumerStub.binding.TenantID, "missing"); !errors.Is(err, channels.ErrVerificationFailed) {
+		t.Fatalf("missing configured binding error = %v", err)
+	}
+}
+
 type routingTargetFixture struct {
 	ctx          context.Context
 	consumer     channels.CandidateConsumer
 	consumerStub *routingCandidateConsumerStub
 	tenants      tenant.Repository
-	apps         agent.Repository
+	apps         appmodel.Repository
 	candidate    channels.CandidateBindingContext
 	verify       func(context.Context, channels.Binding) error
 	verifyErr    error
 	tenantRepo   *singleTenantRepository
 	appRepo      *singleAppRepository
-	app          *agent.App
+	app          *appmodel.App
 }
 
 func newRoutingTargetFixture(t *testing.T) routingTargetFixture {
@@ -273,8 +287,12 @@ type routingCandidateConsumerStub struct {
 func (s *routingCandidateConsumerStub) LookupCandidates(context.Context, channels.Channel, string) ([]channels.CandidateBindingContext, error) {
 	return nil, errors.New("unsupported")
 }
-func (s *routingCandidateConsumerStub) Get(context.Context, string, string) (*channels.Binding, error) {
-	return nil, errors.New("unsupported")
+func (s *routingCandidateConsumerStub) Get(_ context.Context, tenantID, bindingID string) (*channels.Binding, error) {
+	if s.binding == nil || s.binding.TenantID != tenantID || s.binding.BindingID != bindingID {
+		return nil, channels.ErrNotFound
+	}
+	binding := s.binding.Clone()
+	return &binding, nil
 }
 func (s *routingCandidateConsumerStub) ConsumeCandidate(context.Context, channels.CandidateBindingContext) (*channels.Binding, error) {
 	if s.consumeErr != nil {
@@ -317,14 +335,14 @@ func (r *singleTenantRepository) TransitionStatus(context.Context, tenant.Transi
 }
 
 type singleAppRepository struct {
-	value *agent.App
+	value *appmodel.App
 	err   error
 }
 
-func (r *singleAppRepository) Create(context.Context, agent.CreateInput) (*agent.App, error) {
+func (r *singleAppRepository) Create(context.Context, appmodel.CreateInput) (*appmodel.App, error) {
 	return nil, errors.New("unsupported")
 }
-func (r *singleAppRepository) Get(context.Context, string, string) (*agent.App, error) {
+func (r *singleAppRepository) Get(context.Context, string, string) (*appmodel.App, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -334,29 +352,29 @@ func (r *singleAppRepository) Get(context.Context, string, string) (*agent.App, 
 	value := r.value.Clone()
 	return &value, nil
 }
-func (r *singleAppRepository) UpdateMetadata(context.Context, agent.UpdateMetadataInput) (*agent.App, error) {
+func (r *singleAppRepository) UpdateMetadata(context.Context, appmodel.UpdateMetadataInput) (*appmodel.App, error) {
 	return nil, errors.New("unsupported")
 }
-func (r *singleAppRepository) CreateDraft(context.Context, agent.CreateDraftInput) (*agent.Revision, error) {
+func (r *singleAppRepository) CreateDraft(context.Context, appmodel.CreateDraftInput) (*appmodel.Revision, error) {
 	return nil, errors.New("unsupported")
 }
-func (r *singleAppRepository) UpdateDraft(context.Context, agent.UpdateDraftInput) (*agent.Revision, error) {
+func (r *singleAppRepository) UpdateDraft(context.Context, appmodel.UpdateDraftInput) (*appmodel.Revision, error) {
 	return nil, errors.New("unsupported")
 }
-func (r *singleAppRepository) GetRevision(context.Context, string, string, int64) (*agent.Revision, error) {
+func (r *singleAppRepository) GetRevision(context.Context, string, string, int64) (*appmodel.Revision, error) {
 	return nil, errors.New("unsupported")
 }
-func (r *singleAppRepository) Publish(context.Context, agent.PublishInput) (*agent.App, *agent.Revision, agent.ChangeEvent, error) {
-	return nil, nil, agent.ChangeEvent{}, errors.New("unsupported")
+func (r *singleAppRepository) Publish(context.Context, appmodel.PublishInput) (*appmodel.App, *appmodel.Revision, appmodel.ChangeEvent, error) {
+	return nil, nil, appmodel.ChangeEvent{}, errors.New("unsupported")
 }
-func (r *singleAppRepository) Rollback(context.Context, agent.RollbackInput) (*agent.App, agent.ChangeEvent, error) {
-	return nil, agent.ChangeEvent{}, errors.New("unsupported")
+func (r *singleAppRepository) Rollback(context.Context, appmodel.RollbackInput) (*appmodel.App, appmodel.ChangeEvent, error) {
+	return nil, appmodel.ChangeEvent{}, errors.New("unsupported")
 }
-func (r *singleAppRepository) SetCanary(context.Context, agent.SetCanaryInput) (*agent.App, agent.ChangeEvent, error) {
-	return nil, agent.ChangeEvent{}, errors.New("unsupported")
+func (r *singleAppRepository) SetCanary(context.Context, appmodel.SetCanaryInput) (*appmodel.App, appmodel.ChangeEvent, error) {
+	return nil, appmodel.ChangeEvent{}, errors.New("unsupported")
 }
-func (r *singleAppRepository) TransitionStatus(context.Context, agent.TransitionStatusInput) (*agent.App, agent.ChangeEvent, error) {
-	return nil, agent.ChangeEvent{}, errors.New("unsupported")
+func (r *singleAppRepository) TransitionStatus(context.Context, appmodel.TransitionStatusInput) (*appmodel.App, appmodel.ChangeEvent, error) {
+	return nil, appmodel.ChangeEvent{}, errors.New("unsupported")
 }
 
 func TestFakeResolverRejectsPurposeMismatchBadProofExpiryAndReplay(t *testing.T) {
@@ -480,7 +498,7 @@ type integrationClock struct {
 
 func (c *integrationClock) Now() time.Time { return c.now }
 
-func activeTenantApp(t *testing.T, key string) (*tenant.Tenant, tenant.ConfigurationSnapshot, *agent.App) {
+func activeTenantApp(t *testing.T, key string) (*tenant.Tenant, tenant.ConfigurationSnapshot, *appmodel.App) {
 	t.Helper()
 	root, err := tenant.NewTenant(tenant.CreateInput{TenantKey: key, DisplayName: "Integration Tenant", AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1})
 	if err != nil {
@@ -490,19 +508,19 @@ func activeTenantApp(t *testing.T, key string) (*tenant.Tenant, tenant.Configura
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := agent.NewApp(agent.CreateInput{TenantID: root.TenantID, AppKey: "support", DisplayName: "Support", Description: "offline integration"})
+	appRoot, err := appmodel.NewApp(appmodel.CreateInput{TenantID: root.TenantID, AppKey: "support", DisplayName: "Support", Description: "offline integration"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	revision := int64(1)
-	app.Status = agent.StatusActive
-	app.CurrentRevision = &revision
-	app.Version = 2
-	app.UpdatedAt = app.CreatedAt.Add(time.Second)
-	if err := app.Validate(); err != nil {
+	appRoot.Status = appmodel.StatusActive
+	appRoot.CurrentRevision = &revision
+	appRoot.Version = 2
+	appRoot.UpdatedAt = appRoot.CreatedAt.Add(time.Second)
+	if err := appRoot.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	return root, snapshot, app
+	return root, snapshot, appRoot
 }
 
 func createActiveBinding(t *testing.T, repo *inmemory.InMemoryRepository, tenantID, appID, key string, channel channels.Channel, providerAccountID, routeDigest, secretRef string) *channels.Binding {

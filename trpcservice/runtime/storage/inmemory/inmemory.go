@@ -12,14 +12,15 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 )
 
 // Store is a concurrency-safe in-memory implementation of the runtime store.
 type Store struct {
 	mu           *sync.RWMutex
-	sessions     map[string]runtimestorage.Session
+	sessions     map[string]sessionstorage.Session
 	events       map[string]runtimestorage.MessageEvent
-	histories    map[string][]runtimestorage.EventPayload
+	histories    map[string][]sessionstorage.EventPayload
 	messages     map[string]string
 	replies      map[string]runtimestorage.ReplyOutbox
 	correlations map[string]runtimestorage.ReplyCorrelation
@@ -31,6 +32,7 @@ type Store struct {
 	vectors      map[string]runtimestorage.VectorRecord
 	objects      map[string]runtimestorage.ObjectInfo
 	objectData   map[string][]byte
+	attachments  map[string]storedAttachment
 	indexQueue   chan runtimestorage.MemoryRecord
 	indexDone    chan struct{}
 	indexMu      *sync.RWMutex
@@ -130,13 +132,13 @@ func New() *Store {
 func newStore(lifecycle *backendLifecycle) *Store {
 	store := &Store{
 		mu:       &sync.RWMutex{},
-		sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{},
-		histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{},
+		sessions: map[string]sessionstorage.Session{}, events: map[string]runtimestorage.MessageEvent{},
+		histories: map[string][]sessionstorage.EventPayload{}, messages: map[string]string{},
 		replies: map[string]runtimestorage.ReplyOutbox{}, correlations: map[string]runtimestorage.ReplyCorrelation{},
 		memories: map[string]runtimestorage.MemoryRecord{}, summaries: map[string]runtimestorage.SummaryRecord{},
 		knowledge: map[string]runtimestorage.KnowledgeDocument{}, artifacts: map[string]runtimestorage.ArtifactRecord{},
 		audits: map[string][]runtimestorage.AuditRecord{}, vectors: map[string]runtimestorage.VectorRecord{},
-		objects: map[string]runtimestorage.ObjectInfo{}, objectData: map[string][]byte{},
+		objects: map[string]runtimestorage.ObjectInfo{}, objectData: map[string][]byte{}, attachments: map[string]storedAttachment{},
 		indexQueue: make(chan runtimestorage.MemoryRecord, 128), indexDone: lifecycle.done, indexMu: lifecycle.indexMu, lifecycle: lifecycle, closeOnce: &sync.Once{},
 	}
 	go store.indexWorker()
@@ -162,58 +164,58 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 }
 
 // GetSession returns a tenant-scoped session snapshot.
-func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
+func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (sessionstorage.Session, error) {
 	if err := check(ctx); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	value, ok := s.sessions[key(tenantID, sessionID)]
 	if !ok {
-		return runtimestorage.Session{}, runtimestorage.ErrNotFound
+		return sessionstorage.Session{}, runtimestorage.ErrNotFound
 	}
 	return cloneSession(value), nil
 }
 
 // CreateSession creates a tenant-scoped session with an initial state.
-func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
+func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (sessionstorage.Session, error) {
 	if err := check(ctx); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	now := time.Now().UTC()
-	value := runtimestorage.Session{TenantID: tenantID, SessionID: sessionID, Status: runtimestorage.SessionActive, Version: 1, State: cloneMap(state), CreatedAt: now, UpdatedAt: now}
+	value := sessionstorage.Session{TenantID: tenantID, SessionID: sessionID, Status: runtimestorage.SessionActive, Version: 1, State: cloneMap(state), CreatedAt: now, UpdatedAt: now}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.sessions[key(tenantID, sessionID)]; ok {
-		return runtimestorage.Session{}, runtimestorage.ErrDuplicate
+		return sessionstorage.Session{}, runtimestorage.ErrDuplicate
 	}
 	s.sessions[key(tenantID, sessionID)] = value
 	return cloneSession(value), nil
 }
 
 // UpdateSessionState applies an expected-version state update.
-func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (runtimestorage.Session, error) {
+func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (sessionstorage.Session, error) {
 	if err := check(ctx); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := key(tenantID, sessionID)
 	value, ok := s.sessions[k]
 	if !ok {
-		return runtimestorage.Session{}, runtimestorage.ErrNotFound
+		return sessionstorage.Session{}, runtimestorage.ErrNotFound
 	}
 	if value.Version != expectedVersion {
-		return runtimestorage.Session{}, runtimestorage.ErrConflict
+		return sessionstorage.Session{}, runtimestorage.ErrConflict
 	}
 	value.Version++
 	value.State = cloneMap(state)
@@ -251,6 +253,12 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 		for replyKey, reply := range s.replies {
 			if reply.TenantID == tenantID && reply.EventID == event.EventID {
 				delete(s.replies, replyKey)
+			}
+		}
+		for attachmentKey, attachmentValue := range s.attachments {
+			if attachmentValue.eventID == event.EventID && strings.HasPrefix(attachmentKey, key(tenantID)) {
+				attachmentValue.eventID = ""
+				s.attachments[attachmentKey] = attachmentValue
 			}
 		}
 	}
@@ -381,18 +389,18 @@ func applyMessageTransition(value *runtimestorage.MessageEvent, transition runti
 }
 
 // AppendEventPayload adds an ordered payload to a tenant session history.
-func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.EventPayload) (runtimestorage.EventPayload, error) {
+func (s *Store) AppendEventPayload(ctx context.Context, payload sessionstorage.EventPayload) (sessionstorage.EventPayload, error) {
 	if err := check(ctx); err != nil {
-		return runtimestorage.EventPayload{}, err
+		return sessionstorage.EventPayload{}, err
 	}
 	if err := validatePayload(payload); err != nil {
-		return runtimestorage.EventPayload{}, err
+		return sessionstorage.EventPayload{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := key(payload.TenantID, payload.SessionID)
 	if _, ok := s.sessions[k]; !ok {
-		return runtimestorage.EventPayload{}, runtimestorage.ErrNotFound
+		return sessionstorage.EventPayload{}, runtimestorage.ErrNotFound
 	}
 	entries := s.histories[k]
 	for _, existing := range entries {
@@ -400,7 +408,7 @@ func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.E
 			continue
 		}
 		if !jsonEqual(existing.Payload, payload.Payload) {
-			return runtimestorage.EventPayload{}, runtimestorage.ErrConflict
+			return sessionstorage.EventPayload{}, runtimestorage.ErrConflict
 		}
 		return clonePayload(existing), nil
 	}
@@ -412,7 +420,7 @@ func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.E
 }
 
 // ListEventPayloads returns ordered payloads for a tenant session.
-func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.EventPayload, error) {
+func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]sessionstorage.EventPayload, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
 	}
@@ -426,7 +434,7 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 		return nil, runtimestorage.ErrNotFound
 	}
 	entries := s.histories[k]
-	result := make([]runtimestorage.EventPayload, len(entries))
+	result := make([]sessionstorage.EventPayload, len(entries))
 	for i, value := range entries {
 		result[i] = clonePayload(value)
 	}
@@ -438,36 +446,72 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
-	if err := runtimestorage.ValidateTenant(value.TenantID); err != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
+	value, err := prepareReply(value)
+	if err != nil {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
-	if value.Status == "" {
-		value.Status = runtimestorage.ReplyPending
-	}
-	if value.Status != runtimestorage.ReplyPending {
-		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
-	}
-	now := time.Now().UTC()
-	value.CreatedAt = now
-	value.UpdatedAt = now
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	event, ok := s.events[key(value.TenantID, value.EventID)]
-	if !ok {
-		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrNotFound
-	}
-	if event.ReplyTarget != value.ReplyTarget {
-		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+	if err := s.validateReplyEvent(value); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
 	}
 	k := replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)
 	if existing, ok := s.replies[k]; ok {
-		if existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.ReplyTarget != value.ReplyTarget {
+		if !sameReplyContract(existing, value) {
 			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 		}
 		return cloneReply(existing), nil
 	}
 	s.replies[k] = value
 	return cloneReply(value), nil
+}
+
+func prepareReply(value runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, error) {
+	normalized, err := runtimestorage.NormalizeReplyOutbox(value)
+	if err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	if err := validateReplySegment(normalized); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	if normalized.Status == "" {
+		normalized.Status = runtimestorage.ReplyPending
+	}
+	if normalized.Status != runtimestorage.ReplyPending {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	now := time.Now().UTC()
+	normalized.CreatedAt = now
+	normalized.UpdatedAt = now
+	return normalized, nil
+}
+
+func validateReplySegment(value runtimestorage.ReplyOutbox) error {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
+		return runtimestorage.ErrInvalid
+	}
+	return nil
+}
+
+func (s *Store) validateReplyEvent(value runtimestorage.ReplyOutbox) error {
+	event, ok := s.events[key(value.TenantID, value.EventID)]
+	if !ok {
+		return runtimestorage.ErrNotFound
+	}
+	if event.ReplyTarget != value.ReplyTarget {
+		return runtimestorage.ErrConflict
+	}
+	return nil
+}
+
+func sameReplyContract(existing, value runtimestorage.ReplyOutbox) bool {
+	return existing.EventID == value.EventID &&
+		existing.SegmentCount == value.SegmentCount &&
+		existing.Payload == value.Payload &&
+		existing.Kind == value.Kind &&
+		existing.Attachment == value.Attachment &&
+		existing.Fallback == value.Fallback &&
+		existing.ReplyTarget == value.ReplyTarget
 }
 
 // EnqueueReplies validates a complete reply before committing any new segment.
@@ -491,6 +535,11 @@ func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation r
 
 func (s *Store) enqueueReplies(ctx context.Context, correlation runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	values, err = normalizeReplyBatch(values)
+	if err != nil {
 		return nil, err
 	}
 	first, _, err := validateReplyBatch(values)
@@ -562,9 +611,21 @@ func validateReplyBatch(values []runtimestorage.ReplyOutbox) (runtimestorage.Rep
 	return first, seen, nil
 }
 
+func normalizeReplyBatch(values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	normalized := make([]runtimestorage.ReplyOutbox, 0, len(values))
+	for _, value := range values {
+		reply, err := runtimestorage.NormalizeReplyOutbox(value)
+		if err != nil {
+			return nil, runtimestorage.ErrInvalid
+		}
+		normalized = append(normalized, reply)
+	}
+	return normalized, nil
+}
+
 func validateExistingReplies(replies map[string]runtimestorage.ReplyOutbox, values []runtimestorage.ReplyOutbox) error {
 	for _, value := range values {
-		if existing, ok := replies[replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)]; ok && (existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.ReplyTarget != value.ReplyTarget) {
+		if existing, ok := replies[replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)]; ok && (existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.Kind != value.Kind || existing.Attachment != value.Attachment || existing.Fallback != value.Fallback || existing.ReplyTarget != value.ReplyTarget) {
 			return runtimestorage.ErrConflict
 		}
 	}
@@ -638,6 +699,33 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 	return cloneReply(value), nil
 }
 
+// RecordReplyReceipt persists a provider acknowledgement without releasing
+// the current sending lease. The worker later owns the sent transition.
+func (s *Store) RecordReplyReceipt(ctx context.Context, receipt runtimestorage.ReplyReceipt) (runtimestorage.ReplyOutbox, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	if runtimestorage.ValidateTenant(receipt.TenantID) != nil || receipt.ReplyID == "" || receipt.SegmentIndex < 0 || receipt.Owner == "" || receipt.FencingToken <= 0 || strings.TrimSpace(receipt.ProviderID) == "" {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := replyKey(receipt.TenantID, receipt.ReplyID, receipt.SegmentIndex)
+	value, ok := s.replies[key]
+	if !ok {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrNotFound
+	}
+	if value.Status != runtimestorage.ReplySending || value.LeaseOwner != receipt.Owner || value.FencingToken != receipt.FencingToken || value.LeaseExpiresAt == nil || !value.LeaseExpiresAt.After(time.Now().UTC()) || value.ProviderMessageID != "" && value.ProviderMessageID != receipt.ProviderID {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+	}
+	if value.ProviderMessageID == "" {
+		value.ProviderMessageID = receipt.ProviderID
+		value.UpdatedAt = time.Now().UTC()
+		s.replies[key] = value
+	}
+	return cloneReply(value), nil
+}
+
 // TransitionReply applies a fenced reply delivery transition.
 func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.ReplyTransition) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
@@ -672,7 +760,9 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 			value.LeaseExpiresAt = &deadline
 		}
 	}
-	value.ProviderMessageID = transition.ProviderID
+	if transition.ProviderID != "" {
+		value.ProviderMessageID = transition.ProviderID
+	}
 	value.LastErrorClass = transition.ErrorClass
 	value.UpdatedAt = time.Now().UTC()
 	s.replies[k] = value
@@ -726,7 +816,7 @@ func cloneMap(input map[string]any) map[string]any {
 	}
 	return output
 }
-func cloneSession(value runtimestorage.Session) runtimestorage.Session {
+func cloneSession(value sessionstorage.Session) sessionstorage.Session {
 	value.State = cloneMap(value.State)
 	return value
 }
@@ -737,11 +827,11 @@ func cloneEvent(value runtimestorage.MessageEvent) runtimestorage.MessageEvent {
 	}
 	return value
 }
-func clonePayload(value runtimestorage.EventPayload) runtimestorage.EventPayload {
+func clonePayload(value sessionstorage.EventPayload) sessionstorage.EventPayload {
 	value.Payload = append([]byte(nil), value.Payload...)
 	return value
 }
-func validatePayload(value runtimestorage.EventPayload) error {
+func validatePayload(value sessionstorage.EventPayload) error {
 	if runtimestorage.ValidateSession(value.TenantID, value.SessionID) != nil || value.EventID == "" || len(value.Payload) == 0 || !json.Valid(value.Payload) {
 		return runtimestorage.ErrInvalid
 	}
@@ -762,4 +852,8 @@ func cloneReply(value runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 	return value
 }
 
-var _ runtimestorage.RuntimeStore = (*Store)(nil)
+var _ sessionstorage.SessionStateStore = (*Store)(nil)
+var _ sessionstorage.EventHistoryStore = (*Store)(nil)
+var _ runtimestorage.MessageStore = (*Store)(nil)
+var _ runtimestorage.ReplyStore = (*Store)(nil)
+var _ runtimestorage.ReplyReceiptRecorder = (*Store)(nil)

@@ -1,5 +1,5 @@
-// Package runtime composes immutable control-plane snapshots into one
-// tenant-scoped execution plan and assembles the minimum Runner spine.
+// Package runtime composes immutable configuration snapshots into one
+// tenant-scoped execution plan and exposes internal scheduling boundaries.
 package runtime
 
 import (
@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -41,41 +42,46 @@ type ExecutionPlan struct {
 	backend backend.BackendExecutionSnapshot
 }
 
-// NewExecutionPlan validates and freezes one Tenant, current Agent Revision,
-// active Model Profile, and active Backend Profile. All objects must belong to
-// the same tenant and the Model Profile must satisfy the Revision reference.
-func NewExecutionPlan(
-	tenantSnapshot tenant.ConfigurationSnapshot,
-	app *agent.App,
-	revision *agent.Revision,
-	modelProfile *modelprofile.Profile,
-	modelCatalog *modelprofile.ProviderCatalog,
-	backendProfile *backend.Profile,
-	backendCatalog *backend.ProviderCatalog,
-) (ExecutionPlan, error) {
-	tenantValue := tenantSnapshot.Tenant()
+// ExecutionPlanInput contains the tenant-scoped configuration selected for one
+// execution. The input is borrowed during construction; NewExecutionPlanFromInput
+// validates it and freezes defensive copies into the returned plan.
+type ExecutionPlanInput struct {
+	TenantSnapshot tenant.ConfigurationSnapshot
+	AppRoot        *appmodel.App
+	Revision       *appmodel.Revision
+	ModelProfile   *modelprofile.Profile
+	ModelCatalog   *modelprofile.ProviderCatalog
+	BackendProfile *backend.Profile
+	BackendCatalog *backend.ProviderCatalog
+}
+
+// NewExecutionPlanFromInput validates and freezes one explicit execution-plan
+// input group. The grouped input keeps the plan boundary explicit as the
+// snapshot grows and prevents callers from silently reordering dependencies.
+func NewExecutionPlanFromInput(input ExecutionPlanInput) (ExecutionPlan, error) {
+	tenantValue := input.TenantSnapshot.Tenant()
 	if err := tenantValue.Validate(); err != nil {
 		return ExecutionPlan{}, errors.New("invalid execution plan: tenant snapshot is invalid")
 	}
 	if !tenantValue.CanAcceptExecution() {
 		return ExecutionPlan{}, errors.New("invalid execution plan: tenant cannot accept execution")
 	}
-	if app != nil && revision != nil && app.AppID != revision.AppID {
+	if input.AppRoot != nil && input.Revision != nil && input.AppRoot.AppID != input.Revision.AppID {
 		return ExecutionPlan{}, errors.New("invalid execution plan: revision does not belong to App")
 	}
-	agentSnapshot, err := agent.NewAgentExecutionSnapshot(tenantSnapshot, app, revision)
+	agentSnapshot, err := agent.NewAgentExecutionSnapshot(input.TenantSnapshot, input.AppRoot, input.Revision)
 	if err != nil {
 		return ExecutionPlan{}, fmt.Errorf("invalid execution plan: agent snapshot: %w", err)
 	}
-	modelSnapshot, err := modelprofile.NewModelExecutionSnapshot(tenantSnapshot, modelProfile, modelCatalog)
+	modelSnapshot, err := modelprofile.NewModelExecutionSnapshot(input.TenantSnapshot, input.ModelProfile, input.ModelCatalog)
 	if err != nil {
 		return ExecutionPlan{}, fmt.Errorf("invalid execution plan: model snapshot: %w", err)
 	}
-	backendSnapshot, err := backend.NewBackendExecutionSnapshot(tenantSnapshot, backendProfile, backendCatalog)
+	backendSnapshot, err := backend.NewBackendExecutionSnapshot(input.TenantSnapshot, input.BackendProfile, input.BackendCatalog)
 	if err != nil {
 		return ExecutionPlan{}, fmt.Errorf("invalid execution plan: backend snapshot: %w", err)
 	}
-	if revision == nil || modelProfile == nil || revision.ModelProfileID != modelProfile.ProfileID {
+	if input.Revision == nil || input.ModelProfile == nil || input.Revision.ModelProfileID != input.ModelProfile.ProfileID {
 		return ExecutionPlan{}, errors.New("invalid execution plan: revision model reference does not match profile")
 	}
 	tenantCopy := tenantValue.Clone()

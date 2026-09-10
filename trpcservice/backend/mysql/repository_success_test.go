@@ -57,6 +57,82 @@ func TestBackendRepositoryGetDecodesBindings(t *testing.T) {
 	}
 }
 
+func TestBackendRepositoryListsProfiles(t *testing.T) {
+	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
+		Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden,
+		SecretRefPolicy: backend.FieldForbidden, Options: map[string]backend.OptionSpec{"namespace": {Kind: backend.OptionString}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := backend.NewProfile(backend.CreateInput{
+		TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", ProfileKey: "primary", DisplayName: "Primary", Status: backend.StatusActive,
+		SchemaVersion: 1,
+		Bindings:      []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", Options: map[string]string{"namespace": "safe"}}},
+	}, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT profile_id FROM backend_profile WHERE tenant_id = \? ORDER BY profile_id`).WithArgs(profile.TenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"profile_id"}).AddRow(profile.ProfileID))
+	mock.ExpectQuery(".*").WithArgs(profile.TenantID, profile.ProfileID).WillReturnRows(testBackendRootRows(t, profile))
+	mock.ExpectQuery(".*").WithArgs(profile.TenantID, profile.ProfileID).WillReturnRows(testBackendBindingRows(t, profile))
+
+	items, next, err := NewRepository(db, catalog).List(context.Background(), profile.TenantID, "primary", string(profile.Status), "", 50)
+	if err != nil || len(items) != 1 || items[0].ProfileID != profile.ProfileID || next != "" {
+		t.Fatalf("listed backend profiles = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackendRepositoryListBoundaries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := NewRepository(nil, nil).List(ctx, "tenant", "", "", "", 50); err == nil {
+		t.Fatal("canceled backend list was accepted")
+	}
+	if _, _, err := NewRepository(nil, nil).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil backend list error = %v", err)
+	}
+	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden, SecretRefPolicy: backend.FieldForbidden, Options: map[string]backend.OptionSpec{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repository := NewRepository(db, catalog)
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "bad", 50); err == nil {
+		t.Fatal("invalid backend cursor was accepted")
+	}
+	mock.ExpectQuery(`SELECT profile_id FROM backend_profile WHERE tenant_id = \? ORDER BY profile_id`).WithArgs("tenant").WillReturnError(errors.New("query down"))
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("backend query error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	scanDB, scanMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = scanDB.Close() })
+	scanMock.ExpectQuery(`SELECT profile_id FROM backend_profile WHERE tenant_id = \? ORDER BY profile_id`).WithArgs("tenant").WillReturnRows(sqlmock.NewRows([]string{"profile_id", "extra"}).AddRow("profile", "bad"))
+	if _, _, err := NewRepository(scanDB, catalog).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("backend scan error = %v", err)
+	}
+}
+
 func TestBackendRepositoryRejectsInvalidCreationMetadata(t *testing.T) {
 	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
 		Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden,
@@ -436,11 +512,15 @@ func TestBackendRepositoryScannersRejectShortRows(t *testing.T) {
 	}
 }
 
-func testBackendRootRows(t *testing.T, profile *backend.Profile) *sqlmock.Rows {
+func testBackendRootRows(t *testing.T, profiles ...*backend.Profile) *sqlmock.Rows {
 	t.Helper()
-	return sqlmock.NewRows([]string{
+	rows := sqlmock.NewRows([]string{
 		"tenant_id", "profile_id", "profile_key", "display_name", "description", "status", "schema_version", "content_digest", "version", "created_at", "updated_at",
-	}).AddRow(profile.TenantID, profile.ProfileID, profile.ProfileKey, profile.DisplayName, profile.Description, string(profile.Status), profile.SchemaVersion, profile.ContentDigest, profile.Version, profile.CreatedAt, profile.UpdatedAt)
+	})
+	for _, profile := range profiles {
+		rows.AddRow(profile.TenantID, profile.ProfileID, profile.ProfileKey, profile.DisplayName, profile.Description, string(profile.Status), profile.SchemaVersion, profile.ContentDigest, profile.Version, profile.CreatedAt, profile.UpdatedAt)
+	}
+	return rows
 }
 
 func testBackendBindingRows(t *testing.T, profile *backend.Profile) *sqlmock.Rows {

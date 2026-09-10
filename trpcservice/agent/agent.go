@@ -1,3 +1,3 @@
-// Package agent hosts tenant-specific agents built on tRPC-Agent-Go
-// (llmagent, graph, chain/parallel/cycle) and runner.Runner.
+// Package agent owns tenant-scoped construction and adaptation of external
+// tRPC-Agent-Go runners, including model, session, tool, and event boundaries.
 package agent

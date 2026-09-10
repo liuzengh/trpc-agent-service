@@ -28,6 +28,10 @@ The test applies repository migrations, sends a signed encrypted text callback,
 checks the durable reply and provider delivery, then sends the same callback
 again to prove the Runner is not executed twice.
 
+Native media ingress and image/file egress are covered by deterministic channel
+unit tests; this E2E keeps using text so it does not need live WeCom media
+credentials or public provider endpoints.
+
 CI runs this test in a dedicated PostgreSQL service through the **WeCom
 deterministic E2E** job. It intentionally does not require `WECOM_*`, Telegram,
 model, or other production credentials.

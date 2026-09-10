@@ -9,14 +9,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelsinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 )
@@ -128,16 +129,16 @@ func TestInboundMessageNormalizesTextAndRejectsUnsupportedInput(t *testing.T) {
 func TestPlanResolverUsesTenantCanaryRevision(t *testing.T) {
 	fixture := newGatewayFixture(t)
 	current, candidate := int64(1), int64(2)
-	app := fixture.app.Clone()
-	app.CurrentRevision = &current
-	app.CanaryRevision = &candidate
-	if err := app.Validate(); err != nil {
+	appRoot := fixture.app.Clone()
+	appRoot.CurrentRevision = &current
+	appRoot.CanaryRevision = &candidate
+	if err := appRoot.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	config := resolverTestConfig(fixture)
 	candidateRevision := fixture.revision.Clone()
 	candidateRevision.Revision = candidate
-	config.Apps = resolverAgentRepository{Repository: fixture.apps, getFn: func(context.Context, string, string) (*agent.App, error) { return &app, nil }, getRevisionFn: func(_ context.Context, _ string, _ string, revision int64) (*agent.Revision, error) {
+	config.Apps = resolverAgentRepository{Repository: fixture.apps, getFn: func(context.Context, string, string) (*appmodel.App, error) { return &appRoot, nil }, getRevisionFn: func(_ context.Context, _ string, _ string, revision int64) (*appmodel.Revision, error) {
 		if revision == candidate {
 			return &candidateRevision, nil
 		}
@@ -147,7 +148,7 @@ func TestPlanResolverUsesTenantCanaryRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := resolver.Resolve(context.Background(), mustAPIPrincipal(t, fixture.tenant.TenantID, app.AppID))
+	plan, err := resolver.Resolve(context.Background(), mustAPIPrincipal(t, fixture.tenant.TenantID, appRoot.AppID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +159,7 @@ func TestPlanResolverUsesTenantCanaryRevision(t *testing.T) {
 
 func TestPlanResolverBuildsFixedPlanFromRepositoryInterfaces(t *testing.T) {
 	fixture := newGatewayFixture(t)
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -203,7 +204,7 @@ func TestPlanResolverBuildsFixedPlanFromRepositoryInterfaces(t *testing.T) {
 
 func TestPlanResolverResolveAuthenticatedAPIRequiresProofAndResolvesPlan(t *testing.T) {
 	fixture := newGatewayFixture(t)
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -234,7 +235,7 @@ func TestPlanResolverResolveAuthenticatedAPIRequiresProofAndResolvesPlan(t *test
 
 func TestPlanResolverPreservesCancellationAndRedactsDependencyFailures(t *testing.T) {
 	fixture := newGatewayFixture(t)
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -259,16 +260,16 @@ func TestPlanResolverPreservesCancellationAndRedactsDependencyFailures(t *testin
 }
 
 func TestPlanResolverStopsAfterLateRepositoryCancellation(t *testing.T) {
-	for name, wrap := range map[string]func(gatewayFixture, context.CancelFunc) PlanResolverConfig{
-		"model": func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
-			return PlanResolverConfig{
+	for name, wrap := range map[string]func(gatewayFixture, context.CancelFunc) runtime.PlanResolverConfig{
+		"model": func(fixture gatewayFixture, cancel context.CancelFunc) runtime.PlanResolverConfig {
+			return runtime.PlanResolverConfig{
 				Tenants: fixture.tenants, Apps: fixture.apps,
 				Models:   cancelAfterModelGet{Repository: fixture.models, cancel: cancel},
 				Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 			}
 		},
-		"backend": func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
-			return PlanResolverConfig{
+		"backend": func(fixture gatewayFixture, cancel context.CancelFunc) runtime.PlanResolverConfig {
+			return runtime.PlanResolverConfig{
 				Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models,
 				Backends:     cancelAfterBackendGet{Repository: fixture.backends, cancel: cancel},
 				ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
@@ -384,8 +385,8 @@ func newTrustedRoutingTarget(t *testing.T, fixture gatewayFixture) channels.Rout
 
 type gatewayFixture struct {
 	tenant         *tenant.Tenant
-	app            *agent.App
-	revision       *agent.Revision
+	app            *appmodel.App
+	revision       *appmodel.Revision
 	model          *model.Profile
 	backend        *backend.Profile
 	modelCatalog   *model.ProviderCatalog
@@ -434,21 +435,21 @@ func newGatewayFixture(t *testing.T) gatewayFixture {
 		t.Fatal(err)
 	}
 	apps := agentinmemory.NewRepository()
-	app, err := apps.Create(context.Background(), agent.CreateInput{TenantID: root.TenantID, AppKey: "gateway-app", DisplayName: "Gateway App", Description: "Fixture"})
+	appRoot, err := apps.Create(context.Background(), appmodel.CreateInput{TenantID: root.TenantID, AppKey: "gateway-app", DisplayName: "Gateway App", Description: "Fixture"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := apps.CreateDraft(context.Background(), agent.CreateDraftInput{
-		TenantID: root.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version,
-		Configuration: agent.DraftConfiguration{Description: "Gateway revision", Instruction: "Answer clearly.", ModelProfileID: modelProfile.ProfileID, Runtime: agent.DefaultRuntimePolicy()},
+	draft, err := apps.CreateDraft(context.Background(), appmodel.CreateDraftInput{
+		TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version,
+		Configuration: appmodel.DraftConfiguration{Description: "Gateway revision", Instruction: "Answer clearly.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	publishedApp, published, _, err := apps.Publish(context.Background(), agent.PublishInput{
-		TenantID: root.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version,
+	publishedApp, published, _, err := apps.Publish(context.Background(), appmodel.PublishInput{
+		TenantID: root.TenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version,
 		ExpectedDraftVersion: draft.DraftVersion, TenantActive: true,
-		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "fixture", Reason: "fixture", CorrelationID: "fixture"},
+		Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "fixture", Reason: "fixture", CorrelationID: "fixture"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -589,7 +590,7 @@ func TestInboundMessageAndResolverBoundaryEdges(t *testing.T) {
 		})
 	}
 
-	if _, err := NewPlanResolver(PlanResolverConfig{}); !errors.Is(err, ErrInvalid) {
+	if _, err := NewPlanResolver(runtime.PlanResolverConfig{}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing resolver dependencies error = %v", err)
 	}
 	var nilResolver *PlanResolver
@@ -600,7 +601,7 @@ func TestInboundMessageAndResolverBoundaryEdges(t *testing.T) {
 		t.Fatalf("nil resolver error = %v", err)
 	}
 	fixture := newGatewayFixture(t)
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})

@@ -20,6 +20,7 @@ func TestBackendRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 	}{
 		{"create", func() error { _, _, err := r.Create(ctx, backend.CreateInput{}); return err }},
 		{"get", func() error { _, err := r.Get(ctx, "tenant", "profile"); return err }},
+		{"list", func() error { _, _, err := r.List(ctx, "tenant", "", "", "", 1); return err }},
 		{"update", func() error { _, _, err := r.UpdateConfiguration(ctx, backend.UpdateConfigurationInput{}); return err }},
 		{"transition", func() error { _, _, err := r.TransitionStatus(ctx, backend.TransitionStatusInput{}); return err }},
 	}
@@ -27,6 +28,76 @@ func TestBackendRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.call(); !errors.Is(err, context.Canceled) {
 				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestBackendRepositoryListBoundaryBranches(t *testing.T) {
+	ctx := context.Background()
+	if _, _, err := NewRepository(nil, nil).List(ctx, "tenant", "", "", "", 1); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil-storage List error = %v", err)
+	}
+	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
+		Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden,
+		SecretRefPolicy: backend.FieldForbidden, Options: map[string]backend.OptionSpec{"namespace": {Kind: backend.OptionString}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := backend.NewProfile(backend.CreateInput{
+		TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", ProfileKey: "primary", DisplayName: "Primary", Status: backend.StatusActive,
+		SchemaVersion: 1,
+		Bindings:      []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", Options: map[string]string{"namespace": "safe"}}},
+	}, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name        string
+		setup       func(sqlmock.Sqlmock)
+		wantStorage bool
+		wantNoMatch bool
+	}{
+		{"invalid cursor", func(sqlmock.Sqlmock) {}, false, false},
+		{"query error", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery("SELECT profile_id FROM backend_profile").WithArgs(profile.TenantID).WillReturnError(errors.New("list query"))
+		}, true, false},
+		{"rows error", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery("SELECT profile_id FROM backend_profile").WithArgs(profile.TenantID).WillReturnRows(sqlmock.NewRows([]string{"profile_id"}).AddRow(profile.ProfileID).RowError(0, errors.New("rows")))
+		}, true, false},
+		{"filter no-match", func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery("SELECT profile_id FROM backend_profile").WithArgs(profile.TenantID).WillReturnRows(sqlmock.NewRows([]string{"profile_id"}).AddRow(profile.ProfileID))
+			mock.ExpectQuery(".*").WithArgs(profile.TenantID, profile.ProfileID).WillReturnRows(testBackendRootRows(t, profile))
+			mock.ExpectQuery(".*").WithArgs(profile.TenantID, profile.ProfileID).WillReturnRows(testBackendBindingRows(t, profile))
+		}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			tc.setup(mock)
+			cursor, query := "", ""
+			if tc.name == "invalid cursor" {
+				cursor = "bad"
+			}
+			if tc.wantNoMatch {
+				query = "missing"
+			}
+			items, _, callErr := NewRepository(db, catalog).List(ctx, profile.TenantID, query, "", cursor, 1)
+			if tc.wantStorage && !errors.Is(callErr, ErrStorage) {
+				t.Fatalf("error = %v", callErr)
+			}
+			if !tc.wantStorage && tc.name == "invalid cursor" && callErr == nil {
+				t.Fatal("invalid cursor was accepted")
+			}
+			if tc.wantNoMatch && (callErr != nil || len(items) != 0) {
+				t.Fatalf("no-match result = items=%+v err=%v", items, callErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
