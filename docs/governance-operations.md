@@ -76,6 +76,8 @@ Kubernetes 的分角色 Secret、NetworkPolicy 和依赖标签要在实际集群
 
 API Key 更新不等于加密主密钥轮换：**仍不能直接替换 `TRPC_AGENT_MODEL_MASTER_KEY`**，也不能丢失 setup 卷后生成新主密钥冒充恢复。首次升级此功能必须停旧 Worker 并升级相关执行节点，旧版模型实例不会自动获得新的逐请求凭据机制。
 
+容器与宿主机切换可选用部署级 `TRPC_AGENT_MODEL_HOST_ALIASES_JSON`，把模型连接中的 DNS 名映射到回环 IP。配置只影响模型专用 transport，映射目标不允许非回环地址；对于映射命中的名称直连本机，其他请求继续使用原代理/DNS 规则。URL 允许列表、租户边界、TLS 主机名与凭据绑定仍保留，不能从租户表单或模型输入设置此映射。
+
 完整体验 Compose 自动生成主密钥、数据库密码和 Admin Token 并放入专用 setup 卷；启动日志不输出它们。只有管理员显式执行 `trpc-init -show-token` 才显示登录凭据。数据库与 setup 卷应分别加密备份、限制访问；源码交付不包括这些卷。
 
 ## 3. 工具、审批与业务幂等

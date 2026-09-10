@@ -383,7 +383,7 @@ func run() error {
 	var modelConnections *modelregistry.Store
 	if roles.Worker || roles.Jobs || roles.Admin {
 		startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
-		modelConnections, err = modelregistry.New(startupCtx, controlPlaneRepository, os.Getenv("TRPC_AGENT_MODEL_MASTER_KEY"), os.Getenv("TRPC_AGENT_MODEL_ALLOWED_ORIGINS"))
+		modelConnections, err = modelregistry.New(startupCtx, controlPlaneRepository, os.Getenv("TRPC_AGENT_MODEL_MASTER_KEY"), os.Getenv("TRPC_AGENT_MODEL_ALLOWED_ORIGINS"), modelregistry.WithLoopbackAliases(os.Getenv("TRPC_AGENT_MODEL_HOST_ALIASES_JSON")))
 		cancelStartup()
 		if err != nil {
 			return err

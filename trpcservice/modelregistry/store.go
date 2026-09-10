@@ -47,15 +47,16 @@ type Connection struct {
 }
 
 type Store struct {
-	db      *sql.DB
-	aead    cipher.AEAD
-	keyID   string
-	origins map[string]bool
+	db        *sql.DB
+	aead      cipher.AEAD
+	keyID     string
+	origins   map[string]bool
+	transport http.RoundTripper
 }
 
 // New is opt-in. Existing installations without a master key are unchanged.
 // The key must be shared by Admin, Worker and Jobs, never stored in the DB.
-func New(ctx context.Context, repository any, encodedKey, allowedOrigins string) (*Store, error) {
+func New(ctx context.Context, repository any, encodedKey, allowedOrigins string, options ...Option) (*Store, error) {
 	if encodedKey == "" {
 		return nil, nil
 	}
@@ -77,6 +78,14 @@ func New(ctx context.Context, repository any, encodedKey, allowedOrigins string)
 	}
 	digest := sha256.Sum256(key)
 	s := &Store{db: provider.SQLDB(), aead: aead, keyID: hex.EncodeToString(digest[:]), origins: map[string]bool{}}
+	s.transport = http.DefaultTransport
+	for _, option := range options {
+		if option != nil {
+			if err := option(s); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if allowedOrigins == "" {
 		allowedOrigins = "https://api.openai.com"
 	}
@@ -253,7 +262,7 @@ func (s *Store) Resolve(ctx context.Context, tenant, id string) (config.ModelCon
 		return config.ModelConfig{}, ErrEndpoint
 	}
 	u, _ := endpoint(c.BaseURL)
-	client := &http.Client{Transport: boundTransport{base: http.DefaultTransport, expectedOrigin: origin(u), store: s, connection: c}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: boundTransport{base: s.transport, expectedOrigin: origin(u), store: s, connection: c}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	// The SDK only retains a placeholder. The real key is resolved and injected
 	// immediately before each HTTP request, including cached compiled Agents.
 	return config.ModelConfig{Provider: "openai", Name: c.Model, BaseURL: c.BaseURL, APIKey: "managed-credential", HTTPClient: client}, nil
