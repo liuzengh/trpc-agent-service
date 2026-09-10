@@ -50,11 +50,8 @@ const rolling = ref('')
 const versions = ref<VersionInfo[]>([])
 const rollbackVersion = ref(0)
 
-onMounted(async () => {
+onMounted(() => {
   store.fetch()
-  endpoints.fetch()
-  kbs.fetch()
-  tools.value = await listTools()
 })
 
 function openCreate() {
@@ -112,6 +109,18 @@ async function openPublish(row: Agent) {
     skill_ids: [] as string[],
     approval_tool_ids: [] as string[],
   })
+  // Publish-time pickers (endpoints / tools / KBs / skills) load on demand: only
+  // this dialog uses them, so loading them on mount wasted four requests and made
+  // a plain member — who may read agents but not tools or KBs — fire 403s on
+  // every visit to this page.
+  await Promise.allSettled([
+    endpoints.fetch(),
+    kbs.fetch(),
+    skills.fetch(),
+    listTools().then((list) => {
+      tools.value = list
+    }),
+  ])
   // pre-fill from the current profile when available
   try {
     const p = await import('../api/agent').then((m) => m.getProfile(row.id))

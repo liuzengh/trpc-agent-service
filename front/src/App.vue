@@ -26,14 +26,18 @@ onMounted(() => {
   }
 })
 
-// Switching tenants re-fetches tenant-scoped collections
+// Switching tenants re-fetches tenant-scoped collections.
+// Permission-aware on purpose: a plain member cannot read KBs or skills, so an
+// unconditional refresh fires 403s on every login (rejected by the backend and
+// merely noise server-side). Each store mirrors the permission its page route
+// declares.
 watch(
   () => tenantStore.currentTenantId,
   (id) => {
     if (!id) return
-    skillStore.fetch()
-    kbStore.fetch()
-    agentStore.fetch()
+    if (authStore.hasPermission('skill:manage')) skillStore.fetch()
+    if (authStore.hasPermission('kb:manage')) kbStore.fetch()
+    if (authStore.hasPermission('agent:read')) agentStore.fetch()
   },
 )
 

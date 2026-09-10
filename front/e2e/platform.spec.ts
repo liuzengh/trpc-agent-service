@@ -25,9 +25,13 @@ async function openTenant(page: import('@playwright/test').Page) {
 }
 
 async function login(page: import('@playwright/test').Page) {
+  await loginAs(page, 'admin', 'admin123')
+}
+
+async function loginAs(page: import('@playwright/test').Page, user: string, password: string) {
   await page.goto('/login')
-  await page.getByPlaceholder('用户名').fill('admin')
-  await page.getByPlaceholder('密码').fill('admin123')
+  await page.getByPlaceholder('用户名').fill(user)
+  await page.getByPlaceholder('密码').fill(password)
   await page.getByRole('button', { name: '登录' }).click()
   await page.waitForURL(/\/(agents|endpoints|)$/)
   await expect(page).not.toHaveURL(loginUrl)
@@ -162,5 +166,68 @@ test.describe('端点 → 知识库 → Agent 发布链路', () => {
     await expect(row).toBeVisible()
     await expect(row.locator('td').nth(3)).toContainText('1')
     await expect(row).toContainText('published')
+  })
+})
+
+// A plain member is the only role that exercises the guard's permission
+// fallback and the permission-aware data refresh, so it gets its own coverage:
+// limited navigation, no rejected (403) request, and a forbidden URL falling
+// back instead of looping or bouncing through /login.
+const rbacMemberId = `e2e-rbac-${ts}`
+const memberVisible = ['模型端点', 'Agent 配置', 'Agent 对话']
+const memberHidden = [
+  '租户管理', '用户管理', '工具目录', '知识库', 'Skill 资产',
+  'IM 通道', '密钥管理', '审计日志', '用量计量',
+]
+
+test.describe('member 角色 RBAC', () => {
+  test('member 只能看到被授权的页面，且不触发 403', async ({ page }) => {
+    // owner creates the member through the real member-management page
+    await login(page)
+    await page.goto('/users')
+    await page.getByRole('heading', { name: '用户管理' }).waitFor()
+    await page.getByRole('button', { name: '新增成员' }).click()
+    await page.getByLabel('用户名').fill(rbacMemberId)
+    await page.getByLabel('密码').fill('member123')
+    await page.getByRole('button', { name: '创建' }).click()
+    const created = page.locator('tr', { hasText: rbacMemberId })
+    await expect(created).toBeVisible()
+    await expect(created).toContainText('member')
+    const ownerToken = await page.evaluate(() => localStorage.getItem('auth_token'))
+
+    // watch every response of the member session: nothing may be rejected
+    const forbidden: string[] = []
+    page.on('response', (res) => {
+      if (res.status() === 403) forbidden.push(`${res.request().method()} ${res.url()}`)
+    })
+
+    await page.evaluate(() => localStorage.clear())
+    await loginAs(page, rbacMemberId, 'member123')
+
+    // the home page needs tenant:manage, so the guard must fall back for a member
+    await expect(page).toHaveURL(/\/agents$/)
+    const navLabels = await page.locator('.nav-label').allInnerTexts()
+    for (const label of memberVisible) {
+      expect(navLabels, `member 应看到「${label}」`).toContain(label)
+    }
+    for (const label of memberHidden) {
+      expect(navLabels, `member 不应看到「${label}」`).not.toContain(label)
+    }
+
+    // hitting a forbidden URL directly must land on a reachable page: no loop,
+    // no forced re-login
+    await page.goto('/users')
+    await expect(page).toHaveURL(/\/agents$/)
+    await expect(page).not.toHaveURL(loginUrl)
+    expect(await page.evaluate(() => localStorage.getItem('auth_token'))).not.toBeNull()
+
+    expect(forbidden, `member 不应触发 403：${forbidden.join(' | ')}`).toEqual([])
+
+    // cleanup keeps the suite repeatable (user_id is globally unique)
+    const deleted = await page.request.delete(
+      `http://localhost:8080/members/${encodeURIComponent(rbacMemberId)}`,
+      { headers: { Authorization: `Bearer ${ownerToken}` } },
+    )
+    expect(deleted.ok()).toBeTruthy()
   })
 })
