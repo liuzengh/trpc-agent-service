@@ -19,7 +19,9 @@ func TestPostgresApprovalStorePersistsLifecycleAndTenantScope(t *testing.T) {
 		RequestID: "message-1", TraceID: "trace-1", Channel: "telegram", BindingID: "bot-a",
 		ConversationID: "chat-1", ConversationScope: "direct", ExternalUserID: "external-user-1",
 		RequesterUserID: "platform-user-1", ProgressMessageID: "progress-1", ToolName: "request_refund", ToolDescription: "提交退款申请",
-		Status: ApprovalPending, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+		// ListPending intentionally skips records still inside the one second
+		// Redis recovery grace window, so the fixture must be older than that.
+		Status: ApprovalPending, CreatedAt: now.Add(-2 * approvalRedisRecoveryGrace), ExpiresAt: now.Add(10 * time.Minute),
 	}
 	ctx := context.Background()
 	if err := store.Create(ctx, record); err != nil {

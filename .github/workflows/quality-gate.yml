@@ -35,6 +35,16 @@ jobs:
           go mod download
           go mod verify
 
+      - name: Verify CI script references exist
+        run: |
+          grep -rhoE 'scripts/[a-zA-Z0-9_.-]+\.sh' .github/workflows/*.yml | sort -u |
+          while read -r script; do
+            test -f "$script" || { echo "::error::CI references missing script $script"; exit 1; }
+          done
+
+      - name: Verify Docker build context
+        run: scripts/check-docker-context.sh
+
       - name: Run static analysis
         run: go vet ./...
 
@@ -45,7 +55,7 @@ jobs:
         run: go test -race ./...
 
       - name: Generate Go coverage evidence
-        run: scripts/check-go-coverage.sh
+        run: scripts/coverage.sh
 
       - name: Build embedded console
         working-directory: webui

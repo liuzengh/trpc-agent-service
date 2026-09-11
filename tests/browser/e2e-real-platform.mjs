@@ -121,23 +121,30 @@ async function createTenantAndAuthorize(page) {
     await checkbox.waitFor({ timeout: 10000 })
     if (!(await checkbox.isChecked())) await checkbox.check()
   }
-  await backendSection.getByRole('button', { name: '保存数据后端授权', exact: true }).click()
-  await page.getByText(`已更新 ${tenantName} 的数据后端授权`, { exact: true }).waitFor({ timeout: 10000 })
+  // The resource policy dialog saves every section through one footer action
+  // (“保存授权”) instead of per-section buttons.
+  await policy.getByRole('button', { name: '保存授权', exact: true }).click()
+  await page.getByText(`已保存 ${tenantName} 的资源授权`, { exact: true }).waitFor({ timeout: 10000 })
 
-  const modelSection = policy.locator('section[aria-label="模型资产授权"]')
+  // The dialog renders one policy section at a time, so switch to the model tab
+  // before touching the model authorization checkboxes.
+  await policy.getByRole('tab', { name: '模型', exact: true }).click()
+  const modelSection = policy.locator('section[aria-label="模型授权"]')
   const modelCheckbox = modelSection.locator('label').filter({ hasText: modelName }).getByRole('checkbox')
   await modelCheckbox.waitFor({ timeout: 10000 })
   if (!(await modelCheckbox.isChecked())) await modelCheckbox.check()
-  await modelSection.getByRole('button', { name: '保存模型授权', exact: true }).click()
-  await page.getByText(`已更新 ${tenantName} 的模型授权`, { exact: true }).waitFor({ timeout: 10000 })
+  await policy.getByRole('button', { name: '保存授权', exact: true }).click()
+  await page.getByText(`已保存 ${tenantName} 的资源授权`, { exact: true }).waitFor({ timeout: 10000 })
 
   // “关闭”不能隐式保存未提交的授权变更；重新打开应回到服务端已保存状态。
   await modelCheckbox.uncheck()
-  await policy.getByRole('button', { name: '关闭', exact: true }).click()
+  // With unsaved changes the footer dismiss button reads “取消”, not “关闭”.
+  await policy.getByRole('button', { name: '取消', exact: true }).click()
   await policy.waitFor({ state: 'detached' })
   await tenantRow.getByRole('button', { name: '资源授权', exact: true }).click()
   const reopenedPolicy = page.getByRole('dialog', { name: '资源授权' })
-  const reopenedModel = reopenedPolicy.locator('section[aria-label="模型资产授权"] label').filter({ hasText: modelName }).getByRole('checkbox')
+  await reopenedPolicy.getByRole('tab', { name: '模型', exact: true }).click()
+  const reopenedModel = reopenedPolicy.locator('section[aria-label="模型授权"] label').filter({ hasText: modelName }).getByRole('checkbox')
   await reopenedModel.waitFor({ timeout: 10000 })
   expect(await reopenedModel.isChecked(), '关闭资源授权弹窗后重新打开应恢复已保存的模型授权')
   await reopenedPolicy.getByRole('button', { name: '关闭', exact: true }).click()

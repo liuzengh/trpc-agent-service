@@ -10,9 +10,12 @@ bin
 data
 docs
 examples
-tests
+tests/browser
 tests/browser/node_modules
 tests/browser/artifacts
+tests/capacity
+tests/e2e
+tests/infrastructure
 webui/node_modules
 webui/dist
 webui/coverage
