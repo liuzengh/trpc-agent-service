@@ -1,0 +1,134 @@
+# Tenant & model configuration template.
+# Copy to config.yaml and fill in real values:  cp config.example.yaml config.yaml
+# config.yaml is gitignored — never commit real API keys.
+#
+# MODEL_API_KEY / MODEL_NAME / MODEL_BASE_URL environment variables, if set,
+# override the default tenant's model settings (dev convenience).
+# STORAGE_SESSION_BACKEND / STORAGE_SESSION_REDIS_URL override the storage
+# section below the same way; AGENT_MESSAGE_TIMEOUT /
+# AGENT_MAX_CONCURRENCY_PER_TENANT / AGENT_MAX_LLM_CALLS override the agent
+# section — which is how a container or a Pod tunes the envelope without editing
+# a mounted file. CONTROLPLANE_MODE / CONTROLPLANE_MYSQL_DSN do the same for
+# the block below.
+
+default_tenant: demo
+
+# Control plane (second batch, approved plan). "legacy" is the file-backed
+# behaviour this project shipped first: config.yaml is authoritative and the
+# Redis runtime store is a hot-update copy. "mysql" makes a MySQL 8.4 database
+# the source of truth for tenants, apps, immutable revisions, channel/tool/
+# knowledge bindings, and the admin credentials that manage them — at which
+# point the Redis snapshot is no longer consulted at boot, and YAML keeps only
+# what it must: the DSN itself and the deploy-only settings below.
+#
+# Switching to mysql is a deliberate, one-way move per deployment: run
+#   trpc-service -migrate           # apply schema
+#   trpc-service -bootstrap-admin ... # create the first tenant admin
+# before starting any role in mysql mode; see docs/部署说明.md.
+# control_plane:
+#   mode: legacy                      # legacy (default) | mysql
+#   mysql_dsn: user:pass@tcp(127.0.0.1:3306)/tas  # required for mode: mysql
+
+# Shared session backend. Omit the whole block
+# for the in-process memory default; switch to redis for restart-safe and
+# future multi-node sessions. Local redis:
+#   docker run -d --name redis -p 6379:6379 redis:7-alpine
+# storage:
+#   session:
+#     backend: redis                     # memory (default) | redis
+#     redis_url: redis://127.0.0.1:6379  # required for redis; rediss:// for TLS
+#     key_prefix: "trpc-agent-service:"  # optional, this is the default
+#     session_ttl: 72h                   # optional, 0/omit = never expire
+
+# Governance & observability (proposal doc 3.5). Every block below is
+# optional; the shown values are the defaults, so omit blocks you don't
+# need to keep the file clean.
+# log:
+#   level: info        # debug | info | warn | error
+#   json: false        # true = JSON encoding for container deployments
+# audit:
+#   file: data/audit.jsonl   # append-only JSONL trail; omit = log-only audit
+#   max_size_mb: 0           # >0 rotates the trail at this size (e.g. 64)
+#   max_backups: 3           # rotated generations kept (default 3 once rotation is on)
+# admin:
+#   token: REPLACE_WITH_A_LONG_RANDOM_TOKEN  # or inject ADMIN_TOKEN (preferred)
+# telemetry:
+#   traces:
+#     exporter: off                          # off | stdout | otlp
+#     endpoint: http://127.0.0.1:4318        # required for otlp (OTLP/HTTP)
+#   metrics:
+#     exporter: off                          # off | stdout | otlp
+#     endpoint: http://127.0.0.1:4318        # required for otlp (OTLP/HTTP)
+#     interval: 15s                          # push interval, default 15s
+
+# Runtime envelope of one message.
+# Three writers, in increasing order of convenience:
+#   1. this block (edit + restart),
+#   2. the AGENT_* variables above (restart, but no file edit),
+#   3. PUT /admin/settings (live). GET renders the effective values, so the
+#      response can be edited and PUT back; an omitted message_timeout or
+#      max_llm_calls means the default, and 0 concurrency means unlimited. A
+#      change made over HTTP is persisted here, so it survives the next restart.
+# All three land without a restart, but by different routes: the gateway
+# re-reads the timeout and the quota per message, while the call cap is baked
+# into each tenant's runner, so it applies when the commit rebuilds them.
+# Omit the block for the defaults shown.
+# agent:
+#   message_timeout: 2m              # end-to-end budget: queueing behind the
+#                                    #   same session + model call + stream drain.
+#                                    #   On expiry the user gets a timeout notice
+#                                    #   and the trail records error_type=timeout.
+#   max_concurrency_per_tenant: 0    # in-flight messages per tenant; 0 = unlimited.
+#                                    #   Over the cap a message is refused at once
+#                                    #   (never queued) and audited as throttled.
+#                                    #   The cap is per replica, not per cluster.
+#   max_llm_calls: 8                 # ceiling on model calls one message may cause.
+#                                    #   A tool-free answer needs 1, the rest is
+#                                    #   headroom for tool loops. Unlike the quota,
+#                                    #   0 means this default rather than "no cap":
+#                                    #   the framework calls the model again
+#                                    #   whenever a reply is not final, so an
+#                                    #   upstream that answers 200 with an empty
+#                                    #   stream otherwise costs thousands of calls
+#                                    #   a second until the budget runs out.
+
+tenants:
+  - id: demo
+    name: Demo Tenant
+    model:
+      name: deepseek-v4-flash        # model name of an OpenAI-compatible service
+      api_key: REPLACE_WITH_YOUR_KEY # secret, keep out of git
+      base_url: https://api.deepseek.com  # optional; omit for official OpenAI
+    # WeCom (企业微信) binding — callback URL is
+    # https://<public-host>/callback/wecom/<tenant id>
+    # A declared wecom block must be complete or startup fails.
+    # channels:
+    #   wecom:
+    #     corp_id: ww1234567890abcdef        # 企业 ID
+    #     corp_secret: REPLACE_WITH_SECRET   # 应用 Secret
+    #     agent_id: 1000002                  # 应用 AgentId（数字）
+    #     token: REPLACE_WITH_TOKEN          # 回调配置 Token
+    #     encoding_aes_key: REPLACE_43_CHARS # 回调配置 EncodingAESKey，43 位
+    # WeChat customer service (微信客服) binding — callback URL is
+    # https://<public-host>/callback/wechat_kf/<tenant id>
+    # No agent_id: replies target the open_kfid carried by each callback
+    # event. A declared wechat_kf block must be complete or startup fails.
+    # channels:
+    #   wechat_kf:
+    #     corp_id: ww1234567890abcdef        # 企业 ID
+    #     secret: REPLACE_WITH_KF_SECRET     # 微信客服 Secret（与企微应用 Secret 不同）
+    #     token: REPLACE_WITH_TOKEN          # 回调配置 Token
+    #     encoding_aes_key: REPLACE_43_CHARS # 回调配置 EncodingAESKey，43 位
+    # Per-tenant guardrails (proposal doc 3.5). Omit the block to allow
+    # everything; also manageable at runtime via PUT /admin/tenants/{id}.
+    # guardrails:
+    #   max_input_bytes: 8192                  # reject oversized input; 0/omit = no limit
+    #   blocked_keywords: ["敏感词"]            # input tripwire, case-insensitive
+    #   output_blocked_keywords: ["内部资料"]   # streaming output tripwire, cuts the reply off
+
+  - id: demo-alt
+    name: Demo Tenant Alt
+    model:
+      name: deepseek-chat
+      api_key: REPLACE_WITH_YOUR_KEY
+      base_url: https://api.deepseek.com

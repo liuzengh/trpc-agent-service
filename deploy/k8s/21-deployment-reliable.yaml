@@ -1,0 +1,388 @@
+# The reliable-mode roles, as separate Deployments over the same image
+# (approved plan, P5: "更新 Compose/K8s 分角色清单").
+#
+# One image, four processes: the gateway Deployment above serves HTTP, and
+# these three serve the durable pipeline — worker (claim → execute → commit),
+# delivery (reply_outbox → channel send) and jobs (notifications → inbox,
+# plus the outbox_events queue: document indexing, memory, summaries).
+#
+# The label discipline is load-bearing. The gateway Deployment's selector is
+# the bare label `app: trpc-agent-service`, and a Deployment's selector also
+# governs which Pods its ReplicaSet believes it owns — a reliable Pod that
+# carried that label would be *adopted* by the gateway ReplicaSet and deleted
+# during its next rollout. These Pods therefore carry
+# `app.kubernetes.io/name` + a distinct `component`, and no bare `app:`.
+# The gateway Service (selector `app: trpc-agent-service`) consequently never
+# routes to them, which is correct: none of the three listens on a port.
+#
+# No probes on the roles, and that is a fact of the image, not an omission:
+# the runtime image is FROM scratch (no shell, no curl), and the reliable
+# roles serve no HTTP surface to probe. Their health signal is the process
+# staying alive while it holds leases; a crash exits the container and the
+# kubelet restart policy is what recovers it. Liveness probes exist for
+# wedged processes — a role that cannot reach MySQL already exits its loops
+# into error logs rather than hanging, and the lease-sweep design tolerates
+# everything short of process death.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-worker
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: worker
+spec:
+  # Two replicas from day one: the claim loop's fencing and SKIP LOCKED only
+  # mean something when a second worker exists to take over from a dead one.
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: worker
+  # A worker cut off mid-run does not need a long grace period: the lease is
+  # the recovery mechanism (30s TTL), and waiting only delays the takeover.
+  # SIGTERM stops claims; the fence makes whatever was in flight harmless.
+  terminationGracePeriodSeconds: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: copy-config
+          image: busybox:1.36
+          command: ["sh", "-c", "cp /config-src/config.yaml /config/config.yaml"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config-src
+              mountPath: /config-src
+              readOnly: true
+            - name: config
+              mountPath: /config
+          resources:
+            requests:
+              cpu: 10m
+              memory: 8Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+      containers:
+        - name: worker
+          image: trpc-agent-service:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["-role", "worker", "-config", "/config/config.yaml"]
+          envFrom:
+            # MODEL_API_KEY rides in the environment: model profile api_key_ref
+            # values of the form env:MODEL_API_KEY resolve through the allowlist
+            # below (trpcservice/secrets).
+            - secretRef:
+                name: trpc-agent-model
+          env:
+            - name: CONTROLPLANE_MODE
+              value: "mysql"
+            - name: CONTROLPLANE_MYSQL_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-reliable
+                  key: CONTROLPLANE_MYSQL_DSN
+            - name: RELIABLE_SECRET_ENV_ALLOW
+              value: "MODEL_API_KEY"
+            # Per-Pod identity for leases and fences: two replicas of the same
+            # image on one node must never share a WORKER_ID, and the Pod name
+            # is unique by construction.
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: GOMAXPROCS
+              value: "1"
+            - name: GOMEMLIMIT
+              value: "448MiB"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: config-src
+          configMap:
+            name: trpc-agent-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+        - name: config
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-delivery
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: delivery
+spec:
+  # One replica is enough while the sending channel serialises per binding;
+  # the reply_outbox lease makes two safe the day throughput needs it.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: delivery
+  terminationGracePeriodSeconds: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: delivery
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: copy-config
+          image: busybox:1.36
+          command: ["sh", "-c", "cp /config-src/config.yaml /config/config.yaml"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config-src
+              mountPath: /config-src
+              readOnly: true
+            - name: config
+              mountPath: /config
+          resources:
+            requests:
+              cpu: 10m
+              memory: 8Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+      containers:
+        - name: delivery
+          image: trpc-agent-service:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["-role", "delivery", "-config", "/config/config.yaml"]
+          env:
+            - name: CONTROLPLANE_MODE
+              value: "mysql"
+            - name: CONTROLPLANE_MYSQL_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-reliable
+                  key: CONTROLPLANE_MYSQL_DSN
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: GOMAXPROCS
+              value: "1"
+            - name: GOMEMLIMIT
+              value: "448MiB"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: config-src
+          configMap:
+            name: trpc-agent-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+        - name: config
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-jobs
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: jobs
+spec:
+  # The jobs role holds two leases of its own (KF pull scope, outbox row); one
+  # replica is the honest default until indexing volume justifies a second.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: jobs
+  terminationGracePeriodSeconds: 30
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: jobs
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: copy-config
+          image: busybox:1.36
+          command: ["sh", "-c", "cp /config-src/config.yaml /config/config.yaml"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config-src
+              mountPath: /config-src
+              readOnly: true
+            - name: config
+              mountPath: /config
+          resources:
+            requests:
+              cpu: 10m
+              memory: 8Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+      containers:
+        - name: jobs
+          image: trpc-agent-service:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["-role", "jobs", "-config", "/config/config.yaml"]
+          env:
+            - name: CONTROLPLANE_MODE
+              value: "mysql"
+            - name: CONTROLPLANE_MYSQL_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-reliable
+                  key: CONTROLPLANE_MYSQL_DSN
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # The knowledge pipeline is optional per deployment: these four
+            # endpoints are what enable it, and marking the keys optional keeps
+            # a document-less deployment bootable (a revision that pins
+            # knowledge_search in such a deployment fails loudly at assembly).
+            - name: KNOWLEDGE_QDRANT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-reliable
+                  key: KNOWLEDGE_QDRANT_URL
+                  optional: true
+            - name: KNOWLEDGE_MINIO_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-reliable
+                  key: KNOWLEDGE_MINIO_ENDPOINT
+                  optional: true
+            - name: KNOWLEDGE_MINIO_USER
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-reliable
+                  key: KNOWLEDGE_MINIO_USER
+                  optional: true
+            - name: KNOWLEDGE_MINIO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-reliable
+                  key: KNOWLEDGE_MINIO_PASSWORD
+                  optional: true
+            - name: EMBEDDING_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-reliable
+                  key: EMBEDDING_BASE_URL
+                  optional: true
+            - name: EMBEDDING_MODEL
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-reliable
+                  key: EMBEDDING_MODEL
+                  optional: true
+            - name: GOMAXPROCS
+              value: "1"
+            - name: GOMEMLIMIT
+              value: "448MiB"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: config-src
+          configMap:
+            name: trpc-agent-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+        - name: config
+          emptyDir: {}

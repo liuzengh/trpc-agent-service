@@ -1,0 +1,48 @@
+# Overrides that let the reliable stack and the default stack coexist.
+#
+# Both are the same compose project, and several services hard-code a
+# container_name (a deliberate choice the legacy drill scripts depend on). A
+# second `up` with the same names does not create a second stack — it fails —
+# so the reliable E2E runs in its own project (`-p tas-reliable`) with these
+# names and ports remapped. Nothing here changes behaviour; it only removes
+# the collisions.
+#
+# Used as:
+#   docker compose -p tas-reliable \
+#       -f docker-compose.yml -f deploy/compose/reliable.override.yml \
+#       --profile reliable up -d --build mysql fake-model worker-a worker-b delivery jobs
+
+services:
+  mysql:
+    container_name: tas-rel-mysql
+
+  redis:
+    # The projection store of the reliable stack (session_project jobs). It
+    # has no published port, so only the container name needs remapping to
+    # coexist with the default stack's redis.
+    container_name: tas-rel-redis
+
+  gateway:
+    # Only a rename: the service itself is reliable-profile-only and its
+    # compose port already defaults to 9020 (RELIABLE_GATEWAY_PORT), which
+    # cannot collide with the default stack's app on 8080.
+    container_name: tas-rel-gateway
+
+  fake-model:
+    container_name: tas-rel-model
+    # 9019, not 9009: the default stack owns 9009, and the two stacks are
+    # expected to run side by side on one machine.
+    ports:
+      - "${RELIABLE_MODEL_PORT:-9019}:9009"
+
+  qdrant:
+    container_name: tas-rel-qdrant
+    # 6334: the developer's own qdrant container (if any) owns 6333; the E2E
+    # only needs a host port for its readiness probe.
+    ports:
+      - "${RELIABLE_QDRANT_PORT:-6334}:6333"
+
+  minio:
+    container_name: tas-rel-minio
+    ports:
+      - "${RELIABLE_MINIO_PORT:-9011}:9000"
