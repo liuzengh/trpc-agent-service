@@ -212,7 +212,7 @@ type listResponse struct {
 }
 
 // settingsDTO is the runtime envelope of one message (proposal doc 2.3, and
-// docs/spec-deployment-fault-drill.md §2.3). GET renders the effective values,
+// deployment configuration). GET renders the effective values,
 // so a client can round-trip the response unchanged; PUT replaces the envelope
 // whole, with the same zero semantics the config file uses — an omitted
 // message_timeout or max_llm_calls means the documented default, and 0

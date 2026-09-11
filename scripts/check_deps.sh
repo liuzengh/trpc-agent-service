@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Dependency freeze gate (docs/spec-deployment-fault-drill.md §2.1).
+# Dependency freeze gate.
 #
 #   scripts/check_deps.sh            offline gate: verify + baseline diff
 #   scripts/check_deps.sh --tidy     also require `go mod tidy` to be a no-op
-#   scripts/check_deps.sh --update   regenerate docs/deps-baseline.txt
+#   scripts/check_deps.sh --update   regenerate docs/依赖基线.txt
 #
 # Every mode runs offline: `go mod tidy` only resolves against the warm module
 # cache, `go mod verify` only hashes it, and the baseline diff reads go.mod as
@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-BASELINE="docs/deps-baseline.txt"
+BASELINE="docs/依赖基线.txt"
 
 # direct_deps prints the module's own go/toolchain directives plus every
 # direct require of go.mod as "path version", sorted. Indirect requires are

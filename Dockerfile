@@ -1,7 +1,7 @@
 # Two stages: build in golang:1.24 (already present on this machine), run from
 # scratch. There is deliberately no `# syntax=` directive at the top — it makes
 # the builder fetch the Dockerfile frontend image from Docker Hub, which is
-# unreachable here (docs/spec-deployment-fault-drill.md fact #1). Everything
+# unreachable in the build environment. Everything
 # below works on the classic builder and pulls nothing at build time except the
 # Go module cache.
 
@@ -68,7 +68,7 @@ ENTRYPOINT ["/trpc-service"]
 # A missing /config/config.yaml is not an error: config.Load falls back to the
 # MODEL_* environment variables, so `docker run -e MODEL_API_KEY=... -e
 # MODEL_NAME=... image` serves with no mounts at all. Mount a real config at
-# /config/config.yaml for anything beyond a smoke test (deploy/README.md).
+# /config/config.yaml for anything beyond a smoke test (deploy/部署说明.md).
 CMD ["-addr", ":8080", "-config", "/config/config.yaml"]
 
 # --timeout must stay above the binary's own 8s probe budget

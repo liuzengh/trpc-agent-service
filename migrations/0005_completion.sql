@@ -1,4 +1,4 @@
--- 0005_completion.sql — the completion batch (docs/spec-platform-completion.md):
+-- 0005_completion.sql — reply mailbox and rollout data model.
 -- the webchat mailbox marker and the rollout table.
 --
 -- Two changes, one file: both belong to the same batch of work, and neither

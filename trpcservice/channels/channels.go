@@ -170,6 +170,8 @@ type Governance struct {
 	LimitsFor func() config.AgentConfig
 	Audit     *audit.Logger
 	Metrics   *metrics.Recorder
+	// Budget tracks per-tenant spending; nil means no budget enforcement.
+	Budget *BudgetTracker
 }
 
 // WithGovernance attaches the governance hooks; main wires it once at boot.
@@ -428,6 +430,24 @@ func (g *Gateway) dispatch(parent context.Context, a Adapter, in *InboundMessage
 		return
 	}
 
+	// Budget pre-flight: check call count and estimated cost before the
+	// model call, so a tenant over its budget gets a fast rejection.
+	if g.gov.Budget != nil {
+		pol := g.policy(in.TenantID)
+		if !g.gov.Budget.Spend(in.TenantID, 0, 0, 0,
+			pol.MaxPromptTokens, pol.MaxCompletionTokens, pol.MaxCostCents, pol.MaxCalls,
+			pol.BudgetResetInterval) {
+			g.gov.Audit.Log(audit.Record{
+				TraceID: traceID, Event: audit.EventThrottled,
+				TenantID: in.TenantID, Channel: string(in.Channel), SessionID: in.SessionID(),
+				Stage: "admission", Rule: "budget", Decision: audit.DecisionBlock,
+			})
+			g.gov.Metrics.Message(in.TenantID, string(in.Channel), resultThrottled)
+			g.reply(ctx, a, in, ThrottleText, audit.DecisionBlock)
+			return
+		}
+	}
+
 	start := time.Now()
 	// One span wraps the whole model interaction (call plus stream drain) so
 	// the trace shows where the dispatch time actually went.
@@ -519,6 +539,13 @@ drain:
 	g.gov.Metrics.Tokens(in.TenantID, "completion", completionTokens)
 	g.gov.Metrics.Cost(in.TenantID,
 		computeCostMicroCents(promptTokens, completionTokens, lim.PromptCostPer1K, lim.CompletionCostPer1K))
+	// Budget post-flight: record actual token and cost usage now that we
+	// know the real counts from the completed model call.
+	if g.gov.Budget != nil {
+		costCents := int64(promptTokens)*int64(lim.PromptCostPer1K)/1000 +
+			int64(completionTokens)*int64(lim.CompletionCostPer1K)/1000
+		g.gov.Budget.Record(in.TenantID, promptTokens, completionTokens, costCents)
+	}
 
 	result, notice := resultOK, ""
 	replyDecision := audit.DecisionOK

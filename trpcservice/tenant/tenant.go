@@ -1,6 +1,8 @@
 // Package tenant models multi-tenant isolation for config, data, tools, and keys.
 package tenant
 
+import "time"
+
 // ModelConfig selects the LLM backend of one tenant. Secrets are loaded from
 // the gitignored config file (or MODEL_* environment overrides) and must
 // never be written to logs, traces, or error reports.
@@ -64,6 +66,18 @@ type Guardrails struct {
 	BlockedKeywords []string `yaml:"blocked_keywords,omitempty" json:"blocked_keywords,omitempty"`
 	// OutputBlockedKeywords trip the streaming output checker.
 	OutputBlockedKeywords []string `yaml:"output_blocked_keywords,omitempty" json:"output_blocked_keywords,omitempty"`
+	// Budget limits. Zero means unlimited (no budget enforcement).
+	// MaxPromptTokens caps prompt tokens per reset window.
+	MaxPromptTokens uint64 `yaml:"max_prompt_tokens,omitempty" json:"max_prompt_tokens,omitempty"`
+	// MaxCompletionTokens caps completion tokens per reset window.
+	MaxCompletionTokens uint64 `yaml:"max_completion_tokens,omitempty" json:"max_completion_tokens,omitempty"`
+	// MaxCostCents caps model cost in cents per reset window.
+	MaxCostCents uint64 `yaml:"max_cost_cents,omitempty" json:"max_cost_cents,omitempty"`
+	// MaxCalls caps the number of model calls per reset window.
+	MaxCalls uint64 `yaml:"max_calls,omitempty" json:"max_calls,omitempty"`
+	// BudgetResetInterval is the duration after which counters reset
+	// (e.g. "24h" or "720h"). Zero means no reset (lifetime budget).
+	BudgetResetInterval time.Duration `yaml:"-" json:"-"`
 }
 
 // Tools is the tenant-scoped capability policy. Allowed controls which built-in

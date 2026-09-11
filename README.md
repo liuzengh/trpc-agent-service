@@ -1,309 +1,75 @@
-# 基于 tRPC-Agent-Go 设计多租户节点化 Agent 部署平台
+# 基于 tRPC-Agent-Go 的多租户 Agent 部署平台
 
-## 背景和价值
+本项目提供一个面向企业 IM 场景的多租户 Agent 平台参考实现。平台以
+tRPC-Agent-Go 为执行框架，提供租户隔离、Agent 发布、企业微信与微信客服接入、
+共享会话、知识库、受控工具、审计和可观测能力。
 
-企业在落地 Agent 应用时，通常不会只部署一个单体机器人，而是希望面向多个部门、多个业务线、多个 IM 入口和多个数据后端，构建一套可统一管理的 Agent 平台。例如：客服团队希望把 Agent 接入企业微信，研发团队希望接入内部群机器人，运营团队希望接入微信公众号或微信客服，不同租户又需要隔离会话、记忆、知识库、工具权限和审计日志。
+## 交付物
 
-[tRPC-Agent-Go](https://github.com/trpc-group/trpc-agent-go) 已经具备 Agent 编排（LLMAgent / GraphAgent / Chain / Parallel / Cycle）、Tool / MCP、Session、Memory、Knowledge、Artifact、Plugin / Guardrail、Telemetry、HTTP 服务化（OpenAI-compatible / AG-UI / A2A）、OpenClaw / IM 通道等能力。该题要求基于这些能力设计一个“多租户、可节点化部署、支持多后端数据同步、可接入微信 / 企业微信等 IM 软件”的生产级方案。
+项目文档按交付物拆分，设计目标、实现边界和已提供的代码入口在
+[交付物说明](docs/交付物说明.md) 中统一索引。
 
-这个题目解决的业务痛点是：企业希望把 Agent 能力从单点 demo 扩展成平台化服务，同时满足租户隔离、弹性部署、数据一致性、IM 触达、审计合规和后端可替换等要求。它的价值在于把框架能力真正映射到企业级 Agent 平台架构，而不是只停留在单个 Agent 进程。
-
-本题以 **tRPC-Agent-Go** 为实现框架，对称于基于 tRPC-Agent-Python 的同名题目。
-
-### 任务描述
-
-请设计一个基于 tRPC-Agent-Go 的多租户节点化 Agent 部署平台。平台需要支持多个租户创建和部署自己的 Agent，每个租户可以绑定不同 IM 通道、选择不同数据后端、配置不同工具权限和知识库，并允许多个 Agent 节点水平扩展。系统需要考虑跨节点会话路由、数据同步、后端适配、IM 消息接入、监控审计和故障恢复。
-
-本题以架构设计为主，可以包含少量关键 Go 伪代码、接口定义或数据模型示例。不要求实现完整系统，但方案必须足够具体，能指导后续工程落地。
-
-## 具体要求
-
-### 多租户与节点部署
-
-- 设计租户模型，至少包含 `tenant_id`、应用配置、模型配置、工具权限、IM 通道配置、数据后端配置、审计策略。
-- 设计节点部署拓扑，说明 Agent Gateway、Agent Worker、Channel Adapter、Storage Adapter、Admin API、Telemetry Collector 等组件如何协作。可对照 tRPC-Agent-Go 中的 `runner.Runner`、`server/*`、`openclaw` Gateway 与 Channel 的职责划分。
-- 支持多节点水平扩展，说明用户消息如何路由到正确租户和正确 session。
-- 说明是否需要 sticky session；如果不需要，说明如何依赖共享 Session / Memory 后端（例如 `session/redis`、`session/mysql`、`session/postgres`）实现无状态 Worker。
-- 设计租户隔离机制，包括配置隔离、数据隔离、工具权限隔离、日志脱敏和密钥管理。
-
-### 数据同步与多后端支持
-
-- 支持不同租户选择不同数据后端，例如 InMemory、Redis、SQL、向量库、对象存储或外部 Memory 服务。tRPC-Agent-Go 已提供 Session（inmemory / redis / mysql / postgres / sqlite / mongodb 等）、Memory、Knowledge、Artifact 以及 `storage`（redis / mysql / postgres / s3 / qdrant / milvus 等）适配，方案需说明如何在平台层做租户级选择与路由。
-- 设计统一的数据访问抽象，说明 Session、Memory、Summary、Artifact、Knowledge、Audit Log 分别如何存储。
-- 设计数据同步策略，至少覆盖：
-  - 多节点并发写入同一 session 的一致性。
-  - Session event、state、summary 的更新顺序。
-  - Memory 写入后的跨节点可见性。
-  - 后端从 Redis 迁移到 SQL 或从本地向量库迁移到远端向量库时的数据迁移方案。
-  - IM 消息重复投递时的幂等处理。
-- 说明不同后端的一致性取舍，例如强一致、最终一致、读写延迟、成本和运维复杂度。
-- 给出一个最小数据模型或表结构示例，至少包含 tenant、agent app、session、message/event、memory、summary、channel binding、audit log。
-
-### IM 软件接入
-
-- 设计 IM Channel Adapter，支持企业微信、微信客服、微信公众号、Telegram 或其他 IM 通道中的至少两类。可复用并扩展 tRPC-Agent-Go 的 OpenClaw Channel 模型。
-- 说明外部 IM 消息如何转换为 tRPC-Agent-Go 的用户输入（`model.Message` / `runner.Runner.Run`），Agent Event 如何转换为 IM 回复、流式消息或卡片消息。
-- 设计 IM 账号和租户绑定方式，包括 webhook URL、token、secret、回调验签、消息去重、用户身份映射。
-- 说明群聊和单聊的 `session_id` 生成规则，以及用户跨群、跨租户时的隔离策略。
-- 考虑 IM 平台限制，例如消息长度、频率限制、异步回复、图片 / 文件消息、撤回或失败重试。
-
-### 治理、监控和安全
-
-- 使用 Plugin / Guardrail / Callbacks 设计租户级治理策略，例如工具白名单、敏感信息脱敏、预算限制、危险工具二次确认、IM 用户权限校验。
-- 设计监控指标，例如请求量、模型调用耗时、工具调用耗时、IM 投递成功率、错误率、token 消耗、每租户成本、Session 后端延迟。
-- 说明如何接入 OpenTelemetry 或等价 tracing，要求 trace 能串起 IM callback、Runner 执行、Tool 调用、Session / Memory 读写和 IM 回复。
-- 设计审计日志字段，至少包含 `tenant_id`、`channel`、`user_id`、`session_id`、`agent_name`、`tool_name`、`decision`、`latency`、`error_type`、`cost`、`trace_id`。
-- 说明密钥管理和脱敏策略，IM token、模型 API key、数据库密码不能明文出现在日志、trace 或错误报告中。
-
-### 故障恢复与运维
-
-- 设计节点故障、IM 重试、数据库短暂不可用、模型超时、工具执行失败时的降级策略。Go 侧需同时说明 `context.Context` 取消、goroutine 生命周期和 Runner 事件通道排空，避免泄漏。
-- 说明如何做灰度发布和租户级配置回滚。
-- 说明如何做容量评估，例如每节点并发 session 数、平均 token 消耗、Redis / SQL QPS、IM 回调峰值。
-- 设计最小可运行部署方案和生产推荐部署方案，可以使用 Docker Compose、Kubernetes 或等价部署方式描述。
-
-### 交付物
-
-- 一份架构设计文档，建议 2000 – 4000 字。
-- 一张系统架构图，展示 Gateway、Worker、Channel Adapter、Storage Adapter、Plugin / Guardrail、Telemetry、数据库和 IM 平台之间的关系。
-- 一张核心时序图，展示“企业微信用户发消息 → Agent 执行 → Tool 调用 → Session / Memory 写入 → IM 回复”的完整链路。
-- 一份数据模型设计，包含核心表结构或 JSON schema。
-- 一份数据同步和幂等策略说明。
-- 一份多后端适配方案，说明 Redis / SQL / 向量库 / 对象存储分别适合存什么。
-- 一份风险清单，列出至少 8 个生产风险及对应缓解措施。
-- 一份基于该设计的 GitHub 实现代码。
-
-## 题目难点
-
-- 多租户隔离不是只加一个 `tenant_id` 字段，还涉及配置、权限、密钥、数据、日志、工具和成本隔离。
-- 节点化部署要求 Agent Worker 尽量无状态，但 Agent 又天然依赖 Session、Memory、Summary 和工具上下文，需要设计可靠的共享状态层。
-- IM 通道存在消息乱序、重复投递、响应超时、长度限制和身份映射问题，不能简单等同于 HTTP chat API。
-- 不同后端的数据一致性能力不同，Redis、SQL、向量库、对象存储无法用同一种同步策略处理。
-- Agent 执行链路包含模型、工具、MCP、知识库、沙箱和外部系统，监控和审计必须跨组件串联。
-- 企业级平台必须考虑灰度、回滚、租户级限流、成本控制和合规审计。
-
-## 验收标准
-
-1. 架构方案必须覆盖多租户、节点化部署、数据同步、多后端支持、IM 接入、治理监控和故障恢复。
-2. 数据模型必须能表达 tenant、agent、channel binding、session、event、memory、summary、audit log 的关系。
-3. 必须说明至少两种 IM 通道的接入差异，其中至少包含微信或企业微信。
-4. 必须说明至少三类后端的数据存储和同步策略，例如 Redis、SQL、向量库或对象存储。
-5. 必须给出一条完整消息链路的时序说明，包含 `trace_id` 或 `request_id` 如何贯穿链路。
-6. 必须列出至少 8 个生产风险和缓解措施。
-7. 方案需要明确哪些能力可直接复用 tRPC-Agent-Go，哪些需要新增平台层模块。
-
-## 可直接复用的 tRPC-Agent-Go 能力对照
-
-| 平台需求 | 可复用的框架能力 | 需要新增的平台层 |
-| --- | --- | --- |
-| Agent 编排 | `agent/llmagent`、`agent/graph`、Chain / Parallel / Cycle | 租户级 Agent 注册、发布与路由 |
-| 执行入口 | `runner.Runner`（流式 Event、context 取消） | 多租户 Worker 调度、无状态水平扩展 |
-| Session / Memory / Artifact / Knowledge | `session`、`memory`、`artifact`、`knowledge` 及多后端实现 | 租户级后端选择、数据隔离与迁移 |
-| Tool / MCP / Skill | `tool`、MCP Tool、`skill` | 租户工具白名单与密钥注入 |
-| 治理 | Plugin / Guardrail / Callbacks | 租户策略下发、预算与审批 |
-| 服务化 | `server/openai`、`server/agui`、`server/a2a`、`server/trpcagent` | 统一 Gateway、Admin API |
-| IM 接入 | OpenClaw Gateway + Channel | 微信 / 企业微信等通道与租户绑定 |
-| 可观测性 | OpenTelemetry tracing / metrics | 租户维度审计、成本与合规 |
-
-## 代码目录
-
-下面只是一个示范目录，用来说明平台需要覆盖的职责分层。实现时不必严格按这个结构组织代码，只要模块边界清晰、能对应到设计方案即可。
-
-```txt
-|-- README.md              # 说明文档，包含设计、安装、使用
-|-- go.mod                 # Go module 定义
-|-- build.sh               # 构建项目
-|-- clean.sh               # 清理中间产物
-|-- coverage.sh            # 运行单测覆盖率
-|-- format.sh              # 格式化 Go 代码
-|-- lint.sh                # 静态检查
-|-- start.sh               # 启动服务
-|-- stop.sh                # 停止服务
-|-- data                   # 服务运行时数据
-|-- docs                   # 各模块说明与架构设计文档（含切片 spec）
-|-- deploy                 # Compose 配置副本、otel-collector 配置、K8s 清单
-|-- scripts                # e2e / 故障演练 / 冻结与部署门禁 / 假模型（python 版）
-|-- cmd
-|   |-- trpc-service       # 命令行入口，可直接启动服务
-|   `-- fake-model         # 故障可注入的假上游（与平台同一镜像、零第三方依赖）
-`-- trpcservice            # 源码
-    |-- agent              # 基于 tRPC-Agent-Go 的 Agent 定义
-    |-- channels           # 对接 IM 的 Channel Adapter
-    |-- config             # 租户与节点配置
-    |-- log                # 日志级别与脱敏
-    |-- metrics            # 监控指标
-    |-- skill              # 可运行的 Skill
-    |-- tenant             # 多租户模型与隔离
-    |-- tool               # 平台 Tool
-    |-- version.go         # 版本信息
-    |-- web                # 管理 / 对话页面
-    `-- workspace          # 工作目录，包含本地、容器等沙箱环境
-```
+- [架构设计方案](docs/架构设计方案.md)
+- [系统架构图](docs/系统架构图.md)
+- [核心时序图](docs/核心时序图.md)
+- [数据模型设计](docs/数据模型设计.md)
+- [数据同步与幂等策略](docs/数据同步与幂等策略.md)
+- [多后端适配方案](docs/多后端适配方案.md)
+- [风险清单](docs/风险清单.md)
+- [代码实现说明](docs/代码实现说明.md)
+- [部署说明](deploy/部署说明.md)
 
 ## 快速开始
 
-### 1. 本地跑（不需要 Docker）
+### 本地运行
 
 ```bash
-git clone https://github.com/liuzengh/trpc-agent-service.git
-cd trpc-agent-service
-
+cp config.example.yaml config.yaml
+# 在 config.yaml 中配置模型信息，或设置 MODEL_API_KEY
 ./build.sh
 ./start.sh
-./stop.sh          # 停止
+./stop.sh
 ```
 
-这条路需要一份配置，两种方式二选一：
+未提供 `config.yaml` 且未设置 `MODEL_API_KEY` 时，服务会退出并提示配置方式。
 
-```bash
-cp config.example.yaml config.yaml      # 改里面的 model.api_key
-# 或者不建文件，只导出环境变量（单租户开发形态）：
-export MODEL_API_KEY=sk-…             # 可选：MODEL_NAME（默认 gpt-4o-mini）、MODEL_BASE_URL
-```
+### Docker Compose
 
-仓库**不**带 `config.yaml`（它存 API key，已 gitignore）。两者都没有时进程会直接退出（rc=1）并把两条
-补救写在错误里：`load config: no config at config.yaml and MODEL_API_KEY unset; copy config.example.yaml …`。
-**注意 `start.sh` 用的是 `nohup … &` 且不查存活**，所以这种情况下它依旧会打印 `started: pid=…`；
-真正的错因在 `data/trpc-service.log` 里。不想碰这些的话，走下面第 2 条路（不需任何 key）。
-
-### 2. Docker 一条命令起栈（全程离线，不拉任何镜像）
+默认 Compose 使用项目内置的假模型，不需要真实 API Key。
 
 ```bash
 docker compose up -d --build
-curl localhost:8080/readyz        # {"status":"ready"}
-curl localhost:8080/healthz       # {"status":"ok"}
-docker compose down               # 拆栈（加 -v 才会删审计卷）
+curl localhost:8080/readyz
+curl localhost:8080/healthz
+docker compose down
 ```
 
-默认栈里**含一个故障可注入的假模型**（`fake-model`，与平台同一镜像、不同 entrypoint），
-原因是仓库不带 API key —— 指向真供应商的栈开箱连一条消息都答不了，联调与演练就没东西可断言。
-要接真供应商，把自己的配置文件挂过 `/config/config.yaml` 即可。
-另：`redis` **故意不发布端口**（宿主机的 6379 往往已被占），app 走 compose 网络访问 `redis:6379`。
+更多环境变量、可靠模式角色部署和 Kubernetes 配置见 [部署说明](deploy/部署说明.md)。
 
-### 3. 全链路联调（44 条断言）
-
-`scripts/e2e.sh` 只对一个**已在跑**的地址断言，不动容器：租户拓扑、健康探针、正常对话（逐 chunk
-+ 终态 `done`）、输入 guardrail 拦在模型调用**之前**、输出 tripwire 跳 chunk 截断、审计留痕与全链路
-`trace_id`。
+## 验证
 
 ```bash
-mkdir -p .smoke/e2e-cfg
-cp deploy/compose/config/config.yaml .smoke/e2e-cfg/config.yaml
-cat >> .smoke/e2e-cfg/config.yaml <<'YAML'
-
-telemetry:
-  traces:
-    exporter: stdout
-  metrics:
-    exporter: stdout
-    interval: 5s
-YAML
-
-CONFIG_DIR=./.smoke/e2e-cfg docker compose up -d --build
-bash scripts/e2e.sh --strict          # 44 PASS / 0 FAIL / 0 SKIP → E2E PASS
+go test ./...
+bash scripts/check_deps.sh
+bash scripts/check_deploy.sh
 ```
 
-两个绕不开的细节，都是实测出来的：
-
-- **为什么要追加 telemetry**：默认配置没有 `telemetry` 段，tracing 是关的，审计里的 `trace_id`
-  会全为空 —— 这是刻意行为（noop provider 会把 trace_id 渲染成全零，写进每一行是纯噪音），
-  **不是链路断了**。不开 tracing 时 §E 记 SKIP；要拿到「全链路 trace_id」的证据就得开。
-  用 `stdout` 而不是 `otlp`，因为平台没有 pull 式 `/metrics` 端点、而 collector 镜像拉不到；
-- **为什么用一次性副本**：脚本会装一个输出 tripwire 再还原（挂在 `trap` 上），而**任何一次 admin
-  写入都会重新 marshal 整个配置文件、把注释抹平**。别拿它对着仓库里那份跑。
-
-### 4. 故障演练矩阵 D1–D7（143 条断言）
-
-自包含：自己拷配置、自己起栈、自己注入故障、自己拆栈（挂在 `trap` 上，中途失败也不会把
-Redis 留在停止状态）。需要 Docker。
+需要 Docker 的集成验证：
 
 ```bash
-bash scripts/fault_drill.sh --strict       # 143 PASS / 0 FAIL / 0 SKIP → DRILL PASS
-bash scripts/fault_drill.sh --only D4,D6   # 只跑指定的
-bash scripts/fault_drill.sh --keep         # 跑完不拆栈，供人工取证
+bash scripts/e2e.sh --strict
+bash scripts/fault_drill.sh --strict
+bash scripts/reliable_e2e.sh
+bash scripts/reliable_fault_drill.sh
 ```
 
-| # | 注入 | 验什么 |
-| --- | --- | --- |
-| D1 | 模型挂死 30s + 预算 3s | 用户在 3s 级拿到超时话术；上游请求**被真取消**而不是被遗弃 |
-| D2 | 上游 500 / 429 | 错误话术回用户、原始报文进审计；**内部端点不泄给用户** |
-| D3 | 同一 `msg_id` 投两次 | 只执行一次，第二次静默 ACK（连 trace 都不开） |
-| D4 | 运行中 `docker stop redis` | `/readyz` 转 503（该摘流量）而 `/healthz` 不动（不该重启）；新消息拿错误回复而非挂死；起来后自愈且会话不丢 |
-| D5 | redis 未起时启动 app | **fail-fast**：`exited 1`、端口从未绑定、不进半死状态 |
-| D6 | `docker kill app` 后起回来 | 新进程从 Redis 重建对话（无状态节点 + 共享后端） |
-| D7 | 配额=1 + 慢模型，A 连发 3 条、B 发 1 条 | A 的超额被拒且**留痕**（审计 + 指标）；**B 完全不受影响** |
+## 目录
 
-每条 PASS 都带着实测量（耗时、审计字段、指标增量、退出码），所以日志本身就能当证据归档。
-
-### 5. 可靠模式全链路联调（74 条断言）
-
-`scripts/reliable_e2e.sh` 验的是**另一条链路**（第二批）：MySQL 为事实源，消息走
-Inbox → Worker（两个副本）→ 原子提交 → reply_outbox → Delivery 角色投递 → 假 KF
-上游；工具只能来自 revision 固定的绑定，每次调用进 `tool_calls` 账本；不碰 Redis，
-不需要真实 API key。它自己起栈、自己拆栈，用独立 compose 项目（`tas-reliable`）
-与默认栈共存。
-
-```bash
-bash scripts/reliable_e2e.sh                 # 74 PASS / 0 FAIL → RELIABLE E2E PASS
-RELIABLE_KEEP=1 bash scripts/reliable_e2e.sh # 跑完不拆栈，供人工取证
+```txt
+cmd/             服务与测试上游命令入口
+trpcservice/     平台实现
+migrations/      MySQL 数据模型迁移
+docs/            交付物文档
+deploy/          Compose、Kubernetes 与可观测配置
+scripts/         构建、门禁、联调与故障演练脚本
 ```
-
-证据里值得单独看的几条：一条消息在**两个 worker 竞争**下只被执行一次（上游模型
-调用计数 == 1）；`in_seq|head_seq|session_version` 随提交原子推进；第二条消息
-回到同一会话（`session_pk` 不变）；回复的投递目标（`ext-seed-1` + `wk1`）来自
-提交事务里写入的 reply route，而不是任何进程内存；**受控 HTTP 工具**从模型流式
-`tool_call` 到账本 `succeeded`、物理 attempt（200）与上游二轮调用全程留证；
-**write 工具超时**进入 unknown 阻断（队头不动、零回复、不重试），
-`-list-blocked` 查得出来、`-resolve-session cancelled` 处置后重跑成功，账本留下
-`unknown+cancelled` 与 `succeeded` 两段历史。
-
-两处如实标注：回调那一步用 SQL 模拟「已可靠记下 notification」（可靠 gateway 的
-HTTP 挂载点还没接，见下）；webchat / 企微 的可靠投递尚未接线，Delivery 对它们
-返回明确拒绝而不是静默成功。
-
-### 6. 可靠模式故障演练（29 条断言）
-
-`scripts/reliable_fault_drill.sh` 把可靠链路的三条恢复承诺变成真跑出来的断言：
-
-```bash
-bash scripts/reliable_fault_drill.sh   # 29 PASS / 0 FAIL → RELIABLE FAULT DRILL PASS
-```
-
-- **R1 kill -9 接管**：`docker kill -s KILL` 打死正在执行的 worker-a → worker-b 在
-  30s 租约到期后以更高 fence 接管，同一消息只提交一次（`attempts=2` 见证接管，
-  一个 execution、无残留租约、回复照常投递）。
-- **R2 MySQL 停机**：停机期间角色存活且不误标任何消息；恢复后消息照常完成，
-  `attempts=1`（停机不是失败，不会被当成重跑理由）。
-- **R3 Qdrant 停机**：冻结 jobs → ingest → 停向量库 → 放行 jobs；索引任务失败重试，
-  **文档绝不进入 ready**，失败原因落在队列行上；向量库恢复后任务靠退避重试自愈，
-  chunk 与索引计数最终一致。
-
-### 7. 门禁
-
-```bash
-bash scripts/check_deps.sh      # go.mod 冻结：直接依赖与基线一致（--tidy 验幂等）
-bash scripts/check_deploy.sh    # 部署产物结构门禁：58 条，离线可跑（不需 daemon）
-./format.sh && ./lint.sh && ./coverage.sh && go test ./...
-```
-
-### 取证目录
-
-`.smoke/` 是脚本的一次性证据目录（SSE 日志、审计切片、配置副本、演练日志），已 gitignore；
-两个脚本都会先清再写。注意审计落在**命名卷**上，`docker compose down` 不带 `-v` 时它会留着，
-所以脚本一律只看「本次新增的行」—— 否则上一轮的数据会冒充本轮结果。
-
-### 没验过的（如实标注）
-
-K8s 清单在集群里的实际行为（本机无 kind/minikube/k3d，只做了离线解码 + 字段对照）、
-otel-collector 真收到 span（镜像拉不到，只能用 stdout exporter）、Linux 宿主机上 UID 65534
-对挂载目录的写权（本机是 macOS，Docker Desktop 会自动映射）。详见
-[`deploy/README.md`](deploy/README.md) 与 [`docs/spec-deployment-fault-drill.md`](docs/spec-deployment-fault-drill.md)。
-
-可靠模式（第二批）同样只标到验过的为止：角色进程、双 worker 竞争、KF 拉取→入库→
-提交→投递（假 KF 上游）、重启不吃游标、受控工具全链路与 unknown 阻断→人工处置→
-重跑、三类文档 pipeline（上传→索引→ready→embedding），都在 `scripts/reliable_e2e.sh` 里真跑了受控工具与知识管道（P3/P4）；可靠故障矩阵（kill worker 接管、MySQL 停机、Qdrant 停机自愈）在 `scripts/reliable_fault_drill.sh` 里真跑了 29 条断言；
-**可靠 gateway 角色（企微/webchat 的接收端持久化与 HTTP 挂载）尚未接线**，投递侧
-也仅 微信客服 一个通道；delivery unknown 的容器级演练仍未编排（包级测试覆盖了
-unknown 挂起与人工处置，E2E 演练的是工具侧的同类路径）；K8s 分角色清单（gateway +
-worker/delivery/jobs 四个 Deployment）只做了离线渲染与字段门禁，集群行为未验。
-

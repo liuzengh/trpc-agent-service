@@ -7,7 +7,7 @@
 #
 # Honest status: this file has NOT been run against a real collector. The image
 # has to come from Docker Hub and Docker Hub is unreachable from this machine
-# (docs/spec-deployment-fault-drill.md fact #1), so per fact #3 the acceptance
+# in the build environment, so the acceptance
 # bar for everything in deploy/ that cannot be executed is "decodes offline and
 # every field matches the upstream schema" — not "observed working". What HAS
 # been verified is the sending side: telemetry.traces/metrics with

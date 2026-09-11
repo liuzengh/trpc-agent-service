@@ -1,7 +1,7 @@
 // Command fake-model is an OpenAI-compatible streaming model that never calls
 // a model. It exists so the whole platform loop (IM callback -> guardrails ->
 // model -> streaming reply) can be exercised offline, and so the fault drills
-// in docs/spec-deployment-fault-drill.md §2.6 can inject a misbehaving upstream
+// can inject a misbehaving upstream
 // on demand — no API key, no network, no python image (which the build host
 // cannot pull: spec fact #1).
 //

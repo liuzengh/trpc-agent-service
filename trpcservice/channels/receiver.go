@@ -110,7 +110,7 @@ func (rc *Receiver) recordNotification(ctx context.Context, tenantID, eventToken
 }
 
 // accept is the wecom/webchat durable step: resolve the binding's target
-// (app, current revision, profile versions) and commit the message into the
+// (app, revision, profile versions) and commit the message into the
 // inbox. The inbox's per-(binding, message id) unique key is the dedup: a
 // platform retry of the same delivery is a no-op here, not a second turn.
 func (rc *Receiver) accept(ctx context.Context, in *InboundMessage) error {

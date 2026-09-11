@@ -458,7 +458,7 @@ func applyControlPlaneEnv(cp *ControlPlane) {
 // would make every literal construction site a latent validation failure.
 // This was measured — it is exactly how a cloneConfig that forgot the new
 // field would have surfaced, and the same trap caught a Telemetry field once
-// before (docs/spec-governance-observability.md §6).
+// before.
 func (c *Config) validateControlPlane() error {
 	switch c.ControlPlane.Mode {
 	case "", ControlPlaneLegacy:

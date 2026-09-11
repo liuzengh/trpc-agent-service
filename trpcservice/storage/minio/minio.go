@@ -4,7 +4,7 @@
 // Why hand-written instead of the vendor SDK: this platform needs five calls
 // (ensure bucket, put, get, delete, head) on small, operator-sized objects,
 // and the dependency budget is a reviewed artefact of this repository (see
-// docs/deps-baseline.txt). A signing bug is not silent here — the real MinIO
+// docs/依赖基线.txt). A signing bug is not silent here — the real MinIO
 // container in the E2E rejects the request with a signed error — which makes
 // the trade acceptable and measurable.
 //

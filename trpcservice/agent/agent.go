@@ -47,7 +47,7 @@ const AgentName = "assistant"
 // rather than an llmagent default because the framework treats a
 // non-positive value as "no limit", and a non-positive value reaching here
 // would silently reopen the unbounded-call hole the cap exists to close
-// (docs/spec-deployment-fault-drill.md §4.5), so it is corrected instead of
+// during fault testing, so it is corrected instead of
 // trusted.
 //
 // tools carries tools the caller has already assembled — in the reliable
@@ -146,7 +146,7 @@ type Registry struct {
 // NewRegistry builds a Runner for every tenant in the loaded config, all
 // sharing sess. The backend choice is fixed at startup; switching backends
 // means a config change plus restart (first-phase limitation, see
-// docs/spec-storage-redis.md).
+// docs/多后端适配方案.md).
 func NewRegistry(cfg *config.Config, sess session.Service) (*Registry, error) {
 	return NewRegistryWith(cfg, func(string) session.Service { return sess })
 }

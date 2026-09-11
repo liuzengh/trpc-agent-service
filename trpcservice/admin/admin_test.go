@@ -476,7 +476,7 @@ func TestAgentSurvivesTenantMutations(t *testing.T) {
 }
 
 // TestControlPlaneSurvivesTenantMutations is the same trap the observability
-// spec recorded for Telemetry (docs/spec-governance-observability.md §6):
+// telemetry configuration records:
 // cloneConfig deep-copies the running config on every tenant mutation, and a
 // field it forgets to copy silently resets on the first unrelated admin write.
 // For control_plane that would be worse than the Telemetry case: a deployment

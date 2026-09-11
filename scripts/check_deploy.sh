@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deployment artifact gate (docs/spec-deployment-fault-drill.md §2.4).
+# Deployment artifact gate.
 #
 #   scripts/check_deploy.sh            check everything that is checkable offline
 #   scripts/check_deploy.sh --strict   a SKIP becomes a failure (use this in CI)
@@ -614,8 +614,25 @@ if have docker && docker image inspect "$IMAGE" >/dev/null 2>&1; then
     hasnt "镜像里没有 .git" "$SMOKE/image.tar.list" '(^|/)\.git/'
     has "镜像里有 /data 目录" "$SMOKE/image.tar.list" '^data/$'
     has "镜像里有 /trpc-service" "$SMOKE/image.tar.list" '^trpc-service$'
-    has "镜像里有 /fake-model" "$SMOKE/image.tar.list" '^fake-model$'
+   has "镜像里有 /fake-model" "$SMOKE/image.tar.list" '^fake-model$'
     has "镜像里有 TLS 根证书" "$SMOKE/image.tar.list" 'ca-certificates\.crt$'
+    # Linux UID 65534 (nobody) 对 /data 的写入权限。macOS Docker Desktop 自动
+    # 映射权限差异，所以这个测试在 macOS 上会 SKIP（预期内）。
+    if [ "$(uname)" = "Linux" ]; then
+      cid2=$(docker run -d --rm -u 65534:65534 "$IMAGE" -healthcheck -addr 0.0.0.0:1 2>/dev/null || true)
+      if [ -n "$cid2" ]; then
+        if docker exec "$cid2" touch /data/write.test 2>/dev/null; then
+          check "UID 65534 能写入 /data" "yes" "yes"
+        else
+          check "UID 65534 能写入 /data" "yes" "no"
+        fi
+        docker rm -f "$cid2" >/dev/null 2>&1 || true
+      else
+        skipn "UID 65534 写入测试（容器启动失败）" 1
+      fi
+    else
+      skipn "UID 65534 写权仅在 Linux 上测试" 1
+    fi
   else
     skipn "docker create 失败" 6
   fi

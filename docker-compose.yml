@@ -6,7 +6,7 @@
 #
 # Everything here runs offline: redis:7-alpine and golang:1.24 are already on
 # this machine, the runtime stage is scratch, and no other image is referenced
-# (docs/spec-deployment-fault-drill.md fact #1).
+# in the build environment.
 #
 # Two deliberate departures from a "normal" compose file, both forced by facts:
 #

@@ -7,7 +7,7 @@ import (
 )
 
 // The deployment configs are load-bearing artifacts: scripts/e2e.sh,
-// scripts/fault_drill.sh and deploy/README.md all make claims about what the
+// scripts/fault_drill.sh and deploy/部署说明.md all make claims about what the
 // stack does when it boots with them. Nothing else in the tree would notice if
 // one of them stopped validating, or quietly drifted to a memory backend and
 // invalidated the node-failure drill.

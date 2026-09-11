@@ -56,6 +56,12 @@ var ErrBudgetExceeded = errors.New("tool: per-execution call budget exceeded")
 // workflow exists (deferred by the plan).
 var ErrHighRisk = errors.New("tool: high-risk tool calls require an approval path that does not exist yet, so the call is refused")
 
+// ErrApprovalRequired is returned when a high-risk tool call is blocked
+// waiting for human review. Unlike ErrHighRisk the intent is journaled and
+// the session stopped — a human sees it on -list-blocked and resolves with
+// -resolve-session.
+var ErrApprovalRequired = errors.New("tool: high-risk tool call requires human approval; execution is blocked")
+
 // BlockDecision records why an execution stopped and what a human has to
 // look at.
 type BlockDecision struct {
@@ -265,9 +271,43 @@ func (t *governedTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	}
 
 	if t.meta.RiskLevel == "high" {
-		t.journalReject(ctx, seq, jsonArgs, "risk_high", ErrHighRisk.Error())
-		span.SetAttributes(attribute.String("tool.outcome", "rejected"))
-		return nil, ErrHighRisk
+		// High-risk tools: journal the intent and block for human review,
+		// so the session appears on -list-blocked and can be resolved with
+		// -resolve-session.  The ledger holds the attempted tool and its
+		// masked arguments.
+		seq := int(g.seq.Add(1))
+		callID := CallID(g.opts.ExecutionID, g.opts.Fence, seq)
+		intent := CallIntent{
+			TenantID:    g.opts.TenantID,
+			ExecutionID: g.opts.ExecutionID,
+			SessionPK:   g.opts.SessionPK,
+			CallSeq:     seq,
+			ToolID:      t.meta.ToolID,
+			ToolName:    t.meta.Name,
+			ToolVersion: t.meta.Version,
+			ToolKind:    t.meta.Kind,
+			SideEffect:  t.meta.SideEffect,
+			Idempotent:  t.meta.Idempotent,
+			ArgsHash:    HashArguments(jsonArgs),
+			ArgsMasked:  MaskArguments(jsonArgs),
+			TraceID:     g.opts.TraceID,
+			WorkerID:    g.opts.WorkerID,
+			Fence:       g.opts.Fence,
+		}
+		if jErr := g.opts.Journal.Begin(ctx, intent); jErr == nil {
+			_ = g.opts.Journal.Finish(context.WithoutCancel(ctx), g.opts.TenantID, callID,
+				Unknown, "approval_required", ErrApprovalRequired.Error(), 0, 0, 1)
+		}
+		g.block(BlockDecision{
+			CallID:   callID,
+			ToolName: t.meta.Name,
+			Reason: fmt.Sprintf(
+				"tool call %s (%s) requires human approval because it is high-risk",
+				callID, t.meta.Name),
+		})
+		span.SetAttributes(attribute.String("tool.outcome", "awaiting_approval"),
+			attribute.String("tool.call_id", callID))
+		return nil, ErrApprovalRequired
 	}
 
 	if t.schema != nil {

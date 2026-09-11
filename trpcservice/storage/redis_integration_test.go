@@ -10,7 +10,7 @@ import (
 )
 
 // TestRedisIntegrationRoundTrip runs against a real Redis (e.g. the local
-// docker container from docs/spec-storage-redis.md §4):
+// local Docker Redis container):
 //
 //	REDIS_TEST_URL=redis://127.0.0.1:6379 go test ./trpcservice/storage/ -v
 //

@@ -119,7 +119,7 @@ func runOne(t *testing.T, r runner.Runner, text string) string {
 // again immediately. With no cap configured that ran at roughly 8.3k upstream
 // calls per second for as long as the message budget lasted — 16,588 calls for
 // one message on a 2s budget, and the default budget is two minutes
-// (docs/spec-deployment-fault-drill.md §4.5). One user message became an
+// during a fault drill. One user message became an
 // amplification attack on the upstream. The cap makes that cost a constant the
 // operator chose, and names it in the error.
 func TestEmptyUpstreamIsBoundedByTheCallCap(t *testing.T) {

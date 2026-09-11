@@ -24,12 +24,12 @@ default_tenant: demo
 # Switching to mysql is a deliberate, one-way move per deployment: run
 #   trpc-service -migrate           # apply schema
 #   trpc-service -bootstrap-admin ... # create the first tenant admin
-# before starting any role in mysql mode; see docs/README.md.
+# before starting any role in mysql mode; see docs/部署说明.md.
 # control_plane:
 #   mode: legacy                      # legacy (default) | mysql
 #   mysql_dsn: user:pass@tcp(127.0.0.1:3306)/tas  # required for mode: mysql
 
-# Shared session backend (docs/spec-storage-redis.md). Omit the whole block
+# Shared session backend. Omit the whole block
 # for the in-process memory default; switch to redis for restart-safe and
 # future multi-node sessions. Local redis:
 #   docker run -d --name redis -p 6379:6379 redis:7-alpine
@@ -61,7 +61,7 @@ default_tenant: demo
 #     endpoint: http://127.0.0.1:4318        # required for otlp (OTLP/HTTP)
 #     interval: 15s                          # push interval, default 15s
 
-# Runtime envelope of one message (docs/spec-deployment-fault-drill.md §2.3).
+# Runtime envelope of one message.
 # Three writers, in increasing order of convenience:
 #   1. this block (edit + restart),
 #   2. the AGENT_* variables above (restart, but no file edit),

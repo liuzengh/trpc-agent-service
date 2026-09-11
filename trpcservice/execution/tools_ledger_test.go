@@ -719,11 +719,6 @@ func TestGovernorRejectionMatrix(t *testing.T) {
 		t.Fatalf("the target was called %d times for a schema-refused call", hits)
 	}
 
-	// 2. risk: high-risk bindings are refused outright.
-	if _, err := risky.Call(ctx, []byte(`{}`)); !errors.Is(err, tool.ErrHighRisk) {
-		t.Fatalf("high-risk call error = %v, want ErrHighRisk", err)
-	}
-
 	// 3. revocation lands after assembly; the next call must see it.
 	if _, err := h.scope.Exec(ctx,
 		"UPDATE tool_bindings SET status = 'revoked' WHERE tenant_id = ? AND app_id = ? AND name = ?",
@@ -742,9 +737,33 @@ func TestGovernorRejectionMatrix(t *testing.T) {
 		t.Fatalf("echo: %v", err)
 	}
 
-	// 5. the budget is exhausted by all of the above (rejections count).
-	if _, err := echoTool.Call(ctx, []byte(`{"text":"again"}`)); !errors.Is(err, tool.ErrBudgetExceeded) {
-		t.Fatalf("over-budget call error = %v, want ErrBudgetExceeded", err)
+	// 5. risk: high-risk bindings block for approval (must run after the
+	// read-only & revocation tests, because blocking poisons the governor).
+	if _, err := risky.Call(ctx, []byte(`{}`)); !errors.Is(err, tool.ErrApprovalRequired) {
+		t.Fatalf("high-risk call error = %v, want ErrApprovalRequired (session blocked for review)", err)
+	}
+	if d := gov.Blocked(); d == nil {
+		t.Fatal("after a high-risk call the governor must be blocked")
+	} else if !strings.Contains(d.Reason, "high-risk") {
+		t.Fatalf("block reason = %q, want it to name risk as the cause", d.Reason)
+	}
+	var blockedTool string
+	bdRow, err := h.scope.QueryRow(context.Background(),
+		"SELECT tool_name FROM tool_calls WHERE tenant_id = ? AND status = 'unknown' AND error_type = 'approval_required'",
+		h.tenantID)
+	if err != nil {
+		t.Fatalf("query blocked tool: %v", err)
+	}
+	if err := bdRow.Scan(&blockedTool); err != nil {
+		t.Fatalf("no blocked tool_calls row: %v", err)
+	}
+	if blockedTool != "risky" {
+		t.Fatalf("blocked tool = %q, want risky", blockedTool)
+	}
+
+	// 6. the governor is blocked; further calls are refused.
+	if _, err := echoTool.Call(ctx, []byte(`{"text":"again"}`)); !errors.Is(err, tool.ErrExecutionBlocked) {
+		t.Fatalf("post-block call error = %v, want ErrExecutionBlocked", err)
 	}
 
 	calls := h.callRows(t)
@@ -753,8 +772,8 @@ func TestGovernorRejectionMatrix(t *testing.T) {
 		byType[c.Status+"/"+c.ErrorType]++
 	}
 	for _, want := range []string{
-		"rejected/schema_invalid", "rejected/risk_high", "rejected/revoked",
-		"rejected/budget_exceeded", "succeeded/",
+		"rejected/schema_invalid", "unknown/approval_required", "rejected/revoked",
+		"succeeded/",
 	} {
 		if byType[want] != 1 {
 			t.Fatalf("ledger states = %v, missing a single %q", byType, want)

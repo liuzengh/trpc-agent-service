@@ -352,6 +352,7 @@ func main() {
 		LimitsFor: adm.Agent,
 		Audit:     aud,
 		Metrics:   rec,
+		Budget:    channels.NewBudgetTracker(),
 	})
 	if coord != nil {
 		gw.WithCoordinator(coord)
