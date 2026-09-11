@@ -2,6 +2,18 @@
 # Usage: cp .env.example .env && docker compose up -d --build
 # Ports: frontend :5173, backend :8080, mysql :3307, redis :6379,
 #        minio :9000/:9001, artifact-minio :9002/:9003, milvus :19530/:9091.
+#
+# Profiles: the core services (mysql, redis, backend, frontend) always start.
+# The optional ones are grouped so a smaller deployment is one flag away:
+#   vector        etcd + minio + milvus   — knowledge bases (Milvus)
+#   artifacts     artifact-minio          — artifact persistence (MinIO)
+#   observability otel-collector + jaeger + prometheus — traces/metrics
+# `COMPOSE_PROFILES=full` (set in .env/.env.example) enables all three, so the
+# default `docker compose up` is the full stack exactly as before. For a core-only
+# run: `COMPOSE_PROFILES= docker compose up -d` — the backend degrades in the
+# documented way (artifacts disabled, knowledge search unavailable, no trace
+# export) instead of failing, which is why these services are not in its
+# depends_on.
 
 services:
   mysql:
@@ -39,6 +51,7 @@ services:
 
   # ---- Milvus standalone (etcd + minio + milvus) ----
   etcd:
+    profiles: ["vector", "full"]
     image: quay.io/coreos/etcd:v3.5.18
     restart: unless-stopped
     environment:
@@ -56,6 +69,7 @@ services:
       retries: 3
 
   minio:
+    profiles: ["vector", "full"] # Milvus's object storage
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     restart: unless-stopped
     environment:
@@ -74,6 +88,7 @@ services:
       retries: 3
 
   milvus:
+    profiles: ["vector", "full"]
     # 2.5+ required: BM25 full-text search used by the platform KB pipeline.
     image: milvusdb/milvus:v2.5.6
     restart: unless-stopped
@@ -98,6 +113,7 @@ services:
 
   # ---- Artifact object storage (MinIO, S3 protocol) ----
   artifact-minio:
+    profiles: ["artifacts", "full"]
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     restart: unless-stopped
     environment:
@@ -137,19 +153,20 @@ services:
     ports:
       - "8080:8080"
     depends_on:
+      # Only hard dependencies: the platform cannot serve without MySQL
+      # (persistence, audit, worker) and Redis (bus, locks, idempotency).
+      # Milvus, MinIO and the OTLP collector are optional profiles — the
+      # backend degrades as documented when they are absent (KB search
+      # unavailable, artifacts disabled, no trace export), so requiring them
+      # here would make the core-only profile impossible to start.
       mysql:
         condition: service_healthy
       redis:
         condition: service_healthy
-      milvus:
-        condition: service_started
-      artifact-minio:
-        condition: service_healthy
-      otel-collector:
-        condition: service_started
 
   # ---- Observability: OTLP collector -> Jaeger (traces) + Prometheus (metrics)
   otel-collector:
+    profiles: ["observability", "full"]
     image: otel/opentelemetry-collector-contrib:0.115.1
     restart: unless-stopped
     command: ["--config", "/etc/otel/config.yaml"]
@@ -163,6 +180,7 @@ services:
       - jaeger
 
   jaeger:
+    profiles: ["observability", "full"]
     image: jaegertracing/all-in-one:1.62.0
     restart: unless-stopped
     environment:
@@ -171,6 +189,7 @@ services:
       - "16686:16686" # UI
 
   prometheus:
+    profiles: ["observability", "full"]
     image: prom/prometheus:v2.55.1
     restart: unless-stopped
     command:

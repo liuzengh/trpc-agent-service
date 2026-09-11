@@ -187,7 +187,7 @@ func TestToolMySQLPersistence(t *testing.T) {
 	if err := m.tools.Register(ctx, d); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := m.tools.Grant(ctx, "agent-1", "tool-1"); err != nil {
+	if err := m.tools.Grant(ctx, "t-1", "agent-1", "tool-1"); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 

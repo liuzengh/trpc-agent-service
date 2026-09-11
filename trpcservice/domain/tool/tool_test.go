@@ -108,10 +108,10 @@ func mustRegister(t *testing.T, r *Registry, d Definition) {
 	}
 }
 
-// mustGrant grants a tool to an agent, failing the test on error.
+// mustGrant grants a tool to an agent in tenant t1, failing the test on error.
 func mustGrant(t *testing.T, r *Registry, agentID, toolID string) {
 	t.Helper()
-	if err := r.Grant(context.Background(), agentID, toolID); err != nil {
+	if err := r.Grant(context.Background(), "t1", agentID, toolID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -124,4 +124,62 @@ func mustIsAllowed(t *testing.T, r *Registry, agentID, toolID string) bool {
 		t.Fatal(err)
 	}
 	return ok
+}
+
+// TestGrantIsScopedToItsTenant covers the second lock on the same door: the
+// API already refuses to create a cross-tenant grant, and this is the check the
+// worker performs at run time, so a grant row that crossed a tenant boundary
+// (hand-edited database, a future writer, a bug) still cannot authorise a tool
+// call for the wrong tenant.
+func TestGrantIsScopedToItsTenant(t *testing.T) {
+	ctx := context.Background()
+	r := NewRegistry()
+	mustRegister(t, r, Definition{ID: "echo", Name: "echo", RiskLevel: RiskLow})
+
+	// A grant recorded for acme.
+	if err := r.Grant(ctx, "acme", "agent-1", "echo"); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err := r.IsAllowedForTenant(ctx, "acme", "agent-1", "echo")
+	if err != nil || !allowed {
+		t.Fatalf("owning tenant: allowed=%v err=%v, want true", allowed, err)
+	}
+	allowed, err = r.IsAllowedForTenant(ctx, "globex", "agent-1", "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed {
+		t.Error("another tenant must not inherit a grant it does not own")
+	}
+	// The plain check stays tenant-agnostic (it answers "is there a grant").
+	if !mustIsAllowed(t, r, "agent-1", "echo") {
+		t.Error("IsAllowed must still report the existence of the grant")
+	}
+
+	// A legacy grant (no tenant recorded) keeps working for every tenant, so an
+	// upgrade does not silently revoke tools.
+	if err := r.Grant(ctx, "", "agent-legacy", "echo"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tenant := range []string{"acme", "globex"} {
+		allowed, err := r.IsAllowedForTenant(ctx, tenant, "agent-legacy", "echo")
+		if err != nil || !allowed {
+			t.Errorf("legacy grant for %s: allowed=%v err=%v, want true", tenant, allowed, err)
+		}
+	}
+
+	// Re-granting under another tenant moves the ownership, and revoking
+	// removes it entirely.
+	if err := r.Grant(ctx, "globex", "agent-1", "echo"); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, _ := r.IsAllowedForTenant(ctx, "acme", "agent-1", "echo"); allowed {
+		t.Error("re-granting under globex must move ownership away from acme")
+	}
+	if err := r.Revoke(ctx, "agent-1", "echo"); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, _ := r.IsAllowedForTenant(ctx, "globex", "agent-1", "echo"); allowed {
+		t.Error("revoke must clear the grant for every tenant")
+	}
 }

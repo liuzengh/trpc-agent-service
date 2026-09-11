@@ -111,17 +111,20 @@ func (a *ToolAPI) visibleAgents(ctx context.Context, ids []string) []string {
 
 // grant whitelists a tool for an agent (idempotent). The agent must be in the
 // same tenant as the tool: a tenant's tool is not a lever on another tenant's
-// agent, and a grant is only meaningful inside one tenant's boundary.
+// agent, and a grant is only meaningful inside one tenant's boundary. The
+// owning tenant is recorded with the grant, so the worker can verify it again
+// when the tool is about to run.
 func (a *ToolAPI) grant(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !a.canAccess(w, r, id) {
 		return
 	}
 	agentID := r.PathValue("agentID")
-	if !a.agentBindable(w, r, id, agentID) {
+	tenantID, ok := a.agentBindable(w, r, id, agentID)
+	if !ok {
 		return
 	}
-	if err := a.reg.Grant(r.Context(), agentID, id); err != nil {
+	if err := a.reg.Grant(r.Context(), tenantID, agentID, id); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -135,7 +138,7 @@ func (a *ToolAPI) revoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agentID := r.PathValue("agentID")
-	if !a.agentBindable(w, r, id, agentID) {
+	if _, ok := a.agentBindable(w, r, id, agentID); !ok {
 		return
 	}
 	if err := a.reg.Revoke(r.Context(), agentID, id); err != nil {
@@ -145,37 +148,38 @@ func (a *ToolAPI) revoke(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// agentBindable reports whether agentID may be bound to toolID. A cross-tenant
-// target is reported as 404 so the response does not confirm that the other
-// tenant's agent exists.
-func (a *ToolAPI) agentBindable(w http.ResponseWriter, r *http.Request, toolID, agentID string) bool {
+// agentBindable reports whether agentID may be bound to toolID, and returns the
+// tenant the grant belongs to (the agent's tenant). A cross-tenant target is
+// reported as 404 so the response does not confirm that the other tenant's
+// agent exists.
+func (a *ToolAPI) agentBindable(w http.ResponseWriter, r *http.Request, toolID, agentID string) (string, bool) {
 	if a.agents == nil {
-		return true
+		return "", true
 	}
 	ag, err := a.agents.Get(r.Context(), agentID)
 	if err != nil {
 		if errors.Is(err, agent.ErrNotFound) {
 			writeError(w, http.StatusNotFound, err)
-			return false
+			return "", false
 		}
 		writeError(w, http.StatusInternalServerError, err)
-		return false
+		return "", false
 	}
 	if !TenantAccessible(GetClaims(r.Context()), ag.TenantID) {
 		WriteCrossTenant(w)
-		return false
+		return "", false
 	}
 	def, err := a.reg.Get(r.Context(), toolID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
-		return false
+		return "", false
 	}
 	// A tenant-scoped tool only ever belongs to agents of that tenant, even for
 	// the owner: the pair would otherwise be incoherent (the agent's tenant
 	// could never legitimately use it).
 	if def.Scope == tool.ScopeTenant && def.TenantID != "" && def.TenantID != ag.TenantID {
 		WriteCrossTenant(w)
-		return false
+		return "", false
 	}
-	return true
+	return ag.TenantID, true
 }

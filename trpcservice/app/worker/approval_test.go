@@ -59,13 +59,13 @@ func TestToolsFromProfileApprovalRails(t *testing.T) {
 	if err := reg.Register(ctx, tool.Definition{ID: "echo", Name: "echo", Description: "x", RiskLevel: tool.RiskLow}); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.Grant(ctx, "a1", "echo"); err != nil {
+	if err := reg.Grant(ctx, "t1", "a1", "echo"); err != nil {
 		t.Fatal(err)
 	}
 
 	// rail 1: manually listed in the profile -> requires approval
 	w := &Worker{toolRes: NewToolResolver(reg, echoSource, nil)}
-	tools, names := w.toolRes.fromProfile(ctx, "a1", agent.RuntimeProfile{
+	tools, names := w.toolRes.fromProfile(ctx, "t1", "a1", agent.RuntimeProfile{
 		ToolIDs:         []string{"echo"},
 		ApprovalToolIDs: []string{"echo"},
 	}, defaultTenantPolicy())
@@ -80,7 +80,7 @@ func TestToolsFromProfileApprovalRails(t *testing.T) {
 	if err := reg.Register(ctx, tool.Definition{ID: "echo", Name: "echo", Description: "x", RiskLevel: tool.RiskHigh}); err != nil {
 		t.Fatal(err)
 	}
-	_, names = w.toolRes.fromProfile(ctx, "a1", agent.RuntimeProfile{ToolIDs: []string{"echo"}}, defaultTenantPolicy())
+	_, names = w.toolRes.fromProfile(ctx, "t1", "a1", agent.RuntimeProfile{ToolIDs: []string{"echo"}}, defaultTenantPolicy())
 	if !names["echo"] {
 		t.Errorf("rail 2: high-risk tool must be in the approval name set, got %v", names)
 	}
@@ -89,13 +89,13 @@ func TestToolsFromProfileApprovalRails(t *testing.T) {
 	if err := reg.Register(ctx, tool.Definition{ID: "echo", Name: "echo", Description: "x", RiskLevel: tool.RiskLow}); err != nil {
 		t.Fatal(err)
 	}
-	_, names = w.toolRes.fromProfile(ctx, "a1", agent.RuntimeProfile{ToolIDs: []string{"echo"}}, defaultTenantPolicy())
+	_, names = w.toolRes.fromProfile(ctx, "t1", "a1", agent.RuntimeProfile{ToolIDs: []string{"echo"}}, defaultTenantPolicy())
 	if len(names) != 0 {
 		t.Errorf("plain low-risk tool must not require approval, got %v", names)
 	}
 
 	// an agent without grants gets no tools at all
-	_, names = w.toolRes.fromProfile(ctx, "nobody", agent.RuntimeProfile{ToolIDs: []string{"echo"}}, defaultTenantPolicy())
+	_, names = w.toolRes.fromProfile(ctx, "t1", "nobody", agent.RuntimeProfile{ToolIDs: []string{"echo"}}, defaultTenantPolicy())
 	if len(names) != 0 {
 		t.Errorf("ungranted agent must see no approval tools, got %v", names)
 	}
@@ -103,14 +103,14 @@ func TestToolsFromProfileApprovalRails(t *testing.T) {
 	// rail 3: the tenant's force-approval set triggers approval for a plain
 	// low-risk tool even when the profile does not list it.
 	forced := &tenantPolicy{Redact: true, ForceApproval: map[string]struct{}{"echo": {}}}
-	_, names = w.toolRes.fromProfile(ctx, "a1", agent.RuntimeProfile{ToolIDs: []string{"echo"}}, forced)
+	_, names = w.toolRes.fromProfile(ctx, "t1", "a1", agent.RuntimeProfile{ToolIDs: []string{"echo"}}, forced)
 	if !names["echo"] {
 		t.Errorf("rail 3: tenant force-approval must be union-ed into the approval name set, got %v", names)
 	}
 
 	// tenant tool whitelist filters the mounted tools before approval marking.
 	whitelisted := &tenantPolicy{Redact: true, ToolWhitelist: map[string]struct{}{"other": {}}}
-	tools, names = w.toolRes.fromProfile(ctx, "a1", agent.RuntimeProfile{ToolIDs: []string{"echo"}}, whitelisted)
+	tools, names = w.toolRes.fromProfile(ctx, "t1", "a1", agent.RuntimeProfile{ToolIDs: []string{"echo"}}, whitelisted)
 	if len(tools) != 0 || len(names) != 0 {
 		t.Errorf("non-whitelisted tool must be filtered out, got tools=%d names=%v", len(tools), names)
 	}

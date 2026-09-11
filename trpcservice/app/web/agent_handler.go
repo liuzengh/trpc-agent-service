@@ -16,9 +16,16 @@ import (
 // AgentAPI exposes agent CRUD + version publish/rollback over HTTP.
 type AgentAPI struct {
 	mgr     *agent.Manager
+	agents  agentSource    // optional: tool grants record the agent's tenant
 	tools   *tool.Registry // optional: tool grants reconciled on publish
 	skills  *skill.Manager // optional: skill bindings reconciled on publish
 	auditor assetAuditor   // optional: asset changes are audited
+}
+
+// agentSource is the narrow read side of the agent store the API needs to
+// resolve an agent's tenant when it records tool grants.
+type agentSource interface {
+	Get(ctx context.Context, id string) (*agent.Agent, error)
 }
 
 // NewAgentAPI returns an agent API backed by the given manager.
@@ -35,6 +42,10 @@ func (a *AgentAPI) SetAuditor(rec assetAuditor) { a.auditor = rec }
 func (a *AgentAPI) SetGrants(tools *tool.Registry, skills *skill.Manager) {
 	a.tools = tools
 	a.skills = skills
+	// The manager answers the tenant lookup used when recording tool grants.
+	if a.agents == nil {
+		a.agents = a.mgr
+	}
 }
 
 // Register mounts agent routes on the mux.
@@ -227,13 +238,23 @@ func (a *AgentAPI) publish(w http.ResponseWriter, r *http.Request) {
 
 // syncGrants persists the profile's tool grants and skill bindings after a
 // successful publish, so the worker's RBAC check (agent_tool_grants) and the
-// skill version lock (agent_skills) reflect the frozen profile. Best-effort:
-// a grant failure is logged, not fatal, since the profile itself is already
-// the source of truth for resolution.
+// skill version lock (agent_skills) reflect the frozen profile. The agent's own
+// tenant is recorded on each grant, which is what the tenant-aware RBAC check
+// at run time compares against. Best-effort: a grant failure is logged, not
+// fatal, since the profile itself is already the source of truth for
+// resolution.
 func (a *AgentAPI) syncGrants(ctx context.Context, agentID string, p agent.RuntimeProfile) {
 	if a.tools != nil {
+		tenantID := ""
+		if a.agents != nil {
+			if ag, err := a.agents.Get(ctx, agentID); err == nil && ag != nil {
+				tenantID = ag.TenantID
+			} else if err != nil {
+				slog.Warn("agent: grant tenant lookup failed", "agent", agentID, "err", err)
+			}
+		}
 		for _, tid := range p.ToolIDs {
-			if err := a.tools.Grant(ctx, agentID, tid); err != nil {
+			if err := a.tools.Grant(ctx, tenantID, agentID, tid); err != nil {
 				slog.Warn("agent: grant tool failed", "agent", agentID, "tool", tid, "err", err)
 			}
 		}

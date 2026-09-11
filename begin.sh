@@ -4,10 +4,15 @@
 #
 # 用法：
 #   ./begin.sh           启动全栈（构建 + 启动 + 等待就绪 + 打印访问地址）
+#   ./begin.sh core      只启动核心四件（mysql/redis/backend/frontend）
 #   ./begin.sh reset     重置数据库后启动（删 MySQL 数据卷 → 重跑 init/*.sql）
 #   ./begin.sh status    查看各服务运行状态
 #   ./begin.sh logs      跟踪后端 + 前端日志（可追加服务名）
 #   ./begin.sh down      停止并移除容器（数据卷保留，重启再跑 ./begin.sh）
+#
+# 说明：可选服务由 compose profiles 分组（vector=Milvus 向量库、artifacts=
+#       制品 MinIO、observability=OTel/Jaeger/Prometheus）；.env 里
+#       COMPOSE_PROFILES=full 默认全开，等价于旧行为。
 #
 # 前置：本机已安装 Docker Desktop / docker engine（含 compose 插件）。
 # 说明：首次运行会拉取基础镜像（mysql/redis/etcd/minio/milvus/otel/jaeger/
@@ -105,6 +110,14 @@ print_addresses() {
 start_stack() {
     [[ -f .env ]] || { info "未找到 .env，从 .env.example 生成默认配置"; cp .env.example .env; }
 
+    # Compose profiles: .env 的 COMPOSE_PROFILES=full 会拉起全部可选服务
+    # （向量库 Milvus / 制品 MinIO / 观测栈）。第一条参数 core 时仅起核心四件
+    # （mysql/redis/backend/frontend），适合只需要管理台+对话的最小验证。
+    if [[ "${PROFILE_ARG:-}" == "core" ]]; then
+        export COMPOSE_PROFILES=""
+        info "核心模式：仅启动 mysql/redis/backend/frontend（无 Milvus/MinIO/观测栈）"
+    fi
+
     info "构建并启动全栈（首次需拉取镜像 + 构建 backend/frontend，请耐心等待）..."
     "${COMPOSE[@]}" up -d --build
 
@@ -131,6 +144,11 @@ start_stack() {
 # ---- 命令分发 ----
 case "${1:-up}" in
     up)
+        PROFILE_ARG="${2:-}"
+        start_stack
+        ;;
+    core)
+        PROFILE_ARG="core"
         start_stack
         ;;
     reset)

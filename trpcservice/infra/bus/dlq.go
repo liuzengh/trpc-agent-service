@@ -63,9 +63,9 @@ type DeadLetter struct {
 // Redis DLQ stream still holds the message.
 type DeadLetterSink func(ctx context.Context, e DeadLetter)
 
-// retryKey namespaces the per-entry failure counter.
+// retryKey namespaces the per-entry failure counter (see keyBuilder in bus.go).
 func retryKey(streamEntryID string) string {
-	return "retry:" + streamEntryID
+	return keyRetry.key(streamEntryID)
 }
 
 // SetDeadLetter arms the dead-letter policy: after maxAttempts business

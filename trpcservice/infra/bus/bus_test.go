@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"strings"
 	"testing"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -45,6 +46,47 @@ func TestStreamKeys(t *testing.T) {
 	}
 	if StreamOutbound != "stream:outbound" {
 		t.Errorf("StreamOutbound = %q", StreamOutbound)
+	}
+}
+
+// TestKeyBuilderWireFormat pins every key the bus writes, including the ones
+// added later (cursor, IM route, retry counter). The exact strings are a
+// compatibility contract: renaming a namespace would silently orphan live
+// locks, routes and cursors on an upgrade, so a change here must be deliberate.
+func TestKeyBuilderWireFormat(t *testing.T) {
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"route", RouteKey("t1", "s1"), "route:t1:s1"},
+		{"lock", LockKey("t1", "s1"), "lock:session:t1:s1"},
+		{"idem", IdemKey("msg-1"), "idem:msg-1"},
+		{"approval request", ApprovalReqKey("t1", "s1"), "approval:req:t1:s1"},
+		{"approval result", ApprovalResKey("t1", "s1"), "approval:res:t1:s1"},
+		{"outbound cursor", OutboundCursorKey(), "cursor:outbound"},
+		{"im route", IMRouteKey("t1:wecom:user:u1"), "imroute:t1:wecom:user:u1"},
+		{"dlq retry counter", retryKey("1700000000000-0"), "retry:1700000000000-0"},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s key = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+
+	// No key may be a prefix of another: two features sharing a key space would
+	// read each other's state (a route lookup returning a lock token, for
+	// instance). Distinct sub-namespaces under one root (approval:req /
+	// approval:res) are fine.
+	for i := range cases {
+		for j := range cases {
+			if i == j {
+				continue
+			}
+			if strings.HasPrefix(cases[i].want, cases[j].want) {
+				t.Errorf("%s key %q is nested under %s key %q", cases[i].name, cases[i].want, cases[j].name, cases[j].want)
+			}
+		}
 	}
 }
 

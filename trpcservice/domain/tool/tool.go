@@ -47,9 +47,15 @@ type Store interface {
 	Register(ctx context.Context, d Definition) error
 	Get(ctx context.Context, id string) (Definition, error)
 	List(ctx context.Context, tenantID string) ([]Definition, error)
-	Grant(ctx context.Context, agentID, toolID string) error
+	// Grant whitelists a tool for an agent. tenantID is the tenant the grant
+	// belongs to; an empty tenant records a tenant-agnostic grant.
+	Grant(ctx context.Context, tenantID, agentID, toolID string) error
 	Revoke(ctx context.Context, agentID, toolID string) error
 	IsAllowed(ctx context.Context, agentID, toolID string) (bool, error)
+	// IsAllowedForTenant is the same question asked by a tenant: a grant
+	// recorded for another tenant does not authorise this one. Empty-tenant
+	// (legacy) grants stay valid for every tenant.
+	IsAllowedForTenant(ctx context.Context, tenantID, agentID, toolID string) (bool, error)
 	Allowed(ctx context.Context, agentID string) ([]string, error)
 	GrantedAgents(ctx context.Context, toolID string) ([]string, error)
 }
@@ -87,9 +93,10 @@ func (r *Registry) List(ctx context.Context, tenantID string) ([]Definition, err
 	return r.store.List(ctx, tenantID)
 }
 
-// Grant allows an agent to use a tool.
-func (r *Registry) Grant(ctx context.Context, agentID, toolID string) error {
-	return r.store.Grant(ctx, agentID, toolID)
+// Grant allows an agent to use a tool, recording the tenant the grant belongs
+// to. An empty tenantID keeps the grant tenant-agnostic.
+func (r *Registry) Grant(ctx context.Context, tenantID, agentID, toolID string) error {
+	return r.store.Grant(ctx, tenantID, agentID, toolID)
 }
 
 // Revoke removes an agent's access to a tool.
@@ -100,6 +107,12 @@ func (r *Registry) Revoke(ctx context.Context, agentID, toolID string) error {
 // IsAllowed reports whether the agent may use the tool.
 func (r *Registry) IsAllowed(ctx context.Context, agentID, toolID string) (bool, error) {
 	return r.store.IsAllowed(ctx, agentID, toolID)
+}
+
+// IsAllowedForTenant reports whether the agent may use the tool *on behalf of*
+// tenantID: a grant owned by another tenant does not authorise this one.
+func (r *Registry) IsAllowedForTenant(ctx context.Context, tenantID, agentID, toolID string) (bool, error) {
+	return r.store.IsAllowedForTenant(ctx, tenantID, agentID, toolID)
 }
 
 // Allowed returns the tool ids granted to an agent.
@@ -118,14 +131,22 @@ type memStore struct {
 	mu     sync.RWMutex
 	tools  map[string]Definition
 	grants map[string]map[string]bool // agentID -> toolID -> granted
+	// grantTenant records the tenant each grant was created for ("" =
+	// tenant-agnostic), mirroring the agent_tool_grants.tenant_id column so the
+	// in-memory backend answers IsAllowedForTenant identically.
+	grantTenant map[string]string // "agentID\x00toolID" -> tenantID
 }
 
 func newMemStore() *memStore {
 	return &memStore{
-		tools:  make(map[string]Definition),
-		grants: make(map[string]map[string]bool),
+		tools:       make(map[string]Definition),
+		grants:      make(map[string]map[string]bool),
+		grantTenant: make(map[string]string),
 	}
 }
+
+// grantKey identifies one grant row.
+func grantKey(agentID, toolID string) string { return agentID + "\x00" + toolID }
 
 func (s *memStore) Register(_ context.Context, d Definition) error {
 	s.mu.Lock()
@@ -156,13 +177,18 @@ func (s *memStore) List(_ context.Context, tenantID string) ([]Definition, error
 	return out, nil
 }
 
-func (s *memStore) Grant(_ context.Context, agentID, toolID string) error {
+func (s *memStore) Grant(_ context.Context, tenantID, agentID, toolID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.grants[agentID] == nil {
 		s.grants[agentID] = make(map[string]bool)
 	}
 	s.grants[agentID][toolID] = true
+	if tenantID == "" {
+		delete(s.grantTenant, grantKey(agentID, toolID))
+	} else {
+		s.grantTenant[grantKey(agentID, toolID)] = tenantID
+	}
 	return nil
 }
 
@@ -172,6 +198,7 @@ func (s *memStore) Revoke(_ context.Context, agentID, toolID string) error {
 	if g := s.grants[agentID]; g != nil {
 		delete(g, toolID)
 	}
+	delete(s.grantTenant, grantKey(agentID, toolID))
 	return nil
 }
 
@@ -179,6 +206,16 @@ func (s *memStore) IsAllowed(_ context.Context, agentID, toolID string) (bool, e
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.grants[agentID][toolID], nil
+}
+
+func (s *memStore) IsAllowedForTenant(_ context.Context, tenantID, agentID, toolID string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.grants[agentID][toolID] {
+		return false, nil
+	}
+	owner := s.grantTenant[grantKey(agentID, toolID)]
+	return owner == "" || tenantID == "" || owner == tenantID, nil
 }
 
 func (s *memStore) Allowed(_ context.Context, agentID string) ([]string, error) {

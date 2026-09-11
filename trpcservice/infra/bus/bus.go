@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,32 +26,58 @@ const (
 	StreamOutbound = "stream:outbound"
 )
 
-// Key builders. Session-scoped keys carry the tenant so tenants are isolated
-// at the key-namespace level (detailed design §3).
+// keyBuilder is the one place the bus composes Redis key names. Each builder
+// owns its namespace prefix and joins the remaining segments with the same
+// separator, so a key is never assembled by ad-hoc concatenation and the wire
+// format stays auditable in one file. The key tests pin the exact strings: an
+// upgrade must not silently orphan live locks, routes or cursors.
+type keyBuilder struct {
+	prefix string
+}
+
+// key joins the builder's prefix with the given segments.
+func (k keyBuilder) key(segments ...string) string {
+	return k.prefix + strings.Join(segments, ":")
+}
+
+// Bus key namespaces. Session-scoped keys carry the tenant so tenants are
+// isolated at the key-namespace level (detailed design §3).
+var (
+	keyRoute      = keyBuilder{prefix: "route:"}
+	keyLock       = keyBuilder{prefix: "lock:session:"}
+	keyIdem       = keyBuilder{prefix: "idem:"}
+	keyApprovalRe = keyBuilder{prefix: "approval:req:"}
+	keyApprovalRs = keyBuilder{prefix: "approval:res:"}
+	keyOutCursor  = keyBuilder{prefix: "cursor:outbound"}
+	keyIMRoute    = keyBuilder{prefix: "imroute:"}
+	keyRetry      = keyBuilder{prefix: "retry:"}
+)
+
+// RouteKey returns the key binding a session to its agent.
 func RouteKey(tenantID, sessionID string) string {
-	return "route:" + tenantID + ":" + sessionID
+	return keyRoute.key(tenantID, sessionID)
 }
 
 // LockKey returns the per-session serialization lock key.
 func LockKey(tenantID, sessionID string) string {
-	return "lock:session:" + tenantID + ":" + sessionID
+	return keyLock.key(tenantID, sessionID)
 }
 
 // IdemKey returns the message idempotency key.
 func IdemKey(msgKey string) string {
-	return "idem:" + msgKey
+	return keyIdem.key(msgKey)
 }
 
 // ApprovalReqKey returns the pending-approval key of a session. A session has
 // at most one pending human approval at a time (single-pending model).
 func ApprovalReqKey(tenantID, sessionID string) string {
-	return "approval:req:" + tenantID + ":" + sessionID
+	return keyApprovalRe.key(tenantID, sessionID)
 }
 
 // ApprovalResKey returns the human decision key of a session. The blocking
 // reviewer polls it while the agent turn is suspended.
 func ApprovalResKey(tenantID, sessionID string) string {
-	return "approval:res:" + tenantID + ":" + sessionID
+	return keyApprovalRs.key(tenantID, sessionID)
 }
 
 // OutboundCursorKey is the persisted read position of the outbound follower.
@@ -60,14 +87,14 @@ func ApprovalResKey(tenantID, sessionID string) string {
 // node, because two nodes would open competing IM connections for the same bot
 // account (see docs/多后端适配方案.md).
 func OutboundCursorKey() string {
-	return "cursor:outbound"
+	return keyOutCursor.key()
 }
 
 // IMRouteKey returns the persisted reply route of an IM conversation. The
 // in-memory route table dies with the process; without this a restarted gateway
 // could read a missed reply but would not know which chat to send it to.
 func IMRouteKey(sessionID string) string {
-	return "imroute:" + sessionID
+	return keyIMRoute.key(sessionID)
 }
 
 // ---------------------------------------------------------------- envelope --

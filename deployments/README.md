@@ -51,18 +51,41 @@ cp .env.example .env        # 按需改密码
 docker compose up -d --build
 ```
 
+**Compose profiles（分层启动）**：核心四件（mysql/redis/backend/frontend）无 profile，
+其余按下面三组分组；`.env` 里 `COMPOSE_PROFILES=full` 默认三组全开（等价旧行为）。
+
+| profile | 服务 | 关掉后的如实降级 |
+| --- | --- | --- |
+| `vector` | etcd + minio + milvus | 知识库检索不可用（向量后端连不上，KB 写/查报错），对话/Agent 不受影响 |
+| `artifacts` | artifact-minio | 产物持久化关闭（启动日志 `minio unavailable, artifact persistence disabled`） |
+| `observability` | otel-collector + jaeger + prometheus | 无 trace/metrics 导出（OTLP 连接失败仅影响观测） |
+
+```bash
+docker compose up -d --build              # 全栈（.env 默认 full）
+./begin.sh core                           # 只起核心四件（最小验证/低配机器）
+COMPOSE_PROFILES=vector docker compose up -d   # 核心 + 向量库
+```
+
+> 可选三组服务**刻意不放进 backend 的 `depends_on`**：backend 对它们的缺失是
+> 文档化的降级（上表），若写成硬依赖则「核心模式」根本起不来。
+
 | 服务 | 端口 | 说明 |
 | --- | --- | --- |
 | frontend | 5173 | nginx 托管 SPA，`/api/*` 反代到后端 |
 | backend | 8080 | 多租户 Agent 服务（挂载 `backend-compose.config.yaml`：MySQL/Redis/Milvus/OTLP 全接） |
 | mysql | 3307 | 首次启动自动执行 `mysql/init/*.sql`（主机端口，避开本地 3306，经 `MYSQL_PORT` 配置） |
 | redis | 6379 | Streams 消息总线 + session/memory 后端 |
-| etcd + minio | — | Milvus standalone 依赖（内部） |
-| milvus | 19530/9091 | 向量库 standalone（v2.5.6，BM25 全文检索） |
-| artifact-minio | 9002/9003 | 产物对象存储 |
-| otel-collector | 4317/4318/8889 | OTLP 接收 → Jaeger trace / Prometheus metrics（配置 `../configs/otel-collector.yaml`） |
-| jaeger | 16686 | 分布式追踪 UI（traces 经 collector 汇聚） |
-| prometheus | 9090 | 指标查询（抓取 collector :8889 Prometheus 导出端点） |
+| etcd + minio | — | Milvus standalone 依赖（内部，profile `vector`） |
+| milvus | 19530/9091 | 向量库 standalone（v2.5.6，BM25 全文检索，profile `vector`） |
+| artifact-minio | 9002/9003 | 产物对象存储（profile `artifacts`） |
+| otel-collector | 4317/4318/8889 | OTLP 接收 → Jaeger trace / Prometheus metrics（profile `observability`，配置 `../configs/otel-collector.yaml`） |
+| jaeger | 16686 | 分布式追踪 UI（traces 经 collector 汇聚，profile `observability`） |
+| prometheus | 9090 | 指标查询（抓取 collector :8889 Prometheus 导出端点，profile `observability`） |
+
+> 既有数据卷升级提示：新增/变更的列不会自动出现（init 脚本只在数据卷首次创建时
+> 执行）。`mysql/init/*.sql` 文件头部注释给出了对应的 `ALTER TABLE` 清单，例如
+> `003_agents.sql`（gray 列）、`004_tools.sql`（agent_tool_grants.tenant_id）、
+> `001_tenants.sql`（删 model_config）、`008_channels_outbox.sql`（outbox dead 状态）。
 
 > 后端只读 YAML 配置，不支持环境变量注入；如需改连接串直接编辑
 > `backend-compose.config.yaml`（或利用 `.env` + compose 变量拼入——见该文件注释）。

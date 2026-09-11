@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	fwagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
@@ -442,6 +443,72 @@ func classifyRunError(err error) string {
 	}
 }
 
+// resumeRecordedTurn looks for a completed answer of this inbound message in
+// the session log. Returns the reply to deliver when one is found.
+//
+// Why the session and not the outbox: the outbox append and the idempotency
+// commit are the last steps of a turn, so a crash just before them leaves the
+// model output persisted in the session (the framework stamps every event of a
+// run with its RequestID, which the worker sets to the message id) and nothing
+// in the outbox. Reusing that text keeps the session free of a duplicated user
+// message and avoids re-running — and re-billing — the model.
+//
+// A partial (still streaming) answer is deliberately not resumed: delivering a
+// truncated reply is worse than running the turn again.
+func (w *Worker) resumeRecordedTurn(ctx context.Context, m *bus.Message) (*bus.Message, bool) {
+	if w.sessions == nil || m == nil || m.ID == "" || m.SessionID == "" {
+		return nil, false
+	}
+	s, err := w.sessions.Sessions(ctx, m.TenantID)
+	if err != nil {
+		return nil, false
+	}
+	sess, err := s.Get(ctx, m.TenantID, m.UserID, m.SessionID)
+	if err != nil || sess == nil {
+		return nil, false
+	}
+	text := recordedAssistantText(sess.Events, m.ID)
+	if text == "" {
+		return nil, false
+	}
+	reply := model.NewAssistantMessage(text)
+	return &bus.Message{
+		ID:        uuid.NewString(),
+		TraceID:   m.TraceID,
+		TenantID:  m.TenantID,
+		AgentID:   m.AgentID,
+		SessionID: m.SessionID,
+		Channel:   m.Channel,
+		UserID:    m.UserID,
+		Content:   &reply,
+		ReplyTo:   m.ID,
+	}, true
+}
+
+// recordedAssistantText returns the last completed assistant answer persisted
+// for requestID, or "" when the turn has no recorded answer.
+func recordedAssistantText(events []event.Event, requestID string) string {
+	if requestID == "" {
+		return ""
+	}
+	var text string
+	for i := range events {
+		ev := events[i]
+		if ev.RequestID != requestID || ev.Response == nil {
+			continue
+		}
+		if ev.IsPartial || ev.IsToolCallResponse() {
+			continue
+		}
+		for _, c := range ev.Choices {
+			if c.Message.Role == model.RoleAssistant && c.Message.Content != "" {
+				text = c.Message.Content
+			}
+		}
+	}
+	return text
+}
+
 // run builds the agent from its current runtime profile and executes one turn.
 // lockToken is the session lock the worker holds; a pending human approval
 // refreshes it while waiting.
@@ -472,6 +539,18 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 	}
 	span.SetAttributes(attribute.Int("agent_version", agentVersion))
 
+	// Event-level idempotency: a previous attempt of this same inbound message
+	// may have finished the model work and died before the reply was recorded
+	// (see handle's two-phase idempotency). The session log is the durable
+	// record of that attempt — the run stamps every event with the message id
+	// as its RequestID — so the reply is recovered from it instead of paying
+	// for a second model turn and appending the user message twice.
+	if reply, ok := w.resumeRecordedTurn(ctx, m); ok {
+		slog.Info("worker: resumed a turn recorded before the crash",
+			"tenant", m.TenantID, "session", m.SessionID, "message", m.ID)
+		return reply, nil, 0, nil
+	}
+
 	// Tenant token budget: reject the turn before spending any model/tool
 	// cost. The quota comes from the tenant's governance snapshot; a meter
 	// failure logs and lets the turn proceed (availability over strictness).
@@ -486,7 +565,7 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 	var tools []fwtool.Tool
 	var approvalToolNames map[string]bool
 	if w.toolRes != nil {
-		tools, approvalToolNames = w.toolRes.fromProfile(ctx, agentID, profile, policy)
+		tools, approvalToolNames = w.toolRes.fromProfile(ctx, m.TenantID, agentID, profile, policy)
 		tools = append(tools, w.toolRes.knowledgeTools(ctx, profile)...)
 	}
 	// Long-term memory (per tenant + user, framework-provided): the memory
@@ -522,7 +601,13 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 	runCtx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 
-	events, err := r.Run(runCtx, m.UserID, m.SessionID, *m.Content)
+	// The inbound message id is the run's RequestID: every event this turn
+	// persists (the user message, assistant text, tool calls) then carries the
+	// same idempotency key the bus uses. That is what makes a replay after a
+	// crash recognisable — the framework stamps its events with the RequestID,
+	// and its own restore path can tell an already-persisted user message of
+	// this request apart from a new one (see the framework's content processor).
+	events, err := r.Run(runCtx, m.UserID, m.SessionID, *m.Content, fwagent.WithRequestID(m.ID))
 	// Record model latency even when the run failed: model calls did happen
 	// and a timeout spike is exactly what the metric should surface.
 	if md := timer.Duration(); md > 0 {

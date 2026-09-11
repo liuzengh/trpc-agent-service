@@ -5,9 +5,6 @@ import (
 	"fmt"
 
 	"trpc.group/trpc-go/trpc-agent-go/session"
-	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
-	sessionmysql "trpc.group/trpc-go/trpc-agent-go/session/mysql"
-	sessionredis "trpc.group/trpc-go/trpc-agent-go/session/redis"
 )
 
 // Sessions wraps a session service with tenant-scoped access, mapping the
@@ -16,26 +13,18 @@ type Sessions struct {
 	svc session.Service
 }
 
-// NewSessions builds a session service for the given backend.
+// NewSessions builds a session service for the given backend (see
+// backends.go for the backend table).
 func NewSessions(cfg SessionConfig) (*Sessions, error) {
-	switch cfg.Backend {
-	case BackendInMemory:
-		return &Sessions{svc: sessioninmemory.NewSessionService()}, nil
-	case BackendMySQL:
-		svc, err := sessionmysql.NewService(sessionmysql.WithMySQLClientDSN(cfg.MySQLDSN))
-		if err != nil {
-			return nil, fmt.Errorf("storage: mysql session: %w", err)
-		}
-		return &Sessions{svc: svc}, nil
-	case BackendRedis:
-		svc, err := sessionredis.NewService(sessionredis.WithRedisClientURL(cfg.RedisURL))
-		if err != nil {
-			return nil, fmt.Errorf("storage: redis session: %w", err)
-		}
-		return &Sessions{svc: svc}, nil
-	default:
-		return nil, fmt.Errorf("storage: unknown session backend %q", cfg.Backend)
+	b, ok := backendTable[cfg.Backend]
+	if !ok || b.session == nil {
+		return nil, fmt.Errorf("storage: unknown session backend %q (supported: %v)", cfg.Backend, SupportedBackends())
 	}
+	svc, err := b.session(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Sessions{svc: svc}, nil
 }
 
 // Create creates a session with the given initial state for the tenant,

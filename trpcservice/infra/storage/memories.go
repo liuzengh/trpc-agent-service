@@ -5,9 +5,6 @@ import (
 	"fmt"
 
 	"trpc.group/trpc-go/trpc-agent-go/memory"
-	memoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
-	memorymysql "trpc.group/trpc-go/trpc-agent-go/memory/mysql"
-	memoryredis "trpc.group/trpc-go/trpc-agent-go/memory/redis"
 )
 
 // Memories wraps a memory service with tenant-scoped access, mapping the
@@ -16,26 +13,18 @@ type Memories struct {
 	svc memory.Service
 }
 
-// NewMemories builds a memory service for the given backend.
+// NewMemories builds a memory service for the given backend (see backends.go
+// for the backend table).
 func NewMemories(cfg MemoryConfig) (*Memories, error) {
-	switch cfg.Backend {
-	case BackendInMemory:
-		return &Memories{svc: memoryinmemory.NewMemoryService()}, nil
-	case BackendRedis:
-		svc, err := memoryredis.NewService(memoryredis.WithRedisClientURL(cfg.RedisURL))
-		if err != nil {
-			return nil, fmt.Errorf("storage: redis memory: %w", err)
-		}
-		return &Memories{svc: svc}, nil
-	case BackendMySQL:
-		svc, err := memorymysql.NewService(memorymysql.WithMySQLClientDSN(cfg.MySQLDSN))
-		if err != nil {
-			return nil, fmt.Errorf("storage: mysql memory: %w", err)
-		}
-		return &Memories{svc: svc}, nil
-	default:
-		return nil, fmt.Errorf("storage: unknown memory backend %q", cfg.Backend)
+	b, ok := backendTable[cfg.Backend]
+	if !ok || b.memory == nil {
+		return nil, fmt.Errorf("storage: unknown memory backend %q (supported: %v)", cfg.Backend, SupportedBackends())
 	}
+	svc, err := b.memory(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Memories{svc: svc}, nil
 }
 
 // Add stores a memory entry for the tenant's user.

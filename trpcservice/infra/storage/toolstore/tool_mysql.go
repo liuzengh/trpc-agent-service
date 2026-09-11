@@ -81,10 +81,11 @@ func (s *mysqlStore) List(ctx context.Context, tenantID string) ([]tool.Definiti
 	return out, rows.Err()
 }
 
-func (s *mysqlStore) Grant(ctx context.Context, agentID, toolID string) error {
+func (s *mysqlStore) Grant(ctx context.Context, tenantID, agentID, toolID string) error {
 	_, err := s.db.ExecContext(ctx,
-		"INSERT IGNORE INTO agent_tool_grants (agent_id, tool_id) VALUES (?, ?)",
-		agentID, toolID)
+		`INSERT INTO agent_tool_grants (agent_id, tool_id, tenant_id) VALUES (?, ?, ?)
+		 ON DUPLICATE KEY UPDATE tenant_id = VALUES(tenant_id)`,
+		agentID, toolID, tenantID)
 	return err
 }
 
@@ -100,6 +101,20 @@ func (s *mysqlStore) IsAllowed(ctx context.Context, agentID, toolID string) (boo
 	if err := s.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM agent_tool_grants WHERE agent_id = ? AND tool_id = ?",
 		agentID, toolID).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// IsAllowedForTenant additionally requires the grant to belong to the asking
+// tenant. An empty tenant_id is a legacy row (created before the column) and
+// stays valid for every tenant, so an upgrade does not silently revoke tools.
+func (s *mysqlStore) IsAllowedForTenant(ctx context.Context, tenantID, agentID, toolID string) (bool, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_tool_grants
+		 WHERE agent_id = ? AND tool_id = ? AND (tenant_id = '' OR tenant_id = ?)`,
+		agentID, toolID, tenantID).Scan(&n); err != nil {
 		return false, err
 	}
 	return n > 0, nil

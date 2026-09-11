@@ -36,7 +36,11 @@ func NewToolResolver(tools *tool.Registry, toolSrc ToolSource, knowledge *knowle
 // Approval is triggered by any of the three rails: the tool is listed in
 // profile.ApprovalToolIDs, in the tenant's force-approval set, or its
 // definition is risk_level=high.
-func (r *toolResolver) fromProfile(ctx context.Context, agentID string, profile agent.RuntimeProfile, policy *tenantPolicy) ([]fwtool.Tool, map[string]bool) {
+//
+// The RBAC check is tenant-aware: the grant must belong to the tenant running
+// the turn (tenantID), so a grant that crossed a tenant boundary — however it
+// got there — cannot authorise a tool call.
+func (r *toolResolver) fromProfile(ctx context.Context, tenantID, agentID string, profile agent.RuntimeProfile, policy *tenantPolicy) ([]fwtool.Tool, map[string]bool) {
 	if len(profile.ToolIDs) == 0 || r.toolSrc == nil || r.tools == nil {
 		return nil, nil
 	}
@@ -50,7 +54,7 @@ func (r *toolResolver) fromProfile(ctx context.Context, agentID string, profile 
 	var out []fwtool.Tool
 	approvalNames := make(map[string]bool)
 	for _, id := range profile.ToolIDs {
-		allowed, err := r.tools.IsAllowed(ctx, agentID, id)
+		allowed, err := r.tools.IsAllowedForTenant(ctx, tenantID, agentID, id)
 		if err != nil {
 			slog.Warn("worker: RBAC check failed, skipping tool", "agent", agentID, "tool", id, "err", err)
 			continue
