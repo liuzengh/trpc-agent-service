@@ -15,22 +15,6 @@ dist/
 coverage.out
 coverage.html
 
-# Root Go binary produced by ./build.sh (rebuildable; ~100 MB)
-/trpc-service
-
-# Local Go toolchain & module cache (never commit; ~170 MB)
-/.toolchain/
-
-# Backup / temp files
-*.bak
-*.orig
-*~
-*.tmp
-
-# Local env variants
-.env.local
-.env.*.local
-
 # Temporary & local development data
 /.scratch/
 vendor/

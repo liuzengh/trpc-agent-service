@@ -119,6 +119,10 @@ func newCompleteConnectorTestManagerWithRedis(t *testing.T, client redis.Univers
 	if err != nil {
 		t.Fatalf("NewRedisIMProgressHub() error = %v", err)
 	}
+	pending, err := messaging.NewRedisPendingAttachmentStore(client)
+	if err != nil {
+		t.Fatalf("NewRedisPendingAttachmentStore() error = %v", err)
+	}
 	manifests, err := messaging.NewExecutionManifestCodec("connector-test", []byte("connector-test-manifest-key-at-least-32-bytes"), time.Hour)
 	if err != nil {
 		t.Fatalf("NewExecutionManifestCodec() error = %v", err)
@@ -135,6 +139,7 @@ func newCompleteConnectorTestManagerWithRedis(t *testing.T, client redis.Univers
 		approvals,
 		progress,
 		connectorTestArtifactProvider{service: artifactinmemory.NewService()},
+		pending,
 		&connectorTestSender{},
 		manifests,
 	)
@@ -146,7 +151,7 @@ func newCompleteConnectorTestManagerWithRedis(t *testing.T, client redis.Univers
 
 func TestNewChannelConnectorManagerValidatesDependencies(t *testing.T) {
 	t.Parallel()
-	if _, err := newChannelConnectorManager(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil); err == nil {
+	if _, err := newChannelConnectorManager(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil); err == nil {
 		t.Fatal("newChannelConnectorManager(incomplete) error = nil")
 	}
 	manager, _ := newCompleteConnectorTestManager(t)

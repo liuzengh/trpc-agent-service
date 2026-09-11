@@ -5,7 +5,7 @@ const BUILT_IN_TOOL_PRESENTATION: Record<string, { name: string; description: st
     name: '网络搜索',
     description: '搜索公开网页并返回结果摘要。',
   },
-  'platform.present_card': {
+  'platform_present_card': {
     name: '结果卡片',
     description: '向用户展示简洁的结果卡片，可附带 HTTPS 链接。',
   },

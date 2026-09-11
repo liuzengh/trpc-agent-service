@@ -1,6 +1,6 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { deleteSession, generateUUID, getSessionMessages, listSessions, postChat } from '../api'
+import { artifactDownloadURL, deleteSession, generateUUID, getSessionMessages, listSessions, postChat, resolveChatApproval } from '../api'
 import { useAppContext } from '../context'
 import {
   formatChatListTime,
@@ -8,6 +8,7 @@ import {
   threadFromSession,
   visibleUserMessage,
   useChatWorkspace,
+  type ChatAttachment,
   type ChatMessage,
   type ChatThread,
 } from '../chatState'
@@ -17,6 +18,7 @@ import { FeedbackBanner } from '../components/FeedbackBanner'
 import { ChatCard } from '../components/ChatCard'
 import { Toast, type ToastTone } from '../components/Toast'
 import { useDismissibleLayer } from '../hooks/useDismissibleLayer'
+import { chatFailureMessage } from '../chatError'
 
 const Markdown = lazy(() => import('../components/Markdown').then((module) => ({ default: module.Markdown })))
 const loadConfirmDialog = () => import('../components/ConfirmDialog')
@@ -57,7 +59,9 @@ export function ChatPage() {
   const [text, setText] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [fileError, setFileError] = useState('')
+  const [draggingFiles, setDraggingFiles] = useState(false)
   const activeChatAbort = useRef(new Map<string, AbortController>())
+  const dragDepthRef = useRef(0)
   const logRef = useRef<HTMLDivElement>(null)
   const pendingScrollRestore = useRef<{ threadId: string; height: number; top: number } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -222,22 +226,58 @@ export function ChatPage() {
         queueStreamDelta,
         controller.signal,
         pendingFiles,
+        (card) => updateMessage(workspaceKey, threadId, assistantId, (message) => ({ ...message, card })),
       )
       if (streamTimer) window.clearTimeout(streamTimer)
       flushStream()
-      updateMessage(workspaceKey, threadId, assistantId, (message) => ({ ...message, content: result.reply || message.content, card: result.card }))
+      updateMessage(workspaceKey, threadId, assistantId, (message) => ({
+        ...message,
+        content: result.reply || message.content,
+        card: result.card,
+        attachments: result.artifacts?.map((artifact) => ({
+          name: artifact.name?.trim() || artifact.filename,
+          filename: artifact.filename,
+          version: artifact.version,
+          mime_type: artifact.mime_type,
+        })),
+      }))
       if (result.sessionKey) setThreadSession(workspaceKey, threadId, result.sessionKey)
     } catch (error) {
       cancelBufferedStream()
       removeMessage(workspaceKey, threadId, assistantId)
       if ((error as Error).name !== 'AbortError') {
-        appendMessage(workspaceKey, threadId, { id: generateUUID(), role: 'error', content: (error as Error).message, time: stamp() })
+        appendMessage(workspaceKey, threadId, { id: generateUUID(), role: 'error', content: chatFailureMessage(error), time: stamp() })
       }
     } finally {
       if (streamTimer) window.clearTimeout(streamTimer)
       if (activeChatAbort.current.get(threadId) === controller) activeChatAbort.current.delete(threadId)
       setPending(workspaceKey, threadId, false)
     }
+  }
+
+  const resolveApproval = async (threadId: string, messageId: string, actionID: string) => {
+    let previousCard: ChatMessage['card']
+    updateMessage(workspaceKey, threadId, messageId, (message) => {
+      previousCard = message.card
+      return message.card ? { ...message, card: { ...message.card, state: 'resolving' } } : message
+    })
+    try {
+      const card = await resolveChatApproval(tenantId, actionID)
+      updateMessage(workspaceKey, threadId, messageId, (message) => ({ ...message, card }))
+    } catch (error) {
+      updateMessage(workspaceKey, threadId, messageId, (message) => ({ ...message, card: previousCard ?? message.card }))
+      setToast({ message: (error as Error).message, tone: 'error' })
+    }
+  }
+
+  const downloadArtifact = (attachment: ChatAttachment) => {
+    if (!attachment.filename || !activeThread?.sessionKey) return
+    const anchor = document.createElement('a')
+    anchor.href = artifactDownloadURL(tenantId, appCode, activeThread.sessionKey, attachment.filename, attachment.version)
+    anchor.download = attachment.filename.replace(/^user:/, '') || 'artifact'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
   }
 
   const startNewConversation = () => {
@@ -285,6 +325,48 @@ export function ChatPage() {
     setFileError('')
   }
 
+  const hasDraggedFiles = (event: DragEvent<HTMLElement>) => Array.from(event.dataTransfer.types).includes('Files')
+
+  const handleDragEnter = (event: DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event)) return
+    event.preventDefault()
+    event.stopPropagation()
+    dragDepthRef.current += 1
+    if (selected && !streaming) setDraggingFiles(true)
+  }
+
+  const handleDragOver = (event: DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event)) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = selected && !streaming ? 'copy' : 'none'
+  }
+
+  const handleDragLeave = (event: DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event)) return
+    event.preventDefault()
+    event.stopPropagation()
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+    if (dragDepthRef.current === 0) setDraggingFiles(false)
+  }
+
+  const handleDrop = (event: DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event)) return
+    event.preventDefault()
+    event.stopPropagation()
+    dragDepthRef.current = 0
+    setDraggingFiles(false)
+    if (!selected) {
+      setFileError('请先选择机器人')
+      return
+    }
+    if (streaming) {
+      setFileError('当前消息处理中，请稍后再添加文件')
+      return
+    }
+    addFiles(event.dataTransfer.files)
+  }
+
   const removeFile = (index: number) => {
     setFiles((current) => current.filter((_, fileIndex) => fileIndex !== index))
     setFileError('')
@@ -304,7 +386,22 @@ export function ChatPage() {
   return (
     <div className="page-stack">
       <div className="chat-workspace">
-      <section className="thread">
+      <section
+        className={`thread ${draggingFiles ? 'is-file-dragging' : ''}`}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {draggingFiles && (
+          <div className="chat-drop-overlay" aria-hidden="true">
+            <div className="chat-drop-overlay-content">
+              <PaperclipIcon size={22} />
+              <span>松开以上传文件</span>
+              <small>最多 4 个文件，总大小不超过 16 MB</small>
+            </div>
+          </div>
+        )}
         <header className="thread-head">
           <div className="thread-bot">
             <span className="avatar avatar-agent">
@@ -389,6 +486,10 @@ export function ChatPage() {
               message={message}
               assistantName={selected?.Config.app_code ?? '机器人'}
               streaming={streaming}
+              onCardAction={message.role === 'assistant' && activeThread
+                ? (actionID) => void resolveApproval(activeThread.id, message.id, actionID)
+                : undefined}
+              onArtifactDownload={downloadArtifact}
             />
           ))}
         </div>
@@ -477,10 +578,14 @@ const ChatMessageRow = memo(function ChatMessageRow({
   message,
   assistantName,
   streaming,
+  onCardAction,
+  onArtifactDownload,
 }: {
   message: ChatMessage
   assistantName: string
   streaming: boolean
+  onCardAction?: (actionID: string) => void
+  onArtifactDownload?: (attachment: ChatAttachment) => void
 }) {
   const visible = message.role === 'user'
     ? visibleUserMessage(message.content, message.attachments)
@@ -502,10 +607,25 @@ const ChatMessageRow = memo(function ChatMessageRow({
         {visible.attachments && visible.attachments.length > 0 && (
           <div className="message-attachments">
             {visible.attachments.map((attachment) => (
-              <span key={`${attachment.name}-${attachment.size}`} className="message-attachment">
-                <FileTextIcon size={13} />
-                <span>{attachment.name}</span>
-              </span>
+              attachment.filename ? (
+                <button
+                  key={`${attachment.filename}-${attachment.version ?? 0}`}
+                  type="button"
+                  className="message-attachment message-attachment-action"
+                  title={attachment.name && attachment.name !== attachment.filename
+                    ? `${attachment.name} · 下载 ${attachment.filename.replace(/^user:/, '')}`
+                    : `下载 ${attachment.filename.replace(/^user:/, '')}`}
+                  onClick={() => onArtifactDownload?.(attachment)}
+                >
+                  <FileTextIcon size={13} />
+                  <span>{attachment.filename.replace(/^user:/, '')}</span>
+                </button>
+              ) : (
+                <span key={`${attachment.name}-${attachment.size}`} className="message-attachment">
+                  <FileTextIcon size={13} />
+                  <span>{attachment.name}</span>
+                </span>
+              )
             ))}
           </div>
         )}
@@ -523,6 +643,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
         {message.role === 'assistant' && message.card && (
           <ChatCard
             card={message.card}
+            onAction={onCardAction}
             body={(
               <Suspense fallback={<span>{message.card.body}</span>}>
                 <Markdown content={message.card.body} />

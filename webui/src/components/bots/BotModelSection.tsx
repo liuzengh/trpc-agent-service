@@ -50,6 +50,7 @@ export function BotModelSection({ providers }: { providers: ModelProviderInfo[] 
   const selectedModel = useMemo(() => findManagedModel(providers, providerID, modelName), [modelName, providerID, providers])
   const selectedCapabilities = selectedModel?.model.capabilities
   const reasoningControlsAvailable = hasReasoningControls(selectedCapabilities)
+  const reasoningEffortDisabled = Boolean(selectedCapabilities?.thinking_toggle && !thinkingEnabled)
   const modelGroups = useMemo(() => providers
     .map((provider) => {
       const id = modelProviderID(provider)
@@ -159,24 +160,33 @@ export function BotModelSection({ providers }: { providers: ModelProviderInfo[] 
                   <strong>推理设置</strong>
                   <small>{reasoningControlsAvailable ? '仅显示当前模型实际支持的推理参数。' : '当前模型没有声明可调推理参数，将使用模型默认行为。'}</small>
                 </div>
+                {selectedCapabilities?.thinking_toggle && (
+                  <label className="checkbox bot-setting-checkbox">
+                    <input
+                      type="checkbox"
+                      {...register('thinking_enabled', {
+                        onChange: (event) => {
+                          if (!event.target.checked) setValue('reasoning_effort', '', { shouldDirty: true })
+                        },
+                      })}
+                    />
+                    <span><strong>启用推理模式</strong><small>显式开启该模型提供的思考模式；关闭时使用服务默认行为。</small></span>
+                  </label>
+                )}
                 {selectedCapabilities?.reasoning_efforts && selectedCapabilities.reasoning_efforts.length > 0 && (
                   <label htmlFor="bot-reasoning-effort">
                     推理强度
                     <SelectControl
                       id="bot-reasoning-effort"
-                      value={reasoningEffort || '__default__'}
+                      value={reasoningEffortDisabled ? '__default__' : (reasoningEffort || '__default__')}
+                      disabled={reasoningEffortDisabled}
                       onValueChange={(value) => setValue('reasoning_effort', value === '__default__' ? '' : value, { shouldDirty: true })}
                       options={[
                         { value: '__default__', label: '跟随模型默认' },
                         ...selectedCapabilities.reasoning_efforts.map((effort) => ({ value: effort, label: reasoningEffortLabel(effort) })),
                       ]}
                     />
-                  </label>
-                )}
-                {selectedCapabilities?.thinking_toggle && (
-                  <label className="checkbox bot-setting-checkbox">
-                    <input type="checkbox" {...register('thinking_enabled')} />
-                    <span><strong>启用推理模式</strong><small>显式开启该模型提供的思考模式；关闭时使用服务默认行为。</small></span>
+                    {reasoningEffortDisabled && <small className="field-help">请先启用推理模式，再选择推理强度。</small>}
                   </label>
                 )}
                 {selectedCapabilities?.thinking_budget && (

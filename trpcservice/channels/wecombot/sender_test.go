@@ -327,7 +327,7 @@ func TestUpdateCardReplacesApprovalButtonsWithResolvedNotice(t *testing.T) {
 
 func TestSenderUploadsAndSendsFile(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "report.txt")
+	path := filepath.Join(dir, "report.docx")
 	if err := os.WriteFile(path, []byte("artifact-body"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func TestSenderUploadsAndSendsFile(t *testing.T) {
 	}}
 	sender := newSender(requester, 16<<20)
 	_, err := sender.Send(context.Background(), channels.ReplyTarget{Channel: channels.WeCom, ConversationID: "chat-1"}, channels.OutboundMessage{
-		Files: []channels.OutboundFile{{Path: path, Name: "report.txt"}},
+		Files: []channels.OutboundFile{{Path: path, Name: "report.docx"}},
 	})
 	if err != nil {
 		t.Fatalf("Send() error = %v", err)

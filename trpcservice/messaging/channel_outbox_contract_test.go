@@ -295,6 +295,30 @@ func TestChannelOutboxDispatchMaterializesArtifactsForIM(t *testing.T) {
 	}
 }
 
+func TestChannelOutboxDispatchPreservesArtifactMetadataForWeb(t *testing.T) {
+	t.Parallel()
+	store := storage.NewMemoryStateStore()
+	sender := &contractSender{}
+	resolver := &contractResolver{sender: sender}
+	dispatcher, _ := NewChannelOutboxDispatcherWithResolver(store, resolver)
+	payload := channelReplyPayload{
+		Channel: channels.Web, BindingID: "web-console", AppCode: "assistant", ConfigVersion: 2,
+		ConversationID: "conversation-1", WebOwnerID: "user-1", Text: "文档已生成",
+		Artifacts: []OutboundArtifactRef{{Filename: "report.docx", Version: 3, Name: "维修报告", MimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}},
+	}
+	event := claimChannelReply(t, store, dispatcher, payload)
+	if _, err := dispatcher.Dispatch(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if resolver.cleaned || len(sender.messages) != 1 || len(sender.messages[0].Files) != 0 || len(sender.messages[0].Artifacts) != 1 {
+		t.Fatalf("web artifact delivery cleaned=%v messages=%+v", resolver.cleaned, sender.messages)
+	}
+	artifact := sender.messages[0].Artifacts[0]
+	if artifact.Filename != "report.docx" || artifact.Version != 3 || artifact.Name != "维修报告" {
+		t.Fatalf("web artifact = %+v", artifact)
+	}
+}
+
 func TestChannelOutboxSendWithLeaseSegmentsAndFiles(t *testing.T) {
 	t.Parallel()
 	store := storage.NewMemoryStateStore()

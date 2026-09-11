@@ -27,6 +27,7 @@ type channelIngress struct {
 	identities    messaging.ChannelIdentityResolver
 	controls      *channelControlHandler
 	artifacts     channelArtifactProvider
+	pendingFiles  messaging.PendingAttachmentStore
 	manifests     *messaging.ExecutionManifestCodec
 	resolveSender channelSenderResolver
 }
@@ -38,15 +39,16 @@ func newChannelIngress(
 	identities messaging.ChannelIdentityResolver,
 	controls *channelControlHandler,
 	artifacts channelArtifactProvider,
+	pendingFiles messaging.PendingAttachmentStore,
 	manifests *messaging.ExecutionManifestCodec,
 	resolveSender channelSenderResolver,
 ) (*channelIngress, error) {
-	if repository == nil || producer == nil || sessions == nil || identities == nil || controls == nil || artifacts == nil || manifests == nil || resolveSender == nil {
+	if repository == nil || producer == nil || sessions == nil || identities == nil || controls == nil || artifacts == nil || pendingFiles == nil || manifests == nil || resolveSender == nil {
 		return nil, errors.New("channel ingress dependencies are incomplete")
 	}
 	return &channelIngress{
 		repository: repository, producer: producer, sessions: sessions, identities: identities,
-		controls: controls, artifacts: artifacts, manifests: manifests, resolveSender: resolveSender,
+		controls: controls, artifacts: artifacts, pendingFiles: pendingFiles, manifests: manifests, resolveSender: resolveSender,
 	}, nil
 }
 
@@ -101,17 +103,11 @@ func (i *channelIngress) publish(ctx context.Context, bindingID string, inbound 
 		return fmt.Errorf("resolve connector release: %w", err)
 	}
 	snapshot = selection.Snapshot
-	progress := i.startProgress(ctx, snapshot, bindingID, &inbound)
-	published := false
-	defer func() {
-		if !published {
-			i.cancelProgress(progress)
-		}
-	}()
 	var (
 		artifactService agentartifact.Service
 		artifactInfo    agentartifact.SessionInfo
 		stagedFiles     []channels.InboundFile
+		drainedFiles    []messaging.PendingAttachmentBatch
 	)
 	if len(inbound.ReceivedFiles) > 0 {
 		artifactService, err = i.artifacts.ArtifactService(ctx, snapshot.Config)
@@ -128,16 +124,81 @@ func (i *channelIngress) publish(ctx context.Context, bindingID string, inbound 
 		inbound.Files = append(inbound.Files, stagedFiles...)
 		inbound.ReceivedFiles = nil
 	}
+	pendingKey := messaging.PendingAttachmentKey{
+		TenantID: snapshot.Config.TenantID, AppCode: snapshot.Config.AppCode, Channel: inbound.Channel, BindingID: bindingID,
+		SessionKey: sessionKey, SenderID: inbound.SenderID,
+	}
+	if strings.TrimSpace(inbound.Text) == "" && len(inbound.Files) > 0 {
+		if err := i.pendingFiles.Append(ctx, pendingKey, messaging.PendingAttachmentBatch{
+			MessageID: inbound.MessageID, ReceivedAt: inbound.ReceivedAt, Files: inbound.Files,
+		}); err != nil {
+			messaging.DeleteInboundFiles(ctx, artifactService, artifactInfo, stagedFiles)
+			if errors.Is(err, messaging.ErrPendingAttachmentLimit) {
+				if notifyErr := i.sendPendingAttachmentNotice(ctx, snapshot, bindingID, inbound, "待处理附件过多，请先发送文字说明后再继续上传。"); notifyErr != nil {
+					return notifyErr
+				}
+				return fmt.Errorf("%w: pending attachment limit exceeded", errChannelIngressRejected)
+			}
+			return fmt.Errorf("store pending attachments: %w", err)
+		}
+		return i.sendPendingAttachmentNotice(ctx, snapshot, bindingID, inbound, "已收到附件，请继续发送你的问题。")
+	}
+	if strings.TrimSpace(inbound.Text) != "" {
+		drainedFiles, err = i.pendingFiles.Drain(ctx, pendingKey)
+		if err != nil {
+			messaging.DeleteInboundFiles(ctx, artifactService, artifactInfo, stagedFiles)
+			return fmt.Errorf("drain pending attachments: %w", err)
+		}
+		if len(drainedFiles) > 0 {
+			inbound.Files = append(messaging.PendingAttachmentFiles(drainedFiles), inbound.Files...)
+		}
+		if err := messaging.ValidatePendingAttachmentFiles(inbound.Files); err != nil {
+			restoreErr := i.pendingFiles.Restore(ctx, pendingKey, drainedFiles)
+			messaging.DeleteInboundFiles(ctx, artifactService, artifactInfo, stagedFiles)
+			if notifyErr := i.sendPendingAttachmentNotice(ctx, snapshot, bindingID, inbound, "附件总量过大，请减少附件后重试。"); notifyErr != nil {
+				return errors.Join(err, restoreErr, notifyErr)
+			}
+			return fmt.Errorf("%w: %v", errChannelIngressRejected, errors.Join(err, restoreErr))
+		}
+	}
+	progress := i.startProgress(ctx, snapshot, bindingID, &inbound)
+	published := false
+	defer func() {
+		if !published {
+			i.cancelProgress(progress)
+		}
+	}()
 	envelope, err := messaging.NewInboundEnvelopeWithContext(ctx, selection, bindingID, sessionKey, inbound, i.manifests)
 	if err != nil {
+		restoreErr := i.pendingFiles.Restore(ctx, pendingKey, drainedFiles)
 		messaging.DeleteInboundFiles(ctx, artifactService, artifactInfo, stagedFiles)
-		return err
+		return errors.Join(err, restoreErr)
 	}
 	if err := i.producer.Publish(ctx, envelope); err != nil {
+		restoreErr := i.pendingFiles.Restore(ctx, pendingKey, drainedFiles)
 		messaging.DeleteInboundFiles(ctx, artifactService, artifactInfo, stagedFiles)
-		return err
+		return errors.Join(err, restoreErr)
 	}
 	published = true
+	return nil
+}
+
+func (i *channelIngress) sendPendingAttachmentNotice(ctx context.Context, snapshot tenant.Snapshot, bindingID string, inbound channels.InboundMessage, text string) error {
+	if inbound.ConversationScope == channels.ConversationGroup {
+		return nil
+	}
+	sender, err := i.resolveSender(ctx, snapshot.Config.TenantID, snapshot.Config.AppCode, snapshot.Config.ConfigVersion, channels.BindingKey{Channel: inbound.Channel, BindingID: bindingID})
+	if err != nil {
+		return fmt.Errorf("resolve pending attachment sender: %w", err)
+	}
+	_, err = sender.Send(ctx, channels.ReplyTarget{
+		TenantID: snapshot.Config.TenantID, Channel: inbound.Channel, BindingID: bindingID,
+		ConversationID: inbound.ConversationID, ConversationScope: inbound.ConversationScope,
+		ProviderReplyToken: inbound.ProviderReplyToken,
+	}, channels.OutboundMessage{Text: text, IdempotencyKey: "pending-attachment:" + inbound.MessageID})
+	if err != nil {
+		return fmt.Errorf("send pending attachment notice: %w", err)
+	}
 	return nil
 }
 

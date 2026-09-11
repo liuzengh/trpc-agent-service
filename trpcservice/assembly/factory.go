@@ -487,6 +487,9 @@ func (f *Factory) runtimeInstruction(tenantConfig config.TenantConfig) string {
 	}
 
 	platform := "附件能力由平台决定，不要根据模型名称猜测，也不要自行缩小支持范围。当前可处理：" + strings.Join(accepted, "；") + "。未列出的格式不要声称支持；压缩包等归档文件不支持。"
+	if len(tenantConfig.Tools.RequireConfirmation) > 0 {
+		platform += "\n\n用户明确要求执行可用的有副作用工具，且请求符合该工具说明并已提供必需参数时，应调用工具而不是仅用文本代替执行。是否允许执行、是否需要用户确认以及最终业务结果由平台工具链负责；不要自行假装已确认，也不要因为需要确认而拒绝调用。"
+	}
 	if instruction == "" {
 		return platform
 	}

@@ -128,6 +128,23 @@ func TestManagedModelProviderBuildsOpenAIAndHunyuanAndFailover(t *testing.T) {
 	}
 }
 
+func TestModelAcceptsNonTextInputRequiresExplicitConfiguredCapability(t *testing.T) {
+	provider := config.ModelProviderConfig{Models: []config.ModelPricingConfig{
+		{Name: "text-only"},
+		{Name: "vision", Capabilities: &config.ModelCapabilities{Input: &config.ModelInputCapabilities{Image: true}}},
+		{Name: "audio", Capabilities: &config.ModelCapabilities{Input: &config.ModelInputCapabilities{Audio: true}}},
+	}}
+	if modelAcceptsNonTextInput(provider, "text-only") {
+		t.Fatal("text-only model unexpectedly accepts non-text input")
+	}
+	if !modelAcceptsNonTextInput(provider, "vision") || !modelAcceptsNonTextInput(provider, "audio") {
+		t.Fatal("explicit multimodal capability was not honored")
+	}
+	if modelAcceptsNonTextInput(provider, "discovered-only") {
+		t.Fatal("unconfigured discovered model must not gain multimodal capability")
+	}
+}
+
 func TestManagedModelProviderPersistsEachInvocationModelCall(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/chat/completions" {

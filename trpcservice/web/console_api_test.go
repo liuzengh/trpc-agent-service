@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -565,7 +566,7 @@ func TestConsoleListsEmptyToolCatalogAsArray(t *testing.T) {
 
 func TestFilterToolGrantsByCatalogHidesRetiredPlatformCapability(t *testing.T) {
 	t.Parallel()
-	grants := []identity.TenantToolGrant{{ToolName: "query_order"}, {ToolName: "platform.present_card"}}
+	grants := []identity.TenantToolGrant{{ToolName: "query_order"}, {ToolName: "platform_present_card"}}
 	visible := filterToolGrantsByCatalog(grants, []ToolInfo{{Name: "query_order"}})
 	if len(visible) != 1 || visible[0].ToolName != "query_order" {
 		t.Fatalf("visible grants = %#v", visible)
@@ -1039,6 +1040,13 @@ func TestConsoleManagesTenantPlatformData(t *testing.T) {
 	artifact := handler.requestAs(t, artifactOwner, http.MethodGet, "/api/v1/artifacts?tenant=example&app=support&session="+url.QueryEscape(artifactSessionKey)+"&filename=report.txt", "")
 	if artifact.Code != http.StatusOK || artifact.Body.String() != "report-v1" || artifact.Header().Get("Content-Type") != "text/plain" || artifact.Header().Get("X-Artifact-Version") != "1" {
 		t.Fatalf("latest artifact response = %d: %s", artifact.Code, artifact.Body.String())
+	}
+	download := handler.requestAs(t, artifactOwner, http.MethodGet, "/api/v1/artifacts?tenant=example&app=support&session="+url.QueryEscape(artifactSessionKey)+"&filename=report.txt&download=1", "")
+	if download.Code != http.StatusOK || download.Body.String() != "report-v1" ||
+		!strings.Contains(download.Header().Get("Content-Disposition"), "attachment") ||
+		!strings.Contains(download.Header().Get("Content-Disposition"), "report.txt") ||
+		download.Header().Get("Content-Length") != strconv.Itoa(len("report-v1")) {
+		t.Fatalf("artifact download response = %d headers=%v body=%q", download.Code, download.Header(), download.Body.String())
 	}
 	historicalArtifact := handler.requestAs(t, artifactOwner, http.MethodGet, "/api/v1/artifacts?tenant=example&app=support&session="+url.QueryEscape(artifactSessionKey)+"&filename=report.txt&version=0", "")
 	if historicalArtifact.Code != http.StatusOK || historicalArtifact.Body.String() != "report-v0" || historicalArtifact.Header().Get("X-Artifact-Version") != "0" {

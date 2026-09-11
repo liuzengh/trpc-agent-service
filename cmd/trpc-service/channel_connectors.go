@@ -147,10 +147,11 @@ func newChannelConnectorManager(
 	approvals governance.ApprovalBroker,
 	progress *messaging.RedisIMProgressHub,
 	artifacts channelArtifactProvider,
+	pendingFiles messaging.PendingAttachmentStore,
 	webSender channels.Sender,
 	manifests *messaging.ExecutionManifestCodec,
 ) (*channelConnectorManager, error) {
-	if repository == nil || producer == nil || secrets == nil || httpClient == nil || feishuCache == nil || redisClient == nil || state == nil || identities == nil || approvals == nil || progress == nil || artifacts == nil || webSender == nil || manifests == nil {
+	if repository == nil || producer == nil || secrets == nil || httpClient == nil || feishuCache == nil || redisClient == nil || state == nil || identities == nil || approvals == nil || progress == nil || artifacts == nil || pendingFiles == nil || webSender == nil || manifests == nil {
 		return nil, fmt.Errorf("channel connector dependencies are incomplete")
 	}
 	owner := uuid.NewString()
@@ -165,7 +166,7 @@ func newChannelConnectorManager(
 		return nil, err
 	}
 	manager.controls = controls
-	ingress, err := newChannelIngress(repository, producer, state, identities, controls, artifacts, manifests, manager.ResolveSender)
+	ingress, err := newChannelIngress(repository, producer, state, identities, controls, artifacts, pendingFiles, manifests, manager.ResolveSender)
 	if err != nil {
 		return nil, err
 	}

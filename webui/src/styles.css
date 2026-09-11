@@ -2738,12 +2738,41 @@ tbody tr:last-child td {
 }
 
 .thread {
+  position: relative;
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--hairline);
   border-radius: var(--r-sheet);
   background: var(--surface);
   box-shadow: var(--sh-card);
+}
+
+.chat-drop-overlay {
+  position: absolute;
+  z-index: 20;
+  inset: 10px;
+  display: grid;
+  place-items: center;
+  border: 1.5px dashed var(--accent);
+  border-radius: calc(var(--r-sheet) - 4px);
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  pointer-events: none;
+}
+
+.chat-drop-overlay-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.chat-drop-overlay-content small {
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 400;
 }
 
 .thread-head,
@@ -3322,9 +3351,12 @@ tbody tr:last-child td {
   border: 1px solid var(--hairline-strong);
   border-radius: var(--r-thumb);
   color: var(--text-2);
+  background: transparent;
+  font-family: inherit;
   font-size: 11px;
   font-weight: 600;
   text-decoration: none;
+  cursor: pointer;
 }
 
 .chat-card-action:hover {
@@ -3336,6 +3368,11 @@ tbody tr:last-child td {
   border-color: color-mix(in srgb, var(--accent) 30%, var(--hairline));
   background: var(--accent-soft);
   color: var(--accent-link);
+}
+
+.chat-card-action:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .message-attachments {
@@ -3369,6 +3406,16 @@ tbody tr:last-child td {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.message-attachment-action {
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.message-attachment-action:hover {
+  color: var(--text-1);
 }
 
 .msg.error .msg-text {

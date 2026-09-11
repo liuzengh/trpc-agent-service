@@ -37,3 +37,18 @@ func TestFactoryRuntimeInstructionStatesActualAttachmentCapabilities(t *testing.
 		}
 	}
 }
+
+func TestFactoryRuntimeInstructionDelegatesConfirmedSideEffectsToToolChain(t *testing.T) {
+	factory := NewFactoryWithModelProvider(
+		attachmentCapabilityModelProvider{}, nil, nil, nil, nil, nil, nil,
+	)
+	instruction := factory.runtimeInstruction(config.TenantConfig{
+		Instruction: "你是售后助手。",
+		Tools:       config.ToolPolicy{RequireConfirmation: []string{"request_refund"}},
+	})
+	for _, want := range []string{"有副作用工具", "应调用工具", "由平台工具链负责", "不要因为需要确认而拒绝调用"} {
+		if !strings.Contains(instruction, want) {
+			t.Fatalf("runtime instruction missing %q: %q", want, instruction)
+		}
+	}
+}

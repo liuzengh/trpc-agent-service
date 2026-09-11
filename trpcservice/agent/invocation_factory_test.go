@@ -41,7 +41,7 @@ func TestDefaultInvocationFactoryUsesTenantToolBudget(t *testing.T) {
 func TestDefaultInvocationFactoryCopiesToolIdentity(t *testing.T) {
 	invocation, err := DefaultInvocationFactory(context.Background(), tenant.Snapshot{Config: config.TenantConfig{
 		TenantID: "acme", AppCode: "support", ConfigVersion: 1,
-		Tools: config.ToolPolicy{AllowedRoles: map[string][]string{"platform.save_artifact": {"admin"}}},
+		Tools: config.ToolPolicy{AllowedRoles: map[string][]string{"platform_save_artifact": {"admin"}}},
 	}}, "web-console", channels.InboundMessage{
 		Channel: channels.Web, SenderID: "user-1", SubjectID: "user-1", MessageID: "msg-1", ConversationID: "conv-1",
 		ProgressMessageID: "progress-1", ProviderReplyToken: "reply-token-1",
@@ -55,7 +55,7 @@ func TestDefaultInvocationFactoryCopiesToolIdentity(t *testing.T) {
 	if invocation.Execution.ProgressMessageID != "progress-1" || invocation.Execution.ProviderReplyToken != "reply-token-1" {
 		t.Fatalf("progress routing = %+v", invocation.Execution)
 	}
-	if got := invocation.Execution.ToolRoles["platform.save_artifact"]; len(got) != 1 || got[0] != "admin" {
+	if got := invocation.Execution.ToolRoles["platform_save_artifact"]; len(got) != 1 || got[0] != "admin" {
 		t.Fatalf("tool roles = %v", invocation.Execution.ToolRoles)
 	}
 }

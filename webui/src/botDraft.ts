@@ -312,7 +312,8 @@ export function applicationPayloadFromDraft({
 
 function generationFromDraft(draft: BotDraft, capabilities?: ModelCapabilities): GenerationConfig | undefined {
   const supportedEfforts = capabilities?.reasoning_efforts ?? []
-  const reasoningEffort = supportedEfforts.includes(draft.reasoning_effort as NonNullable<GenerationConfig['reasoning_effort']>)
+  const reasoningEffortAllowed = !capabilities?.thinking_toggle || draft.thinking_enabled
+  const reasoningEffort = reasoningEffortAllowed && supportedEfforts.includes(draft.reasoning_effort as NonNullable<GenerationConfig['reasoning_effort']>)
     ? draft.reasoning_effort as NonNullable<GenerationConfig['reasoning_effort']>
     : undefined
   const thinkingEnabled = Boolean(capabilities?.thinking_toggle && draft.thinking_enabled)

@@ -183,7 +183,8 @@ func (d *ChannelOutboxDispatcher) Dispatch(ctx context.Context, event storage.Ou
 	if strings.TrimSpace(payload.TraceParent) != "" {
 		ctx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": payload.TraceParent})
 	}
-	if !payload.Channel.Supported() || strings.TrimSpace(payload.ConversationID) == "" || (strings.TrimSpace(payload.Text) == "" && payload.Card == nil) {
+	if !payload.Channel.Supported() || strings.TrimSpace(payload.ConversationID) == "" ||
+		(strings.TrimSpace(payload.Text) == "" && payload.Card == nil && len(payload.Artifacts) == 0) {
 		return channels.SendReceipt{}, fmt.Errorf("invalid channel outbox payload")
 	}
 	key := channels.BindingKey{Channel: payload.Channel, BindingID: payload.BindingID}
@@ -203,8 +204,19 @@ func (d *ChannelOutboxDispatcher) Dispatch(ctx context.Context, event storage.Ou
 		idempotencyKey = event.ID
 	}
 	var outboundFiles []channels.OutboundFile
+	var outboundArtifacts []channels.OutboundArtifact
 	cleanupFiles := func() {}
-	if payload.Channel != channels.Web && len(payload.Artifacts) > 0 {
+	if payload.Channel == channels.Web {
+		outboundArtifacts = make([]channels.OutboundArtifact, 0, len(payload.Artifacts))
+		for _, artifact := range payload.Artifacts {
+			outboundArtifacts = append(outboundArtifacts, channels.OutboundArtifact{
+				Filename: artifact.Filename,
+				Version:  artifact.Version,
+				Name:     artifact.Name,
+				MimeType: artifact.MimeType,
+			})
+		}
+	} else if len(payload.Artifacts) > 0 {
 		materializer, ok := d.resolver.(ChannelArtifactMaterializer)
 		if !ok {
 			return channels.SendReceipt{}, fmt.Errorf("outbox resolver cannot materialize artifacts")
@@ -219,7 +231,10 @@ func (d *ChannelOutboxDispatcher) Dispatch(ctx context.Context, event storage.Ou
 		TenantID: event.TenantID, Channel: payload.Channel, BindingID: payload.BindingID,
 		ConversationID: payload.ConversationID, ConversationScope: payload.ConversationScope,
 		ProviderReplyToken: payload.ProviderReplyToken, WebOwnerID: payload.WebOwnerID,
-	}, channels.OutboundMessage{Text: payload.Text, Card: payload.Card, Files: outboundFiles, UpdateMessageID: payload.ProgressMessageID, IdempotencyKey: idempotencyKey})
+	}, channels.OutboundMessage{
+		Text: payload.Text, Card: payload.Card, Files: outboundFiles, Artifacts: outboundArtifacts,
+		UpdateMessageID: payload.ProgressMessageID, IdempotencyKey: idempotencyKey,
+	})
 	finish(sendErr)
 	if sendErr != nil {
 		finalizeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -268,6 +283,9 @@ func (d *ChannelOutboxDispatcher) sendWithLease(ctx context.Context, event stora
 		part := message
 		part.Text = text
 		part.Files = nil
+		if index < len(segments)-1 {
+			part.Artifacts = nil
+		}
 		if len(segments) > 1 && index < len(segments)-1 {
 			part.Card = nil
 		}

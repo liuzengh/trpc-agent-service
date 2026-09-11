@@ -392,7 +392,7 @@ func TestConsoleSessionMessagesReturnsFrameworkTranscript(t *testing.T) {
 		TenantID: "example", AppCode: "support", SessionKey: sessionKey,
 		MessageID: "message-1", Channel: "web", BindingID: "web-console", ConversationID: "conversation-1", ConversationScope: "direct", TraceID: "trace-1",
 		Action: "agent_reply", Result: "queued", OutboxType: "channel_reply.web", SubjectID: "user-1", OwnerPlatformUserID: "console-admin",
-		OutboxPayload:   []byte(`{"channel":"web","web_owner_id":"console-admin","text":"正在查询订单","card":{"title":"订单信息","body":"已找到订单","actions":[{"label":"查看","url":"https://support.example.test/orders/42"}]}}`),
+		OutboxPayload:   []byte(`{"channel":"web","web_owner_id":"console-admin","text":"正在查询订单","card":{"title":"订单信息","body":"已找到订单","actions":[{"label":"查看","url":"https://support.example.test/orders/42"}]},"artifacts":[{"filename":"维修受理.md","version":2,"name":"维修受理说明","mime_type":"text/markdown"}]}`),
 		OutboxRequestID: "message-1",
 	}); err != nil {
 		t.Fatalf("seed platform session: %v", err)
@@ -409,7 +409,7 @@ func TestConsoleSessionMessagesReturnsFrameworkTranscript(t *testing.T) {
 		Messages   []chatTranscriptMessage `json:"messages"`
 		NextCursor string                  `json:"next_cursor"`
 	}
-	if latest.Code != http.StatusOK || json.Unmarshal(latest.Body.Bytes(), &latestPage) != nil || len(latestPage.Messages) != 1 || latestPage.Messages[0].Content != "正在查询订单" || latestPage.Messages[0].Card == nil || latestPage.Messages[0].Card.Title != "订单信息" || latestPage.NextCursor == "" {
+	if latest.Code != http.StatusOK || json.Unmarshal(latest.Body.Bytes(), &latestPage) != nil || len(latestPage.Messages) != 1 || latestPage.Messages[0].Content != "正在查询订单" || latestPage.Messages[0].Card == nil || latestPage.Messages[0].Card.Title != "订单信息" || len(latestPage.Messages[0].Attachments) != 1 || latestPage.Messages[0].Attachments[0].Filename != "维修受理.md" || latestPage.Messages[0].Attachments[0].Version != 2 || latestPage.NextCursor == "" {
 		t.Fatalf("latest transcript page = %d %s", latest.Code, latest.Body.String())
 	}
 	older := handler.request(t, http.MethodGet, "/api/v1/sessions/messages?tenant=example&session_key=example%2Fsupport%2Fsession%2Fconversation-1&limit=1&before="+latestPage.NextCursor, "")
@@ -419,6 +419,9 @@ func TestConsoleSessionMessagesReturnsFrameworkTranscript(t *testing.T) {
 	}
 	if older.Code != http.StatusOK || json.Unmarshal(older.Body.Bytes(), &olderPage) != nil || len(olderPage.Messages) != 1 || olderPage.Messages[0].Content != "订单到哪了" || olderPage.NextCursor != "" {
 		t.Fatalf("older transcript page = %d %s", older.Code, older.Body.String())
+	}
+	if len(olderPage.Messages[0].Attachments) != 0 || olderPage.Messages[0].Card != nil {
+		t.Fatalf("user message inherited assistant reply metadata: %#v", olderPage.Messages[0])
 	}
 	list := handler.request(t, http.MethodGet, "/api/v1/sessions/mine?tenant=example&app=support&channel=web&subject=user-1&status=active", "")
 	if list.Code != http.StatusOK {

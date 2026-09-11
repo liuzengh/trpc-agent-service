@@ -43,7 +43,10 @@
           "name": "deepseek-flash",
           "capabilities": {
             "reasoning_efforts": ["low", "high", "max"],
-            "thinking_toggle": true
+            "thinking_toggle": true,
+            "input": {
+              "image": true
+            }
           }
         },
         {

@@ -6,6 +6,7 @@ import {
   type ChatRequest,
   type Snapshot,
   type SSEEvent,
+  type ChatArtifact,
   type InteractiveCard,
   type SystemStatus,
   type ModelConfig,
@@ -732,6 +733,12 @@ export function getArtifact(tenant: string, app: string, session: string, filena
   })
 }
 
+export function artifactDownloadURL(tenant: string, app: string, session: string, filename: string, version?: number): string {
+  const query = new URLSearchParams({ tenant, app, session, filename, download: '1' })
+  if (version !== undefined) query.set('version', String(version))
+  return `/api/v1/artifacts?${query}`
+}
+
 export interface ApplicationPayload {
   tenant_id: string
   app_code: string
@@ -796,6 +803,7 @@ interface ChatStreamResult {
   lastEventID: string
   reply: string
   card?: InteractiveCard
+  artifacts?: ChatArtifact[]
   done: boolean
   sawDelta: boolean
 }
@@ -806,6 +814,7 @@ interface ChatStreamResult {
 export interface ChatResult {
   reply: string
   card?: InteractiveCard
+  artifacts?: ChatArtifact[]
   eventId: string
   sessionKey: string
 }
@@ -815,6 +824,7 @@ export async function postChat(
   onDelta: (content: string) => void,
   signal?: AbortSignal,
   files: File[] = [],
+  onCard?: (card: InteractiveCard) => void,
 ): Promise<ChatResult> {
   const headers = new Headers()
   const token = csrfToken()
@@ -839,7 +849,7 @@ export async function postChat(
   if (!queued.stream_url) throw new ApiError(500, 'chat stream URL missing')
   const eventId = queued.event_id ?? requestId
   const sessionKey = queued.session_key ?? ''
-  const resultOf = (text: string, card?: InteractiveCard): ChatResult => ({ reply: text, card, eventId, sessionKey })
+  const resultOf = (text: string, card?: InteractiveCard, artifacts?: ChatArtifact[]): ChatResult => ({ reply: text, card, artifacts, eventId, sessionKey })
 
   let lastEventID = ''
   let sawDelta = false
@@ -848,14 +858,14 @@ export async function postChat(
   const seenEventIDs = new Set<string>()
   for (let attempt = 0; attempt < CHAT_STREAM_MAX_ATTEMPTS; attempt += 1) {
     try {
-      const result = await readChatStream(queued.stream_url, lastEventID, seenEventIDs, onDelta, signal)
+      const result = await readChatStream(queued.stream_url, lastEventID, seenEventIDs, onDelta, onCard, signal)
       lastEventID = result.lastEventID
       sawDelta = sawDelta || result.sawDelta
       if (result.reply) reply = result.reply
       if (result.card) card = result.card
       if (result.done) {
         if (!sawDelta && result.reply) onDelta(result.reply)
-        return resultOf(result.reply, result.card)
+        return resultOf(result.reply, result.card, result.artifacts)
       }
     } catch (error) {
       if (signal?.aborted || (error as Error).name === 'AbortError') throw error
@@ -866,24 +876,27 @@ export async function postChat(
   }
 
   // Fallback: If reconnect attempts exhausted or stream disconnected, check if execution already completed in DB
+  let executionFailed = false
   if (body.tenant_id && eventId) {
     try {
       const trace = await getExecution(body.tenant_id, 'web', 'web-console', eventId, sessionKey)
       if (trace.outbox && trace.outbox.length > 0) {
         for (const out of trace.outbox) {
           const payload = outboxReplyPayload(out.Payload)
-          if (payload && (payload.text || payload.card)) {
+          if (payload && (payload.text || payload.card || payload.artifacts?.length)) {
             const text = payload.text
             if (!sawDelta) onDelta(text)
-            return resultOf(text, payload.card)
+            return resultOf(text, payload.card, payload.artifacts)
           }
         }
       }
+      executionFailed = trace.status === 'failed' || trace.agent_trace?.status === 'failed' || trace.claim?.status === 'failed'
     } catch {
       /* ignore */
     }
   }
 
+  if (executionFailed) throw new ApiError(500, '请求处理失败，请稍后重试。')
   if (reply || card) return resultOf(reply, card)
   throw new ApiError(504, 'chat stream reconnect limit reached')
 }
@@ -893,6 +906,7 @@ async function readChatStream(
   lastEventID: string,
   seenEventIDs: Set<string>,
   onDelta: (content: string) => void,
+  onCard?: (card: InteractiveCard) => void,
   signal?: AbortSignal,
 ): Promise<ChatStreamResult> {
   const headers = new Headers()
@@ -916,7 +930,7 @@ async function readChatStream(
             try {
               const event = JSON.parse(line.slice(6)) as SSEEvent
               if (event.type === 'done') {
-                return { lastEventID: nextEventID, reply: event.reply || reply, done: true, sawDelta }
+                return { lastEventID: nextEventID, reply: event.reply || reply, card: event.card, artifacts: event.artifacts, done: true, sawDelta }
               }
             } catch { /* ignore */ }
           }
@@ -950,10 +964,13 @@ async function readChatStream(
         sawDelta = true
         reply += event.content
         onDelta(event.content)
+      } else if (event.type === 'card' && event.card) {
+        card = event.card
+        onCard?.(event.card)
       } else if (event.type === 'done') {
         const finalReply = event.reply || reply
         card = event.card
-        return { lastEventID: nextEventID, reply: finalReply, card, done: true, sawDelta }
+        return { lastEventID: nextEventID, reply: finalReply, card, artifacts: event.artifacts, done: true, sawDelta }
       } else if (event.type === 'error') {
         const message = event.message ?? 'agent execution failed'
         if (message.includes('timed out') || message.includes('stream closed')) {
@@ -963,6 +980,14 @@ async function readChatStream(
       }
     }
   }
+}
+
+export function resolveChatApproval(tenantID: string, actionID: string): Promise<InteractiveCard> {
+  return request<{ card: InteractiveCard }>('/api/v1/chat/approval', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tenant_id: tenantID, action_id: actionID }),
+  }).then((response) => response.card)
 }
 
 function waitForChatRetry(attempt: number, signal?: AbortSignal): Promise<void> {

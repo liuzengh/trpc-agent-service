@@ -144,6 +144,31 @@ func TestConnectorRequiresBotMentionInGroup(t *testing.T) {
 	}
 }
 
+func TestConnectorAcceptsUnmentionedGroupAttachmentForDeferredInstruction(t *testing.T) {
+	fake := &fakeRuntimeChannel{
+		files: map[string][]byte{"image-key": []byte("image-bytes")},
+		message: &channeltypes.NormalizedMessage{
+			EventID: "evt-group-file", MessageID: "om-group-file", ChatID: "oc-group", ChatType: "group",
+			UserID: "ou-user", MentionedBot: false,
+			Resources: []channeltypes.Resource{{Type: "image", FileKey: "image-key", FileName: "proof.png"}},
+		},
+	}
+	connector := newConnectorWithChannel(fake)
+	var got channels.InboundMessage
+	if err := connector.Run(context.Background(), func(_ context.Context, message channels.InboundMessage) error {
+		got = message
+		return nil
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got.ConversationScope != channels.ConversationGroup || got.TriggerType != "" || got.Text != "" || len(got.ReceivedFiles) != 1 {
+		t.Fatalf("group attachment = %#v", got)
+	}
+	if got.ReceivedFiles[0].Name != "proof.png" || string(got.ReceivedFiles[0].Data) != "image-bytes" {
+		t.Fatalf("group attachment file = %#v", got.ReceivedFiles[0])
+	}
+}
+
 func TestConnectorDownloadsFileResources(t *testing.T) {
 	fake := &fakeRuntimeChannel{
 		files: map[string][]byte{"file-key": []byte("document bytes")},

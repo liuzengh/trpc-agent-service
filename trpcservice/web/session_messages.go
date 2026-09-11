@@ -41,7 +41,10 @@ type chatTranscriptMessage struct {
 }
 
 type chatTranscriptAttachment struct {
-	Name string `json:"name"`
+	Name     string `json:"name"`
+	Filename string `json:"filename,omitempty"`
+	Version  int    `json:"version,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
 }
 
 type chatMessageSource struct {
@@ -170,21 +173,46 @@ func (c *consoleAPI) attachChatMessageCards(ctx context.Context, tenantID string
 	if err != nil {
 		return nil, err
 	}
-	cards := make(map[string]*channels.InteractiveCard, len(events))
+	type replyMetadata struct {
+		card        *channels.InteractiveCard
+		attachments []chatTranscriptAttachment
+	}
+	metadata := make(map[string]replyMetadata, len(events))
 	for _, outbox := range events {
 		var payload struct {
-			Card *channels.InteractiveCard `json:"card,omitempty"`
+			Card      *channels.InteractiveCard   `json:"card,omitempty"`
+			Artifacts []channels.OutboundArtifact `json:"artifacts,omitempty"`
 		}
 		if err := json.Unmarshal(outbox.Payload, &payload); err != nil {
 			return nil, fmt.Errorf("decode stored reply card: %w", err)
 		}
-		if payload.Card != nil {
-			cards[outbox.RequestID] = payload.Card
+		entry := replyMetadata{card: payload.Card}
+		for _, artifact := range payload.Artifacts {
+			name := strings.TrimSpace(artifact.Name)
+			if name == "" {
+				name = strings.TrimSpace(artifact.Filename)
+			}
+			entry.attachments = append(entry.attachments, chatTranscriptAttachment{
+				Name: name, Filename: artifact.Filename, Version: artifact.Version, MimeType: artifact.MimeType,
+			})
+		}
+		if entry.card != nil || len(entry.attachments) > 0 {
+			metadata[outbox.RequestID] = entry
 		}
 	}
 	for index := range messages {
-		if card := cards[messages[index].RequestID]; card != nil {
-			messages[index].Card = card
+		if messages[index].Role != string(model.RoleAssistant) {
+			continue
+		}
+		entry, ok := metadata[messages[index].RequestID]
+		if !ok {
+			continue
+		}
+		if entry.card != nil {
+			messages[index].Card = entry.card
+		}
+		if len(entry.attachments) > 0 {
+			messages[index].Attachments = append(messages[index].Attachments, entry.attachments...)
 		}
 	}
 	return messages, nil

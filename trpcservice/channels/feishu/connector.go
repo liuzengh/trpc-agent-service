@@ -124,8 +124,10 @@ func (c *Connector) Run(ctx context.Context, handler MessageHandler) error {
 			return nil
 		}
 		scope := channels.ConversationDirect
+		groupAttachmentWithoutMention := false
 		if strings.EqualFold(strings.TrimSpace(message.ChatType), "group") {
-			if !message.MentionedBot {
+			groupAttachmentWithoutMention = !message.MentionedBot && len(message.Resources) > 0
+			if !message.MentionedBot && !groupAttachmentWithoutMention {
 				return nil
 			}
 			scope = channels.ConversationGroup
@@ -149,9 +151,9 @@ func (c *Connector) Run(ctx context.Context, handler MessageHandler) error {
 		}
 		if strings.HasPrefix(strings.TrimSpace(content), "/") {
 			inbound.TriggerType = channels.TriggerCommand
-		} else if scope == channels.ConversationGroup {
+		} else if scope == channels.ConversationGroup && !groupAttachmentWithoutMention {
 			inbound.TriggerType = channels.TriggerMention
-		} else {
+		} else if scope == channels.ConversationDirect {
 			inbound.TriggerType = channels.TriggerDirect
 		}
 		if message.CreateTimeMs > 0 {

@@ -403,6 +403,9 @@ export interface SessionChatMessage {
     name: string
     size?: number
     type?: string
+    filename?: string
+    version?: number
+    mime_type?: string
   }>
   card?: InteractiveCard
   source?: {
@@ -416,11 +419,20 @@ export interface SessionChatMessage {
   }
 }
 
+export interface ChatArtifact {
+  filename: string
+  version: number
+  name?: string
+  mime_type?: string
+}
+
 export interface SSEEvent {
-  type: 'delta' | 'done' | 'error'
+  type: 'delta' | 'card' | 'done' | 'error'
   content?: string
   reply?: string
   card?: InteractiveCard
+  artifacts?: ChatArtifact[]
+  code?: string
   message?: string
 }
 
@@ -488,12 +500,13 @@ export function decodeBase64JSON<T>(encoded: string): T | null {
   }
 }
 
-export function outboxReplyPayload(payload: string): { text: string; card?: InteractiveCard } | null {
-  const decoded = decodeBase64JSON<{ text?: string; card?: InteractiveCard }>(payload)
+export function outboxReplyPayload(payload: string): { text: string; card?: InteractiveCard; artifacts?: ChatArtifact[] } | null {
+  const decoded = decodeBase64JSON<{ text?: string; card?: InteractiveCard; artifacts?: ChatArtifact[] }>(payload)
   if (!decoded) return null
   return {
     text: typeof decoded.text === 'string' ? decoded.text : '',
     card: decoded.card,
+    artifacts: Array.isArray(decoded.artifacts) ? decoded.artifacts : undefined,
   }
 }
 

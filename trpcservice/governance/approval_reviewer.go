@@ -47,12 +47,6 @@ func (r *InteractiveApprovalReviewer) Review(ctx context.Context, request *revie
 		return &review.Decision{Approved: false, RiskLevel: "high", Reason: "approval context is incomplete"}, nil
 	}
 	execution := invocation.Execution
-	if execution.Channel == "web" {
-		if err := r.recordAudit(ctx, execution, request.Action.ToolName, "approval.rejected", "rejected", "web_approval_unavailable", 0, time.Now().UTC()); err != nil {
-			return nil, err
-		}
-		return &review.Decision{Approved: false, RiskLevel: "high", Reason: "web interactive approval is unavailable"}, nil
-	}
 	started := time.Now().UTC()
 	if err := r.recordAudit(ctx, execution, request.Action.ToolName, "approval.requested", "pending", "", 0, started); err != nil {
 		return nil, err

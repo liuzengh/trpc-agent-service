@@ -65,7 +65,7 @@ type ToolDescriptor struct {
 }
 
 // NewToolRegistry constructs the single platform registry. DuckDuckGo is a
-// framework-native built-in; platform.present_card is a governed presentation
+// framework-native built-in; platform_present_card is a governed presentation
 // tool; callers may add additional platform-owned tools.
 func NewToolRegistry(registry map[string]agenttool.CallableTool, opts ...ToolRegistryOption) (*ToolRegistry, error) {
 	tools := &ToolRegistry{

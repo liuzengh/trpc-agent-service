@@ -93,6 +93,15 @@ describe('bot draft', () => {
       thinking_enabled: true,
       thinking_tokens: 2048,
     })
+
+    const reasoningDisabled = applicationPayloadFromDraft({
+      draft: { ...draft, thinking_enabled: false },
+      tenantID: 'tenant-a',
+      mode: 'create',
+      app: null,
+      capabilities: { reasoning_efforts: ['high'], thinking_toggle: true },
+    })
+    expect(reasoningDisabled.model.generation).toBeUndefined()
   })
 
   it('keeps allowed roles only for tools that remain allowed', () => {
@@ -119,7 +128,7 @@ describe('bot draft', () => {
     const app = {
       Config: {
         tenant_id: 'tenant-a', app_code: 'support', status: 'active', model: {}, storage: {},
-        tools: { allowed: ['platform.present_card', 'duckduckgo_search'], require_confirmation: ['platform.present_card'] },
+        tools: { allowed: ['platform_present_card', 'duckduckgo_search'], require_confirmation: ['platform_present_card'] },
         governance: { max_tool_calls: 8, budget_units: 100 }, audit: { retention_days: 90 }, channels: [],
       },
     } as unknown as Snapshot
@@ -131,8 +140,8 @@ describe('bot draft', () => {
       draft: {
         ...draft,
         provider_id: 'provider-a', model_name: 'model-a', ...storageProfiles,
-        tools_allowed: ['platform.present_card', 'duckduckgo_search'],
-        tools_require_confirmation: ['platform.present_card'],
+        tools_allowed: ['platform_present_card', 'duckduckgo_search'],
+        tools_require_confirmation: ['platform_present_card'],
       },
       tenantID: 'tenant-a', mode: 'edit', app,
     })

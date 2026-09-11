@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"sort"
 	"strconv"
@@ -639,6 +640,14 @@ func (c *consoleAPI) artifacts(writer http.ResponseWriter, request *http.Request
 	writer.Header().Set("X-Artifact-Version", strconv.Itoa(targetVersion))
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	writer.Header().Set("Cache-Control", "private, no-store")
+	writer.Header().Set("Content-Length", strconv.Itoa(len(artifact.Data)))
+	if query.Get("download") == "1" {
+		downloadName := strings.TrimSpace(strings.TrimPrefix(filename, "user:"))
+		if downloadName == "" {
+			downloadName = "artifact"
+		}
+		writer.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": downloadName}))
+	}
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(artifact.Data)
 }

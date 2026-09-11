@@ -157,6 +157,14 @@ type Processor interface {
 	Process(context.Context, Envelope) error
 }
 
+// TerminalFailureNotifier is an optional Processor capability invoked only
+// after a delivery has reached its final failure boundary and the DLQ handoff
+// succeeded. Notification errors are best-effort and must not create a Kafka
+// replay loop after the business delivery is already terminal.
+type TerminalFailureNotifier interface {
+	NotifyTerminalFailure(context.Context, Envelope, string, error) error
+}
+
 // ProcessorFunc adapts a function to Processor.
 type ProcessorFunc func(context.Context, Envelope) error
 
@@ -298,10 +306,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	}
 	defer w.finishDelivery()
 	if delivery.DecodeError != nil {
-		return w.finishWithDLQ(ctx, delivery, "invalid_json")
+		return w.finishWithDLQ(ctx, delivery, "invalid_json", delivery.DecodeError)
 	}
 	if err := delivery.Envelope.Validate(); err != nil {
-		return w.finishWithDLQ(ctx, delivery, "invalid_envelope")
+		return w.finishWithDLQ(ctx, delivery, "invalid_envelope", err)
 	}
 	if delivery.Envelope.TraceParent != "" {
 		ctx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": delivery.Envelope.TraceParent})
@@ -336,7 +344,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 				return fmt.Errorf("%w: %v", ErrRetryScheduled, err)
 			}
 		}
-		return w.finishWithDLQ(ctx, delivery, errorClass(err))
+		return w.finishWithDLQ(ctx, delivery, errorClass(err), err)
 	}
 	if err := w.consumer.Commit(ctx, delivery); err != nil {
 		return fmt.Errorf("commit Kafka delivery: %w", err)
@@ -353,7 +361,7 @@ func (w *Worker) receive(ctx context.Context) (Delivery, error) {
 	return w.consumer.Receive(ctx)
 }
 
-func (w *Worker) finishWithDLQ(ctx context.Context, delivery Delivery, class string) error {
+func (w *Worker) finishWithDLQ(ctx context.Context, delivery Delivery, class string, cause error) error {
 	slog.Warn("dead-lettering Kafka delivery",
 		"tenant_id", delivery.Envelope.TenantID,
 		"session_key", delivery.Envelope.SessionKey,
@@ -361,6 +369,16 @@ func (w *Worker) finishWithDLQ(ctx context.Context, delivery Delivery, class str
 		"class", class)
 	if err := w.consumer.PublishDLQ(ctx, DeadLetter{Envelope: delivery.Envelope, RawPayload: append([]byte(nil), delivery.RawPayload...), ErrorClass: class}); err != nil {
 		return fmt.Errorf("publish Kafka dead letter: %w", err)
+	}
+	if notifier, ok := w.processor.(TerminalFailureNotifier); ok {
+		if err := notifier.NotifyTerminalFailure(ctx, delivery.Envelope, class, cause); err != nil {
+			slog.Warn("publish terminal delivery failure notification",
+				"tenant_id", delivery.Envelope.TenantID,
+				"session_key", delivery.Envelope.SessionKey,
+				"event_id", delivery.Envelope.EventID,
+				"class", class,
+				"error", err)
+		}
 	}
 	if err := w.consumer.Commit(ctx, delivery); err != nil {
 		return fmt.Errorf("commit Kafka delivery after DLQ: %w", err)

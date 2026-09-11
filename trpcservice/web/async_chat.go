@@ -88,6 +88,7 @@ func (c *consoleAPI) enqueueChat(writer http.ResponseWriter, request *http.Reque
 	var (
 		artifactService agentartifact.Service
 		artifactInfo    agentartifact.SessionInfo
+		drainedFiles    []messaging.PendingAttachmentBatch
 	)
 	if len(uploads) > 0 {
 		if c.dependencies.ArtifactServices == nil {
@@ -115,6 +116,89 @@ func (c *consoleAPI) enqueueChat(writer http.ResponseWriter, request *http.Reque
 			return
 		}
 	}
+	pendingKey := messaging.PendingAttachmentKey{
+		TenantID: snapshot.Config.TenantID, AppCode: snapshot.Config.AppCode, Channel: channels.Web, BindingID: "web-console",
+		SessionKey: sessionKey, SenderID: inbound.SenderID,
+	}
+	if strings.TrimSpace(inbound.Text) == "" && len(inbound.Files) > 0 {
+		if c.dependencies.PendingAttachments == nil {
+			deleteChatUploads(request.Context(), artifactService, artifactInfo, inbound.Files)
+			if ingressLease.Key != "" {
+				_ = c.dependencies.WebIdempotency.Release(request.Context(), ingressLease)
+			}
+			serverError(writer, "store pending chat files", errors.New("pending attachment store is not configured"))
+			return
+		}
+		if err := c.dependencies.PendingAttachments.Append(request.Context(), pendingKey, messaging.PendingAttachmentBatch{
+			MessageID: inbound.MessageID, ReceivedAt: inbound.ReceivedAt, Files: inbound.Files,
+		}); err != nil {
+			deleteChatUploads(request.Context(), artifactService, artifactInfo, inbound.Files)
+			if ingressLease.Key != "" {
+				_ = c.dependencies.WebIdempotency.Release(request.Context(), ingressLease)
+			}
+			if errors.Is(err, messaging.ErrPendingAttachmentLimit) {
+				badRequest(writer, "待处理附件过多，请先发送文字说明后再继续上传。")
+				return
+			}
+			serverError(writer, "store pending chat files", err)
+			return
+		}
+		if c.dependencies.ReplySender == nil {
+			if ingressLease.Key != "" {
+				_ = c.dependencies.WebIdempotency.Release(request.Context(), ingressLease)
+			}
+			serverError(writer, "acknowledge pending chat files", errors.New("web reply sender is not configured"))
+			return
+		}
+		if _, err := c.dependencies.ReplySender.Send(request.Context(), channels.ReplyTarget{
+			TenantID: snapshot.Config.TenantID, Channel: channels.Web, BindingID: "web-console",
+			ConversationID: inbound.ConversationID, ConversationScope: inbound.ConversationScope, WebOwnerID: user.PlatformUserID,
+		}, channels.OutboundMessage{Text: "已收到附件，请继续发送你的问题。", IdempotencyKey: inbound.MessageID}); err != nil {
+			if ingressLease.Key != "" {
+				_ = c.dependencies.WebIdempotency.Release(request.Context(), ingressLease)
+			}
+			serverError(writer, "acknowledge pending chat files", err)
+			return
+		}
+		if ingressLease.Key != "" {
+			if err := c.dependencies.WebIdempotency.Complete(request.Context(), ingressLease, 24*time.Hour); err != nil {
+				serverError(writer, "complete web request", err)
+				return
+			}
+		}
+		writeJSON(writer, http.StatusAccepted, map[string]any{
+			"event_id": inbound.MessageID, "session_key": sessionKey,
+			"stream_url": "/api/v1/chat/stream?tenant=" + snapshot.Config.TenantID + "&event_id=" + inbound.MessageID,
+		})
+		return
+	}
+	if strings.TrimSpace(inbound.Text) != "" && c.dependencies.PendingAttachments != nil {
+		drainedFiles, err = c.dependencies.PendingAttachments.Drain(request.Context(), pendingKey)
+		if err != nil {
+			deleteChatUploads(request.Context(), artifactService, artifactInfo, inbound.Files)
+			if ingressLease.Key != "" {
+				_ = c.dependencies.WebIdempotency.Release(request.Context(), ingressLease)
+			}
+			serverError(writer, "drain pending chat files", err)
+			return
+		}
+		if len(drainedFiles) > 0 {
+			inbound.Files = append(messaging.PendingAttachmentFiles(drainedFiles), inbound.Files...)
+		}
+		if err := messaging.ValidatePendingAttachmentFiles(inbound.Files); err != nil {
+			restoreErr := c.dependencies.PendingAttachments.Restore(request.Context(), pendingKey, drainedFiles)
+			deleteChatUploads(request.Context(), artifactService, artifactInfo, inbound.Files[len(messaging.PendingAttachmentFiles(drainedFiles)):])
+			if ingressLease.Key != "" {
+				_ = c.dependencies.WebIdempotency.Release(request.Context(), ingressLease)
+			}
+			if restoreErr != nil {
+				serverError(writer, "restore pending chat files", restoreErr)
+				return
+			}
+			badRequest(writer, "附件总量过大，请减少附件后重试。")
+			return
+		}
+	}
 	selection := tenant.ReleaseSelection{Snapshot: snapshot, Variant: tenant.ReleaseStable}
 	if rollout, rolloutErr := c.dependencies.Configurations.GetRollout(request.Context(), snapshot.Config.TenantID, snapshot.Config.AppCode); rolloutErr == nil {
 		selection.RolloutGeneration = rollout.Generation
@@ -122,28 +206,35 @@ func (c *consoleAPI) enqueueChat(writer http.ResponseWriter, request *http.Reque
 			selection.Variant = tenant.ReleaseCandidate
 		}
 	} else if !errors.Is(rolloutErr, tenant.ErrRolloutNotFound) {
-		deleteChatUploads(request.Context(), artifactService, artifactInfo, inbound.Files)
+		restoreErr := restorePendingChatAttachments(request.Context(), c.dependencies.PendingAttachments, pendingKey, drainedFiles)
+		deleteChatUploads(request.Context(), artifactService, artifactInfo, currentChatFiles(inbound.Files, drainedFiles))
 		if ingressLease.Key != "" {
 			_ = c.dependencies.WebIdempotency.Release(request.Context(), ingressLease)
 		}
-		serverError(writer, "resolve web release metadata", rolloutErr)
+		serverError(writer, "resolve web release metadata", errors.Join(rolloutErr, restoreErr))
 		return
 	}
 	envelope, err := messaging.NewInboundEnvelopeWithContext(request.Context(), selection, "web-console", sessionKey, inbound, c.dependencies.ExecutionManifests)
 	if err != nil {
-		deleteChatUploads(request.Context(), artifactService, artifactInfo, inbound.Files)
+		restoreErr := restorePendingChatAttachments(request.Context(), c.dependencies.PendingAttachments, pendingKey, drainedFiles)
+		deleteChatUploads(request.Context(), artifactService, artifactInfo, currentChatFiles(inbound.Files, drainedFiles))
 		if ingressLease.Key != "" {
 			_ = c.dependencies.WebIdempotency.Release(request.Context(), ingressLease)
+		}
+		if restoreErr != nil {
+			serverError(writer, "restore pending chat files", restoreErr)
+			return
 		}
 		badRequest(writer, err.Error())
 		return
 	}
 	if err := c.dependencies.Producer.Publish(request.Context(), envelope); err != nil {
-		deleteChatUploads(request.Context(), artifactService, artifactInfo, inbound.Files)
+		restoreErr := restorePendingChatAttachments(request.Context(), c.dependencies.PendingAttachments, pendingKey, drainedFiles)
+		deleteChatUploads(request.Context(), artifactService, artifactInfo, currentChatFiles(inbound.Files, drainedFiles))
 		if ingressLease.Key != "" {
 			_ = c.dependencies.WebIdempotency.Release(request.Context(), ingressLease)
 		}
-		serverError(writer, "publish web chat", err)
+		serverError(writer, "publish web chat", errors.Join(err, restoreErr))
 		return
 	}
 	if ingressLease.Key != "" {
@@ -156,6 +247,21 @@ func (c *consoleAPI) enqueueChat(writer http.ResponseWriter, request *http.Reque
 		"event_id": inbound.MessageID, "session_key": sessionKey,
 		"stream_url": "/api/v1/chat/stream?tenant=" + snapshot.Config.TenantID + "&event_id=" + inbound.MessageID,
 	})
+}
+
+func currentChatFiles(files []channels.InboundFile, drained []messaging.PendingAttachmentBatch) []channels.InboundFile {
+	pendingCount := len(messaging.PendingAttachmentFiles(drained))
+	if pendingCount >= len(files) {
+		return nil
+	}
+	return files[pendingCount:]
+}
+
+func restorePendingChatAttachments(ctx context.Context, store messaging.PendingAttachmentStore, key messaging.PendingAttachmentKey, batches []messaging.PendingAttachmentBatch) error {
+	if store == nil || len(batches) == 0 {
+		return nil
+	}
+	return store.Restore(ctx, key, batches)
 }
 
 func parseChatSubmission(writer http.ResponseWriter, request *http.Request) (chatRequest, []*multipart.FileHeader, error) {
@@ -252,7 +358,7 @@ func (c *consoleAPI) chatStream(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 		stream.begin()
-		stream.doneMessageWithID(reply.EventID, reply.Text, reply.Card)
+		stream.doneMessageWithID(reply.EventID, reply.Text, reply.Card, reply.Artifacts...)
 		return
 	}
 	stream.begin()
@@ -277,7 +383,7 @@ func (c *consoleAPI) chatStream(writer http.ResponseWriter, request *http.Reques
 			stream.error("reply access denied")
 			return
 		}
-		stream.doneMessageWithID(reply.EventID, reply.Text, reply.Card)
+		stream.doneMessageWithID(reply.EventID, reply.Text, reply.Card, reply.Artifacts...)
 		return
 	}
 
@@ -302,7 +408,7 @@ func (c *consoleAPI) chatStream(writer http.ResponseWriter, request *http.Reques
 		case reply, ok := <-replies:
 			if !ok {
 				if fallback, ready, err := c.completedWebReply(request.Context(), tenantID, requestID); err == nil && ready && fallback.visibleTo(user) {
-					stream.doneMessageWithID(fallback.EventID, fallback.Text, fallback.Card)
+					stream.doneMessageWithID(fallback.EventID, fallback.Text, fallback.Card, fallback.Artifacts...)
 				} else {
 					stream.error("reply stream closed")
 				}
@@ -318,8 +424,13 @@ func (c *consoleAPI) chatStream(writer http.ResponseWriter, request *http.Reques
 			switch reply.Type {
 			case "delta":
 				stream.deltaWithID(reply.ID, reply.Content)
+			case "card":
+				stream.cardWithID(reply.ID, reply.Card)
 			case "done":
-				stream.doneMessageWithID(reply.ID, reply.Reply, reply.Card)
+				stream.doneMessageWithID(reply.ID, reply.Reply, reply.Card, reply.Artifacts...)
+				return
+			case "error":
+				stream.errorWithID(reply.ID, reply.Code, reply.Message)
 				return
 			}
 		}
@@ -327,10 +438,11 @@ func (c *consoleAPI) chatStream(writer http.ResponseWriter, request *http.Reques
 }
 
 type completedWebReply struct {
-	Text    string
-	Card    *channels.InteractiveCard
-	EventID string
-	OwnerID string
+	Text      string
+	Card      *channels.InteractiveCard
+	Artifacts []channels.OutboundArtifact
+	EventID   string
+	OwnerID   string
 }
 
 func (reply completedWebReply) visibleTo(user identity.SessionUser) bool {
@@ -348,25 +460,26 @@ func (c *consoleAPI) completedWebReply(ctx context.Context, tenantID, requestID 
 	if err != nil {
 		return completedWebReply{}, false, err
 	}
-	reply, ownerID, card, err := decodeStoredReply(event)
+	reply, ownerID, card, artifacts, err := decodeStoredReply(event)
 	if err != nil {
 		return completedWebReply{}, false, err
 	}
-	return completedWebReply{Text: reply, Card: card, EventID: event.DeliveryReceipt, OwnerID: ownerID}, true, nil
+	return completedWebReply{Text: reply, Card: card, Artifacts: artifacts, EventID: event.DeliveryReceipt, OwnerID: ownerID}, true, nil
 }
 
-func decodeStoredReply(event storage.OutboxEvent) (string, string, *channels.InteractiveCard, error) {
+func decodeStoredReply(event storage.OutboxEvent) (string, string, *channels.InteractiveCard, []channels.OutboundArtifact, error) {
 	var payload struct {
-		Channel    channels.Channel          `json:"channel"`
-		Text       string                    `json:"text"`
-		WebOwnerID string                    `json:"web_owner_id"`
-		Card       *channels.InteractiveCard `json:"card,omitempty"`
+		Channel    channels.Channel            `json:"channel"`
+		Text       string                      `json:"text"`
+		WebOwnerID string                      `json:"web_owner_id"`
+		Card       *channels.InteractiveCard   `json:"card,omitempty"`
+		Artifacts  []channels.OutboundArtifact `json:"artifacts,omitempty"`
 	}
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
-		return "", "", nil, err
+		return "", "", nil, nil, err
 	}
-	if payload.Channel != channels.Web || (strings.TrimSpace(payload.Text) == "" && payload.Card == nil) || strings.TrimSpace(payload.WebOwnerID) == "" {
-		return "", "", nil, errors.New("not an owned web reply")
+	if payload.Channel != channels.Web || (strings.TrimSpace(payload.Text) == "" && payload.Card == nil && len(payload.Artifacts) == 0) || strings.TrimSpace(payload.WebOwnerID) == "" {
+		return "", "", nil, nil, errors.New("not an owned web reply")
 	}
-	return payload.Text, payload.WebOwnerID, payload.Card, nil
+	return payload.Text, payload.WebOwnerID, payload.Card, payload.Artifacts, nil
 }

@@ -72,7 +72,7 @@ func (s *approvalUpdateSender) UpdateCard(_ context.Context, _ channels.ReplyTar
 
 func TestApprovalPromptCardExplainsOperationBeforeTechnicalToolName(t *testing.T) {
 	t.Parallel()
-	card := approvalPromptCard(governance.PendingApproval{
+	card := governance.ApprovalPromptCard(governance.PendingApproval{
 		Token: "token-1", ToolName: "request_refund", ToolDescription: "为指定订单发起退款申请",
 	})
 	if card.Title != "确认执行操作" || !strings.Contains(card.Body, "为指定订单发起退款申请") ||
@@ -87,14 +87,14 @@ func TestApprovalPromptCardExplainsOperationBeforeTechnicalToolName(t *testing.T
 func TestApprovalOperationSummaryDoesNotExposeModelToolPolicy(t *testing.T) {
 	t.Parallel()
 	description := "为测试订单 TF-1002 正式提交退款申请，这是有副作用的操作。仅当用户明确要求发起/提交退款时调用；查询订单状态时绝不能调用。"
-	if got, want := approvalOperationSummary(description, "request_refund"), "为测试订单 TF-1002 正式提交退款申请"; got != want {
+	if got, want := governance.ApprovalOperationSummary(description, "request_refund"), "为测试订单 TF-1002 正式提交退款申请"; got != want {
 		t.Fatalf("approvalOperationSummary() = %q, want %q", got, want)
 	}
 }
 
 func TestApprovalPromptCardHasReadableFallbackWithoutDescription(t *testing.T) {
 	t.Parallel()
-	card := approvalPromptCard(governance.PendingApproval{Token: "token-1", ToolName: "request_refund"})
+	card := governance.ApprovalPromptCard(governance.PendingApproval{Token: "token-1", ToolName: "request_refund"})
 	if !strings.Contains(card.Body, "执行操作：request_refund") {
 		t.Fatalf("approval fallback card = %#v", card)
 	}
@@ -252,10 +252,10 @@ func TestReplaceApprovalCardUsesNativeUpdateThenStableMessageFallback(t *testing
 
 func TestApprovalResultTitleMatchesDecision(t *testing.T) {
 	t.Parallel()
-	if got := approvalResultTitle(true); got != "已确认" {
+	if got := governance.ApprovalResultCard(governance.PendingApproval{ToolDescription: "提交退款"}, true).Title; got != "已确认" {
 		t.Fatalf("approved title = %q", got)
 	}
-	if got := approvalResultTitle(false); got != "已取消" {
+	if got := governance.ApprovalResultCard(governance.PendingApproval{ToolDescription: "提交退款"}, false).Title; got != "已取消" {
 		t.Fatalf("rejected title = %q", got)
 	}
 }

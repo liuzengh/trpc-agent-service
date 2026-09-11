@@ -13,7 +13,7 @@ import (
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-const SaveArtifactToolName = "platform.save_artifact"
+const SaveArtifactToolName = "platform_save_artifact"
 
 type SaveArtifactTool struct{}
 

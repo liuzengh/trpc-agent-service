@@ -6,7 +6,7 @@ describe('toolPresentation', () => {
   it('uses Chinese names for platform built-ins', () => {
     expect(toolDisplayName({ name: 'duckduckgo_search', description: 'Search the web' })).toBe('网络搜索')
     expect(toolDisplayDescription({ name: 'duckduckgo_search', description: 'Search the web' })).toBe('搜索公开网页并返回结果摘要。')
-    expect(toolDisplayName({ name: 'platform.present_card', description: 'Present a card' })).toBe('结果卡片')
+    expect(toolDisplayName({ name: 'platform_present_card', description: 'Present a card' })).toBe('结果卡片')
   })
 
   it('uses a concise Chinese description as the friendly name for custom platform tools', () => {

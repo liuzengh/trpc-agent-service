@@ -10,6 +10,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+type approvalNotifierFunc func(context.Context, PendingApproval) (string, error)
+
+func (f approvalNotifierFunc) NotifyPendingApproval(ctx context.Context, approval PendingApproval) (string, error) {
+	return f(ctx, approval)
+}
+
 func TestRedisApprovalBrokerWaitsForMatchingHumanDecision(t *testing.T) {
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
@@ -308,5 +314,73 @@ func TestRedisApprovalBrokerListPendingCleansExpiredIndexEntries(t *testing.T) {
 	}
 	if _, err := client.ZScore(context.Background(), approvalPendingKey, staleToken).Result(); !errors.Is(err, redis.Nil) {
 		t.Fatalf("expired pending index member remains: %v", err)
+	}
+}
+
+func TestRedisApprovalBrokerNotifiesAndResolvesWebRequester(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	store := NewMemoryApprovalStore()
+	notified := make(chan PendingApproval, 1)
+	broker, err := NewRedisApprovalBroker(client, store, time.Minute, WithApprovalNotifier(approvalNotifierFunc(func(_ context.Context, approval PendingApproval) (string, error) {
+		notified <- approval
+		return "stream-card-1", nil
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ApprovalRequest{
+		TenantID: "tenant-a", AppCode: "support", ConfigVersion: 2, RequestID: "request-1", TraceID: "trace-1",
+		Channel: "web", BindingID: "web-console", ConversationID: "conversation-1", ConversationScope: "direct",
+		ExternalUserID: "platform-user-1", RequesterUserID: "platform-user-1",
+		ToolName: "request_refund", ToolDescription: "提交退款申请",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result := make(chan bool, 1)
+	errC := make(chan error, 1)
+	go func() {
+		approved, requestErr := broker.Request(ctx, request)
+		if requestErr != nil {
+			errC <- requestErr
+			return
+		}
+		result <- approved
+	}()
+
+	pending := <-notified
+	if pending.RequestID != request.RequestID || pending.RequesterUserID != request.RequesterUserID || pending.Token == "" {
+		t.Fatalf("notified approval = %#v", pending)
+	}
+	record, err := store.Get(ctx, request.TenantID, pending.Token)
+	if err != nil || record.NotificationID != "stream-card-1" {
+		t.Fatalf("durable notification = %#v, %v", record, err)
+	}
+	if _, err := broker.ResolveForRequester(ctx, request.TenantID, pending.Token, "another-user", true); !errors.Is(err, ErrApprovalRouteMismatch) {
+		t.Fatalf("ResolveForRequester(other user) error = %v", err)
+	}
+	resolved, err := broker.ResolveForRequester(ctx, request.TenantID, pending.Token, request.RequesterUserID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ToolName != request.ToolName {
+		t.Fatalf("resolved approval = %#v", resolved)
+	}
+	if repeated, err := broker.ResolveForRequester(ctx, request.TenantID, pending.Token, request.RequesterUserID, true); err != nil || repeated.ToolName != request.ToolName {
+		t.Fatalf("repeated ResolveForRequester() = %#v, %v", repeated, err)
+	}
+	if _, err := broker.ResolveForRequester(ctx, request.TenantID, pending.Token, request.RequesterUserID, false); !errors.Is(err, ErrApprovalResolved) {
+		t.Fatalf("opposite repeated resolution error = %v", err)
+	}
+	select {
+	case approved := <-result:
+		if !approved {
+			t.Fatal("Request() returned rejected after approval")
+		}
+	case requestErr := <-errC:
+		t.Fatalf("Request() error = %v", requestErr)
+	case <-ctx.Done():
+		t.Fatal("Request() did not resume after web approval")
 	}
 }

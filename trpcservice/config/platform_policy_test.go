@@ -92,7 +92,7 @@ func TestPlatformPolicyValidatorRejectsUnknownModelToolAndCredential(t *testing.
 		[]string{"env:MODEL_KEY", "env:BOT_CONFIG"},
 		[]string{"env:BOT_CONFIG"},
 		nil,
-		[]string{"query_order", "platform.save_artifact"},
+		[]string{"query_order", "platform_save_artifact"},
 		testArtifactDrivers,
 	)
 	if err != nil {
@@ -119,7 +119,7 @@ func TestPlatformPolicyValidatorRejectsUnknownModelToolAndCredential(t *testing.
 	confirmationOutsideAllowList := base
 	confirmationOutsideAllowList.Tools = ToolPolicy{
 		Allowed:             []string{"query_order"},
-		RequireConfirmation: []string{"platform.save_artifact"},
+		RequireConfirmation: []string{"platform_save_artifact"},
 	}
 	if err := validator.Validate(confirmationOutsideAllowList); err == nil {
 		t.Fatal("Validate() error = nil, want confirmation tool outside allow-list rejected")
@@ -578,6 +578,11 @@ func TestPlatformPolicyValidatorCustomToolValidationMatrix(t *testing.T) {
 		{
 			name: "http invalid name",
 			tool: ToolPolicy{Allowed: []string{"bad tool"}, HTTP: []HTTPToolConfig{{Name: "bad tool", URL: "https://tools.example.test/query"}}},
+			want: "invalid tool name",
+		},
+		{
+			name: "http provider-incompatible name",
+			tool: ToolPolicy{Allowed: []string{"bad.tool"}, HTTP: []HTTPToolConfig{{Name: "bad.tool", URL: "https://tools.example.test/query"}}},
 			want: "invalid tool name",
 		},
 		{

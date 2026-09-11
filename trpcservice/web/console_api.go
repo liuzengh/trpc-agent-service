@@ -158,6 +158,9 @@ type ConsoleDependencies struct {
 	ChannelStatuses         channels.BindingStatusLister
 	Replies                 storage.OutboxDeliveryStore
 	ReplySubscriber         WebReplySubscriber
+	ReplySender             channels.Sender
+	PendingAttachments      messaging.PendingAttachmentStore
+	Approvals               WebApprovalResolver
 	Knowledge               KnowledgeAdmin
 	KnowledgeSourcePolicy   KnowledgeSourcePolicy
 	AgentMemory             AgentMemoryProvider
@@ -272,6 +275,7 @@ func NewConsoleHandler(dependencies ConsoleDependencies) (http.Handler, error) {
 	mux.HandleFunc("/api/v1/tenant-backend-policy", console.tenantBackendPolicy)
 	mux.HandleFunc("/api/v1/chat", console.enqueueChat)
 	mux.HandleFunc("/api/v1/chat/stream", console.chatStream)
+	mux.HandleFunc("/api/v1/chat/approval", console.resolveChatApproval)
 	return mux, nil
 }
 

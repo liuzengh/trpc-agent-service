@@ -23,6 +23,22 @@ type recordingDeadLetterObserver struct {
 	observations []metrics.DeadLetterAttributes
 }
 
+type recordingTerminalFailureProcessor struct {
+	err           error
+	notifications int
+	class         string
+	cause         error
+}
+
+func (p *recordingTerminalFailureProcessor) Process(context.Context, Envelope) error { return p.err }
+
+func (p *recordingTerminalFailureProcessor) NotifyTerminalFailure(_ context.Context, _ Envelope, class string, cause error) error {
+	p.notifications++
+	p.class = class
+	p.cause = cause
+	return nil
+}
+
 func (o *recordingDeadLetterObserver) RecordDeadLetter(_ context.Context, observation metrics.DeadLetterAttributes) {
 	o.observations = append(o.observations, observation)
 }
@@ -182,6 +198,29 @@ func TestWorkerExhaustedRetriesGoToDLQ(t *testing.T) {
 	}
 	if consumer.commits != 1 {
 		t.Fatalf("commits = %d, want 1 after exhausted DLQ", consumer.commits)
+	}
+}
+
+func TestWorkerNotifiesTerminalFailureOnlyAfterRetryBudgetIsExhausted(t *testing.T) {
+	t.Parallel()
+
+	consumer := &scriptedConsumer{deliveries: []Delivery{{Envelope: validEnvelope(0)}}}
+	processor := &recordingTerminalFailureProcessor{err: Retryable(errors.New("model provider unavailable"))}
+	worker, err := NewWorker(consumer, processor, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.RunOnce(context.Background()); !errors.Is(err, ErrRetryScheduled) {
+		t.Fatalf("first RunOnce() error = %v, want retry scheduled", err)
+	}
+	if processor.notifications != 0 {
+		t.Fatalf("terminal notifications during retry = %d, want 0", processor.notifications)
+	}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatalf("final RunOnce() error = %v", err)
+	}
+	if processor.notifications != 1 || processor.class != "retry_exhausted" || !errors.Is(processor.cause, processor.err) {
+		t.Fatalf("terminal notification = count=%d class=%q cause=%v", processor.notifications, processor.class, processor.cause)
 	}
 }
 

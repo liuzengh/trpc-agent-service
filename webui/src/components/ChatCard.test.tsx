@@ -26,5 +26,21 @@ describe('ChatCard', () => {
     expect(html).not.toContain('approval:approve:token')
     expect(html).not.toContain('javascript:')
     expect(html).not.toContain('<a ')
+    expect(html).toContain('<button')
+    expect(html).toContain('disabled=""')
+  })
+
+  it('renders pending approval actions as enabled buttons when a handler is present', () => {
+    const html = renderToStaticMarkup(<ChatCard onAction={() => {}} card={{
+      body: '提交退款申请',
+      state: 'pending',
+      actions: [
+        { label: '确认执行', action_id: 'approval:approve:token', style: 'primary' },
+        { label: '取消', action_id: 'approval:reject:token' },
+      ],
+    }} />)
+    expect(html).toContain('确认执行')
+    expect(html).toContain('取消')
+    expect(html).not.toContain('disabled=""')
   })
 })

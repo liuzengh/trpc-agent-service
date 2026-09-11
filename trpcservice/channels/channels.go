@@ -276,13 +276,24 @@ type ReplyTarget struct {
 // OutboundFile reuses OpenClaw's cross-channel file contract.
 type OutboundFile = occhannel.OutboundFile
 
+// OutboundArtifact is durable file metadata carried to browser clients. IM
+// senders receive materialized OutboundFile values instead, so this struct
+// never contains local paths or file bytes.
+type OutboundArtifact struct {
+	Filename string `json:"filename"`
+	Version  int    `json:"version"`
+	Name     string `json:"name,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+}
+
 // OutboundMessage embeds OpenClaw's text/file payload and adds only the
 // enterprise-IM capabilities that OpenClaw's public channel contract does not
 // currently model: interactive cards, durable idempotency and in-place update.
 type OutboundMessage struct {
-	Text  string           `json:"text,omitempty"`
-	Files []OutboundFile   `json:"files,omitempty"`
-	Card  *InteractiveCard `json:"card,omitempty"`
+	Text      string             `json:"text,omitempty"`
+	Files     []OutboundFile     `json:"files,omitempty"`
+	Artifacts []OutboundArtifact `json:"artifacts,omitempty"`
+	Card      *InteractiveCard   `json:"card,omitempty"`
 	// UpdateMessageID asks a capable sender to replace an existing progress or
 	// card message instead of creating a second reply.
 	UpdateMessageID string `json:"update_message_id,omitempty"`

@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	PresentCardToolName = "platform.present_card"
+	PresentCardToolName = "platform_present_card"
 	maxCardTitleRunes   = 120
 	maxCardBodyRunes    = 4000
 	maxCardActions      = 3

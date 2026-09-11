@@ -15,6 +15,9 @@ export interface ChatAttachment {
   name: string
   size?: number
   type?: string
+  filename?: string
+  version?: number
+  mime_type?: string
 }
 
 export function visibleUserMessage(content: string, attachments?: ChatAttachment[]) {

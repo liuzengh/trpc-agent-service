@@ -77,6 +77,21 @@ type ApprovalRequester interface {
 	Request(context.Context, ApprovalRequest) (bool, error)
 }
 
+// ApprovalNotifier publishes a pending approval to an interactive surface.
+// Returning an empty notification ID means the notifier intentionally did not
+// handle this approval (for example, an IM approval owned by the Channel node).
+type ApprovalNotifier interface {
+	NotifyPendingApproval(context.Context, PendingApproval) (string, error)
+}
+
+type ApprovalBrokerOption func(*RedisApprovalBroker)
+
+func WithApprovalNotifier(notifier ApprovalNotifier) ApprovalBrokerOption {
+	return func(broker *RedisApprovalBroker) {
+		broker.notifier = notifier
+	}
+}
+
 type ApprovalBroker interface {
 	ApprovalRequester
 	ListPending(context.Context, int) ([]PendingApproval, error)
@@ -85,12 +100,13 @@ type ApprovalBroker interface {
 }
 
 type RedisApprovalBroker struct {
-	client redis.UniversalClient
-	store  ApprovalStore
-	ttl    time.Duration
+	client   redis.UniversalClient
+	store    ApprovalStore
+	ttl      time.Duration
+	notifier ApprovalNotifier
 }
 
-func NewRedisApprovalBroker(client redis.UniversalClient, store ApprovalStore, ttl time.Duration) (*RedisApprovalBroker, error) {
+func NewRedisApprovalBroker(client redis.UniversalClient, store ApprovalStore, ttl time.Duration, options ...ApprovalBrokerOption) (*RedisApprovalBroker, error) {
 	if client == nil {
 		return nil, errors.New("approval broker Redis client is required")
 	}
@@ -100,7 +116,13 @@ func NewRedisApprovalBroker(client redis.UniversalClient, store ApprovalStore, t
 	if ttl <= 0 {
 		return nil, errors.New("approval broker TTL must be positive")
 	}
-	return &RedisApprovalBroker{client: client, store: store, ttl: ttl}, nil
+	broker := &RedisApprovalBroker{client: client, store: store, ttl: ttl}
+	for _, option := range options {
+		if option != nil {
+			option(broker)
+		}
+	}
+	return broker, nil
 }
 
 func (b *RedisApprovalBroker) Request(ctx context.Context, request ApprovalRequest) (bool, error) {
@@ -124,6 +146,29 @@ func (b *RedisApprovalBroker) Request(ctx context.Context, request ApprovalReque
 	if err := b.restoreRedisApproval(ctx, token, request, "", ApprovalPending, expiresAt); err != nil {
 		b.closeDurableApproval(request.TenantID, token, ApprovalCanceled)
 		return false, fmt.Errorf("create approval request: %w", err)
+	}
+	if b.notifier != nil {
+		pending := PendingApproval{
+			Token: token, TenantID: request.TenantID, AppCode: request.AppCode, ConfigVersion: request.ConfigVersion,
+			RequestID: strings.TrimSpace(request.RequestID), TraceID: strings.TrimSpace(request.TraceID),
+			Channel: request.Channel, BindingID: request.BindingID, ConversationID: request.ConversationID,
+			ConversationScope: strings.TrimSpace(request.ConversationScope), ExternalUserID: request.ExternalUserID,
+			RequesterUserID: strings.TrimSpace(request.RequesterUserID), ProgressMessageID: strings.TrimSpace(request.ProgressMessageID),
+			ProviderReplyToken: strings.TrimSpace(request.ProviderReplyToken), ToolName: request.ToolName,
+			ToolDescription: strings.TrimSpace(request.ToolDescription),
+		}
+		notificationID, notifyErr := b.notifier.NotifyPendingApproval(ctx, pending)
+		if notifyErr != nil {
+			b.cancelPending(request.TenantID, approvalKeyPrefix+token)
+			return false, fmt.Errorf("notify approval request: %w", notifyErr)
+		}
+		if strings.TrimSpace(notificationID) != "" {
+			pending.NotificationID = notificationID
+			if err := b.MarkNotified(ctx, pending, notificationID); err != nil {
+				b.cancelPending(request.TenantID, approvalKeyPrefix+token)
+				return false, fmt.Errorf("mark approval request notified: %w", err)
+			}
+		}
 	}
 	key := approvalKeyPrefix + token
 
@@ -180,6 +225,37 @@ func (b *RedisApprovalBroker) Request(ctx context.Context, request ApprovalReque
 		case <-ticker.C:
 		}
 	}
+}
+
+// ResolveForRequester resolves a browser approval without trusting route
+// fields supplied by the browser. The durable approval owns the route; the
+// authenticated platform user only proves they are the original requester.
+func (b *RedisApprovalBroker) ResolveForRequester(ctx context.Context, tenantID, token, requesterUserID string, approved bool) (PendingApproval, error) {
+	tenantID, token, requesterUserID = strings.TrimSpace(tenantID), strings.TrimSpace(token), strings.TrimSpace(requesterUserID)
+	if tenantID == "" || token == "" || requesterUserID == "" {
+		return PendingApproval{}, errors.New("approval requester identity is incomplete")
+	}
+	record, err := b.store.Get(ctx, tenantID, token)
+	if errors.Is(err, ErrApprovalRecordNotFound) {
+		return PendingApproval{}, ErrApprovalExpired
+	}
+	if err != nil {
+		return PendingApproval{}, fmt.Errorf("read approval requester: %w", err)
+	}
+	if record.Channel != "web" || strings.TrimSpace(record.RequesterUserID) != requesterUserID {
+		return PendingApproval{}, ErrApprovalRouteMismatch
+	}
+	if record.Status == ApprovalApproved || record.Status == ApprovalRejected {
+		wasApproved := record.Status == ApprovalApproved
+		if wasApproved == approved {
+			return pendingApprovalFromRecord(record), nil
+		}
+		return PendingApproval{}, ErrApprovalResolved
+	}
+	return b.Resolve(ctx, ApprovalResolution{
+		Token: record.Token, TenantID: record.TenantID, Channel: record.Channel, BindingID: record.BindingID,
+		ConversationID: record.ConversationID, ExternalUserID: record.ExternalUserID, Approved: approved,
+	})
 }
 
 func (b *RedisApprovalBroker) recoverFromDurable(ctx context.Context, token string, request ApprovalRequest) (*bool, error) {

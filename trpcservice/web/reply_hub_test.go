@@ -8,8 +8,35 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/redis/go-redis/v9"
 )
+
+func TestRedisReplyHubPublishesWebApprovalAsNonTerminalCard(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	hub, err := NewRedisReplyHub(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	eventID, err := hub.NotifyPendingApproval(ctx, governance.PendingApproval{
+		Token: "approval-1", TenantID: "tenant-a", RequestID: "request-a", Channel: "web",
+		RequesterUserID: "owner-a", ToolName: "request_refund", ToolDescription: "提交退款申请",
+	})
+	if err != nil || eventID == "" {
+		t.Fatalf("NotifyPendingApproval() = %q, %v", eventID, err)
+	}
+	events, cancel, err := hub.Subscribe(ctx, "tenant-a", "owner-a", "request-a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	event := receiveWebStreamEvent(t, events)
+	if event.Type != "card" || event.Card == nil || event.Card.State != "pending" || len(event.Card.Actions) != 2 {
+		t.Fatalf("approval event = %#v", event)
+	}
+}
 
 func TestRedisReplyHubReplaysDeltaAndDoneEvents(t *testing.T) {
 	server := miniredis.RunT(t)
@@ -86,6 +113,54 @@ func TestRedisReplyHubReplaysCardOnlyDoneEvent(t *testing.T) {
 	}
 }
 
+func TestRedisReplyHubReplaysTerminalFailureEvent(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	hub, err := NewRedisReplyHub(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.PublishFailure(context.Background(), "tenant-a", "owner-a", "request-failed", "model_unavailable", "模型服务暂时不可用，请稍后重试。"); err != nil {
+		t.Fatal(err)
+	}
+	events, cancel, err := hub.Subscribe(context.Background(), "tenant-a", "owner-a", "request-failed", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	event := receiveWebStreamEvent(t, events)
+	if event.Type != "error" || event.Code != "model_unavailable" || event.Message != "模型服务暂时不可用，请稍后重试。" || event.ID == "" {
+		t.Fatalf("failure event = %#v", event)
+	}
+}
+
+func TestRedisReplyHubReplaysGeneratedArtifacts(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	hub, err := NewRedisReplyHub(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := hub.Send(context.Background(), channels.ReplyTarget{
+		Channel: channels.Web, TenantID: "tenant-a", WebOwnerID: "owner-a",
+	}, channels.OutboundMessage{
+		IdempotencyKey: "request-artifact", Text: "文档已生成",
+		Artifacts: []channels.OutboundArtifact{{Filename: "report.docx", Version: 2, Name: "维修报告", MimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, cancel, err := hub.Subscribe(context.Background(), "tenant-a", "owner-a", "request-artifact", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	event := receiveWebStreamEvent(t, events)
+	if event.ID != receipt.ExternalMessageID || event.Type != "done" || len(event.Artifacts) != 1 || event.Artifacts[0].Filename != "report.docx" || event.Artifacts[0].Version != 2 {
+		t.Fatalf("artifact event = %#v", event)
+	}
+}
+
 func TestRedisReplyHubSkipsMalformedStreamEvents(t *testing.T) {
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
@@ -118,6 +193,9 @@ func TestRedisReplyHubValidatesDependenciesAndRouting(t *testing.T) {
 	hub := &RedisReplyHub{}
 	if err := hub.PublishDelta(context.Background(), "", "owner", "request", "delta"); err == nil {
 		t.Fatal("PublishDelta() accepted a missing tenant")
+	}
+	if err := hub.PublishFailure(context.Background(), "tenant", "owner", "request", "model_unavailable", ""); err == nil {
+		t.Fatal("PublishFailure() accepted an empty message")
 	}
 	if _, err := hub.Send(context.Background(), channels.ReplyTarget{Channel: channels.Telegram}, channels.OutboundMessage{Text: "reply"}); err == nil {
 		t.Fatal("Send() accepted an invalid Web target")

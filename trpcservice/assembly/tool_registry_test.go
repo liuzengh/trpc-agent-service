@@ -28,7 +28,7 @@ func (t stubTool) Call(context.Context, []byte) (any, error) {
 
 func TestToolRegistryAppliesTenantAllowList(t *testing.T) {
 	registry, err := NewToolRegistry(map[string]agenttool.CallableTool{
-		"demo.echo": stubTool{name: "demo.echo"},
+		"demo_echo": stubTool{name: "demo_echo"},
 	})
 	if err != nil {
 		t.Fatalf("NewToolRegistry() error = %v", err)
@@ -36,24 +36,24 @@ func TestToolRegistryAppliesTenantAllowList(t *testing.T) {
 
 	surface, err := registry.Surface(context.Background(), config.TenantConfig{
 		TenantID: "acme", AppCode: "support",
-		Tools: config.ToolPolicy{Allowed: []string{"demo.echo"}},
+		Tools: config.ToolPolicy{Allowed: []string{"demo_echo"}},
 	})
 	if err != nil {
 		t.Fatalf("Surface() error = %v", err)
 	}
 	tools := surface.Tools
-	if len(tools) != 2 || tools[0].Declaration().Name != "platform.present_card" || tools[1].Declaration().Name != "demo.echo" {
-		t.Fatalf("Surface().Tools = %#v, want implicit present_card plus demo.echo", tools)
+	if len(tools) != 2 || tools[0].Declaration().Name != "platform_present_card" || tools[1].Declaration().Name != "demo_echo" {
+		t.Fatalf("Surface().Tools = %#v, want implicit present_card plus demo_echo", tools)
 	}
 
 	surface, err = registry.Surface(context.Background(), config.TenantConfig{TenantID: "acme", AppCode: "support"})
-	if err != nil || len(surface.Tools) != 1 || surface.Tools[0].Declaration().Name != "platform.present_card" || len(surface.ToolSets) != 0 {
+	if err != nil || len(surface.Tools) != 1 || surface.Tools[0].Declaration().Name != "platform_present_card" || len(surface.ToolSets) != 0 {
 		t.Fatalf("empty allow-list surface/error = %#v/%v, want implicit present_card/nil", surface, err)
 	}
 
 	_, err = registry.Surface(context.Background(), config.TenantConfig{
 		TenantID: "acme", AppCode: "support",
-		Tools: config.ToolPolicy{Allowed: []string{"unknown.tool"}},
+		Tools: config.ToolPolicy{Allowed: []string{"unknown_tool"}},
 	})
 	if err == nil {
 		t.Fatal("unknown allowed tool error = nil")
@@ -81,21 +81,21 @@ func TestToolRegistryRejectsDuplicateModelFacingToolName(t *testing.T) {
 
 func TestToolRegistryCatalogUsesRuntimeDeclarations(t *testing.T) {
 	registry, err := NewToolRegistry(map[string]agenttool.CallableTool{
-		"ignored-map-key": stubTool{name: "zeta.tool"},
-		"also-ignored":    stubTool{name: "alpha.tool"},
+		"ignored-map-key": stubTool{name: "zeta_tool"},
+		"also-ignored":    stubTool{name: "alpha_tool"},
 	})
 	if err != nil {
 		t.Fatalf("NewToolRegistry() error = %v", err)
 	}
-	if got := registry.Names(); len(got) != 4 || got[0] != "alpha.tool" || got[1] != "duckduckgo_search" || got[2] != "platform.present_card" || got[3] != "zeta.tool" {
+	if got := registry.Names(); len(got) != 4 || got[0] != "alpha_tool" || got[1] != "duckduckgo_search" || got[2] != "platform_present_card" || got[3] != "zeta_tool" {
 		t.Fatalf("Names() = %v, want stable declaration names plus built-in search/card tools", got)
 	}
 	selectable := registry.SelectableNames()
-	if len(selectable) != 3 || selectable[0] != "alpha.tool" || selectable[1] != "duckduckgo_search" || selectable[2] != "zeta.tool" {
+	if len(selectable) != 3 || selectable[0] != "alpha_tool" || selectable[1] != "duckduckgo_search" || selectable[2] != "zeta_tool" {
 		t.Fatalf("SelectableNames() = %v, want tenant-grantable tools only", selectable)
 	}
 	catalog := registry.Catalog()
-	if len(catalog) != 3 || catalog[0].Name != "alpha.tool" || catalog[0].Description != "alpha.tool" {
+	if len(catalog) != 3 || catalog[0].Name != "alpha_tool" || catalog[0].Description != "alpha_tool" {
 		t.Fatalf("Catalog() = %#v, want tenant-selectable runtime declaration metadata", catalog)
 	}
 }
@@ -111,7 +111,7 @@ func TestToolRegistryAlwaysExposesPresentCardWithoutTenantGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(surface.Tools) != 1 || surface.Tools[0].Declaration().Name != "platform.present_card" {
+	if len(surface.Tools) != 1 || surface.Tools[0].Declaration().Name != "platform_present_card" {
 		t.Fatalf("Surface().Tools = %#v", surface.Tools)
 	}
 }
@@ -159,7 +159,7 @@ func TestToolRegistryHTTPFunctionToolUsesConfiguredSchemaAndSecretResolver(t *te
 	if err != nil {
 		t.Fatalf("Surface() error = %v", err)
 	}
-	if len(surface.Tools) != 2 || surface.Tools[0].Declaration().Name != "platform.present_card" || surface.Tools[1].Declaration().Name != "query_order" {
+	if len(surface.Tools) != 2 || surface.Tools[0].Declaration().Name != "platform_present_card" || surface.Tools[1].Declaration().Name != "query_order" {
 		t.Fatalf("surface tools = %#v", surface.Tools)
 	}
 	callable, ok := surface.Tools[1].(agenttool.CallableTool)

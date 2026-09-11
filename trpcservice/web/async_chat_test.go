@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/messaging"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
+	"github.com/redis/go-redis/v9"
 	agentartifact "trpc.group/trpc-go/trpc-agent-go/artifact"
 )
 
@@ -51,28 +53,26 @@ func (delayedDoneReplySubscriber) Subscribe(ctx context.Context, _, _, _, _ stri
 	return replies, cancel, nil
 }
 
-func TestConsoleChatStagesMultipartFilesBeforePublishing(t *testing.T) {
-	producer := &recordingProducer{}
-	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
-		dependencies.Producer = producer
-	})
-
+func submitMultipartChat(t *testing.T, handler *testConsole, requestID, conversationID, text, filename string, data []byte) *httptest.ResponseRecorder {
+	t.Helper()
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	for key, value := range map[string]string{
-		"tenant_id": "example", "app_code": "support", "conversation_id": "conversation-1",
-		"request_id": "11111111-1111-4111-8111-111111111111",
+		"tenant_id": "example", "app_code": "support", "conversation_id": conversationID,
+		"request_id": requestID, "text": text,
 	} {
 		if err := form.WriteField(key, value); err != nil {
 			t.Fatalf("WriteField(%q) error = %v", key, err)
 		}
 	}
-	file, err := form.CreateFormFile("files", "notes.txt")
-	if err != nil {
-		t.Fatalf("CreateFormFile() error = %v", err)
-	}
-	if _, err := file.Write([]byte("hello attachment")); err != nil {
-		t.Fatalf("write multipart file error = %v", err)
+	if filename != "" {
+		file, err := form.CreateFormFile("files", filename)
+		if err != nil {
+			t.Fatalf("CreateFormFile() error = %v", err)
+		}
+		if _, err := file.Write(data); err != nil {
+			t.Fatalf("write multipart file error = %v", err)
+		}
 	}
 	if err := form.Close(); err != nil {
 		t.Fatalf("multipart Close() error = %v", err)
@@ -90,17 +90,51 @@ func TestConsoleChatStagesMultipartFilesBeforePublishing(t *testing.T) {
 	request.Header.Set("X-CSRF-Token", csrf)
 	recorder := httptest.NewRecorder()
 	handler.handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func TestConsoleChatHoldsBareAttachmentUntilFollowingText(t *testing.T) {
+	producer := &recordingProducer{}
+	redisServer := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = redisClient.Close() })
+	pending, err := messaging.NewRedisPendingAttachmentStore(redisClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replyHub, err := NewRedisReplyHub(redisClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
+		dependencies.Producer = producer
+		dependencies.PendingAttachments = pending
+		dependencies.ReplySender = replyHub
+	})
+
+	recorder := submitMultipartChat(t, handler, "11111111-1111-4111-8111-111111111111", "conversation-1", "", "notes.txt", []byte("hello attachment"))
 	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("chat upload status = %d, want 202: %s", recorder.Code, recorder.Body.String())
 	}
+	if len(producer.published) != 0 {
+		t.Fatalf("bare attachment published envelopes = %d, want 0", len(producer.published))
+	}
+
+	text := handler.request(t, http.MethodPost, "/api/v1/chat", `{
+		"tenant_id":"example","app_code":"support","conversation_id":"conversation-1",
+		"text":"请总结刚才的附件","request_id":"22222222-2222-4222-8222-222222222222"
+	}`)
+	if text.Code != http.StatusAccepted {
+		t.Fatalf("follow-up text status = %d, want 202: %s", text.Code, text.Body.String())
+	}
 	if len(producer.published) != 1 {
-		t.Fatalf("published envelopes = %d, want 1", len(producer.published))
+		t.Fatalf("follow-up published envelopes = %d, want 1", len(producer.published))
 	}
 	payload, err := messaging.DecodeInboundPayload(producer.published[0])
 	if err != nil {
 		t.Fatalf("DecodeInboundPayload() error = %v", err)
 	}
-	if len(payload.Inbound.Files) != 1 {
+	if payload.Inbound.Text != "请总结刚才的附件" || len(payload.Inbound.Files) != 1 {
 		t.Fatalf("inbound files = %d, want 1", len(payload.Inbound.Files))
 	}
 	upload := payload.Inbound.Files[0]
@@ -116,6 +150,49 @@ func TestConsoleChatStagesMultipartFilesBeforePublishing(t *testing.T) {
 	}
 	if stored == nil || string(stored.Data) != "hello attachment" {
 		t.Fatalf("stored artifact = %#v", stored)
+	}
+}
+
+func TestConsoleChatRestoresPendingAttachmentWhenKafkaPublishFails(t *testing.T) {
+	producer := &recordingProducer{}
+	redisServer := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = redisClient.Close() })
+	pending, _ := messaging.NewRedisPendingAttachmentStore(redisClient)
+	replyHub, _ := NewRedisReplyHub(redisClient)
+	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
+		dependencies.Producer = producer
+		dependencies.PendingAttachments = pending
+		dependencies.ReplySender = replyHub
+	})
+
+	attachment := submitMultipartChat(t, handler, "33333333-3333-4333-8333-333333333333", "conversation-restore", "", "proof.txt", []byte("restore me"))
+	if attachment.Code != http.StatusAccepted {
+		t.Fatalf("attachment status = %d: %s", attachment.Code, attachment.Body.String())
+	}
+	producer.err = errors.New("kafka unavailable")
+	failed := handler.request(t, http.MethodPost, "/api/v1/chat", `{
+		"tenant_id":"example","app_code":"support","conversation_id":"conversation-restore",
+		"text":"第一次尝试","request_id":"44444444-4444-4444-8444-444444444444"
+	}`)
+	if failed.Code != http.StatusInternalServerError {
+		t.Fatalf("failed publish status = %d, want 500: %s", failed.Code, failed.Body.String())
+	}
+
+	producer.err = nil
+	retry := handler.request(t, http.MethodPost, "/api/v1/chat", `{
+		"tenant_id":"example","app_code":"support","conversation_id":"conversation-restore",
+		"text":"第二次尝试","request_id":"55555555-5555-4555-8555-555555555555"
+	}`)
+	if retry.Code != http.StatusAccepted || len(producer.published) != 1 {
+		t.Fatalf("retry status/published = %d/%d: %s", retry.Code, len(producer.published), retry.Body.String())
+	}
+	payload, err := messaging.DecodeInboundPayload(producer.published[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Inbound.Text != "第二次尝试" || len(payload.Inbound.Files) != 1 || payload.Inbound.Files[0].Name != "proof.txt" {
+		t.Fatalf("restored web inbound = %#v", payload.Inbound)
 	}
 }
 
@@ -216,6 +293,29 @@ func TestConsoleChatStreamResumesAfterLastEventID(t *testing.T) {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("chat stream body %q does not contain %q", body, expected)
 		}
+	}
+}
+
+func TestConsoleChatStreamForwardsTerminalFailureAndStops(t *testing.T) {
+	subscriber := &replayReplySubscriber{events: []WebStreamEvent{
+		{ID: "4-0", Type: "error", Code: "model_unavailable", Message: "模型服务暂时不可用，请稍后重试。"},
+		{ID: "5-0", Type: "done", Reply: "must not be emitted"},
+	}}
+	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
+		dependencies.ReplySubscriber = subscriber
+	})
+	recorder := requestWithLastEventID(t, handler, "/api/v1/chat/stream?tenant=example&event_id=request-failed", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, expected := range []string{"id: 4-0", `"type":"error"`, `"code":"model_unavailable"`, "模型服务暂时不可用，请稍后重试。"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("failure stream body %q does not contain %q", body, expected)
+		}
+	}
+	if strings.Contains(body, "must not be emitted") {
+		t.Fatalf("stream continued after terminal failure: %s", body)
 	}
 }
 

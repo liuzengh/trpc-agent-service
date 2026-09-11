@@ -43,7 +43,7 @@ func (h *channelControlHandler) reconcileApprovals(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("resolve approval sender: %w", err)
 		}
-		card := approvalPromptCard(approval)
+		card := governance.ApprovalPromptCard(approval)
 		target := channels.ReplyTarget{
 			TenantID: approval.TenantID, Channel: channel, BindingID: approval.BindingID,
 			ConversationID: approval.ConversationID, ConversationScope: channels.ConversationScope(approval.ConversationScope),
@@ -69,19 +69,6 @@ func (h *channelControlHandler) reconcileApprovals(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-func approvalPromptCard(approval governance.PendingApproval) channels.InteractiveCard {
-	description := approvalOperationSummary(approval.ToolDescription, approval.ToolName)
-	return channels.InteractiveCard{
-		Title: "确认执行操作",
-		Body:  description + "\n\n确认后将执行此操作。",
-		State: "pending",
-		Actions: []channels.CardAction{
-			{ActionID: "approval:approve:" + approval.Token, Label: "确认执行", Style: "primary"},
-			{ActionID: "approval:reject:" + approval.Token, Label: "取消", Style: "danger"},
-		},
-	}
 }
 
 func (h *channelControlHandler) handle(ctx context.Context, snapshot tenant.Snapshot, bindingID string, inbound channels.InboundMessage) (bool, error) {
@@ -112,7 +99,7 @@ func (h *channelControlHandler) handleAction(ctx context.Context, snapshot tenan
 	if inbound.Action == nil {
 		return nil
 	}
-	token, approved, ok := parseApprovalAction(inbound.Action.ActionID)
+	token, approved, ok := governance.ParseApprovalAction(inbound.Action.ActionID)
 	if !ok {
 		return h.sendReply(ctx, snapshot, bindingID, inbound, "该交互已失效或无法识别，请重新发起操作。")
 	}
@@ -138,12 +125,7 @@ func (h *channelControlHandler) handleAction(ctx context.Context, snapshot tenan
 		}
 	}
 	slog.Info("approval action resolved", "channel", inbound.Channel, "binding_id", bindingID, "approved", approved)
-	description := approvalOperationSummary(resolved.ToolDescription, resolved.ToolName)
-	state, body := "rejected", "已取消："+description
-	if approved {
-		state, body = "approved", "已确认："+description
-	}
-	card := channels.InteractiveCard{Title: approvalResultTitle(approved), Body: body, State: state}
+	card := governance.ApprovalResultCard(resolved, approved)
 	return h.replaceApprovalCard(ctx, resolved.TenantID, resolved.AppCode, resolved.ConfigVersion, bindingID, inbound, card)
 }
 
@@ -185,48 +167,6 @@ func (h *channelControlHandler) replaceApprovalCard(
 		return updateErr
 	}
 	return errors.New("provider does not support in-place approval updates")
-}
-
-func approvalOperationSummary(description, toolName string) string {
-	text := strings.TrimSpace(description)
-	if text == "" {
-		if name := strings.TrimSpace(toolName); name != "" {
-			return "执行操作：" + name
-		}
-		return "执行这项操作"
-	}
-	for _, separator := range []string{"。", "；", "\n", "，这是"} {
-		if index := strings.Index(text, separator); index > 0 {
-			text = strings.TrimSpace(text[:index])
-		}
-	}
-	runes := []rune(text)
-	if len(runes) > 80 {
-		text = string(runes[:80]) + "…"
-	}
-	return text
-}
-
-func approvalResultTitle(approved bool) string {
-	if approved {
-		return "已确认"
-	}
-	return "已取消"
-}
-
-func parseApprovalAction(actionID string) (string, bool, bool) {
-	parts := strings.Split(strings.TrimSpace(actionID), ":")
-	if len(parts) != 3 || parts[0] != "approval" || strings.TrimSpace(parts[2]) == "" {
-		return "", false, false
-	}
-	switch parts[1] {
-	case "approve":
-		return parts[2], true, true
-	case "reject":
-		return parts[2], false, true
-	default:
-		return "", false, false
-	}
 }
 
 func (h *channelControlHandler) sendReply(ctx context.Context, snapshot tenant.Snapshot, bindingID string, inbound channels.InboundMessage, text string) error {

@@ -1,18 +1,28 @@
 import type { ReactNode } from 'react'
 import type { InteractiveCard } from '../types'
 
-export function ChatCard({ card, body }: { card: InteractiveCard; body?: ReactNode }) {
-  const actions = (card.actions ?? []).flatMap((action) => {
+export function ChatCard({
+  card,
+  body,
+  onAction,
+}: {
+  card: InteractiveCard
+  body?: ReactNode
+  onAction?: (actionID: string) => void
+}) {
+  const linkActions = (card.actions ?? []).flatMap((action) => {
     const href = safeHTTPSURL(action.url)
     return href ? [{ ...action, href }] : []
   })
+  const interactiveActions = (card.actions ?? []).filter((action) => action.action_id && !action.url)
+  const hasActions = linkActions.length > 0 || interactiveActions.length > 0
   return (
     <section className={`chat-card${card.state ? ` is-${card.state}` : ''}`} aria-label={card.title || '回答卡片'}>
       {card.title && <h4 className="chat-card-title">{card.title}</h4>}
       <div className="chat-card-body">{body ?? card.body}</div>
-      {actions.length > 0 && (
+      {hasActions && (
         <div className="chat-card-actions">
-          {actions.map((action) => (
+          {linkActions.map((action) => (
             <a
               key={`${action.label}:${action.href}`}
               className={`chat-card-action${action.style === 'primary' ? ' is-primary' : ''}`}
@@ -22,6 +32,17 @@ export function ChatCard({ card, body }: { card: InteractiveCard; body?: ReactNo
             >
               {action.label}
             </a>
+          ))}
+          {interactiveActions.map((action) => (
+            <button
+              key={`${action.label}:${action.action_id}`}
+              type="button"
+              className={`chat-card-action${action.style === 'primary' ? ' is-primary' : ''}`}
+              onClick={() => action.action_id && onAction?.(action.action_id)}
+              disabled={!onAction || card.state !== 'pending'}
+            >
+              {action.label}
+            </button>
           ))}
         </div>
       )}

@@ -26,6 +26,7 @@ type fakeFeishuServer struct {
 	messageCalls atomic.Int64
 	failMessages atomic.Int64
 	imageCalls   atomic.Int64
+	fileCalls    atomic.Int64
 	patchCalls   atomic.Int64
 	lastReceive  string
 	lastMsgType  string
@@ -72,7 +73,7 @@ func newFakeFeishuServer(t *testing.T) *fakeFeishuServer {
 			fake.lastReceive = body.ReceiveID
 			fake.lastMsgType = body.MsgType
 			fake.lastCreate = body.Content
-			if (body.MsgType != "post" && body.MsgType != "interactive" && body.MsgType != "image") || body.ReceiveID != "oc_1" {
+			if (body.MsgType != "post" && body.MsgType != "interactive" && body.MsgType != "image" && body.MsgType != "file") || body.ReceiveID != "oc_1" {
 				t.Fatalf("unexpected send body: %+v", body)
 			}
 			_ = json.NewEncoder(writer).Encode(map[string]any{
@@ -89,6 +90,20 @@ func newFakeFeishuServer(t *testing.T) *fakeFeishuServer {
 			}
 			_ = json.NewEncoder(writer).Encode(map[string]any{
 				"code": 0, "msg": "ok", "data": map[string]any{"image_key": "img-key-1"},
+			})
+		case "/open-apis/im/v1/files":
+			fake.fileCalls.Add(1)
+			if err := request.ParseMultipartForm(4 << 20); err != nil {
+				t.Fatalf("parse file upload: %v", err)
+			}
+			if got := request.FormValue("file_type"); got != "stream" {
+				t.Fatalf("file_type = %q, want stream", got)
+			}
+			if got := request.FormValue("file_name"); got != "report.docx" {
+				t.Fatalf("file_name = %q, want report.docx", got)
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"code": 0, "msg": "ok", "data": map[string]any{"file_key": "file-key-1"},
 			})
 		default:
 			if request.Method == http.MethodPatch && strings.HasPrefix(request.URL.Path, "/open-apis/im/v1/messages/") {
@@ -173,6 +188,27 @@ func TestFeishuSenderUsesNativeImageMessageForImageArtifact(t *testing.T) {
 	}
 	if !strings.Contains(fake.lastCreate, "img-key-1") {
 		t.Fatalf("image content = %q, want uploaded image key", fake.lastCreate)
+	}
+}
+
+func TestFeishuSenderUsesNativeFileMessageForDocumentArtifact(t *testing.T) {
+	t.Parallel()
+	fake := newFakeFeishuServer(t)
+	sender := newTestFeishuSender(t, fake)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "report.docx")
+	if err := os.WriteFile(path, []byte("fake-docx-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	receipt, err := sender.Send(context.Background(), channels.ReplyTarget{
+		Channel: channels.Feishu, ConversationID: "oc_1",
+	}, channels.OutboundMessage{Files: []channels.OutboundFile{{Path: path, Name: "report.docx"}}})
+	if err != nil {
+		t.Fatalf("Send(document) error = %v", err)
+	}
+	if receipt.ExternalMessageID != "om-reply-1" || fake.fileCalls.Load() != 1 || fake.lastMsgType != "file" || !strings.Contains(fake.lastCreate, "file-key-1") {
+		t.Fatalf("receipt/file calls/msg type/content = %#v / %d / %q / %q", receipt, fake.fileCalls.Load(), fake.lastMsgType, fake.lastCreate)
 	}
 }
 

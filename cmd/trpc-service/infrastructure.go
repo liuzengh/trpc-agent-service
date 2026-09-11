@@ -75,6 +75,8 @@ type infrastructure struct {
 	identities               identity.ConsoleIdentityStore
 	identityIngress          messaging.ChannelIdentityResolver
 	webReplyHub              *web.RedisReplyHub
+	approvalBroker           *governance.RedisApprovalBroker
+	pendingAttachments       messaging.PendingAttachmentStore
 	agentMemory              web.AgentMemoryProvider
 	agentSessions            web.AgentSessionProvider
 	sessionMigrationStore    storage.SessionMigrationStore
@@ -136,6 +138,7 @@ type infrastructureBuilder struct {
 	configurationCache      *tenant.RedisCache
 	webReplyHub             *web.RedisReplyHub
 	approvalBroker          *governance.RedisApprovalBroker
+	pendingAttachments      messaging.PendingAttachmentStore
 	imProgressHub           *messaging.RedisIMProgressHub
 
 	// Provider layer.
@@ -275,11 +278,18 @@ func (b *infrastructureBuilder) composeStorage() error {
 	if err != nil {
 		return err
 	}
+	b.pendingAttachments, err = messaging.NewRedisPendingAttachmentStore(b.redisClient)
+	if err != nil {
+		return fmt.Errorf("construct pending attachment store: %w", err)
+	}
 	approvalStore, approvalStoreErr := governance.NewPostgresApprovalStore(b.database)
 	if approvalStoreErr != nil {
 		return fmt.Errorf("construct approval store: %w", approvalStoreErr)
 	}
-	b.approvalBroker, err = governance.NewRedisApprovalBroker(b.redisClient, approvalStore, 10*time.Minute)
+	b.approvalBroker, err = governance.NewRedisApprovalBroker(
+		b.redisClient, approvalStore, 10*time.Minute,
+		governance.WithApprovalNotifier(b.webReplyHub),
+	)
 	if err != nil {
 		return fmt.Errorf("construct approval broker: %w", err)
 	}
@@ -537,7 +547,7 @@ func (b *infrastructureBuilder) composeGatewayAndChannels() error {
 		httpClient := &http.Client{Timeout: b.serviceConfig.Service.RequestTimeout.Duration}
 		b.channelConnectors, err = newChannelConnectorManager(
 			b.repository, b.producer, b.secretResolver, httpClient, feishuTokenCache,
-			b.redisClient, b.stateStore, b.identityStore, b.approvalBroker, b.imProgressHub, b.storeFactory, b.webReplyHub, b.executionManifests,
+			b.redisClient, b.stateStore, b.identityStore, b.approvalBroker, b.imProgressHub, b.storeFactory, b.pendingAttachments, b.webReplyHub, b.executionManifests,
 		)
 		if err != nil {
 			return fmt.Errorf("construct channel connector manager: %w", err)
@@ -657,7 +667,10 @@ func (b *infrastructureBuilder) composeWorkerAndNode() error {
 		if groupErr != nil {
 			return groupErr
 		}
-		processor, processorErr := agent.NewKafkaProcessor(runtime, b.repository, b.executionManifests)
+		processor, processorErr := agent.NewKafkaProcessor(
+			runtime, b.repository, b.executionManifests,
+			agent.WithWebFailurePublisher(b.webReplyHub),
+		)
 		if processorErr != nil {
 			return processorErr
 		}
@@ -774,6 +787,8 @@ func (b *infrastructureBuilder) build() *infrastructure {
 		identities:               b.identityStore,
 		identityIngress:          b.identityIngress,
 		webReplyHub:              b.webReplyHub,
+		approvalBroker:           b.approvalBroker,
+		pendingAttachments:       b.pendingAttachments,
 		agentMemory:              b.memoryProvider,
 		agentSessions:            b.sessionProvider,
 		sessionMigrationStore:    b.sessionMigrationStore,

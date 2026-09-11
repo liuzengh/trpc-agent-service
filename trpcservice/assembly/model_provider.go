@@ -173,12 +173,18 @@ func (p *ManagedModelProvider) buildSingleModel(ctx context.Context, tenantName,
 		if err != nil {
 			return nil, fmt.Errorf("resolve model key for tenant %q: %w", tenantName, err)
 		}
-		configured := observeModel(openaimodel.New(
-			modelName,
+		options := []openaimodel.Option{
 			openaimodel.WithBaseURL(provider.BaseURL),
 			openaimodel.WithAPIKey(apiKey),
 			openaimodel.WithEnableTokenTailoring(true),
-		), p.health, providerID, providerType)
+		}
+		if modelAcceptsNonTextInput(provider, modelName) {
+			// Some provider variants keep historical text-only compatibility
+			// defaults. An explicit platform capability declaration is stronger:
+			// preserve the corresponding multimodal content parts on the wire.
+			options = append(options, openaimodel.WithTextOnlyMessageContent(false))
+		}
+		configured := observeModel(openaimodel.New(modelName, options...), p.health, providerID, providerType)
 		return observeActualModelUsage(configured, providerID, modelName), nil
 	}
 
@@ -223,6 +229,18 @@ func (p *ManagedModelProvider) buildSingleModel(ctx context.Context, tenantName,
 	}
 
 	return nil, fmt.Errorf("tenant %q model provider %q has unsupported type %q", tenantName, providerID, provider.Type)
+}
+
+func modelAcceptsNonTextInput(provider config.ModelProviderConfig, modelName string) bool {
+	modelName = strings.TrimSpace(modelName)
+	for _, configured := range provider.Models {
+		if strings.TrimSpace(configured.Name) != modelName || configured.Capabilities == nil || configured.Capabilities.Input == nil {
+			continue
+		}
+		input := configured.Capabilities.Input
+		return input.Image || input.Audio || input.File
+	}
+	return false
 }
 
 func (p *ManagedModelProvider) resolveSecret(ctx context.Context, reference string) (string, error) {

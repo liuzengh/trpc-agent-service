@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -22,11 +23,14 @@ const (
 // WebStreamEvent is one replayable browser reply event. ID is the Redis Stream
 // entry ID and is emitted as the SSE id so reconnects can resume after it.
 type WebStreamEvent struct {
-	ID      string
-	Type    string
-	Content string
-	Reply   string
-	Card    *channels.InteractiveCard
+	ID        string
+	Type      string
+	Content   string
+	Reply     string
+	Code      string
+	Message   string
+	Card      *channels.InteractiveCard
+	Artifacts []channels.OutboundArtifact
 }
 
 // WebReplySubscriber is the narrow replayable stream seam used by the HTTP
@@ -43,6 +47,12 @@ type WebReplyDeltaPublisher interface {
 	PublishDelta(context.Context, string, string, string, string) error
 }
 
+// WebReplyFailurePublisher publishes one terminal, user-safe failure for a
+// browser request after the worker has stopped retrying it.
+type WebReplyFailurePublisher interface {
+	PublishFailure(context.Context, string, string, string, string, string) error
+}
+
 // RedisReplyHub is the Web channel Sender, delta publisher, and replayable
 // Redis Streams fanout. The durable Outbox remains the source of truth for the
 // completed reply; the Redis stream provides short-lived delta replay.
@@ -56,10 +66,13 @@ func NewRedisReplyHub(client redis.UniversalClient) (*RedisReplyHub, error) {
 }
 
 func (h *RedisReplyHub) Send(ctx context.Context, target channels.ReplyTarget, message channels.OutboundMessage) (channels.SendReceipt, error) {
-	if target.Channel != channels.Web || strings.TrimSpace(target.TenantID) == "" || strings.TrimSpace(target.WebOwnerID) == "" || strings.TrimSpace(message.IdempotencyKey) == "" || (strings.TrimSpace(message.Text) == "" && message.Card == nil) {
+	if target.Channel != channels.Web || strings.TrimSpace(target.TenantID) == "" || strings.TrimSpace(target.WebOwnerID) == "" || strings.TrimSpace(message.IdempotencyKey) == "" ||
+		(strings.TrimSpace(message.Text) == "" && message.Card == nil && len(message.Artifacts) == 0) {
 		return channels.SendReceipt{}, fmt.Errorf("invalid web reply")
 	}
-	eventID, err := h.publishEvent(ctx, target.TenantID, target.WebOwnerID, message.IdempotencyKey, WebStreamEvent{Type: "done", Reply: message.Text, Card: message.Card})
+	eventID, err := h.publishEvent(ctx, target.TenantID, target.WebOwnerID, message.IdempotencyKey, WebStreamEvent{
+		Type: "done", Reply: message.Text, Card: message.Card, Artifacts: append([]channels.OutboundArtifact(nil), message.Artifacts...),
+	})
 	if err != nil {
 		return channels.SendReceipt{}, fmt.Errorf("publish web reply: %w", err)
 	}
@@ -74,6 +87,46 @@ func (h *RedisReplyHub) PublishDelta(ctx context.Context, tenantID, ownerID, req
 		return fmt.Errorf("publish web reply delta: %w", err)
 	}
 	return nil
+}
+
+func (h *RedisReplyHub) PublishFailure(ctx context.Context, tenantID, ownerID, requestID, code, message string) error {
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(ownerID) == "" || strings.TrimSpace(requestID) == "" || strings.TrimSpace(message) == "" {
+		return fmt.Errorf("web failure tenant, owner, request ID and message are required")
+	}
+	if _, err := h.publishEvent(ctx, tenantID, ownerID, requestID, WebStreamEvent{
+		Type: "error", Code: strings.TrimSpace(code), Message: strings.TrimSpace(message),
+	}); err != nil {
+		return fmt.Errorf("publish web reply failure: %w", err)
+	}
+	return nil
+}
+
+// NotifyPendingApproval publishes a non-terminal card into the browser's
+// existing chat stream. IM approvals remain owned by the Channel reconciler.
+func (h *RedisReplyHub) NotifyPendingApproval(ctx context.Context, approval governance.PendingApproval) (string, error) {
+	if approval.Channel != string(channels.Web) {
+		return "", nil
+	}
+	if strings.TrimSpace(approval.TenantID) == "" || strings.TrimSpace(approval.RequesterUserID) == "" || strings.TrimSpace(approval.RequestID) == "" {
+		return "", fmt.Errorf("web approval routing is incomplete")
+	}
+	card := governance.ApprovalPromptCard(approval)
+	eventID, err := h.PublishApprovalCard(ctx, approval.TenantID, approval.RequesterUserID, approval.RequestID, card)
+	if err != nil {
+		return "", err
+	}
+	return eventID, nil
+}
+
+func (h *RedisReplyHub) PublishApprovalCard(ctx context.Context, tenantID, ownerID, requestID string, card channels.InteractiveCard) (string, error) {
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(ownerID) == "" || strings.TrimSpace(requestID) == "" || strings.TrimSpace(card.Body) == "" {
+		return "", fmt.Errorf("web approval card routing and body are required")
+	}
+	eventID, err := h.publishEvent(ctx, tenantID, ownerID, requestID, WebStreamEvent{Type: "card", Card: &card})
+	if err != nil {
+		return "", fmt.Errorf("publish web approval card: %w", err)
+	}
+	return eventID, nil
 }
 
 func (h *RedisReplyHub) Subscribe(ctx context.Context, tenantID, ownerID, requestID, afterID string) (<-chan WebStreamEvent, func(), error) {
@@ -132,12 +185,25 @@ func (h *RedisReplyHub) publishEvent(ctx context.Context, tenantID, ownerID, req
 	if event.Reply != "" {
 		values["reply"] = event.Reply
 	}
+	if event.Code != "" {
+		values["code"] = event.Code
+	}
+	if event.Message != "" {
+		values["message"] = event.Message
+	}
 	if event.Card != nil {
 		encoded, err := json.Marshal(event.Card)
 		if err != nil {
 			return "", fmt.Errorf("encode web reply card: %w", err)
 		}
 		values["card"] = string(encoded)
+	}
+	if len(event.Artifacts) > 0 {
+		encoded, err := json.Marshal(event.Artifacts)
+		if err != nil {
+			return "", fmt.Errorf("encode web reply artifacts: %w", err)
+		}
+		values["artifacts"] = string(encoded)
 	}
 	streamKey := webReplyStreamKey(tenantID, ownerID, requestID)
 	eventID, err := h.client.XAdd(ctx, &redis.XAddArgs{Stream: streamKey, Values: values}).Result()
@@ -153,7 +219,7 @@ func (h *RedisReplyHub) publishEvent(ctx context.Context, tenantID, ownerID, req
 
 func decodeWebStreamEvent(message redis.XMessage) (WebStreamEvent, error) {
 	typeValue, ok := message.Values["type"].(string)
-	if !ok || (typeValue != "delta" && typeValue != "done") {
+	if !ok || (typeValue != "delta" && typeValue != "card" && typeValue != "done" && typeValue != "error") {
 		return WebStreamEvent{}, fmt.Errorf("invalid web stream event")
 	}
 	event := WebStreamEvent{ID: message.ID, Type: typeValue}
@@ -163,6 +229,12 @@ func decodeWebStreamEvent(message redis.XMessage) (WebStreamEvent, error) {
 	if reply, ok := message.Values["reply"].(string); ok {
 		event.Reply = reply
 	}
+	if code, ok := message.Values["code"].(string); ok {
+		event.Code = code
+	}
+	if failure, ok := message.Values["message"].(string); ok {
+		event.Message = failure
+	}
 	if encoded, ok := message.Values["card"].(string); ok && encoded != "" {
 		var card channels.InteractiveCard
 		if err := json.Unmarshal([]byte(encoded), &card); err != nil {
@@ -170,7 +242,15 @@ func decodeWebStreamEvent(message redis.XMessage) (WebStreamEvent, error) {
 		}
 		event.Card = &card
 	}
-	if (event.Type == "delta" && event.Content == "") || (event.Type == "done" && event.Reply == "" && event.Card == nil) {
+	if encoded, ok := message.Values["artifacts"].(string); ok && encoded != "" {
+		if err := json.Unmarshal([]byte(encoded), &event.Artifacts); err != nil {
+			return WebStreamEvent{}, fmt.Errorf("decode web reply artifacts: %w", err)
+		}
+	}
+	if (event.Type == "delta" && event.Content == "") ||
+		(event.Type == "card" && event.Card == nil) ||
+		(event.Type == "done" && event.Reply == "" && event.Card == nil && len(event.Artifacts) == 0) ||
+		(event.Type == "error" && strings.TrimSpace(event.Message) == "") {
 		return WebStreamEvent{}, fmt.Errorf("incomplete web stream event")
 	}
 	return event, nil
@@ -201,3 +281,5 @@ func webReplyStreamKey(tenantID, ownerID, requestID string) string {
 var _ channels.Sender = (*RedisReplyHub)(nil)
 var _ WebReplySubscriber = (*RedisReplyHub)(nil)
 var _ WebReplyDeltaPublisher = (*RedisReplyHub)(nil)
+var _ WebReplyFailurePublisher = (*RedisReplyHub)(nil)
+var _ governance.ApprovalNotifier = (*RedisReplyHub)(nil)

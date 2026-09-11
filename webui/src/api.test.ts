@@ -4,6 +4,7 @@ import {
   createBackendProfile,
   createApplication,
   createTenant,
+  artifactDownloadURL,
   getArtifact,
   getApps,
   getClaims,
@@ -16,6 +17,7 @@ import {
   setUnauthorizedHandler,
   type ApplicationPayload,
 } from './api'
+import type { InteractiveCard } from './types'
 
 function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
@@ -295,6 +297,22 @@ describe('console API client', () => {
     expect(deltas).toEqual(['A'])
   })
 
+  it('stops chat immediately on a terminal worker failure', async () => {
+    vi.stubGlobal('window', globalThis)
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ stream_url: '/api/v1/chat/events/event-failed', event_id: 'event-failed', session_key: 'session-failed' }, 202))
+      .mockResolvedValueOnce(sseResponse([
+        'id: 7\ndata: {"type":"error","code":"model_unavailable","message":"模型服务暂时不可用，请稍后重试。"}\n\n',
+      ]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(postChat({
+      tenant_id: 'tenant-a', app_code: 'support', conversation_id: 'chat-1', text: 'hello', request_id: 'request-failed',
+    }, () => {})).rejects.toThrow('模型服务暂时不可用，请稍后重试。')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('ignores malformed SSE events and continues to the next event', async () => {
     vi.stubGlobal('window', globalThis)
     const fetchMock = vi
@@ -339,6 +357,54 @@ describe('console API client', () => {
       eventId: 'event-card',
       sessionKey: 'session-card',
     })
+  })
+
+  it('returns generated artifacts from the terminal chat event', async () => {
+    vi.stubGlobal('window', globalThis)
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ stream_url: '/api/v1/chat/events/event-artifact', event_id: 'event-artifact', session_key: 'session-artifact' }, 202))
+      .mockResolvedValueOnce(sseResponse([
+        'id: 1\ndata: {"type":"done","reply":"文档已生成","artifacts":[{"filename":"report.docx","version":2,"name":"维修报告","mime_type":"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}]}\n\n',
+      ]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(postChat({
+      tenant_id: 'tenant-a', app_code: 'support', conversation_id: 'chat-1', text: '生成文档', request_id: 'request-artifact',
+    }, () => {})).resolves.toEqual({
+      reply: '文档已生成',
+      artifacts: [{
+        filename: 'report.docx', version: 2, name: '维修报告',
+        mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      }],
+      eventId: 'event-artifact',
+      sessionKey: 'session-artifact',
+    })
+  })
+
+  it('delivers a non-terminal approval card before the final reply', async () => {
+    vi.stubGlobal('window', globalThis)
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ stream_url: '/api/v1/chat/events/event-approval', event_id: 'event-approval', session_key: 'session-approval' }, 202))
+      .mockResolvedValueOnce(sseResponse([
+        'id: 1\ndata: {"type":"card","card":{"title":"确认执行操作","body":"提交退款申请","state":"pending","actions":[{"label":"确认执行","action_id":"approval:approve:token"}]}}\n\n',
+        'id: 2\ndata: {"type":"done","reply":"退款申请已提交"}\n\n',
+      ]))
+    vi.stubGlobal('fetch', fetchMock)
+    const cards: InteractiveCard[] = []
+
+    await expect(postChat({
+      tenant_id: 'tenant-a', app_code: 'support', conversation_id: 'chat-1', text: 'refund', request_id: 'request-approval',
+    }, () => {}, undefined, [], (card) => cards.push(card))).resolves.toEqual({
+      reply: '退款申请已提交',
+      eventId: 'event-approval',
+      sessionKey: 'session-approval',
+    })
+    expect(cards).toEqual([{
+      title: '确认执行操作', body: '提交退款申请', state: 'pending',
+      actions: [{ label: '确认执行', action_id: 'approval:approve:token' }],
+    }])
   })
 
   it('sends chat files as multipart without overriding the browser boundary', async () => {
@@ -457,6 +523,12 @@ describe('console API client', () => {
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/artifacts?tenant=acme&app=support&session=session-1&filename=report.txt',
       expect.anything(),
+    )
+  })
+
+  it('builds a same-origin artifact download URL with a pinned version', () => {
+    expect(artifactDownloadURL('tenant/a', 'support bot', 'session/1', '维修受理.md', 2)).toBe(
+      '/api/v1/artifacts?tenant=tenant%2Fa&app=support+bot&session=session%2F1&filename=%E7%BB%B4%E4%BF%AE%E5%8F%97%E7%90%86.md&download=1&version=2',
     )
   })
 

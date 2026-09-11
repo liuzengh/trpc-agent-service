@@ -389,7 +389,7 @@ func (c TenantConfig) validatePlatformPolicyWithDynamic(location string, provide
 	seen := make(map[string]struct{}, len(c.Tools.Allowed))
 	for _, name := range c.Tools.Allowed {
 		name = strings.TrimSpace(name)
-		if name == "" || strings.ContainsAny(name, " /\\") {
+		if !validToolName(name) {
 			return fmt.Errorf("%s.tools.allowed contains an invalid tool name", location)
 		}
 		if _, exists := seen[name]; exists {
@@ -402,7 +402,7 @@ func (c TenantConfig) validatePlatformPolicyWithDynamic(location string, provide
 	}
 	for _, name := range c.Tools.RequireConfirmation {
 		name = strings.TrimSpace(name)
-		if name == "" || strings.ContainsAny(name, " /\\") {
+		if !validToolName(name) {
 			return fmt.Errorf("%s.tools.require_confirmation contains an invalid tool name", location)
 		}
 		if _, allowed := seen[name]; !allowed {
@@ -514,7 +514,19 @@ func validateCustomTools(location string, policy ToolPolicy, allowedSecrets map[
 }
 
 func validToolName(name string) bool {
-	return name != "" && !strings.ContainsAny(name, " /\\")
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for _, character := range name {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validateRemoteToolURL(location, raw string) error {

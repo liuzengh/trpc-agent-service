@@ -24,6 +24,25 @@ type failingVersionRepository struct {
 	err error
 }
 
+type recordingWebFailurePublisher struct {
+	calls     int
+	tenantID  string
+	ownerID   string
+	requestID string
+	code      string
+	message   string
+}
+
+func (p *recordingWebFailurePublisher) PublishFailure(_ context.Context, tenantID, ownerID, requestID, code, message string) error {
+	p.calls++
+	p.tenantID = tenantID
+	p.ownerID = ownerID
+	p.requestID = requestID
+	p.code = code
+	p.message = message
+	return nil
+}
+
 func (r failingVersionRepository) GetVersion(context.Context, string, string, uint64) (tenant.Snapshot, error) {
 	return tenant.Snapshot{}, r.err
 }
@@ -206,6 +225,37 @@ func TestKafkaProcessorClassifiesRuntimeFailureAsRetryable(t *testing.T) {
 	processErr := processor.Process(context.Background(), envelope)
 	if processErr == nil || !messaging.IsRetryable(processErr) || !strings.Contains(processErr.Error(), runtimeErr.Error()) {
 		t.Fatalf("Process() error = %v, want retryable runtime failure", processErr)
+	}
+}
+
+func TestKafkaProcessorPublishesUserSafeTerminalWebFailure(t *testing.T) {
+	repository := tenant.NewMemoryRepository()
+	publishRuntimeConfig(t, repository, "tenant-a", "telegram-bot-a")
+	snapshot, err := repository.GetVersion(context.Background(), "tenant-a", "support", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifests, err := messaging.NewExecutionManifestCodec("test-v1", []byte("platform-hmac-secret-key-at-least-32-bytes"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := messaging.NewInboundEnvelope(tenant.ReleaseSelection{Snapshot: snapshot, Variant: tenant.ReleaseStable}, "web-console", "tenant-a/support/session/web-failed", channels.InboundMessage{
+		MessageID: "web-failed", Channel: channels.Web, ConversationID: "conversation-1", SenderID: "user-1", WebOwnerID: "user-1", Text: "hello",
+	}, manifests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := &recordingWebFailurePublisher{}
+	processor, err := NewKafkaProcessor(&Runtime{}, repository, manifests, WithWebFailurePublisher(publisher))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := processor.NotifyTerminalFailure(context.Background(), envelope, "retry_exhausted", errors.New("model provider unavailable")); err != nil {
+		t.Fatal(err)
+	}
+	if publisher.calls != 1 || publisher.tenantID != "tenant-a" || publisher.ownerID != "user-1" || publisher.requestID != "web-failed" ||
+		publisher.code != "model_unavailable" || publisher.message != "模型服务暂时不可用，请稍后重试。" {
+		t.Fatalf("published failure = %#v", publisher)
 	}
 }
 

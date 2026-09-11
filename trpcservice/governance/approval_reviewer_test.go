@@ -102,11 +102,11 @@ func TestInteractiveApprovalReviewerPropagatesInfrastructureFailure(t *testing.T
 	}
 }
 
-func TestInteractiveApprovalReviewerFailsClosedForWeb(t *testing.T) {
+func TestInteractiveApprovalReviewerUsesBrokerForWeb(t *testing.T) {
 	audits := storage.NewMemoryStateStore()
-	brokerCalls := 0
-	reviewer, err := NewInteractiveApprovalReviewer(approvalRequesterFunc(func(context.Context, ApprovalRequest) (bool, error) {
-		brokerCalls++
+	var got ApprovalRequest
+	reviewer, err := NewInteractiveApprovalReviewer(approvalRequesterFunc(func(_ context.Context, request ApprovalRequest) (bool, error) {
+		got = request
 		return true, nil
 	}), audits)
 	if err != nil {
@@ -120,14 +120,14 @@ func TestInteractiveApprovalReviewerFailsClosedForWeb(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision == nil || decision.Approved || decision.Reason != "web interactive approval is unavailable" || brokerCalls != 0 {
-		t.Fatalf("Review(web) = %#v, broker calls=%d, want fail-closed denial", decision, brokerCalls)
+	if decision == nil || !decision.Approved || got.Channel != "web" || got.RequesterUserID != "admin-1" || got.RequestID != "message-web" {
+		t.Fatalf("Review(web) = %#v, request=%#v", decision, got)
 	}
 	events, err := audits.ListAudit(context.Background(), "tenant-a", "trace-web")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Action != "approval.rejected" || events[0].Decision != "rejected" || events[0].ErrorType != "web_approval_unavailable" {
+	if len(events) != 2 || events[0].Action != "approval.requested" || events[1].Action != "approval.approved" {
 		t.Fatalf("web approval audit events = %+v", events)
 	}
 }

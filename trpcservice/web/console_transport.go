@@ -42,16 +42,34 @@ func (s *sseWriter) doneWithID(eventID, reply string) {
 	s.doneMessageWithID(eventID, reply, nil)
 }
 
-func (s *sseWriter) doneMessageWithID(eventID, reply string, card *channels.InteractiveCard) {
+func (s *sseWriter) doneMessageWithID(eventID, reply string, card *channels.InteractiveCard, artifacts ...channels.OutboundArtifact) {
 	payload := map[string]any{"type": "done", "reply": reply}
 	if card != nil {
 		payload["card"] = card
 	}
+	if len(artifacts) > 0 {
+		payload["artifacts"] = artifacts
+	}
 	s.emit(eventID, payload)
 }
 
+func (s *sseWriter) cardWithID(eventID string, card *channels.InteractiveCard) {
+	if card == nil {
+		return
+	}
+	s.emit(eventID, map[string]any{"type": "card", "card": card})
+}
+
 func (s *sseWriter) error(message string) {
-	s.emit("", map[string]any{"type": "error", "message": message})
+	s.errorWithID("", "", message)
+}
+
+func (s *sseWriter) errorWithID(eventID, code, message string) {
+	payload := map[string]any{"type": "error", "message": message}
+	if code != "" {
+		payload["code"] = code
+	}
+	s.emit(eventID, payload)
 }
 
 func (s *sseWriter) keepAlive() {

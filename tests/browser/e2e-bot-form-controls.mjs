@@ -33,7 +33,7 @@ const catalog = {
   ],
   tools: [
     { name: 'duckduckgo_search', description: '搜索公开网页' },
-    { name: 'platform.present_card', description: 'Present a compact result card' },
+    { name: 'platform_present_card', description: 'Present a compact result card' },
     { name: 'query_order', description: '查询订单' },
   ],
   channel_credential_refs: ['env:FEISHU_SUPPORT', 'env:TELEGRAM_SUPPORT'],
@@ -97,8 +97,11 @@ try {
   await temperature.fill('1.1')
   await dialog.locator('label').filter({ hasText: '最大输出长度' }).locator('input').fill('1024')
   await dialog.locator('label').filter({ hasText: '采样阈值' }).locator('input').fill('0.9')
-  await choose(dialog.getByRole('combobox', { name: '推理强度' }), '高')
+  const reasoningEffort = dialog.getByRole('combobox', { name: '推理强度' })
+  assert.equal(await reasoningEffort.isDisabled(), true, 'reasoning effort must be disabled until reasoning mode is enabled')
   await dialog.getByRole('checkbox', { name: '启用推理模式' }).check()
+  assert.equal(await reasoningEffort.isDisabled(), false)
+  await choose(reasoningEffort, '高')
   await dialog.locator('label').filter({ hasText: '推理 Token 上限' }).locator('input').fill('2048')
 
   const failover = dialog.getByRole('combobox', { name: '添加备用模型' })
