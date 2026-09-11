@@ -1,6 +1,6 @@
-# 多租户 Agent 部署平台
+# tRPC Agent Service
 
-基于 tRPC-Agent-Go 的 Agent 管理与运行平台。支持多个租户独立配置模型、工具、知识库和存储后端，通过网页工作台发布 Agent，并接入 Telegram 或企业微信。
+基于 tRPC-Agent-Go 的多租户 Agent 管理与运行平台。通过网页工作台配置模型、工具、知识库和存储后端，调试并发布 Agent，接入 Telegram 或企业微信。支持单机运行，也可拆分为多个角色节点部署。
 
 ## 主要能力
 
@@ -13,31 +13,59 @@
 
 支持范围与使用条件见[功能说明](docs/acceptance.md)。
 
-## 安装
+## 快速开始
 
-准备 Docker 与 Docker Compose v2，在解压目录执行：
+需要 Git、Docker 和 Docker Compose v2。首次构建需能访问容器镜像、Go 和 npm 依赖源；宿主机不需要额外安装 Go、Node.js 或数据库。
+
+### 1. 获取代码
+
+```bash
+git clone https://github.com/liuzengh/trpc-agent-service.git
+cd trpc-agent-service
+```
+
+以下命令均在仓库根目录执行。
+
+### 2. 启动平台
 
 ```bash
 docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml up -d --build --wait
 ```
 
-获取安装时生成的管理员凭据：
+首次启动会生成管理员凭据和加密主密钥，启动 PostgreSQL、Redis，执行数据库迁移并启动平台。
+
+### 3. 登录并创建 Agent
+
+获取管理员凭据：
 
 ```bash
 docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml exec platform trpc-init -show-token
 ```
 
-访问 `http://127.0.0.1:18080/admin/ui/`，登录后依次创建工作空间、配置模型连接、创建 Agent、调试并发布。
+在浏览器访问 `http://127.0.0.1:18080/admin/ui/`，使用管理员凭据登录：
 
-此配置仅监听本机回环地址。服务器部署、HTTPS、备份和权限设置见[安装运行手册](docs/operations-runbook.md)。模型和 IM 账号由部署者提供；未配置模型服务时，内置演示模型只提供固定回复。
+1. 创建工作空间，配置模型连接。
+2. 创建 Agent，设置提示词、工具和知识库。
+3. 在线调试，确认配置后发布。
+4. 按需连接 Telegram 或企业微信，接入步骤见 [IM 接入说明](docs/im-channels.md)。
 
-停止平台时使用：
+模型服务和 IM 账号由部署者提供。未配置模型服务时，内置演示模型只提供固定回复。
+
+### 停止与再次启动
+
+停止平台：
 
 ```bash
 docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml stop
 ```
 
-不要删除安装数据卷：其中保存管理员凭据、加密主密钥、数据库和会话数据。
+再次启动时执行第 2 步的命令，已有数据与凭据会保留。不要执行 `down -v` 或删除安装数据卷：其中保存管理员凭据、加密主密钥、数据库和会话数据。
+
+## 部署说明
+
+上述 Compose 配置用于单机运行，仅监听本机回环地址。公网服务器部署需配置 HTTPS 并限制管理入口；多节点部署需使用共享控制面、队列、协调器及数据后端。InMemory 后端仅适用于单进程。
+
+服务器部署、宿主机安装、多节点配置、备份与升级步骤见[安装与运行手册](docs/operations-runbook.md)。
 
 ## 文档
 
@@ -51,3 +79,5 @@ docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml s
 - [多后端适配](docs/backend-adapters.md)
 - [治理、安全与监控](docs/governance-operations.md)
 - [生产风险与缓解措施](docs/risks.md)
+
+[项目原始需求](docs/requirements.md)完整保留最初的任务说明、具体要求和验收标准。当前功能范围及安装方式以本 README 和上述文档为准。

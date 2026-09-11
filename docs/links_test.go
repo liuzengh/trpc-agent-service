@@ -44,8 +44,8 @@ func TestLocalDocumentLinks(t *testing.T) {
 	}
 }
 
-// The delivery README is a product entry point, not an assignment or build log.
-func TestReadmeDeliveryBoundary(t *testing.T) {
+// The root README introduces the project and links to usage and requirements.
+func TestReadmeProjectEntryPoints(t *testing.T) {
 	raw, err := os.ReadFile("../README.md")
 	if err != nil {
 		t.Fatal(err)
@@ -55,9 +55,10 @@ func TestReadmeDeliveryBoundary(t *testing.T) {
 		"tRPC-Agent-Go", "docs/architecture.md", "docs/sequence.md",
 		"docs/data-model.md", "docs/data-consistency.md", "docs/backend-adapters.md",
 		"docs/risks.md", "docs/operations-runbook.md", "compose.demo.yaml",
+		"docs/requirements.md",
 	} {
 		if !strings.Contains(content, required) {
-			t.Fatalf("README lost a delivery entry point: %s", required)
+			t.Fatalf("README lost a project entry point: %s", required)
 		}
 	}
 }

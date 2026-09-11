@@ -19,3 +19,7 @@
 | [多后端适配](backend-adapters.md) | Redis、SQL、向量库与对象存储的选择和路由 |
 | [治理、安全与监控](governance-operations.md) | 鉴权、审批、密钥、预算、审计和观测 |
 | [生产风险](risks.md) | 风险、监控信号及缓解措施 |
+
+## 项目需求
+
+[项目原始需求](requirements.md)保留原始 README 全文，包括任务说明、具体要求、验收标准和 tRPC-Agent-Go 能力复用对照。该文档用于查阅项目要求；当前功能范围和安装步骤见上方文档。
