@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,7 +24,20 @@ func validationFixture(t *testing.T) (*Service, *controlplane.MemoryRepository, 
 	t.Helper()
 	repo := controlplane.NewMemoryRepository(controlplane.DefaultBootstrapData())
 	t.Cleanup(func() { _ = repo.Close() })
-	registry, err := platformskill.Load("../../skills", `[{"tenant_id":"tutorial-tenant","name":"json-digest","version":"1"}]`)
+	skillRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(skillRoot, "preflight-check"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"catalog.json":             `[{"name":"preflight-check","version":"1","directory":"preflight-check"}]`,
+		"preflight-check/SKILL.md": "---\nname: preflight-check\ndescription: Revision validation fixture\n---\nCheck revision validation rules.\n",
+		"preflight-check/run.sh":   "#!/bin/sh\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(skillRoot, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	registry, err := platformskill.Load(skillRoot, `[{"tenant_id":"tutorial-tenant","name":"preflight-check","version":"1"}]`)
 	if err != nil {
 		t.Fatal(err)
 	}

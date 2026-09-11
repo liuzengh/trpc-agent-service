@@ -1,6 +1,6 @@
 # tRPC Agent Service
 
-基于 tRPC-Agent-Go 的多租户 Agent 管理与运行平台。通过网页工作台配置模型、工具、知识库和存储后端，调试并发布 Agent，接入 Telegram 或企业微信。支持单机运行，也可拆分为多个角色节点部署。
+基于 tRPC-Agent-Go 的多租户 Agent 管理与运行平台。通过网页工作台配置模型、工具和存储后端，调试并发布 Agent，接入 Telegram 或企业微信。支持单机运行，也可拆分为多个角色节点部署。
 
 ## 主要能力
 
@@ -54,7 +54,7 @@ docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml e
 在浏览器访问 `http://127.0.0.1:18080/admin/ui/`，使用管理员凭据登录：
 
 1. 创建工作空间，配置模型连接。
-2. 创建 Agent，设置提示词、工具和知识库。
+2. 创建 Agent，设置提示词和工具。
 3. 在线调试，确认配置后发布。
 4. 按需连接 Telegram 或企业微信，接入步骤见 [IM 接入说明](docs/im-channels.md)。
 

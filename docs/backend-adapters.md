@@ -147,7 +147,9 @@ summarizer model and revision
 
 Knowledge 包含原始文档与检索索引。生产建议原始文件放对象存储，元数据/处理状态放 SQL，chunk 与 embedding 放向量库。当前持久化 Job 管理入库/删除，Router 强制注入 tenant/app 过滤；它不等于任意文档格式都能自动解析。
 
-真实 Embedding 与聊天模型分开配置，部署者先用 `bin/trpc-embeddingcheck -env-file .env` 验证连通性、维度、有限数值和非零向量，再发布引用该模型及后端的 Revision。预检只发一条合成文本，不导入文档，不证明语义质量；模型名称、API 地址、Key 和维度不能从聊天配置猜测。
+文本入库、删除和检索已实现；当前采用手动配置与 Admin API 导入，网页不提供文档上传或编辑。操作步骤见[安装运行手册](operations-runbook.md#knowledge-setup)。
+
+真实 Embedding 与聊天模型分开配置，在 Agent 的 `knowledge_config` 中明确模型、API 地址和向量维度，并引用已授权的独立密钥。运行时校验向量维度、有限数值和非零向量；这些检查不代表检索质量已经达标，发布前仍需使用业务样本验证。
 
 运行时必须明确 `purpose=embedding` 的 Key 引用和 `purpose=knowledge` 的向量库凭据；不回退到 SDK 默认 Key。维度与目标 collection 必须一致，变更模型/维度需重建索引。远端请求禁止不受控重定向，限制响应大小，不导出原始供应商错误体或向量内容到 trace。
 

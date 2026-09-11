@@ -47,6 +47,13 @@ const { chromium } = require(process.env.TEST_PLAYWRIGHT_MODULE);
     await page.locator('.ant-select-dropdown:visible .ant-select-item-option-content').filter({hasText:'Tutorial Tenant'}).click();
     await page.getByRole('button',{name:'资源中心',exact:true}).click();
     await page.getByRole('button',{name:'上传 Skill',exact:true}).waitFor();
+    await page.getByRole('tab',{name:'知识库',exact:true}).click();
+    const knowledgeHelp=page.getByRole('alert').filter({hasText:'知识库检索已实现，需手动配置'});
+    await knowledgeHelp.waitFor();
+    const knowledgeSteps=await knowledgeHelp.innerText();
+    for(const step of ['/setup/platform.env','/admin/knowledge/documents','/admin/jobs/get','尚不提供文档上传和编辑入口']) {
+      if(!knowledgeSteps.includes(step))throw new Error('knowledge setup guidance missing: '+step);
+    }
     await page.getByRole('tab',{name:'数据后端'}).click();
     await page.getByRole('button',{name:'新建连接',exact:true}).click();
     const modal=page.getByRole('dialog');
@@ -105,8 +112,12 @@ const { chromium } = require(process.env.TEST_PLAYWRIGHT_MODULE);
     if(instructionResponse.status()!==200)throw new Error('instruction Skill save failed: '+await instructionResponse.text());
     const instruction=instructionResponse.request().postDataJSON().config;
     if(instruction.tool_policy.allowed_tools.includes('skill_run')||!instruction.agent_config.skills.some(s=>s.name===name&&s.version==='3'))throw new Error('instruction-only Skill enabled script execution or selected wrong version');
+    const knowledgeToggle=page.locator('.switch-row').filter({hasText:'启用知识库检索'}).getByRole('switch');
+    await knowledgeToggle.click();
+    await page.getByRole('alert').filter({hasText:'知识库检索已实现，需手动配置'}).waitFor();
+    await knowledgeToggle.click();
     if(errors.length)throw new Error(errors.join('\n'));
-    console.log('Browser passed: typed storage credentials, file upload, explicit approval, multiple versions, Agent selection.');
+    console.log('Browser passed: knowledge setup guidance, typed storage credentials, file upload, explicit approval, multiple versions, Agent selection.');
   } catch (e) { if(page) console.error('Browser state: '+(await page.locator('body').innerText()).slice(-12000)); throw e;
   } finally { await browser.close(); }
 })().catch(e=>{console.error(e);process.exitCode=1;});

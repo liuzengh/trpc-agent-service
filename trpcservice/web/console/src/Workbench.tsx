@@ -968,8 +968,8 @@ export function Workbench({
                   <>
                     <Alert
                       type="info"
-                      title="知识库使用本应用或租户的已启用后端"
-                      description="新增绑定在资源中心配置。更换 Embedding 或向量维度需要重建/迁移，不应只改模型名称。"
+                      title="知识库检索已实现，需手动配置"
+                      description="先在资源中心绑定知识库存储，并在部署配置中设置 Embedding 密钥和授权；资料通过 Admin API 导入，网页暂不支持文档上传。完整步骤见安装运行手册的“知识库：手动配置与资料导入”。更换 Embedding 或向量维度需要重建或迁移索引。"
                     />
                     <Form.Item label="Embedding 供应商">
                       <Select

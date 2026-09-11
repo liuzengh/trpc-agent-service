@@ -16,8 +16,7 @@ done
 CLEAN_TARGETS=()
 for clean_file in coverage.out coverage.html \
   bin/trpc-service bin/trpc-local bin/trpc-migrate bin/trpc-init \
-  bin/trpc-modelcheck bin/trpc-embeddingcheck \
-  bin/trpc-wecomcheck bin/trpc-permissions; do
+  bin/trpc-permissions; do
   [[ ! -L "$clean_file" ]] || { echo "refusing symlink: $clean_file" >&2; exit 1; }
   [[ ! -e "$clean_file" || -f "$clean_file" ]] || { echo "refusing non-file: $clean_file" >&2; exit 1; }
   if [[ -f "$clean_file" ]]; then

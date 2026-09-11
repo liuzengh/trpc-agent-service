@@ -82,6 +82,9 @@ func TestModelProbeOnlyMissingListingIsUnknown(t *testing.T) {
 		if result.State != want {
 			t.Fatalf("status %d: got %s, want %s", code, result.State, want)
 		}
+		if want == "unknown" && !strings.Contains(result.Detail, "generation not tested") {
+			t.Fatal("missing model listing must not imply generation was tested")
+		}
 		if result := modelProbe(context.Background(), server.URL, "secret-canary"); result.State != "down" {
 			t.Fatal("unreachable model incorrectly treated as missing listing")
 		}

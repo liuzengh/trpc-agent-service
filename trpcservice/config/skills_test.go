@@ -14,7 +14,7 @@ func TestSandboxConfigurationIsExplicit(t *testing.T) {
 	if _, err := LoadSkillsConfigFromEnv(); err == nil {
 		t.Fatal("execution enabled without an explicit image")
 	}
-	t.Setenv("TRPC_AGENT_SKILLS_ROOT", "./skills")
+	t.Setenv("TRPC_AGENT_SKILLS_ROOT", t.TempDir())
 	t.Setenv("TRPC_AGENT_SANDBOX_IMAGE", "alpine:3.22")
 	if _, err := LoadSkillsConfigFromEnv(); err != nil {
 		t.Fatal(err)
