@@ -56,9 +56,16 @@ type Factory struct {
 	approvalReviewer approvalreview.Reviewer
 	documentInputs   bool
 
-	mu      sync.Mutex
-	entries map[string]*runnerCacheEntry
-	clock   uint64
+	mu       sync.Mutex
+	entries  map[string]*runnerCacheEntry
+	building map[string]*runnerBuild
+	clock    uint64
+	closed   bool
+}
+
+type runnerBuild struct {
+	done chan struct{}
+	err  error
 }
 
 type FactoryOption func(*Factory)
@@ -119,14 +126,15 @@ func (r runnerResources) close(key string) error {
 // NewFactory constructs a factory around one injected model implementation.
 func NewFactory(modelInstance model.Model) *Factory {
 	return &Factory{
-		model: modelInstance, entries: make(map[string]*runnerCacheEntry),
+		model: modelInstance, entries: make(map[string]*runnerCacheEntry), building: make(map[string]*runnerBuild),
 	}
 }
 
 func NewFactoryWithModelProvider(models ModelProvider, tools ToolProvider, sessions SessionProvider, knowledge KnowledgeProvider, memoryProvider MemoryProvider, artifacts ArtifactProvider, callbacks *agenttool.Callbacks, options ...FactoryOption) *Factory {
 	factory := &Factory{
 		models: models, tools: tools, sessions: sessions, knowledge: knowledge,
-		memory: memoryProvider, artifacts: artifacts, callbacks: callbacks, entries: make(map[string]*runnerCacheEntry),
+		memory: memoryProvider, artifacts: artifacts, callbacks: callbacks,
+		entries: make(map[string]*runnerCacheEntry), building: make(map[string]*runnerBuild),
 	}
 	for _, option := range options {
 		if option != nil {
@@ -175,37 +183,68 @@ func (f *Factory) getOrCreate(ctx context.Context, tenantConfig config.TenantCon
 	}
 
 	key := runnerCacheKey(tenantConfig)
-	f.mu.Lock()
-	if existing := f.entries[key]; existing != nil {
-		f.markUsedLocked(existing, pin)
-		f.mu.Unlock()
-		return existing, nil
-	}
-	f.mu.Unlock()
-
-	created, resources, err := f.buildRunner(ctx, tenantConfig, key)
-	if err != nil {
-		return nil, err
-	}
-	candidate := &runnerCacheEntry{
-		runner: created, resources: resources, appName: tenantConfig.AppName(), version: tenantConfig.ConfigVersion,
-	}
-
-	f.mu.Lock()
-	if existing := f.entries[key]; existing != nil {
-		f.markUsedLocked(existing, pin)
-		f.mu.Unlock()
-		if err := closeRunnerEntry(key, candidate); err != nil {
-			slog.Warn("close duplicate tenant runner", "runner", key, "error", err)
+	for {
+		f.mu.Lock()
+		if f.closed {
+			f.mu.Unlock()
+			return nil, errors.New("runner factory is closed")
 		}
-		return existing, nil
+		if existing := f.entries[key]; existing != nil {
+			f.markUsedLocked(existing, pin)
+			f.mu.Unlock()
+			return existing, nil
+		}
+		if build := f.building[key]; build != nil {
+			done := build.done
+			f.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-done:
+				if build.err != nil {
+					return nil, build.err
+				}
+				continue
+			}
+		}
+		build := &runnerBuild{done: make(chan struct{})}
+		f.building[key] = build
+		f.mu.Unlock()
+
+		created, resources, err := f.buildRunner(ctx, tenantConfig, key)
+		var candidate *runnerCacheEntry
+		if err == nil {
+			candidate = &runnerCacheEntry{
+				runner: created, resources: resources, appName: tenantConfig.AppName(), version: tenantConfig.ConfigVersion,
+			}
+		}
+
+		var evicted []evictedRunner
+		f.mu.Lock()
+		delete(f.building, key)
+		if err == nil && f.closed {
+			err = errors.New("runner factory is closed")
+		}
+		if err == nil {
+			f.markUsedLocked(candidate, pin)
+			f.entries[key] = candidate
+			evicted = f.evictIdleLocked(candidate.appName)
+		}
+		build.err = err
+		close(build.done)
+		f.mu.Unlock()
+
+		if err != nil {
+			if candidate != nil {
+				if closeErr := closeRunnerEntry(key, candidate); closeErr != nil {
+					slog.Warn("close uninstalled tenant runner", "runner", key, "error", closeErr)
+				}
+			}
+			return nil, err
+		}
+		closeEvictedRunners(evicted)
+		return candidate, nil
 	}
-	f.markUsedLocked(candidate, pin)
-	f.entries[key] = candidate
-	evicted := f.evictIdleLocked(candidate.appName)
-	f.mu.Unlock()
-	closeEvictedRunners(evicted)
-	return candidate, nil
 }
 
 func (f *Factory) markUsedLocked(entry *runnerCacheEntry, pin bool) {
@@ -380,6 +419,11 @@ func (f *Factory) buildRunner(ctx context.Context, tenantConfig config.TenantCon
 	if f.callbacks != nil {
 		agentOptions = append(agentOptions, llmagent.WithToolCallbacks(f.callbacks))
 	}
+	if callbackProvider, ok := f.models.(ModelCallbackProvider); ok {
+		if callbacks := callbackProvider.ModelCallbacks(tenantConfig); callbacks != nil {
+			agentOptions = append(agentOptions, llmagent.WithModelCallbacks(callbacks))
+		}
+	}
 	if knowledge != nil {
 		agentOptions = append(agentOptions, llmagent.WithKnowledge(knowledge))
 	}
@@ -455,6 +499,11 @@ func (f *Factory) Close() error {
 		return nil
 	}
 	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return nil
+	}
+	f.closed = true
 	entries := f.entries
 	f.entries = make(map[string]*runnerCacheEntry)
 	f.mu.Unlock()

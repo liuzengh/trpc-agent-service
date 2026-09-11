@@ -95,6 +95,17 @@ func (s *ObservedStateStore) ListPendingOutbox(ctx context.Context, tenantID str
 	return events, err
 }
 
+func (s *ObservedStateStore) OutboxBacklog(ctx context.Context, tenantID, eventType string) (OutboxBacklog, error) {
+	store, ok := s.delegate.(OutboxBacklogStore)
+	if !ok {
+		return OutboxBacklog{}, fmt.Errorf("observed state store delegate does not support outbox backlog")
+	}
+	ctx, finish := s.start(ctx, tenantID, "read_outbox_backlog")
+	backlog, err := store.OutboxBacklog(ctx, tenantID, eventType)
+	finish(err)
+	return backlog, err
+}
+
 func (s *ObservedStateStore) MarkOutboxDelivered(ctx context.Context, tenantID, eventID string) error {
 	ctx, finish := s.start(ctx, tenantID, "mark_outbox_delivered")
 	err := s.delegate.MarkOutboxDelivered(ctx, tenantID, eventID)
@@ -176,6 +187,17 @@ func (s *ObservedStateStore) FindOutboxByRequestID(ctx context.Context, tenantID
 	return event, err
 }
 
+func (s *ObservedStateStore) FindOutboxByRequestIDs(ctx context.Context, tenantID string, requestIDs []string) ([]OutboxEvent, error) {
+	store, ok := s.delegate.(OutboxRequestBatchFinder)
+	if !ok {
+		return nil, fmt.Errorf("observed state store delegate does not support batch outbox lookup")
+	}
+	ctx, finish := s.start(ctx, tenantID, "find_outbox_by_requests")
+	events, err := store.FindOutboxByRequestIDs(ctx, tenantID, requestIDs)
+	finish(err)
+	return events, err
+}
+
 func (s *ObservedStateStore) RecordAudit(ctx context.Context, event AuditEvent) error {
 	recorder, ok := s.delegate.(AuditRecorder)
 	if !ok {
@@ -194,6 +216,17 @@ func (s *ObservedStateStore) PurgeAuditBefore(ctx context.Context, tenantID stri
 	}
 	ctx, finish := s.start(ctx, tenantID, "purge_audit")
 	count, err := store.PurgeAuditBefore(ctx, tenantID, before)
+	finish(err)
+	return count, err
+}
+
+func (s *ObservedStateStore) PurgeDeliveredOutboxBefore(ctx context.Context, tenantID string, before time.Time, limit int) (int64, error) {
+	store, ok := s.delegate.(OutboxRetentionStore)
+	if !ok {
+		return 0, fmt.Errorf("observed state store delegate does not support outbox retention")
+	}
+	ctx, finish := s.start(ctx, tenantID, "purge_delivered_outbox")
+	count, err := store.PurgeDeliveredOutboxBefore(ctx, tenantID, before, limit)
 	finish(err)
 	return count, err
 }
@@ -376,9 +409,9 @@ func (s *ObservedExecutionDedupStore) start(ctx context.Context, tenantID, opera
 	return s.observer.StartStore(ctx, metrics.StoreAttributes{TenantID: tenantID, Backend: s.backend, Operation: operation})
 }
 
-func (s *ObservedExecutionDedupStore) Begin(ctx context.Context, tenantID, channel, bindingID, messageID, traceID string, window time.Duration) (BeginResult, error) {
+func (s *ObservedExecutionDedupStore) Begin(ctx context.Context, tenantID, appCode, channel, bindingID, messageID, traceID string, window time.Duration) (BeginResult, error) {
 	ctx, finish := s.start(ctx, tenantID, "claim_execution")
-	result, err := s.delegate.Begin(ctx, tenantID, channel, bindingID, messageID, traceID, window)
+	result, err := s.delegate.Begin(ctx, tenantID, appCode, channel, bindingID, messageID, traceID, window)
 	finish(err)
 	return result, err
 }
@@ -386,6 +419,13 @@ func (s *ObservedExecutionDedupStore) Begin(ctx context.Context, tenantID, chann
 func (s *ObservedExecutionDedupStore) Abort(ctx context.Context, tenantID, channel, bindingID, messageID, traceID string) error {
 	ctx, finish := s.start(ctx, tenantID, "abort_execution_claim")
 	err := s.delegate.Abort(ctx, tenantID, channel, bindingID, messageID, traceID)
+	finish(err)
+	return err
+}
+
+func (s *ObservedExecutionDedupStore) Fail(ctx context.Context, tenantID, channel, bindingID, messageID, traceID string) error {
+	ctx, finish := s.start(ctx, tenantID, "fail_execution_claim")
+	err := s.delegate.Fail(ctx, tenantID, channel, bindingID, messageID, traceID)
 	finish(err)
 	return err
 }
@@ -499,6 +539,7 @@ func (s *ObservedIdempotencyStore) Release(ctx context.Context, lease Lease) err
 
 var _ StateStore = (*ObservedStateStore)(nil)
 var _ OutboxDeliveryStore = (*ObservedStateStore)(nil)
+var _ OutboxRetentionStore = (*ObservedStateStore)(nil)
 var _ AuditRecorder = (*ObservedStateStore)(nil)
 var _ AuditRetentionStore = (*ObservedStateStore)(nil)
 var _ SessionLister = (*ObservedStateStore)(nil)

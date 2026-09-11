@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -21,6 +22,8 @@ type personalSessionView struct {
 	Summary string `json:"summary,omitempty"`
 	Preview string `json:"preview,omitempty"`
 }
+
+const maxSessionListPreviewEvents = 1000
 
 func (c *consoleAPI) listMySessions(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
@@ -90,27 +93,41 @@ func (c *consoleAPI) writeSessionViews(writer http.ResponseWriter, request *http
 	}
 	metadata := make([]sessionView, 0, min(limit, len(entries)))
 	personal := make([]personalSessionView, 0, min(limit, len(entries)))
+	sessionServices := make(map[string]agentsession.Service)
 	for _, entry := range entries {
 		if !baseFilter(entry) || !matchSessionViewFilters(entry, appCode, channel, status, scope, owner, unlinked) {
 			continue
 		}
 		view := sessionView{Session: entry, MessageCount: entry.Revision}
+		// ResolveSession creates the platform route before the first Worker run.
+		// A request can stop after that point (validation failure, client abort,
+		// publish failure), leaving a revision-0 shell with no framework Session.
+		// It is not conversation history yet and must not make the whole personal
+		// session list fail.
+		if includePersonalContent && entry.Revision == 0 {
+			continue
+		}
 		if includePersonalContent && c.dependencies.AgentSessions != nil && entry.AppCode != "" && entry.SubjectID != "" && entry.SessionKey != "" {
 			personalView := personalSessionView{sessionView: view}
-			service, serviceErr := c.agentSessionService(request.Context(), tenantID, entry.AppCode)
-			if serviceErr != nil {
-				serverError(writer, "resolve agent Session backend", serviceErr)
-				return
+			service := sessionServices[entry.AppCode]
+			if service == nil {
+				var serviceErr error
+				service, serviceErr = c.agentSessionService(request.Context(), tenantID, entry.AppCode)
+				if serviceErr != nil {
+					serverError(writer, "resolve agent Session backend", serviceErr)
+					return
+				}
+				sessionServices[entry.AppCode] = service
 			}
-			frameworkSession, getErr := service.GetSession(request.Context(), agentsession.Key{
+			preview, summary, getErr := loadPersonalSessionListContent(request.Context(), service, agentsession.Key{
 				AppName: tenantID + "/" + entry.AppCode, UserID: entry.SubjectID, SessionID: entry.SessionKey,
 			})
-			if getErr == nil && frameworkSession != nil {
-				personalView.Preview = chatPreview(projectChatMessages(frameworkSession))
-				if summary, ok := service.GetSessionSummaryText(request.Context(), frameworkSession); ok {
-					personalView.Summary = summary
-				}
+			if getErr != nil {
+				serverError(writer, "read agent Session for personal session list", getErr)
+				return
 			}
+			personalView.Preview = preview
+			personalView.Summary = summary
 			personal = append(personal, personalView)
 		} else if includePersonalContent {
 			personal = append(personal, personalSessionView{sessionView: view})
@@ -126,6 +143,55 @@ func (c *consoleAPI) writeSessionViews(writer http.ResponseWriter, request *http
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"sessions": metadata})
+}
+
+func loadPersonalSessionListContent(ctx context.Context, service agentsession.Service, key agentsession.Key) (string, string, error) {
+	batch := minSessionEventScanBatch
+	preview := ""
+	summary := ""
+	for offset := 0; offset < maxSessionListPreviewEvents; {
+		limit := min(batch, maxSessionListPreviewEvents-offset)
+		frameworkSession, err := service.GetSession(ctx, key, agentsession.WithGetSessionEventPage(offset, limit))
+		if errors.Is(err, agentsession.ErrEventPageUnsupported) {
+			frameworkSession, err = service.GetSession(ctx, key)
+			if err != nil {
+				return "", "", err
+			}
+			if frameworkSession == nil {
+				return "", "", fmt.Errorf("session %q is unavailable", key.SessionID)
+			}
+			if value, ok := service.GetSessionSummaryText(ctx, frameworkSession); ok {
+				summary = value
+			}
+			return chatPreview(projectChatMessages(frameworkSession)), summary, nil
+		}
+		if err != nil {
+			return "", "", err
+		}
+		if frameworkSession == nil {
+			return "", "", fmt.Errorf("session %q is unavailable", key.SessionID)
+		}
+		if offset == 0 {
+			if value, ok := service.GetSessionSummaryText(ctx, frameworkSession); ok {
+				summary = value
+			}
+		}
+		events := snapshotSessionEvents(frameworkSession)
+		if len(events) == 0 {
+			break
+		}
+		if pagePreview := chatPreview(projectChatMessages(frameworkSession)); pagePreview != "" {
+			// Event pages walk backwards from the newest events. Older pages
+			// therefore replace newer candidates so the list keeps its existing
+			// "first visible user message" title semantics.
+			preview = pagePreview
+		}
+		offset += len(events)
+		if len(events) < limit {
+			break
+		}
+	}
+	return preview, summary, nil
 }
 
 func matchSessionViewFilters(entry storage.Session, appCode, channel, status, scope, owner string, unlinked bool) bool {

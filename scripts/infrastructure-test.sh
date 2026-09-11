@@ -32,14 +32,23 @@ up() {
 }
 
 run_tests() {
-  echo "[infra] migrations"
+  echo "[infra] applying current database baseline"
   go test -p=1 -count=1 ./migrations
-  echo "[infra] PostgreSQL, Redis, Kafka, S3 and RLS adapters"
-  go test -p=1 -count=1 \
-    ./trpcservice/tenant \
-    ./trpcservice/identity \
-    ./trpcservice/messaging \
-    ./trpcservice/storage
+  echo "[infra] full Go suite with PostgreSQL, Redis, Kafka, S3 and RLS enabled"
+  go test -p=1 -count=1 ./...
+}
+
+run_coverage() {
+  local coverage_dir="${GO_COVERAGE_DIR:-$ROOT/tests/coverage/infrastructure}"
+  local profile="$coverage_dir/go-cover.out"
+  local summary="$coverage_dir/go-cover-summary.txt"
+  mkdir -p "$coverage_dir"
+  echo "[infra] applying current database baseline before coverage"
+  go test -p=1 -count=1 ./migrations
+  echo "[infra] collecting full Go coverage with PostgreSQL, Redis, Kafka, S3 and RLS enabled"
+  go test -p=1 -count=1 -covermode=atomic -coverprofile="$profile" ./...
+  go tool cover -func="$profile" | tee "$summary"
+  echo "[infra] coverage report generated at $coverage_dir"
 }
 
 down() {
@@ -59,6 +68,9 @@ case "$ACTION" in
   test)
     run_tests 2>&1 | tee "$ARTIFACTS/test.log"
     ;;
+  coverage)
+    run_coverage 2>&1 | tee "$ARTIFACTS/coverage.log"
+    ;;
   down)
     down
     ;;
@@ -75,7 +87,7 @@ case "$ACTION" in
     run_tests 2>&1 | tee "$ARTIFACTS/test.log"
     ;;
   *)
-    echo "usage: $0 [up|test|down|all]" >&2
+    echo "usage: $0 [up|test|coverage|down|all]" >&2
     exit 2
     ;;
 esac

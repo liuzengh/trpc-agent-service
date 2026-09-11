@@ -177,3 +177,127 @@ func TestRequiredModelInputsOnlyContainsNativeModalities(t *testing.T) {
 		t.Fatalf("required inputs = %v, want %v", required, want)
 	}
 }
+
+func TestRuntimeFileInputClassification(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name     string
+		filename string
+		declared string
+		want     string
+	}{
+		{name: "declared normalized", filename: "notes.bin", declared: " Text/Plain ; charset=utf-8", want: "text/plain"},
+		{name: "infer json", filename: "payload.json", declared: "application/octet-stream", want: "application/json"},
+		{name: "unknown", filename: "payload.unknown-extension", declared: "application/octet-stream", want: "application/octet-stream"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := inputMimeType(test.filename, test.declared); got != test.want {
+				t.Fatalf("inputMimeType() = %q, want %q", got, test.want)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name     string
+		filename string
+		mimeType string
+		want     bool
+	}{
+		{name: "text mime", filename: "note.bin", mimeType: "text/plain", want: true},
+		{name: "json mime", filename: "note.bin", mimeType: "application/json", want: true},
+		{name: "source extension", filename: "main.rs", mimeType: "application/octet-stream", want: true},
+		{name: "binary", filename: "archive.zip", mimeType: "application/zip", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isTextInput(test.filename, test.mimeType); got != test.want {
+				t.Fatalf("isTextInput() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeAudioInputFormats(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		filename string
+		mimeType string
+		want     string
+		wantErr  bool
+	}{
+		{name: "wav mime", filename: "voice.bin", mimeType: "audio/wav", want: "wav"},
+		{name: "mp3 mime", filename: "voice.bin", mimeType: "audio/mpeg", want: "mp3"},
+		{name: "wav extension", filename: "voice.wav", mimeType: "audio/unknown", want: "wav"},
+		{name: "mp3 extension", filename: "voice.mp3", mimeType: "audio/unknown", want: "mp3"},
+		{name: "unsupported", filename: "voice.ogg", mimeType: "audio/ogg", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := audioInputFormat(test.filename, test.mimeType)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("audioInputFormat() error = nil")
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("audioInputFormat() = %q, %v; want %q, nil", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeBuildUserMessageRequiresArtifactProviderForFiles(t *testing.T) {
+	t.Parallel()
+	runtime := &Runtime{}
+	_, err := runtime.buildUserMessage(context.Background(), config.TenantConfig{TenantID: "tenant-a", AppCode: "support"}, "tenant-a/support/session/1", channels.InboundMessage{
+		SubjectID: "user-1",
+		Files:     []channels.InboundFile{{Name: "note.txt", ArtifactName: "input/note.txt"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "artifact provider") {
+		t.Fatalf("buildUserMessage() error = %v, want artifact provider error", err)
+	}
+}
+
+func TestRuntimeBuildUserMessageRejectsUnsupportedAudio(t *testing.T) {
+	t.Parallel()
+	artifacts := artifactinmemory.NewService()
+	tenantConfig := config.TenantConfig{TenantID: "tenant-a", AppCode: "support"}
+	sessionKey := "tenant-a/support/session/audio"
+	info := agentartifact.SessionInfo{AppName: tenantConfig.AppName(), UserID: "user-1", SessionID: sessionKey}
+	version, err := artifacts.SaveArtifact(context.Background(), info, "input/audio/voice.ogg", &agentartifact.Artifact{
+		Data: []byte("audio-data"), MimeType: "audio/ogg", Name: "voice.ogg",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &Runtime{artifacts: runtimeArtifactProvider{service: artifacts}}
+	_, err = runtime.buildUserMessage(context.Background(), tenantConfig, sessionKey, channels.InboundMessage{
+		SubjectID: "user-1",
+		Files: []channels.InboundFile{{
+			Name: "voice.ogg", MimeType: "audio/ogg", ArtifactName: "input/audio/voice.ogg", Version: version,
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported format") {
+		t.Fatalf("buildUserMessage() error = %v, want unsupported audio format", err)
+	}
+}
+
+func TestRuntimeTextAttachmentHelpers(t *testing.T) {
+	t.Parallel()
+	message := model.NewUserMessage("问题")
+	appendTextAttachment(&message, "empty.txt", "   ")
+	if message.Content != "问题" {
+		t.Fatalf("blank attachment changed message to %q", message.Content)
+	}
+	appendTextAttachment(&message, "note.txt", "  内容  ")
+	if !strings.Contains(message.Content, "附件「note.txt」内容：\n内容") {
+		t.Fatalf("message content = %q", message.Content)
+	}
+	if got := firstNonEmpty(" ", " value ", "fallback"); got != " value " {
+		t.Fatalf("firstNonEmpty() = %q", got)
+	}
+	if got := firstNonEmpty(" ", "\t"); got != "" {
+		t.Fatalf("firstNonEmpty(blank) = %q", got)
+	}
+}

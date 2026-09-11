@@ -147,7 +147,14 @@ function ProviderCard({
             ? <ShieldIcon size={21} />
             : <ChannelBrandIcon channel={provider.type} size={21} />}
         </span>
-        <StatusIndicator tone={state.tone} appearance="pill">{state.label}</StatusIndicator>
+        <div className="login-provider-setting-head-actions">
+          <StatusIndicator tone={state.tone} appearance="pill">{state.label}</StatusIndicator>
+          {canVerify && (
+            <button type="button" className="text-button login-provider-verify-action" disabled={busy} onClick={onVerify}>
+              {busy ? '正在跳转…' : provider.last_successful_login_at ? '重新验证' : '验证登录'}
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="login-provider-setting-copy">
@@ -173,29 +180,40 @@ function ProviderCard({
 
       {provider.type !== 'local' && !isMock && (
         <div className="login-provider-setting-actions">
-          {canVerify && (
-            <button type="button" className="secondary small-btn" disabled={busy} onClick={onVerify}>
-              {busy ? '正在跳转…' : provider.last_successful_login_at ? '重新验证' : '验证登录'}
-            </button>
-          )}
           <details className="login-provider-guide">
-            <summary>配置指南</summary>
+            <summary>
+              <span>配置指南</span>
+              <small>{provider.configured ? '查看配置步骤' : '按步骤完成接入'}</small>
+            </summary>
             <div className="login-provider-guide-body">
-              {guide.note && <p>{guide.note}</p>}
-              <ol>{guide.steps.map((step) => <li key={step}>{step}</li>)}</ol>
-              <div className="login-provider-guide-env">
-                <span>平台配置</span>
-                <code>{guide.environment}</code>
+              {guide.note && <p className="login-provider-guide-note">{guide.note}</p>}
+              <div className="login-provider-guide-steps">
+                {guide.steps.map((step, index) => (
+                  <div className="login-provider-guide-step" key={step}>
+                    <span>{index + 1}</span>
+                    <p>{step}</p>
+                  </div>
+                ))}
               </div>
-              {callbackURL && (
-                <div className="login-provider-guide-callback">
-                  <span>回调地址</span>
-                  <code>{callbackURL}</code>
-                  <CopyButton value={callbackURL} label="复制" copiedLabel="已复制" className="text-button" iconSize={13} />
+              <dl className="login-provider-guide-values">
+                <div>
+                  <dt>平台配置</dt>
+                  <dd><code>{guide.environment}</code></dd>
                 </div>
-              )}
+                {callbackURL && (
+                  <div>
+                    <dt>回调地址</dt>
+                    <dd>
+                      <code>{callbackURL}</code>
+                      <CopyButton value={callbackURL} label="复制" copiedLabel="已复制" className="text-button" iconSize={13} />
+                    </dd>
+                  </div>
+                )}
+              </dl>
               {guide.consoleURL && (
-                <a href={guide.consoleURL} target="_blank" rel="noreferrer">打开{guide.consoleLabel}</a>
+                <a className="login-provider-guide-console" href={guide.consoleURL} target="_blank" rel="noreferrer">
+                  打开{guide.consoleLabel}<span aria-hidden="true">↗</span>
+                </a>
               )}
             </div>
           </details>

@@ -22,6 +22,7 @@ type KnowledgeIngestRequest struct {
 	Data                          []byte
 	ChunkSize, Overlap            int
 	Metadata                      map[string]string
+	ProfileID                     string
 	Backend                       config.BackendConfig
 }
 
@@ -32,6 +33,7 @@ type KnowledgeIngestJob struct {
 	Data                          []byte
 	ChunkSize, Overlap            int
 	Metadata                      map[string]string
+	ProfileID                     string
 	Backend                       config.BackendConfig
 	Attempts                      int
 }
@@ -111,19 +113,20 @@ func (q *PostgresKnowledgeIngestQueue) EnqueueKnowledgeIngest(ctx context.Contex
 	result, err := tx.ExecContext(ctx, `
 INSERT INTO knowledge_ingest_jobs (
     id, tenant_id, app_code, document_id, name, filename, content_type,
-    source_data, chunk_size, overlap, metadata, backend_driver, backend_connection_ref
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
+    source_data, chunk_size, overlap, metadata, backend_profile_id, backend_driver, backend_connection_ref
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14)
 ON CONFLICT (tenant_id, app_code, document_id) DO UPDATE
 SET id=EXCLUDED.id, name=EXCLUDED.name, filename=EXCLUDED.filename,
     content_type=EXCLUDED.content_type, source_data=EXCLUDED.source_data,
     chunk_size=EXCLUDED.chunk_size, overlap=EXCLUDED.overlap, metadata=EXCLUDED.metadata,
+    backend_profile_id=EXCLUDED.backend_profile_id,
     backend_driver=EXCLUDED.backend_driver, backend_connection_ref=EXCLUDED.backend_connection_ref,
     status='queued', attempts=0, available_at=NOW(), lease_owner='', lease_until=NULL,
     last_error='', created_at=NOW(), updated_at=NOW()
 WHERE knowledge_ingest_jobs.status='failed'`,
 		jobID, request.TenantID, request.AppCode, request.DocumentID, request.Name, request.Filename,
 		request.ContentType, request.Data, request.ChunkSize, request.Overlap, string(metadata),
-		request.Backend.Driver, request.Backend.ConnectionRef)
+		strings.TrimSpace(request.ProfileID), request.Backend.Driver, request.Backend.ConnectionRef)
 	if err != nil {
 		return "", fmt.Errorf("enqueue knowledge ingest: %w", err)
 	}
@@ -184,13 +187,13 @@ FROM candidate
 WHERE job.id=candidate.id
 RETURNING job.id, job.tenant_id, job.app_code, job.document_id, job.name, job.filename,
           job.content_type, job.source_data, job.chunk_size, job.overlap, job.metadata,
-          job.backend_driver, job.backend_connection_ref, job.attempts`,
+          job.backend_profile_id, job.backend_driver, job.backend_connection_ref, job.attempts`,
 		owner, lease.Milliseconds())
 	var job KnowledgeIngestJob
 	var metadata []byte
 	if err := row.Scan(&job.ID, &job.TenantID, &job.AppCode, &job.DocumentID, &job.Name, &job.Filename,
 		&job.ContentType, &job.Data, &job.ChunkSize, &job.Overlap, &metadata,
-		&job.Backend.Driver, &job.Backend.ConnectionRef, &job.Attempts); err != nil {
+		&job.ProfileID, &job.Backend.Driver, &job.Backend.ConnectionRef, &job.Attempts); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return KnowledgeIngestJob{}, false, nil
 		}
@@ -288,9 +291,9 @@ func validateKnowledgeIngestRequest(request KnowledgeIngestRequest) error {
 	}
 	switch strings.ToLower(strings.TrimSpace(request.Backend.Driver)) {
 	case "pgvector":
-	case "qdrant":
+	case "qdrant", "elasticsearch":
 		if strings.TrimSpace(request.Backend.ConnectionRef) == "" {
-			return errors.New("Qdrant knowledge backend requires connection_ref")
+			return fmt.Errorf("%s knowledge backend requires connection_ref", request.Backend.Driver)
 		}
 	default:
 		return fmt.Errorf("unsupported knowledge backend %q", request.Backend.Driver)

@@ -58,4 +58,11 @@ func TestPostgresStoreRegistersHeartbeatsAndListsNodes(t *testing.T) {
 	if found == nil || found.State != node.StateDraining || found.Inflight != 1 || found.BootID != record.BootID {
 		t.Fatalf("listed node = %+v", found)
 	}
+	channel := node.Record{
+		NodeID: "channel-integration", BootID: "boot-channel", Role: "channel", State: node.StateReady,
+		BuildVersion: "test", StartedAt: now, LastHeartbeat: now, LeaseUntil: now.Add(time.Minute),
+	}
+	if err := store.Register(context.Background(), channel); err != nil {
+		t.Fatalf("Register(channel) error = %v", err)
+	}
 }

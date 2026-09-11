@@ -56,7 +56,7 @@ func (testLoginProvider) Exchange(context.Context, identity.AuthExchange) (ident
 
 // buildTestKafkaHandler composes the production route table with in-memory
 // identity/auth stores, mirroring buildApplication's wiring.
-func buildTestKafkaHandler(t *testing.T) (http.Handler, *identity.MemorySessionStore) {
+func buildTestKafkaHandler(t *testing.T) (http.Handler, *identity.MemorySessionStore, string) {
 	t.Helper()
 	repository := tenant.NewMemoryRepository()
 	if _, err := repository.Publish(context.Background(), config.TenantConfig{
@@ -66,6 +66,16 @@ func buildTestKafkaHandler(t *testing.T) (http.Handler, *identity.MemorySessionS
 		t.Fatalf("seed tenant: %v", err)
 	}
 	users := identity.NewMemoryIdentityStore()
+	platformUser, err := users.CreateLocalUser(context.Background(), "system-admin", "System Admin", "", "test-password-hash", false)
+	if err != nil {
+		t.Fatalf("create platform user: %v", err)
+	}
+	if err := users.SetSystemAdmin(context.Background(), platformUser.PlatformUserID, true); err != nil {
+		t.Fatalf("grant system admin: %v", err)
+	}
+	if err := users.CreateTenant(context.Background(), "example", "Example", platformUser.PlatformUserID); err != nil {
+		t.Fatalf("create identity tenant: %v", err)
+	}
 	sessions := identity.NewMemorySessionStore()
 	authHandler, err := web.NewAuthHandler(web.AuthDependencies{
 		Providers:   map[string]identity.IdentityProvider{"test-login": testLoginProvider{}},
@@ -90,31 +100,40 @@ func buildTestKafkaHandler(t *testing.T) (http.Handler, *identity.MemorySessionS
 	if err != nil {
 		t.Fatalf("construct execution manifest codec: %v", err)
 	}
+	state := &listableStateStore{MemoryStateStore: storage.NewMemoryStateStore()}
+	dedup := &listableDedupStore{MemoryExecutionDedupStore: storage.NewMemoryExecutionDedupStore()}
+	retries := storage.NewMemoryRetryTracker()
 	handler, err := NewKafkaHTTPHandler(KafkaHTTPDependencies{
-		Configurations:     repository,
-		Producer:           &testProducer{},
-		ExecutionManifests: manifests,
-		StateStore:         &listableStateStore{MemoryStateStore: storage.NewMemoryStateStore()},
-		ExecutionDedup:     &listableDedupStore{MemoryExecutionDedupStore: storage.NewMemoryExecutionDedupStore()},
-		RetryTracker:       storage.NewMemoryRetryTracker(),
-		ConsoleSystem:      web.SystemInfo{Version: "test"},
-		ConsoleProbes:      map[string]web.DependencyProbe{},
+		Console: web.ConsoleDependencies{
+			Configurations:       repository,
+			Producer:             &testProducer{},
+			ExecutionManifests:   manifests,
+			Identities:           users,
+			InboundIdentities:    users,
+			LoginSessions:        sessions,
+			Sessions:             state,
+			SessionManager:       state,
+			Claims:               dedup,
+			State:                state,
+			Attempts:             retries,
+			ApplicationValidator: applicationValidator,
+			System:               web.SystemInfo{Version: "test"},
+			Probes:               map[string]web.DependencyProbe{},
+		},
 		ConsoleFS: fstest.MapFS{
 			"index.html": &fstest.MapFile{Data: []byte("<!doctype html><title>console-root</title>")},
 		},
-		AuthHandler:          authHandler,
-		Sessions:             sessions,
-		Audits:               users,
-		ApplicationValidator: applicationValidator,
+		AuthHandler: authHandler,
+		Audits:      users,
 	})
 	if err != nil {
 		t.Fatalf("NewKafkaHTTPHandler() error = %v", err)
 	}
-	return handler, sessions
+	return handler, sessions, platformUser.PlatformUserID
 }
 
 func TestKafkaHTTPDoesNotExposeLegacyWebhookIngress(t *testing.T) {
-	handler, _ := buildTestKafkaHandler(t)
+	handler, _, _ := buildTestKafkaHandler(t)
 	request := httptest.NewRequest(http.MethodPost, "/webhooks/telegram/example-support-bot", nil)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -129,7 +148,7 @@ func TestKafkaHTTPDoesNotExposeLegacyWebhookIngress(t *testing.T) {
 }
 
 func TestKafkaHTTPProtectedRoutesRequireSession(t *testing.T) {
-	handler, _ := buildTestKafkaHandler(t)
+	handler, _, _ := buildTestKafkaHandler(t)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/apps", nil)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -139,7 +158,7 @@ func TestKafkaHTTPProtectedRoutesRequireSession(t *testing.T) {
 }
 
 func TestKafkaHTTPAdminRouteIsRemoved(t *testing.T) {
-	handler, _ := buildTestKafkaHandler(t)
+	handler, _, _ := buildTestKafkaHandler(t)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/admin/", nil))
 	if recorder.Code != http.StatusNotFound {
@@ -148,8 +167,8 @@ func TestKafkaHTTPAdminRouteIsRemoved(t *testing.T) {
 }
 
 func TestKafkaHTTPWriteRequiresCSRF(t *testing.T) {
-	handler, sessions := buildTestKafkaHandler(t)
-	sessionID, err := sessions.Create(context.Background(), identity.SessionUser{PlatformUserID: "system-admin", IsSystemAdmin: true}, time.Hour)
+	handler, sessions, platformUserID := buildTestKafkaHandler(t)
+	sessionID, err := sessions.Create(context.Background(), identity.SessionUser{PlatformUserID: platformUserID, IsSystemAdmin: true}, time.Hour)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -164,9 +183,9 @@ func TestKafkaHTTPWriteRequiresCSRF(t *testing.T) {
 }
 
 func TestKafkaHTTPAuthedConsoleReachable(t *testing.T) {
-	handler, sessions := buildTestKafkaHandler(t)
+	handler, sessions, platformUserID := buildTestKafkaHandler(t)
 	sessionID, err := sessions.Create(context.Background(), identity.SessionUser{
-		PlatformUserID: "system-admin",
+		PlatformUserID: platformUserID,
 		IsSystemAdmin:  true,
 		Tenants: []identity.TenantRole{{
 			TenantID: "example", Role: identity.RoleAdmin, Status: "active",
@@ -191,7 +210,7 @@ func TestKafkaHTTPAuthedConsoleReachable(t *testing.T) {
 }
 
 func TestKafkaHTTPPublicRoutesStayOpen(t *testing.T) {
-	handler, _ := buildTestKafkaHandler(t)
+	handler, _, _ := buildTestKafkaHandler(t)
 	for path, want := range map[string]int{
 		"/healthz":                               http.StatusNoContent,
 		"/readyz":                                http.StatusNoContent,

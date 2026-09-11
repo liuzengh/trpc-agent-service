@@ -2,10 +2,12 @@ package messaging
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/safego"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 )
 
@@ -71,6 +73,49 @@ func (s *blockingOutboxSender) Send(ctx context.Context, _ channels.ReplyTarget,
 		return channels.SendReceipt{}, ctx.Err()
 	case <-s.release:
 		return channels.SendReceipt{ExternalMessageID: "reply-slow"}, nil
+	}
+}
+
+type panickingRenewOutboxStore struct{ *storage.MemoryStateStore }
+
+func (s *panickingRenewOutboxStore) RenewOutboxDelivery(context.Context, string, string, string, time.Duration) error {
+	panic("renew outbox lease panic")
+}
+
+func TestChannelOutboxDispatcherConvertsLeaseRenewPanicToError(t *testing.T) {
+	base := storage.NewMemoryStateStore()
+	_, err := base.RecordExecution(context.Background(), storage.ExecutionRecord{
+		TenantID: "tenant-a", AppCode: "support", SessionKey: "tenant-a/support/session/chat-1",
+		MessageID: "message-panic", Channel: "telegram", BindingID: "telegram-bot-b", TraceID: "trace-panic", Action: "agent.reply",
+		Result: "queued", OutboxType: ChannelReplyEventType(channels.Telegram),
+		OutboxPayload: []byte(`{"channel":"telegram","binding_id":"telegram-bot-b","conversation_id":"chat-1","text":"reply"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &panickingRenewOutboxStore{MemoryStateStore: base}
+	sender := &blockingOutboxSender{started: make(chan struct{}), release: make(chan struct{})}
+	dispatcher, err := NewChannelOutboxDispatcher(store, map[channels.BindingKey]channels.Sender{
+		{Channel: channels.Telegram, BindingID: "telegram-bot-b"}: sender,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.lease = 30 * time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		_, dispatchErr := dispatcher.DispatchTenant(context.Background(), "tenant-a", 1)
+		done <- dispatchErr
+	}()
+	<-sender.started
+	select {
+	case dispatchErr := <-done:
+		var panicErr *safego.PanicError
+		if !errors.As(dispatchErr, &panicErr) || panicErr.Component != "channel outbox lease renewer" {
+			t.Fatalf("DispatchTenant() error = %#v", dispatchErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DispatchTenant() did not stop after lease renew panic")
 	}
 }
 

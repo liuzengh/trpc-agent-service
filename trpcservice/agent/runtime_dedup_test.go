@@ -70,7 +70,7 @@ func TestRuntimeExecutionDedupBackstop(t *testing.T) {
 
 	// A live claim owned by another node must report in-progress.
 	otherRuntime := newRuntimeWithBackstops(t, repository, dedup, stateStore)
-	dedupClaim, err := dedup.Begin(context.Background(), "tenant-a", "telegram", "telegram-bot-a", "update-43", "other-node", time.Minute)
+	dedupClaim, err := dedup.Begin(context.Background(), "tenant-a", "support", "telegram", "telegram-bot-a", "update-43", "other-node", time.Minute)
 	if err != nil || dedupClaim != storage.ExecutionFresh {
 		t.Fatalf("Begin() claim = %v, error = %v, want fresh", dedupClaim, err)
 	}

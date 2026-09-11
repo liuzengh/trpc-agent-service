@@ -42,7 +42,7 @@ const apps = [
     },
   ),
   application('acme', 'sales-assistant', 'active', [{ type: 'wecom', binding_id: 'sales', credential_ref: 'env:WECOM_SALES' }]),
-  application('acme', 'internal-help', 'suspended'),
+  application('acme', 'internal-help', 'disabled'),
   application('other', 'other-support', 'active'),
 ]
 
@@ -53,7 +53,10 @@ await page.route('**/api/**', async (route) => {
   const responses = {
     '/api/v1/auth/me': {
       platform_user_id: 'admin', role: 'admin', is_system_admin: true,
-      tenants: [{ tenant_id: 'acme', display_name: 'Acme', role: 'admin' }],
+      tenants: [
+        { tenant_id: 'acme', display_name: 'Acme', role: 'admin' },
+        { tenant_id: 'other', display_name: 'Other', role: 'admin' },
+      ],
     },
     '/api/v1/tenants': { tenants: [{ tenant_id: 'acme', display_name: 'Acme', role: 'admin' }, { tenant_id: 'other', display_name: 'Other', role: 'admin' }] },
     '/api/v1/apps': { applications: apps },
@@ -76,6 +79,12 @@ await page.route('**/api/**', async (route) => {
           ],
         },
         { id: 'backup-provider', type: 'openai', models: [{ name: 'backup-chat' }] },
+      ],
+      backend_profiles: [
+        { profile_id: 'platform-postgres', display_name: '平台 PostgreSQL', driver: 'postgres', domains: ['session', 'memory', 'artifact'], available: true, capabilities: { multi_node: true, memory_console_browsing: true } },
+        { profile_id: 'platform-pgvector', display_name: '平台 pgvector', driver: 'pgvector', domains: ['knowledge'], available: true, capabilities: { multi_node: true, memory_console_browsing: false } },
+        { profile_id: 'artifact-s3', display_name: 'S3 兼容对象存储', driver: 's3', domains: ['artifact'], available: true, capabilities: { multi_node: true, memory_console_browsing: false } },
+        { profile_id: 'artifact-cos', display_name: '腾讯云 COS', driver: 'cos', domains: ['artifact'], available: true, capabilities: { multi_node: true, memory_console_browsing: false } },
       ],
       channel_credential_refs: ['env:TELEGRAM_SUPPORT', 'env:WECOM_SUPPORT', 'env:WECOM_SALES'],
       tools: [
@@ -136,25 +145,34 @@ try {
     const content = document.querySelector('.content').getBoundingClientRect()
     const table = document.querySelector('.application-table').getBoundingClientRect()
     const actionCell = document.querySelector('.application-table tbody tr td:last-child').getBoundingClientRect()
+    const actions = document.querySelector('.application-table tbody tr .row-actions')
+    const buttons = [...actions.querySelectorAll('button')]
+    const buttonRects = buttons.map((button) => button.getBoundingClientRect())
     return {
       contentWidth: content.width,
       tableRightGap: Math.abs(table.right - actionCell.right),
       actionCellWidth: actionCell.width,
+      actionCount: buttons.length,
+      actionsFit: actions.scrollWidth <= actions.clientWidth + 1,
+      sameLine: buttonRects.every((rect) => Math.abs(rect.top - buttonRects[0].top) <= 1),
     }
   })
   assert.ok(tableGeometry.contentWidth >= 1200, 'robot workspace should use available desktop width')
   assert.ok(tableGeometry.tableRightGap <= 2, 'robot actions should align with the right edge of the table')
-  assert.ok(tableGeometry.actionCellWidth <= 320, 'robot action column should not reserve excessive empty space')
+  assert.equal(tableGeometry.actionCount, 4, 'robot rows should keep chat, configuration, release, and status as direct actions')
+  assert.equal(tableGeometry.actionsFit, true, 'four robot actions must fit without horizontal clipping')
+  assert.equal(tableGeometry.sameLine, true, 'four robot actions must stay on one line')
+  assert.ok(tableGeometry.actionCellWidth <= tableGeometry.contentWidth * 0.35, 'robot actions should not consume more than 35% of the desktop workspace')
   await page.screenshot({ path: new URL('applications-desktop.png', artifacts).pathname, fullPage: true })
   await page.getByRole('searchbox', { name: '搜索机器人' }).fill('sales')
   assert.equal(await page.locator('.application-table tbody tr').count(), 1)
   await page.getByRole('searchbox').fill('no-match')
   assert.match(await page.locator('.application-table').innerText(), /没有符合条件/)
   await page.getByRole('searchbox').fill('')
-  await page.locator('.application-filters').getByRole('button', { name: '已停用 1' }).click()
+  await page.locator('.application-filters').getByRole('button', { name: /^已停用\s*1$/ }).click()
   assert.equal(await page.locator('.application-table tbody tr').count(), 1)
   assert.equal(await page.locator('.application-table').getByRole('button', { name: '对话', exact: true }).isDisabled(), true)
-  await page.locator('.application-filters').getByRole('button', { name: '全部 3' }).click()
+  await page.locator('.application-filters').getByRole('button', { name: /^全部\s*3$/ }).click()
   await page.getByRole('button', { name: 'support', exact: true }).click()
   const supportDialog = page.getByRole('dialog', { name: /编辑机器人/ })
   await supportDialog.waitFor()
@@ -174,16 +192,16 @@ try {
   assert.match(await supportDialog.innerText(), /基本信息/)
   assert.match(await supportDialog.innerText(), /高级模型设置/)
   assert.match(await supportDialog.innerText(), /备用模型/)
-  assert.match(await supportDialog.innerText(), /文件存储/)
+  assert.match(await supportDialog.innerText(), /数据后端/)
   assert.match(await supportDialog.innerText(), /平台 PostgreSQL/)
   assert.match(await supportDialog.innerText(), /S3 兼容对象存储/)
   assert.match(await supportDialog.innerText(), /腾讯云 COS/)
-  assert.match(await supportDialog.innerText(), /运行限制与审计/)
+  assert.match(await supportDialog.innerText(), /运行配额/)
   assert.match(await supportDialog.innerText(), /工具权限与审批/)
   assert.match(await supportDialog.innerText(), /外部渠道/)
-  assert.equal(await supportDialog.getByRole('checkbox', { name: '允许调用 query_order' }).isChecked(), true)
-  assert.equal(await supportDialog.getByRole('checkbox', { name: '允许调用 refund_order' }).isChecked(), true)
-  assert.equal(await supportDialog.getByRole('checkbox', { name: '允许调用 send_coupon' }).isChecked(), false)
+  assert.equal(await supportDialog.getByRole('checkbox', { name: '启用 query_order' }).isChecked(), true)
+  assert.equal(await supportDialog.getByRole('checkbox', { name: '启用 refund_order' }).isChecked(), true)
+  assert.equal(await supportDialog.getByRole('checkbox', { name: '启用 send_coupon' }).isChecked(), false)
   assert.equal(await supportDialog.getByRole('checkbox', { name: 'refund_order 执行前审批' }).isChecked(), true)
   assert.equal(await supportDialog.getByRole('checkbox', { name: 'query_order 执行前审批' }).isChecked(), false)
   assert.equal(await supportDialog.locator('.bot-tool-list input[type="text"]').count(), 0, 'tool policy must not use free-form text inputs')
@@ -252,13 +270,13 @@ try {
   assert.equal(await supportDialog.getByRole('combobox', { name: '备用模型 1' }).count(), 1, 'each configured fallback remains a dropdown')
   assert.match(await supportDialog.getByRole('combobox', { name: '备用模型 1' }).innerText(), /backup-chat/)
 
-  const storageSelect = supportDialog.locator('label').filter({ hasText: '存储服务' }).locator('.select-control')
+  const storageSelect = supportDialog.locator('.bot-backend-field').filter({ hasText: '文件' }).locator('.select-control')
   await storageSelect.click()
   await page.locator('.select-content').waitFor()
-  assert.equal(await page.getByRole('option', { name: '平台 PostgreSQL', exact: true }).count(), 1)
-  assert.equal(await page.getByRole('option', { name: 'S3 兼容对象存储', exact: true }).count(), 1)
-  assert.equal(await page.getByRole('option', { name: '腾讯云 COS', exact: true }).count(), 1)
-  await page.getByRole('option', { name: '平台 PostgreSQL', exact: true }).click()
+  assert.equal(await page.getByRole('option', { name: /^平台 PostgreSQL/ }).count(), 1)
+  assert.equal(await page.getByRole('option', { name: /^S3 兼容对象存储/ }).count(), 1)
+  assert.equal(await page.getByRole('option', { name: /^腾讯云 COS/ }).count(), 1)
+  await page.getByRole('option', { name: /^平台 PostgreSQL/ }).click()
 
   const channelSelect = supportDialog.locator('.channel-select.channel-telegram').first()
   await channelSelect.click()
@@ -266,7 +284,7 @@ try {
   assert.ok(await page.locator('.select-item-leading :is(svg, img)').count() >= 3, 'channel dropdown should show native brand marks in its menu')
   await page.getByRole('option', { name: 'Telegram', exact: true }).click()
   assert.ok(await supportDialog.locator('.channels-body input').evaluateAll((inputs) => inputs.some((i) => i.value.includes('support-cn'))))
-  await page.keyboard.press('Escape')
+  await supportDialog.getByRole('button', { name: '取消', exact: true }).click()
   await supportDialog.waitFor({ state: 'detached' })
   await page.getByRole('navigation', { name: '主导航' }).getByText('对话', { exact: true }).click()
   await page.getByRole('combobox', { name: '当前机器人' }).click()
@@ -278,7 +296,7 @@ try {
   await otherDialog.waitFor()
   assert.match(await otherDialog.innerText(), /other-support/)
   assert.doesNotMatch(await otherDialog.innerText(), /support-cn/)
-  await page.keyboard.press('Escape')
+  await otherDialog.getByRole('button', { name: '取消', exact: true }).click()
   await otherDialog.waitFor({ state: 'detached' })
   await page.getByRole('navigation', { name: '主导航' }).getByText('对话', { exact: true }).click()
   await page.getByRole('combobox', { name: '当前机器人' }).click()
@@ -303,14 +321,16 @@ try {
   assert.equal(await dialog.locator('.bot-form-section').count(), 6, 'create and edit should share the same six-section configuration layout')
   assert.match(await dialog.innerText(), /基本信息/)
   assert.match(await dialog.innerText(), /高级模型设置/)
-  assert.match(await dialog.innerText(), /运行限制与审计/)
-  assert.equal(await dialog.getByRole('checkbox', { name: '允许调用 query_order' }).isChecked(), false, 'create dialog should use the same tool catalog with no default grants')
+  assert.match(await dialog.innerText(), /运行配额/)
+  assert.equal(await dialog.getByRole('checkbox', { name: '启用 query_order' }).isChecked(), false, 'create dialog should use the same tool catalog with no default grants')
   assert.match(await dialog.innerText(), /外部渠道/)
+  assert.equal(await dialog.getByText('所属租户', { exact: true }).count(), 0, 'create dialog must inherit the current tenant instead of exposing a tenant selector')
+  assert.equal(await dialog.getByText('使用新租户', { exact: true }).count(), 0, 'tenant provisioning must stay outside robot creation')
   assert.equal(await dialog.getByText('状态', { exact: true }).count(), 0, 'create dialog must not ask for runtime status')
   assert.equal(await dialog.getByText(/app_code/i).count(), 0, 'create dialog must not expose app_code terminology')
   assert.equal(await dialog.getByText(/Artifact|工具白名单/i).count(), 0, 'create dialog must not expose backend jargon')
   assert.equal(await dialog.getByText('可用工具', { exact: true }).count(), 0)
-  assert.equal(await dialog.getByText('文件存储', { exact: true }).count(), 1)
+  assert.equal(await dialog.getByText('数据后端', { exact: true }).count(), 1)
   assert.equal(await dialog.evaluate((element) => element.contains(document.activeElement)), true, 'dialog must own keyboard focus')
   await page.keyboard.press('Escape')
   assert.equal(await dialog.count(), 0, 'Escape must close the dialog')

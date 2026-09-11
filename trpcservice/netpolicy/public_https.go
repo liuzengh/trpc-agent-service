@@ -54,6 +54,13 @@ func NewPublicHTTPSClient(timeout time.Duration) *http.Client {
 }
 
 func safeDialContext(lookup func(context.Context, string) ([]net.IPAddr, error)) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{}
+	return safeDialContextWithDialer(lookup, dialer.DialContext)
+}
+
+type dialContextFunc func(context.Context, string, string) (net.Conn, error)
+
+func safeDialContextWithDialer(lookup func(context.Context, string) ([]net.IPAddr, error), dial dialContextFunc) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
@@ -66,8 +73,18 @@ func safeDialContext(lookup func(context.Context, string) ([]net.IPAddr, error))
 		if err := ValidatePublicAddresses(host, addresses); err != nil {
 			return nil, err
 		}
-		dialer := &net.Dialer{}
-		return dialer.DialContext(ctx, network, net.JoinHostPort(addresses[0].IP.String(), port))
+		var dialErr error
+		for _, resolved := range addresses {
+			connection, err := dial(ctx, network, net.JoinHostPort(resolved.IP.String(), port))
+			if err == nil {
+				return connection, nil
+			}
+			dialErr = errors.Join(dialErr, err)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
+		return nil, fmt.Errorf("dial public host %q: %w", host, dialErr)
 	}
 }
 

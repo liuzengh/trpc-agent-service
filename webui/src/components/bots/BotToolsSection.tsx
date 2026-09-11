@@ -2,11 +2,13 @@ import { useState, type ReactNode } from 'react'
 import { useFieldArray, useFormContext, useWatch } from 'react-hook-form'
 
 import type { BotDraft } from '../../botDraft'
+import { isTenantConfigurableTool } from '../../toolPolicy'
 import type { ToolInfo } from '../../types'
 import { ActivityIcon, ShieldIcon } from '../Icons'
 import { BrowserCodeIcon, PlugIcon, PlusIcon } from '../PageIcons'
 import { PanelHeader } from '../PanelHeader'
 import { SelectControl } from '../SelectControl'
+import { toolDisplayDescription, toolDisplayName } from '../toolPresentation'
 
 export function BotToolsSection({
   toolCatalog,
@@ -46,22 +48,23 @@ function BuiltInTools({ toolCatalog }: { toolCatalog: ToolInfo[] }) {
   const { control, setValue } = useFormContext<BotDraft>()
   const allowed = useWatch({ control, name: 'tools_allowed' }) ?? []
   const confirmations = useWatch({ control, name: 'tools_require_confirmation' }) ?? []
+  const configurableTools = toolCatalog.filter((tool) => isTenantConfigurableTool(tool.name))
 
   return (
     <div className="bot-tool-policy">
       <div className="bot-tool-policy-head">
         <span className="bot-tool-policy-icon" aria-hidden="true"><ShieldIcon size={17} /></span>
         <div><strong>工具权限与审批</strong><p>从平台已注册工具中选择；敏感工具可要求执行前审批。</p></div>
-        {toolCatalog.length > 0 && <span className="bot-tool-policy-count">已允许 {allowed.length} / {toolCatalog.length}</span>}
+        {configurableTools.length > 0 && <span className="bot-tool-policy-count">已允许 {allowed.filter(isTenantConfigurableTool).length} / {configurableTools.length}</span>}
       </div>
-      {toolCatalog.length === 0 ? (
+      {configurableTools.length === 0 ? (
         <div className="bot-tool-policy-empty">当前平台未开放可配置工具。知识检索、记忆和当前时间等平台基础能力由系统统一管理，无需手动配置。</div>
       ) : (
         <div className="bot-tool-list">
-          {toolCatalog.map((tool) => {
+          {configurableTools.map((tool) => {
             const isAllowed = allowed.includes(tool.name)
             const requiresConfirmation = confirmations.includes(tool.name)
-            const displayName = toolDisplayName(tool.name)
+            const displayName = toolDisplayName(tool)
             const description = toolDisplayDescription(tool)
             return (
               <div className="bot-tool-row" key={tool.name}>
@@ -107,16 +110,6 @@ function BuiltInTools({ toolCatalog }: { toolCatalog: ToolInfo[] }) {
       )}
     </div>
   )
-}
-
-function toolDisplayName(name: string) {
-  if (name === 'duckduckgo_search') return '网络搜索'
-  return name
-}
-
-function toolDisplayDescription(tool: ToolInfo) {
-  if (tool.name === 'duckduckgo_search') return '搜索公开网页并返回结果摘要。'
-  return tool.description || '平台工具'
 }
 
 function HTTPToolsEditor() {

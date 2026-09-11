@@ -123,8 +123,8 @@ export function MembersPage() {
           </div>}
         />
 
-        <div className="members-table-wrap">
-          <table className="members-table">
+        <div className="table-scroll members-table-wrap">
+          <table className="ui-table members-table">
             <thead><tr><th>成员</th><th>登录方式</th><th>租户角色</th><th>状态</th><th>会话正文审计</th><th>最近登录</th></tr></thead>
             <tbody>
               {members.length === 0 ? (

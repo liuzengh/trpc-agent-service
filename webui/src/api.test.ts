@@ -3,13 +3,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createBackendProfile,
   createApplication,
+  createTenant,
   getArtifact,
   getApps,
   getClaims,
   getSystem,
   getTenantCatalog,
+  getTenantToolPolicy,
   getUsers,
   postChat,
+  replaceTenantToolPolicy,
   setUnauthorizedHandler,
   type ApplicationPayload,
 } from './api'
@@ -40,6 +43,29 @@ afterEach(() => {
 })
 
 describe('console API client', () => {
+  it('updates tenant status through the canonical tenant resource endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { updateTenantStatus } = await import('./api')
+    await updateTenantStatus('tenant/support', 'suspended')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/tenants/tenant%2Fsupport',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'suspended' }),
+      }),
+    )
+  })
+
+  it('accepts successful empty response bodies from void APIs', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(createTenant('support-team', '客服团队', 'user-admin')).resolves.toBeUndefined()
+  })
+
   it('creates backend profiles without a client-controlled status', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
       profile_id: 'session-redis-a', display_name: '会话 Redis A', driver: 'redis', status: 'active',
@@ -47,15 +73,39 @@ describe('console API client', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await createBackendProfile({
-      profile_id: 'session-redis-a', display_name: '会话 Redis A', driver: 'redis', connection_ref: 'env:SESSION_REDIS_URL',
+      profile_id: 'session-redis-a', display_name: '会话 Redis A', driver: 'redis', domains: ['session'], connection_ref: 'env:SESSION_REDIS_URL',
     })
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/v1/backend-profiles')
     expect(init.method).toBe('POST')
     expect(JSON.parse(String(init.body))).toEqual({
-      profile_id: 'session-redis-a', display_name: '会话 Redis A', driver: 'redis', connection_ref: 'env:SESSION_REDIS_URL',
+      profile_id: 'session-redis-a', display_name: '会话 Redis A', driver: 'redis', domains: ['session'], connection_ref: 'env:SESSION_REDIS_URL',
     })
+  })
+
+  it('reads and replaces tenant platform tool grants', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        tenant_id: 'tenant/support', tools: null, catalog: [{ name: 'query_order', description: '查询订单' }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        tenant_id: 'tenant/support', tools: [{ name: 'query_order' }], catalog: [{ name: 'query_order', description: '查询订单' }],
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(getTenantToolPolicy('tenant/support')).resolves.toEqual({
+      tenant_id: 'tenant/support', tools: [], catalog: [{ name: 'query_order', description: '查询订单' }],
+    })
+    await expect(replaceTenantToolPolicy('tenant/support', [{ name: 'query_order' }])).resolves.toEqual({
+      tenant_id: 'tenant/support', tools: [{ name: 'query_order' }], catalog: [{ name: 'query_order', description: '查询订单' }],
+    })
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/tenant-tool-policy?tenant=tenant%2Fsupport')
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/tenant-tool-policy?tenant=tenant%2Fsupport')
+    expect(fetchMock.mock.calls[1][1]).toEqual(expect.objectContaining({
+      method: 'PUT', body: JSON.stringify({ tenant_id: 'tenant/support', tools: [{ name: 'query_order' }] }),
+    }))
   })
 
   it('normalizes nullable member arrays from historical user rows', async () => {
@@ -269,6 +319,28 @@ describe('console API client', () => {
     })
   })
 
+  it('returns a card-only assistant reply from SSE', async () => {
+    vi.stubGlobal('window', globalThis)
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ stream_url: '/api/v1/chat/events/event-card', event_id: 'event-card', session_key: 'session-card' }, 202))
+      .mockResolvedValueOnce(sseResponse([
+        'id: 1\ndata: {"type":"done","reply":"","card":{"title":"订单信息","body":"已找到订单","actions":[{"label":"查看","url":"https://support.example.test/orders/42"}]}}\n\n',
+      ]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(postChat({
+      tenant_id: 'tenant-a', app_code: 'support', conversation_id: 'chat-1', text: 'show card', request_id: 'request-card',
+    }, () => {})).resolves.toEqual({
+      reply: '',
+      card: {
+        title: '订单信息', body: '已找到订单', actions: [{ label: '查看', url: 'https://support.example.test/orders/42' }],
+      },
+      eventId: 'event-card',
+      sessionKey: 'session-card',
+    })
+  })
+
   it('sends chat files as multipart without overriding the browser boundary', async () => {
     vi.stubGlobal('window', globalThis)
     const fetchMock = vi
@@ -341,7 +413,7 @@ describe('console API client', () => {
   it('lists sessions and reads the durable transcript', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({
-        sessions: [{ SessionKey: 'acme/support/session/session-1', Preview: '订单到哪了' }],
+        sessions: [{ SessionKey: 'acme/support/session/session-1', preview: '订单到哪了' }],
       }))
       .mockResolvedValueOnce(jsonResponse({
         messages: [{ id: 'u1', role: 'user', content: '订单到哪了', time: '2026-09-09T09:00:00Z' }],
@@ -350,7 +422,7 @@ describe('console API client', () => {
 
     const { listSessions, getSessionMessages } = await import('./api')
     await expect(listSessions('acme', { app: 'support', channel: 'web', status: 'active' }, 'mine')).resolves.toEqual([
-      { SessionKey: 'acme/support/session/session-1', Preview: '订单到哪了' },
+      { SessionKey: 'acme/support/session/session-1', preview: '订单到哪了' },
     ])
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/sessions/mine?tenant=acme&app=support&channel=web&status=active',
@@ -411,7 +483,7 @@ describe('console API client', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const { getMemories } = await import('./api')
-    const memories = await getMemories({
+    const result = await getMemories({
       tenant: 'tenant-a',
       app: 'support',
       query: 'Shanghai',
@@ -420,8 +492,9 @@ describe('console API client', () => {
       timeBefore: '2026-09-02',
       order: 'event_time',
     })
-    expect(memories).toHaveLength(1)
-    expect(memories[0].id).toBe('mem-1')
+    expect(result.managed_externally).toBe(false)
+    expect(result.memories).toHaveLength(1)
+    expect(result.memories[0].id).toBe('mem-1')
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/memory?tenant=tenant-a&app=support&query=Shanghai&kind=episode&time_after=2026-09-01&time_before=2026-09-02&order=event_time',
       expect.anything(),

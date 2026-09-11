@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 )
 
 type sseWriter struct {
@@ -37,7 +39,15 @@ func (s *sseWriter) done(reply string) {
 }
 
 func (s *sseWriter) doneWithID(eventID, reply string) {
-	s.emit(eventID, map[string]any{"type": "done", "reply": reply})
+	s.doneMessageWithID(eventID, reply, nil)
+}
+
+func (s *sseWriter) doneMessageWithID(eventID, reply string, card *channels.InteractiveCard) {
+	payload := map[string]any{"type": "done", "reply": reply}
+	if card != nil {
+		payload["card"] = card
+	}
+	s.emit(eventID, payload)
 }
 
 func (s *sseWriter) error(message string) {

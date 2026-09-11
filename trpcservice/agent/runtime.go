@@ -14,6 +14,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/messaging"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/modelusage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
@@ -320,13 +321,13 @@ func NewRuntime(configurations tenant.Repository, runners runnerProvider, idempo
 // performs an idempotent Agent invocation, and commits the reply to durable state.
 func (r *Runtime) Handle(ctx context.Context, externalBindingID string, inbound channels.InboundMessage) (result Result, returnErr error) {
 	if err := inbound.Validate(); err != nil {
-		return Result{}, fmt.Errorf("validate inbound message: %w", err)
+		return Result{}, markPermanentExecution(fmt.Errorf("validate inbound message: %w", err))
 	}
 	if inbound.Channel == channels.Web && strings.TrimSpace(inbound.WebOwnerID) == "" {
-		return Result{}, fmt.Errorf("validate inbound message: web owner ID is required")
+		return Result{}, markPermanentExecution(fmt.Errorf("validate inbound message: web owner ID is required"))
 	}
 	if strings.TrimSpace(externalBindingID) == "" {
-		return Result{}, fmt.Errorf("external binding ID is required")
+		return Result{}, markPermanentExecution(fmt.Errorf("external binding ID is required"))
 	}
 	snapshot, err := r.resolveSnapshot(ctx, inbound.Channel, externalBindingID)
 	if err != nil {
@@ -352,15 +353,22 @@ func (r *Runtime) Handle(ctx context.Context, externalBindingID string, inbound 
 	defer leases.Close()
 	if r.rateLimiter != nil {
 		if err := r.rateLimiter.Take(ctx, snapshot.Config.TenantID, snapshot.Config.AppCode, snapshot.Config.Governance.RequestsPerMinute); err != nil {
+			if errors.Is(err, governance.ErrTenantRateLimited) {
+				r.recordGovernanceRejection(ctx, snapshot, "request_rate_limit")
+				return r.completeGovernanceRejection(
+					ctx, snapshot, externalBindingID, sessionKey, inbound, leases,
+					"request_rate_limit", "请求过于频繁，请稍后再试。",
+				)
+			}
 			return Result{}, fmt.Errorf("enforce tenant request rate limit: %w", err)
 		}
 	}
 	if requiredInputs := requiredModelInputKinds(inbound.Files, r.documentInputs); len(requiredInputs) > 0 {
 		if r.modelInputs == nil {
-			return Result{}, errors.New("model input validator is required for non-text input")
+			return Result{}, markPermanentExecution(errors.New("model input validator is required for non-text input"))
 		}
 		if err := r.modelInputs.ValidateInputs(snapshot.Config.Model, requiredInputs); err != nil {
-			return Result{}, fmt.Errorf("validate model input capabilities: %w", err)
+			return Result{}, markPermanentExecution(fmt.Errorf("validate model input capabilities: %w", err))
 		}
 	}
 	tenantRunner, releaseRunner, err := r.runners.Acquire(ctx, snapshot.Config)
@@ -379,51 +387,54 @@ func (r *Runtime) Handle(ctx context.Context, externalBindingID string, inbound 
 			return Result{}, fmt.Errorf("build governance invocation: %w", err)
 		}
 		if err := invocation.Validate(); err != nil {
-			return Result{}, fmt.Errorf("validate governance invocation: %w", err)
+			return Result{}, markPermanentExecution(fmt.Errorf("validate governance invocation: %w", err))
 		}
 		if invocation.Units != nil {
 			if err := invocation.Units.Consume(1); err != nil {
-				return Result{}, fmt.Errorf("reserve model budget: %w", err)
+				r.recordGovernanceRejection(ctx, snapshot, "unit_budget")
+				return Result{}, markPermanentExecution(fmt.Errorf("reserve model budget: %w", err))
 			}
 		}
 		runContext = governance.WithInvocation(runContext, invocation)
 	}
 	savedArtifacts := platformtool.NewSavedArtifactRecorder()
 	runContext = platformtool.WithSavedArtifactRecorder(runContext, savedArtifacts)
+	presentedCard := platformtool.NewPresentedCardRecorder()
+	runContext = platformtool.WithPresentedCardRecorder(runContext, presentedCard)
+	actualModelUsage := modelusage.NewRecorder()
+	runContext = modelusage.WithRecorder(runContext, actualModelUsage)
 	usagePolicy := snapshot.Config.Governance
 	governUsage := usagePolicy.MaxConcurrentRuns > 0 || usagePolicy.TokenBudgetPerHour > 0
-	var (
-		usageReservation governance.UsageReservation
-		usageHeartbeat   *usageReservationHeartbeat
-		usageSettled     bool
-	)
+	var usageLease *runtimeUsageLease
 	if governUsage {
 		if r.usageGovernor == nil {
-			return Result{}, errors.New("model usage governor is required by tenant policy")
+			return Result{}, markPermanentExecution(errors.New("model usage governor is required by tenant policy"))
 		}
-		usageReservation, err = r.usageGovernor.Reserve(runContext, governance.UsageReservationRequest{
+		runContext, usageLease, err = reserveRuntimeUsage(runContext, r.usageGovernor, governance.UsageReservationRequest{
 			TenantID: snapshot.Config.TenantID, AppCode: snapshot.Config.AppCode,
 			Channel: string(inbound.Channel), BindingID: externalBindingID, MessageID: inbound.MessageID, TraceID: traceID,
 			MaxConcurrentRuns: usagePolicy.MaxConcurrentRuns,
 			TokenBudget:       usagePolicy.TokenBudgetPerHour, ReservedTokens: usagePolicy.TokenReservation,
 			LeaseTTL: r.processingTTL,
-		})
+		}, r.processingTTL)
 		if err != nil {
+			if errors.Is(err, governance.ErrConcurrentRunLimit) {
+				r.recordGovernanceRejection(ctx, snapshot, "concurrent_run_limit")
+				return r.completeGovernanceRejection(
+					ctx, snapshot, externalBindingID, sessionKey, inbound, leases,
+					"concurrent_run_limit", "当前应用正在处理较多请求，请稍后再试。",
+				)
+			}
+			if errors.Is(err, governance.ErrTokenBudget) {
+				r.recordGovernanceRejection(ctx, snapshot, "token_budget")
+				return r.completeGovernanceRejection(
+					ctx, snapshot, externalBindingID, sessionKey, inbound, leases,
+					"token_budget", "当前应用本周期模型用量已达上限，请联系管理员或稍后再试。",
+				)
+			}
 			return Result{}, fmt.Errorf("reserve model usage: %w", err)
 		}
-		usageHeartbeat = startUsageReservationHeartbeat(runContext, r.usageGovernor, usageReservation, r.processingTTL)
-		runContext = usageHeartbeat.context
-		defer func() {
-			if usageHeartbeat != nil {
-				usageHeartbeat.Stop()
-			}
-			if usageSettled {
-				return
-			}
-			finalizeCtx, cancel := context.WithTimeout(context.Background(), finalizationTimeout)
-			defer cancel()
-			_ = r.usageGovernor.SettleUnknown(finalizeCtx, usageReservation)
-		}()
+		defer usageLease.Close()
 	}
 	events, err := tenantRunner.Run(
 		runContext,
@@ -435,18 +446,11 @@ func (r *Runtime) Handle(ctx context.Context, externalBindingID string, inbound 
 		agent.WithLatencyDiagnostics(true),
 	)
 	if err != nil {
-		if usageHeartbeat != nil {
-			usageHeartbeat.Stop()
-			usageHeartbeat = nil
-		}
-		if governUsage {
-			finalizeCtx, cancel := context.WithTimeout(context.Background(), finalizationTimeout)
-			settleErr := r.usageGovernor.SettleUnknown(finalizeCtx, usageReservation)
-			cancel()
+		if usageLease != nil {
+			settleErr := usageLease.SettleUnknown()
 			if settleErr != nil {
 				return Result{}, errors.Join(fmt.Errorf("run tenant agent: %w", err), fmt.Errorf("settle unknown model usage: %w", settleErr))
 			}
-			usageSettled = true
 		}
 		return Result{}, fmt.Errorf("run tenant agent: %w", err)
 	}
@@ -473,18 +477,11 @@ func (r *Runtime) Handle(ctx context.Context, externalBindingID string, inbound 
 		}
 	})
 	if outcome.err != nil {
-		if usageHeartbeat != nil {
-			usageHeartbeat.Stop()
-			usageHeartbeat = nil
-		}
-		if governUsage {
-			finalizeCtx, cancel := context.WithTimeout(context.Background(), finalizationTimeout)
-			settleErr := r.usageGovernor.SettleUnknown(finalizeCtx, usageReservation)
-			cancel()
+		if usageLease != nil {
+			settleErr := usageLease.SettleUnknown()
 			if settleErr != nil {
 				return Result{}, errors.Join(outcome.err, fmt.Errorf("settle unknown model usage: %w", settleErr))
 			}
-			usageSettled = true
 		}
 		if err := leases.Check(); err != nil {
 			return Result{}, err
@@ -507,51 +504,27 @@ func (r *Runtime) Handle(ctx context.Context, externalBindingID string, inbound 
 		}
 		return Result{}, outcome.err
 	}
-	reply, usage := outcome.reply, outcome.usage
-	costMicros := int64(0)
-	pricedUsage := pricedTokenUsage(usage)
-	if usage.known && r.costCalculator != nil {
-		costMicros = r.costCalculator.CostMicros(snapshot.Config.Model, pricedUsage)
-	}
-	if usageHeartbeat != nil {
-		usageHeartbeat.Stop()
-		if heartbeatErr := usageHeartbeat.Err(); heartbeatErr != nil {
-			finalizeCtx, cancel := context.WithTimeout(context.Background(), finalizationTimeout)
-			settleErr := r.usageGovernor.SettleUnknown(finalizeCtx, usageReservation)
-			cancel()
-			usageHeartbeat = nil
-			if settleErr == nil {
-				usageSettled = true
-			}
-			return Result{}, errors.Join(fmt.Errorf("model usage reservation lease lost: %w", heartbeatErr), settleErr)
-		}
-		usageHeartbeat = nil
-	}
-	if governUsage {
-		finalizeCtx, cancel := context.WithTimeout(context.Background(), finalizationTimeout)
-		if usage.known {
-			err = r.usageGovernor.SettleKnown(finalizeCtx, usageReservation, governance.SettledUsage{
-				PromptTokens: usage.promptTokens, CompletionTokens: usage.completionTokens,
-				TotalTokens: usage.totalTokens, CostMicros: costMicros,
-			})
-		} else {
-			err = r.usageGovernor.SettleUnknown(finalizeCtx, usageReservation)
-		}
-		cancel()
-		if err != nil {
+	reply := outcome.reply
+	modelUsage := r.priceModelUsage(snapshot.Config.Model, outcome.trace, actualModelUsage.Snapshot())
+	if usageLease != nil {
+		if err := usageLease.Settle(modelUsage.Known, governance.SettledUsage{
+			PromptTokens: modelUsage.PromptTokens, CompletionTokens: modelUsage.CompletionTokens,
+			TotalTokens: modelUsage.TotalTokens, CostMicros: modelUsage.CostMicros,
+		}); err != nil {
 			return Result{}, fmt.Errorf("settle model usage: %w", err)
 		}
-		usageSettled = true
 	}
-	if usage.known {
+	if modelUsage.Known {
 		if usageObserver, ok := r.observer.(metrics.ModelUsageObserver); ok {
-			usageObserver.RecordModelUsage(ctx, metrics.ModelUsageAttributes{
-				TenantID: snapshot.Config.TenantID, AppCode: snapshot.Config.AppCode,
-				ProviderID: snapshot.Config.Model.ProviderID, ModelName: snapshot.Config.Model.Name,
-				PromptTokens: usage.promptTokens, CachedPromptTokens: pricedUsage.CachedPromptTokens,
-				CompletionTokens: usage.completionTokens, TotalTokens: usage.totalTokens,
-				CostMicros: costMicros,
-			})
+			for _, segment := range modelUsage.Breakdown {
+				usageObserver.RecordModelUsage(ctx, metrics.ModelUsageAttributes{
+					TenantID: snapshot.Config.TenantID, AppCode: snapshot.Config.AppCode,
+					ProviderID: segment.ProviderID, ModelName: segment.ModelName,
+					PromptTokens: segment.PromptTokens, CachedPromptTokens: segment.CachedPromptTokens,
+					CompletionTokens: segment.CompletionTokens, TotalTokens: segment.TotalTokens,
+					CostMicros: segment.CostMicros,
+				})
+			}
 		}
 	}
 	if err := leases.Check(); err != nil {
@@ -568,7 +541,7 @@ func (r *Runtime) Handle(ctx context.Context, externalBindingID string, inbound 
 			UserID: inbound.SubjectID, SessionID: sessionKey,
 		})
 	}
-	if _, err := r.recordExecution(ctx, snapshot, externalBindingID, sessionKey, inbound, reply, outboundArtifacts, usage, outcome.trace, leases.FencingToken()); err != nil {
+	if _, err := r.recordExecution(ctx, snapshot, externalBindingID, sessionKey, inbound, reply, presentedCard.Snapshot(), outboundArtifacts, modelUsage, outcome.trace, leases.FencingToken()); err != nil {
 		return Result{}, err
 	}
 	if err := leases.Complete(); err != nil {
@@ -580,6 +553,48 @@ func (r *Runtime) Handle(ctx context.Context, externalBindingID string, inbound 
 		slog.Warn("clean completed inbound files", "tenant_id", snapshot.Config.TenantID, "app_code", snapshot.Config.AppCode, "error", err)
 	}
 	return Result{TenantID: snapshot.Config.TenantID, AppCode: snapshot.Config.AppCode, ConfigVersion: snapshot.Config.ConfigVersion, SessionKey: sessionKey}, nil
+}
+
+func (r *Runtime) recordGovernanceRejection(ctx context.Context, snapshot tenant.Snapshot, reason string) {
+	observer, ok := r.observer.(metrics.GovernanceObserver)
+	if !ok {
+		return
+	}
+	observer.RecordGovernanceRejection(ctx, metrics.GovernanceRejectionAttributes{
+		TenantID: snapshot.Config.TenantID,
+		AppCode:  snapshot.Config.AppCode,
+		Reason:   reason,
+	})
+}
+
+func (r *Runtime) completeGovernanceRejection(
+	ctx context.Context,
+	snapshot tenant.Snapshot,
+	bindingID string,
+	sessionKey string,
+	inbound channels.InboundMessage,
+	leases *runtimeExecutionLeases,
+	reason string,
+	reply string,
+) (Result, error) {
+	if err := leases.Check(); err != nil {
+		return Result{}, err
+	}
+	if _, err := r.recordGovernanceReply(ctx, snapshot, bindingID, sessionKey, inbound, reply, reason, leases.FencingToken()); err != nil {
+		return Result{}, err
+	}
+	if err := leases.Complete(); err != nil {
+		return Result{}, fmt.Errorf("complete message lease after governance rejection: %w", err)
+	}
+	finalizeCtx, cancel := context.WithTimeout(context.Background(), finalizationTimeout)
+	defer cancel()
+	if err := r.deleteInboundFiles(finalizeCtx, snapshot.Config, sessionKey, inbound); err != nil {
+		slog.Warn("clean rejected inbound files", "tenant_id", snapshot.Config.TenantID, "app_code", snapshot.Config.AppCode, "reason", reason, "error", err)
+	}
+	return Result{
+		TenantID: snapshot.Config.TenantID, AppCode: snapshot.Config.AppCode,
+		ConfigVersion: snapshot.Config.ConfigVersion, SessionKey: sessionKey,
+	}, nil
 }
 
 func (r *Runtime) resolveSnapshot(ctx context.Context, channel channels.Channel, externalBindingID string) (tenant.Snapshot, error) {

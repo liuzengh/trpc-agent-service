@@ -44,7 +44,12 @@ const restoredMessages = [
   { id: 'u1', role: 'user', content: '订单到哪了', time: '2026-09-09T09:00:00Z' },
   { id: 'a1', role: 'assistant', content: '正在查询订单', time: '2026-09-09T09:00:01Z' },
 ]
+const olderMessages = [
+  { id: 'u0', role: 'user', content: '这是更早的一条消息', time: '2026-09-09T08:59:00Z' },
+  { id: 'a0', role: 'assistant', content: '这是更早的一条回复', time: '2026-09-09T08:59:01Z' },
+]
 let streamReads = 0
+let transcriptReads = 0
 const postedChats = []
 const archivedSessions = []
 
@@ -73,8 +78,12 @@ await page.route('**/api/**', async (route) => {
   }
   if (path === '/api/v1/sessions/messages') {
     const sessionKey = url.searchParams.get('session_key')
-    const messages = sessionKey === restoredSession.SessionKey ? restoredMessages : []
-    return route.fulfill({ status: 200, json: { messages } })
+    transcriptReads += 1
+    if (sessionKey !== restoredSession.SessionKey) return route.fulfill({ status: 200, json: { messages: [], next_cursor: '' } })
+    if (url.searchParams.get('before') === 'older-cursor') {
+      return route.fulfill({ status: 200, json: { messages: olderMessages, next_cursor: '' } })
+    }
+    return route.fulfill({ status: 200, json: { messages: restoredMessages, next_cursor: 'older-cursor' } })
   }
   if (path === '/api/v1/sessions/archive' && request.method() === 'POST') {
     archivedSessions.push(request.postDataJSON())
@@ -140,6 +149,11 @@ try {
   await page.getByRole('combobox', { name: '当前机器人' }).waitFor()
   await page.locator('.msg.user .msg-text').getByText('订单到哪了', { exact: true }).waitFor()
   await page.locator('.msg.assistant .msg-text').getByText('正在查询订单', { exact: true }).waitFor()
+  const readsBeforeEarlier = transcriptReads
+  await page.getByRole('button', { name: '加载更早消息', exact: true }).click()
+  await page.getByText('这是更早的一条消息', { exact: true }).waitFor()
+  assert.equal(transcriptReads, readsBeforeEarlier + 1, 'load earlier must request exactly one older transcript page')
+  assert.equal(await page.getByRole('button', { name: '加载更早消息', exact: true }).count(), 0, 'load earlier must disappear at the oldest page')
   await page.locator('.session-switch-btn').click()
   assert.equal(await page.locator('[data-chat-thread]').count(), 1, 'refresh must restore the durable web conversation')
   assert.equal(await page.locator('.chat-thread-name').getByText('订单到哪了', { exact: true }).count(), 1)

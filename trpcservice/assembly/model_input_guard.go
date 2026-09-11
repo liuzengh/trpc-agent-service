@@ -8,32 +8,28 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// inputValidatingModel is the final provider-boundary check for multimodal
-// requests. Runtime validates newly uploaded attachments earlier for a better
-// user error, while this wrapper also catches non-text parts restored from
-// historical Session events before they reach any provider or failover model.
-type inputValidatingModel struct {
-	inner       model.Model
-	catalog     *config.ModelCatalog
-	modelConfig config.ModelConfig
+// newInputValidationCallbacks performs the final multimodal capability check at
+// the framework's model-callback seam. Runtime validates newly uploaded
+// attachments earlier for a better user error; this callback also catches
+// non-text parts restored from historical Session events immediately before a
+// provider or failover model is invoked.
+func newInputValidationCallbacks(catalog *config.ModelCatalog, modelConfig config.ModelConfig) *model.Callbacks {
+	callbacks := model.NewCallbacks()
+	callbacks.RegisterBeforeModel(func(_ context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
+		if catalog == nil {
+			return nil, fmt.Errorf("model input guard is not configured")
+		}
+		var request *model.Request
+		if args != nil {
+			request = args.Request
+		}
+		if err := catalog.ValidateInputs(modelConfig, requiredRequestInputs(request)); err != nil {
+			return nil, fmt.Errorf("reject unsupported model input before provider call: %w", err)
+		}
+		return nil, nil
+	})
+	return callbacks
 }
-
-func newInputValidatingModel(inner model.Model, catalog *config.ModelCatalog, modelConfig config.ModelConfig) model.Model {
-	return &inputValidatingModel{inner: inner, catalog: catalog, modelConfig: modelConfig}
-}
-
-func (m *inputValidatingModel) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
-	if m == nil || m.inner == nil || m.catalog == nil {
-		return nil, fmt.Errorf("model input guard is not configured")
-	}
-	required := requiredRequestInputs(request)
-	if err := m.catalog.ValidateInputs(m.modelConfig, required); err != nil {
-		return nil, fmt.Errorf("reject unsupported model input before provider call: %w", err)
-	}
-	return m.inner.GenerateContent(ctx, request)
-}
-
-func (m *inputValidatingModel) Info() model.Info { return m.inner.Info() }
 
 func requiredRequestInputs(request *model.Request) []config.ModelInputKind {
 	if request == nil {

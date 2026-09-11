@@ -6,8 +6,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 )
 
 func newSupportUser(t *testing.T, store *MemoryIdentityStore, subject string) PlatformUser {
@@ -223,6 +221,25 @@ func TestMemoryIdentityStoreTenantModelsRolesAndVisibility(t *testing.T) {
 	if err := store.ReplaceTenantModelGrants(ctx, "support", []TenantModelGrant{{ProviderID: "", ModelName: "bad"}}); err == nil {
 		t.Fatal("invalid model grant error = nil")
 	}
+	wantTools := []TenantToolGrant{{ToolName: "query_order"}, {ToolName: "refund_order"}}
+	if err := store.ReplaceTenantToolGrants(ctx, "support", wantTools); err != nil {
+		t.Fatal(err)
+	}
+	tools, err := store.ListTenantToolGrants(ctx, "support")
+	if err != nil || !reflect.DeepEqual(tools, wantTools) {
+		t.Fatalf("ListTenantToolGrants() = %+v, %v", tools, err)
+	}
+	tools[0].ToolName = "mutated"
+	againTools, _ := store.ListTenantToolGrants(ctx, "support")
+	if againTools[0].ToolName != "query_order" {
+		t.Fatal("tenant tool grants alias internal state")
+	}
+	if _, err := store.ListTenantToolGrants(ctx, "missing"); !errors.Is(err, ErrTenantNotFound) {
+		t.Fatalf("ListTenantToolGrants(missing) error = %v", err)
+	}
+	if err := store.ReplaceTenantToolGrants(ctx, "support", []TenantToolGrant{{ToolName: " "}}); err == nil {
+		t.Fatal("invalid tool grant error = nil")
+	}
 
 	if err := store.GrantMembership(ctx, "support", member.PlatformUserID, RoleMember); err != nil {
 		t.Fatal(err)
@@ -294,39 +311,5 @@ func TestMemoryIdentityStoreAccessValidation(t *testing.T) {
 	}
 	if _, err := store.ResolveSessionUser(ctx, "missing"); !errors.Is(err, ErrPlatformUserNotFound) {
 		t.Fatalf("ResolveSessionUser(missing) error = %v", err)
-	}
-}
-
-func TestMemoryIdentityStoreChannelIdentityUnlinkAndList(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	store := NewMemoryIdentityStore()
-	user := newSupportUser(t, store, "channel-owner")
-	first := ChannelIdentity{TenantID: "support", Channel: channels.Telegram, BindingID: "support-bot", ExternalUserID: "customer-1", PlatformUserID: user.PlatformUserID}
-	second := ChannelIdentity{TenantID: "support", Channel: channels.Feishu, BindingID: "support-feishu", ExternalUserID: "customer-2", PlatformUserID: user.PlatformUserID}
-	if err := store.LinkChannelIdentity(ctx, first); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.LinkChannelIdentity(ctx, second); err != nil {
-		t.Fatal(err)
-	}
-	listed, err := store.ListChannelIdentities(ctx, "support", user.PlatformUserID)
-	if err != nil || len(listed) != 2 || listed[0].Channel != channels.Feishu || listed[1].Channel != channels.Telegram {
-		t.Fatalf("ListChannelIdentities() = %+v, %v", listed, err)
-	}
-	if err := store.UnlinkChannelIdentity(ctx, first); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UnlinkChannelIdentity(ctx, first); !errors.Is(err, ErrChannelIdentityNotLinked) {
-		t.Fatalf("second unlink error = %v", err)
-	}
-	invalid := first
-	invalid.PlatformUserID = ""
-	if err := store.UnlinkChannelIdentity(ctx, invalid); err == nil {
-		t.Fatal("invalid unlink error = nil")
-	}
-	listed, _ = store.ListChannelIdentities(ctx, "support", user.PlatformUserID)
-	if len(listed) != 1 || listed[0].Channel != channels.Feishu {
-		t.Fatalf("channel identities after unlink = %+v", listed)
 	}
 }

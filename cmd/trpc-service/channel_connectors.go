@@ -24,20 +24,21 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/credential"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/safego"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	agentartifact "trpc.group/trpc-go/trpc-agent-go/artifact"
 )
 
 const (
-	channelConnectorLeaseKey   = "trpc-agent:channel-connectors:leader"
-	channelConnectorLeaseTTL   = 15 * time.Second
-	channelConnectorRenewEvery = 5 * time.Second
-	channelConnectorReconcile  = 5 * time.Second
-	approvalReconcile          = time.Second
-	channelStatusTTL           = 20 * time.Second
+	channelConnectorLeaseKey     = "trpc-agent:channel-connectors:leader"
+	channelConnectorLeaseTTL     = 15 * time.Second
+	channelConnectorRenewEvery   = 5 * time.Second
+	channelConnectorAcquireRetry = time.Second
+	channelConnectorReconcile    = 5 * time.Second
+	approvalReconcile            = time.Second
+	channelStatusTTL             = 20 * time.Second
 )
 
 var renewConnectorLeaseScript = redis.NewScript(`
@@ -53,6 +54,51 @@ if redis.call("GET", KEYS[1]) == ARGV[1] then
 end
 return 0
 `)
+
+var advanceTelegramOffsetScript = redis.NewScript(`
+local current = tonumber(redis.call("GET", KEYS[1]) or "0")
+local incoming = tonumber(ARGV[1])
+if incoming > current then
+  redis.call("SET", KEYS[1], ARGV[1])
+  return incoming
+end
+return current
+`)
+
+type telegramRedisOffsetStore struct {
+	client redis.UniversalClient
+	key    string
+}
+
+func (s telegramRedisOffsetStore) Load(ctx context.Context) (int64, error) {
+	if s.client == nil || strings.TrimSpace(s.key) == "" {
+		return 0, errors.New("telegram offset store is not configured")
+	}
+	offset, err := s.client.Get(ctx, s.key).Int64()
+	if errors.Is(err, redis.Nil) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read Telegram offset: %w", err)
+	}
+	if offset < 0 {
+		return 0, fmt.Errorf("read Telegram offset: invalid negative value %d", offset)
+	}
+	return offset, nil
+}
+
+func (s telegramRedisOffsetStore) Save(ctx context.Context, offset int64) error {
+	if s.client == nil || strings.TrimSpace(s.key) == "" {
+		return errors.New("telegram offset store is not configured")
+	}
+	if offset <= 0 {
+		return nil
+	}
+	if _, err := advanceTelegramOffsetScript.Run(ctx, s.client, []string{s.key}, offset).Int64(); err != nil {
+		return fmt.Errorf("persist Telegram offset: %w", err)
+	}
+	return nil
+}
 
 type connectorProcess struct {
 	fingerprint string
@@ -97,7 +143,7 @@ func newChannelConnectorManager(
 	feishuCache *feishu.RedisCache,
 	redisClient redis.UniversalClient,
 	state storage.StateStore,
-	identities identity.IdentityStore,
+	identities messaging.ChannelIdentityResolver,
 	approvals governance.ApprovalBroker,
 	progress *messaging.RedisIMProgressHub,
 	artifacts channelArtifactProvider,
@@ -127,9 +173,9 @@ func newChannelConnectorManager(
 	return manager, nil
 }
 
-// Run elects one Gateway as the owner of long-lived IM connections. This is a
+// Run elects one Channel node as the owner of long-lived IM connections. This is a
 // control-plane lease only: Kafka remains the sole execution scheduler. On
-// lease loss every connector is cancelled before another Gateway takes over.
+// lease loss every connector is cancelled before another Channel node takes over.
 func (m *channelConnectorManager) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		acquired, err := m.redis.SetNX(ctx, channelConnectorLeaseKey, m.owner, channelConnectorLeaseTTL).Result()
@@ -141,7 +187,7 @@ func (m *channelConnectorManager) Run(ctx context.Context) {
 			continue
 		}
 		if !acquired {
-			if !waitContext(ctx, channelConnectorRenewEvery) {
+			if !waitContext(ctx, channelConnectorAcquireRetry) {
 				return
 			}
 			continue
@@ -152,16 +198,19 @@ func (m *channelConnectorManager) Run(ctx context.Context) {
 
 func (m *channelConnectorManager) runLeader(ctx context.Context) {
 	leaderCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	m.setLeader(true)
-	defer m.setLeader(false)
-	defer m.stopAllConnectors()
-	go m.runProgressUpdates(leaderCtx)
 	defer func() {
+		// Leadership owns the complete connector lifecycle. Stop all work that
+		// may still use the external binding before making the Redis lease
+		// available to another Channel node.
+		cancel()
+		m.stopAllConnectors()
+		m.setLeader(false)
 		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer releaseCancel()
 		_, _ = releaseConnectorLeaseScript.Run(releaseCtx, m.redis, []string{channelConnectorLeaseKey}, m.owner).Result()
 	}()
+	safego.Go("channel progress updates", func() { m.runProgressUpdates(leaderCtx) })
 
 	if err := m.reconcile(leaderCtx); err != nil {
 		logBackgroundError("channel connector reconcile", err)
@@ -363,7 +412,11 @@ func (m *channelConnectorManager) startConnector(ctx context.Context, key channe
 			// request_timeout cap would abort every idle getUpdates cycle.
 			HTTPClient:   &http.Client{},
 			MaxFileBytes: storage.MaxArtifactBytes,
-			OnReady:      func() { m.updateProcessStatus(key, channels.ChannelStateConnected, "") },
+			OffsetStore: telegramRedisOffsetStore{
+				client: m.redis,
+				key:    telegramOffsetKey(key.BindingID, value.BotToken),
+			},
+			OnReady: func() { m.updateProcessStatus(key, channels.ChannelStateConnected, "") },
 			OnError: func(error) {
 				m.updateProcessStatus(key, channels.ChannelStateConnecting, "连接中断，正在重连")
 			},
@@ -480,9 +533,14 @@ func (m *channelConnectorManager) startConnector(ctx context.Context, key channe
 func (m *channelConnectorManager) runOpenClawChannel(ctx context.Context, key channels.BindingKey, process *connectorProcess, label string) {
 	go func() {
 		defer close(process.done)
-		if err := process.channel.Run(ctx); err != nil && ctx.Err() == nil {
+		var runErr error
+		panicErr := safego.Run(label+" connector", func() { runErr = process.channel.Run(ctx) })
+		if panicErr != nil {
+			runErr = panicErr
+		}
+		if runErr != nil && ctx.Err() == nil {
 			m.updateProcessStatus(key, channels.ChannelStateError, "连接已停止")
-			slog.Error(label+" connector stopped", "binding_id", key.BindingID, "error", err)
+			slog.Error(label+" connector stopped", "binding_id", key.BindingID, "error", runErr)
 		}
 	}()
 }
@@ -698,6 +756,11 @@ func (m *channelConnectorManager) persistStatus(ctx context.Context, status chan
 func channelStatusKey(channel channels.Channel, bindingID string) string {
 	digest := sha256.Sum256([]byte(string(channel) + "\x00" + bindingID))
 	return fmt.Sprintf("trpc-agent:channel-status:%x", digest[:12])
+}
+
+func telegramOffsetKey(bindingID, botToken string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(bindingID) + "\x00" + strings.TrimSpace(botToken)))
+	return fmt.Sprintf("trpc-agent:telegram-offset:%x", digest[:16])
 }
 
 func (m *channelConnectorManager) ListBindingStatuses(ctx context.Context, tenantID, appCode string) ([]channels.BindingStatus, error) {

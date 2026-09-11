@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/safego"
 	"golang.org/x/net/websocket"
 )
 
@@ -28,6 +29,77 @@ type Client struct {
 	done      chan struct{}
 	pending   map[string]chan WireFrame
 	running   bool
+}
+
+const (
+	cardActionWorkers = 8
+	cardActionQueue   = 32
+)
+
+var ErrCardActionBackpressure = errors.New("wecombot card action executor is saturated")
+
+type cardActionJob struct {
+	ctx     context.Context
+	inbound channels.InboundMessage
+	handler MessageHandler
+}
+
+type cardActionExecutor struct {
+	queue  chan cardActionJob
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+func newCardActionExecutor(ctx context.Context) *cardActionExecutor {
+	workerCtx, cancel := context.WithCancel(ctx)
+	executor := &cardActionExecutor{queue: make(chan cardActionJob, cardActionQueue), cancel: cancel}
+	executor.wg.Add(cardActionWorkers)
+	for range cardActionWorkers {
+		safego.Go("wecom card action worker", func() {
+			defer executor.wg.Done()
+			for {
+				select {
+				case job := <-executor.queue:
+					if job.ctx.Err() != nil {
+						continue
+					}
+					var handlerErr error
+					if panicErr := safego.Run("wecom card action handler", func() {
+						handlerErr = job.handler(job.ctx, job.inbound)
+					}); panicErr != nil {
+						continue
+					}
+					if handlerErr != nil {
+						slog.Error("wecombot: card action handler error", "message_id", job.inbound.MessageID, "error", handlerErr)
+					}
+				case <-workerCtx.Done():
+					return
+				}
+			}
+		})
+	}
+	return executor
+}
+
+func (e *cardActionExecutor) submit(ctx context.Context, inbound channels.InboundMessage, handler MessageHandler) bool {
+	if e == nil || handler == nil {
+		return false
+	}
+	select {
+	case e.queue <- cardActionJob{ctx: ctx, inbound: inbound, handler: handler}:
+		return true
+	case <-ctx.Done():
+		return false
+	default:
+		return false
+	}
+}
+
+func (e *cardActionExecutor) close() {
+	if e != nil {
+		e.cancel()
+		e.wg.Wait()
+	}
 }
 
 // NewClient constructs a WeComBot client.
@@ -70,9 +142,11 @@ func (c *Client) Run(ctx context.Context, handler MessageHandler) error {
 		c.mu.Unlock()
 	}()
 
+	cardActions := newCardActionExecutor(ctx)
+	defer cardActions.close()
 	attempt := 0
 	for ctx.Err() == nil {
-		authenticated, err := c.connectAndLoop(ctx, handler)
+		authenticated, err := c.connectAndLoop(ctx, handler, cardActions)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -113,7 +187,7 @@ func reconnectBackoff(attempt int) time.Duration {
 	return min(delay, 30*time.Second)
 }
 
-func (c *Client) connectAndLoop(ctx context.Context, handler MessageHandler) (bool, error) {
+func (c *Client) connectAndLoop(ctx context.Context, handler MessageHandler, cardActions *cardActionExecutor) (bool, error) {
 	wsCfg, err := websocket.NewConfig(c.config.Endpoint, c.config.Origin)
 	if err != nil {
 		return false, fmt.Errorf("wecombot: invalid ws config: %w", err)
@@ -125,13 +199,13 @@ func (c *Client) connectAndLoop(ctx context.Context, handler MessageHandler) (bo
 	}
 	defer conn.Close()
 	closeOnCancelDone := make(chan struct{})
-	go func() {
+	safego.Go("wecom connection cancellation", func() {
 		select {
 		case <-ctx.Done():
 			_ = conn.Close()
 		case <-closeOnCancelDone:
 		}
-	}()
+	})
 	defer close(closeOnCancelDone)
 
 	sessionDone := make(chan struct{})
@@ -194,24 +268,24 @@ func (c *Client) connectAndLoop(ctx context.Context, handler MessageHandler) (bo
 	// 2. Start heartbeat
 	hbStop := make(chan struct{})
 	defer close(hbStop)
-	go c.heartbeatLoop(ctx, conn, sessionDone, hbStop)
+	safego.Go("wecom heartbeat", func() { c.heartbeatLoop(ctx, conn, sessionDone, hbStop) })
 
 	// Provider command acknowledgments arrive on the same WebSocket as inbound
 	// callbacks. Never execute the application handler on the receive loop: the
 	// handler can legitimately send a callback reply and wait for its ACK.
 	deliveries := make(chan func(), 256)
-	go func() {
+	safego.Go("wecom inbound delivery worker", func() {
 		for {
 			select {
 			case <-sessionCtx.Done():
 				return
 			case deliver := <-deliveries:
 				if deliver != nil {
-					deliver()
+					_ = safego.Run("wecom inbound delivery", deliver)
 				}
 			}
 		}
-	}()
+	})
 	queueDelivery := func(deliver func()) bool {
 		select {
 		case deliveries <- deliver:
@@ -254,11 +328,12 @@ func (c *Client) connectAndLoop(ctx context.Context, handler MessageHandler) (bo
 					// window. Do not queue them behind ordinary message delivery: a
 					// slow/retrying message handler could otherwise make an otherwise
 					// valid aibot_respond_update_msg arrive too late.
-					go func() {
-						if err := handler(sessionCtx, inbound); err != nil {
-							slog.Error("wecombot: card action handler error", "message_id", inbound.MessageID, "error", err)
+					if !cardActions.submit(sessionCtx, inbound, handler) {
+						if err := sessionCtx.Err(); err != nil {
+							return true, err
 						}
-					}()
+						return true, ErrCardActionBackpressure
+					}
 				} else {
 					slog.Warn("wecombot: ignored malformed template card event", "req_id", frame.Headers.RequestID)
 				}

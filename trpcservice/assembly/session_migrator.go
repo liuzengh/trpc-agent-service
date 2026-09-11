@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	platformstorage "github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -19,6 +21,9 @@ const (
 	sessionMigrationLeaseTTL  = 5 * time.Minute
 	sessionMigrationEventCap  = 1_000_000
 	sessionMigrationOwnerBase = "session-migration:"
+	sessionRepairLeaseTTL     = 30 * time.Second
+	sessionRepairPollInterval = 5 * time.Second
+	sessionRepairBatchSize    = 20
 )
 
 // SessionMigrationManager is the control-plane surface used by the console.
@@ -40,6 +45,8 @@ type SessionMigrator struct {
 	provider      *ManagedSessionProvider
 	catalog       platformstorage.ApplicationSessionLister
 	leaser        platformstorage.SessionExecutionLeaser
+	repairs       platformstorage.SessionMigrationRepairStore
+	repairOwner   string
 	leaseTTL      time.Duration
 	maximumEvents int
 }
@@ -48,10 +55,15 @@ func NewSessionMigrator(store platformstorage.SessionMigrationStore, configs ten
 	if store == nil || configs == nil || provider == nil || catalog == nil || leaser == nil {
 		return nil, errors.New("Session migration store, configuration repository, provider, catalog, and leaser are required")
 	}
-	return &SessionMigrator{
+	migrator := &SessionMigrator{
 		store: store, configs: configs, provider: provider, catalog: catalog, leaser: leaser,
 		leaseTTL: sessionMigrationLeaseTTL, maximumEvents: sessionMigrationEventCap,
-	}, nil
+		repairOwner: "session-repair:" + uuid.NewString(),
+	}
+	if repairs, ok := store.(platformstorage.SessionMigrationRepairStore); ok {
+		migrator.repairs = repairs
+	}
+	return migrator, nil
 }
 
 func (m *SessionMigrator) StartSessionMigration(ctx context.Context, tenantID, appCode, targetProfileID string) (platformstorage.SessionMigrationStatus, error) {
@@ -72,24 +84,70 @@ func (m *SessionMigrator) StartSessionMigration(ctx context.Context, tenantID, a
 	if err != nil {
 		return platformstorage.SessionMigrationStatus{}, fmt.Errorf("resolve Session migration target profile: %w", err)
 	}
-	source := platformstorage.SessionBackendRef{Driver: sourceConfig.Driver, ConnectionRef: sourceConfig.ConnectionRef}.Normalize(SessionDriverPostgres)
-	target := platformstorage.SessionBackendRef{Driver: targetConfig.Driver, ConnectionRef: targetConfig.ConnectionRef}.Normalize(SessionDriverPostgres)
+	source := platformstorage.SessionBackendRef{ProfileID: sourceProfileID, Driver: sourceConfig.Driver, ConnectionRef: sourceConfig.ConnectionRef}.Normalize(SessionDriverPostgres)
+	target := platformstorage.SessionBackendRef{ProfileID: targetProfileID, Driver: targetConfig.Driver, ConnectionRef: targetConfig.ConnectionRef}.Normalize(SessionDriverPostgres)
 	if source.Equal(target) {
 		return platformstorage.SessionMigrationStatus{}, errors.New("Session migration target already matches the active backend")
 	}
 	// Construct both physical services before creating durable migration state.
 	// This fails fast on missing secrets, invalid endpoints, or unsupported drivers.
-	if _, err := m.provider.SessionServiceFor(ctx, active.Config, source); err != nil {
+	sourceService, err := m.provider.SessionServiceFor(ctx, active.Config, source)
+	if err != nil {
 		return platformstorage.SessionMigrationStatus{}, fmt.Errorf("prepare Session migration source: %w", err)
 	}
-	if _, err := m.provider.SessionServiceFor(ctx, active.Config, target); err != nil {
+	targetService, err := m.provider.SessionServiceFor(ctx, active.Config, target)
+	if err != nil {
 		return platformstorage.SessionMigrationStatus{}, fmt.Errorf("prepare Session migration target: %w", err)
+	}
+	if err := validateSessionMigrationCapabilities(sourceService, targetService); err != nil {
+		return platformstorage.SessionMigrationStatus{}, err
 	}
 	return m.store.CreateSessionMigration(ctx, platformstorage.SessionMigrationStatus{
 		TenantID: tenantID, AppCode: appCode,
 		SourceProfileID: sourceProfileID, TargetProfileID: targetProfileID,
 		Source: source, Target: target,
 	})
+}
+
+func validateSessionMigrationCapabilities(source, target session.Service) error {
+	if source == nil || target == nil {
+		return errors.New("Session migration source and target services are required")
+	}
+	for _, capability := range []struct {
+		name      string
+		sourceHas bool
+		targetHas bool
+	}{
+		{name: "event search", sourceHas: implementsSessionSearch(source), targetHas: implementsSessionSearch(target)},
+		{name: "event window", sourceHas: implementsSessionWindow(source), targetHas: implementsSessionWindow(target)},
+		{name: "track events", sourceHas: implementsSessionTrack(source), targetHas: implementsSessionTrack(target)},
+		{name: "track event reads", sourceHas: implementsSessionTrackReader(source), targetHas: implementsSessionTrackReader(target)},
+	} {
+		if capability.sourceHas && !capability.targetHas {
+			return fmt.Errorf("Session migration target does not preserve source %s capability", capability.name)
+		}
+	}
+	return nil
+}
+
+func implementsSessionSearch(service session.Service) bool {
+	_, ok := service.(session.SearchableService)
+	return ok
+}
+
+func implementsSessionWindow(service session.Service) bool {
+	_, ok := service.(session.WindowService)
+	return ok
+}
+
+func implementsSessionTrack(service session.Service) bool {
+	_, ok := service.(session.TrackService)
+	return ok
+}
+
+func implementsSessionTrackReader(service session.Service) bool {
+	_, ok := service.(sessionTrackEventReader)
+	return ok
 }
 
 func (m *SessionMigrator) AdvanceSessionMigration(ctx context.Context, tenantID, appCode, migrationID string, expectedGeneration uint64) (platformstorage.SessionMigrationStatus, error) {
@@ -119,9 +177,18 @@ func (m *SessionMigrator) AdvanceSessionMigration(ctx context.Context, tenantID,
 			status.Phase = platformstorage.SessionMigrationVerify
 		}
 	case platformstorage.SessionMigrationVerify:
-		status.Phase = platformstorage.SessionMigrationCutRead
+		err = m.ensureNoPendingRepairs(ctx, status)
+		if err == nil {
+			status.Phase = platformstorage.SessionMigrationCutRead
+		}
 	case platformstorage.SessionMigrationCutRead:
-		status.Phase = platformstorage.SessionMigrationStopOldWrite
+		err = m.ensureNoPendingRepairs(ctx, status)
+		if err == nil {
+			_, err = m.verifyBackends(ctx, active.Config, status, status.Target, status.Source)
+		}
+		if err == nil {
+			status.Phase = platformstorage.SessionMigrationStopOldWrite
+		}
 	case platformstorage.SessionMigrationStopOldWrite:
 		if err = m.publishTargetConfiguration(ctx, active.Config, status); err == nil {
 			status.Phase = platformstorage.SessionMigrationDone
@@ -158,6 +225,9 @@ func (m *SessionMigrator) RollbackSessionMigration(ctx context.Context, tenantID
 		platformstorage.SessionMigrationBackfill,
 		platformstorage.SessionMigrationVerify,
 		platformstorage.SessionMigrationCutRead:
+		if err := m.ensureNoPendingRepairs(ctx, status); err != nil {
+			return platformstorage.SessionMigrationStatus{}, fmt.Errorf("cannot roll back Session migration with pending repairs: %w", err)
+		}
 		status.Phase = platformstorage.SessionMigrationRolledBack
 		status.LastError = ""
 		return m.store.UpdateSessionMigration(ctx, status, expectedGeneration)
@@ -194,15 +264,19 @@ func (m *SessionMigrator) backfill(ctx context.Context, tenantConfig config.Tena
 }
 
 func (m *SessionMigrator) verify(ctx context.Context, tenantConfig config.TenantConfig, status platformstorage.SessionMigrationStatus) (int, error) {
+	return m.verifyBackends(ctx, tenantConfig, status, status.Source, status.Target)
+}
+
+func (m *SessionMigrator) verifyBackends(ctx context.Context, tenantConfig config.TenantConfig, status platformstorage.SessionMigrationStatus, sourceRef, targetRef platformstorage.SessionBackendRef) (int, error) {
 	entries, err := m.catalog.ListApplicationSessions(ctx, status.TenantID, status.AppCode)
 	if err != nil {
 		return 0, err
 	}
-	source, err := m.provider.SessionServiceFor(ctx, tenantConfig, status.Source)
+	source, err := m.provider.SessionServiceFor(ctx, tenantConfig, sourceRef)
 	if err != nil {
 		return 0, err
 	}
-	target, err := m.provider.SessionServiceFor(ctx, tenantConfig, status.Target)
+	target, err := m.provider.SessionServiceFor(ctx, tenantConfig, targetRef)
 	if err != nil {
 		return 0, err
 	}
@@ -234,6 +308,173 @@ func (m *SessionMigrator) verify(ctx context.Context, tenantConfig config.Tenant
 		}
 	}
 	return len(entries), nil
+}
+
+func (m *SessionMigrator) ensureNoPendingRepairs(ctx context.Context, status platformstorage.SessionMigrationStatus) error {
+	if m.repairs == nil {
+		return errors.New("Session migration repair store is unavailable")
+	}
+	pending, err := m.repairs.CountPendingSessionMigrationRepairs(ctx, status.TenantID, status.ID)
+	if err != nil {
+		return fmt.Errorf("count pending Session migration repairs: %w", err)
+	}
+	if pending != 0 {
+		return fmt.Errorf("Session migration has %d pending repair(s)", pending)
+	}
+	return nil
+}
+
+// RunRepairs continuously converges durable dirty intents. Claims are leased
+// so multiple Worker nodes may run this loop safely.
+func (m *SessionMigrator) RunRepairs(ctx context.Context) {
+	if m == nil || m.repairs == nil {
+		return
+	}
+	m.runRepairPass(ctx)
+	ticker := time.NewTicker(sessionRepairPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.runRepairPass(ctx)
+		}
+	}
+}
+
+func (m *SessionMigrator) runRepairPass(ctx context.Context) {
+	applications, err := m.configs.ListApplications(ctx, "")
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Error("list applications for Session repair", "error", err)
+		}
+		return
+	}
+	for _, application := range applications {
+		if ctx.Err() != nil {
+			return
+		}
+		status, active, err := m.store.ActiveSessionMigration(ctx, application.Config.TenantID, application.Config.AppCode)
+		if err != nil {
+			slog.Error("resolve active Session migration for repair", "tenant", application.Config.TenantID, "app", application.Config.AppCode, "error", err)
+			continue
+		}
+		if !active {
+			continue
+		}
+		repairs, err := m.repairs.ClaimSessionMigrationRepairs(
+			ctx, status.TenantID, status.ID, m.repairOwner, sessionRepairBatchSize, sessionRepairLeaseTTL,
+		)
+		if err != nil {
+			slog.Error("claim Session migration repairs", "tenant", status.TenantID, "app", status.AppCode, "migration_id", status.ID, "error", err)
+			continue
+		}
+		for _, repair := range repairs {
+			if err := m.repairOne(ctx, application.Config, status, repair); err != nil {
+				retryAt := time.Now().Add(sessionRepairBackoff(repair.Attempts))
+				if failErr := m.repairs.FailSessionMigrationRepair(ctx, repair, m.repairOwner, retryAt, err.Error()); failErr != nil && !errors.Is(failErr, platformstorage.ErrSessionMigrationConflict) && ctx.Err() == nil {
+					slog.Error("release failed Session migration repair", "migration_id", status.ID, "error", failErr)
+				}
+				continue
+			}
+			if _, err := m.repairs.CompleteSessionMigrationRepair(ctx, repair, m.repairOwner); err != nil && ctx.Err() == nil {
+				slog.Error("complete Session migration repair", "migration_id", status.ID, "error", err)
+			}
+		}
+	}
+}
+
+func (m *SessionMigrator) repairOne(
+	ctx context.Context,
+	tenantConfig config.TenantConfig,
+	status platformstorage.SessionMigrationStatus,
+	repair platformstorage.SessionMigrationRepair,
+) error {
+	if repair.MigrationID != status.ID || repair.RouteGeneration > status.Generation {
+		return platformstorage.ErrSessionMigrationConflict
+	}
+	primaryRef, err := sessionMigrationBackendForProfile(status, repair.PrimaryProfileID)
+	if err != nil {
+		return err
+	}
+	replicaRef, err := sessionMigrationBackendForProfile(status, repair.ReplicaProfileID)
+	if err != nil {
+		return err
+	}
+	if primaryRef.Equal(replicaRef) {
+		return errors.New("Session repair primary and replica resolve to the same backend")
+	}
+	primary, err := m.provider.SessionServiceFor(ctx, tenantConfig, primaryRef)
+	if err != nil {
+		return err
+	}
+	replica, err := m.provider.SessionServiceFor(ctx, tenantConfig, replicaRef)
+	if err != nil {
+		return err
+	}
+	appName := repair.TenantID + "/" + repair.AppCode
+	switch repair.Scope {
+	case platformstorage.SessionRepairScopeApplication:
+		return syncApplicationState(ctx, primary, replica, appName)
+	case platformstorage.SessionRepairScopeUser:
+		key := session.UserKey{AppName: appName, UserID: repair.SubjectID}
+		return syncUserState(ctx, primary, replica, key)
+	case platformstorage.SessionRepairScopeSession:
+		entry := platformstorage.Session{
+			TenantID: repair.TenantID, AppCode: repair.AppCode, SessionKey: repair.ScopeKey, SubjectID: repair.SubjectID,
+		}
+		return m.withSessionMigrationLease(ctx, status, entry, func(lease *platformstorage.SessionExecutionLease) error {
+			key := frameworkSessionKey(entry)
+			current, readErr := primary.GetSession(ctx, key, session.WithEventNum(m.maximumEvents))
+			if readErr != nil {
+				return fmt.Errorf("read primary Session %q for repair: %w", entry.SessionKey, readErr)
+			}
+			if current == nil {
+				if existing, err := replica.GetSession(ctx, key); err != nil {
+					return err
+				} else if existing != nil {
+					if err := replica.DeleteSession(ctx, key); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			if len(current.Events) >= m.maximumEvents {
+				return fmt.Errorf("Session %q reached migration event safety cap %d", entry.SessionKey, m.maximumEvents)
+			}
+			return m.copySession(ctx, primary, replica, entry, lease)
+		})
+	default:
+		return fmt.Errorf("unsupported Session migration repair scope %q", repair.Scope)
+	}
+}
+
+func sessionMigrationBackendForProfile(status platformstorage.SessionMigrationStatus, profileID string) (platformstorage.SessionBackendRef, error) {
+	profileID = strings.TrimSpace(profileID)
+	switch profileID {
+	case status.SourceProfileID:
+		return status.Source, nil
+	case status.TargetProfileID:
+		return status.Target, nil
+	default:
+		return platformstorage.SessionBackendRef{}, fmt.Errorf("Session migration repair references unknown backend profile %q", profileID)
+	}
+}
+
+func sessionRepairBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	shift := attempt - 1
+	if shift > 6 {
+		shift = 6
+	}
+	delay := time.Second * time.Duration(1<<shift)
+	if delay > time.Minute {
+		return time.Minute
+	}
+	return delay
 }
 
 func (m *SessionMigrator) withSessionMigrationLease(ctx context.Context, status platformstorage.SessionMigrationStatus, entry platformstorage.Session, operation func(*platformstorage.SessionExecutionLease) error) error {
@@ -287,6 +528,31 @@ func (m *SessionMigrator) copySession(ctx context.Context, source, target sessio
 		eventCopy := current.Events[index]
 		if err := target.AppendEvent(ctx, created, &eventCopy); err != nil {
 			return fmt.Errorf("copy Session %q event %d: %w", entry.SessionKey, index, err)
+		}
+	}
+	currentCopy := current.Clone()
+	if len(currentCopy.Tracks) > 0 {
+		trackTarget, ok := target.(session.TrackService)
+		if !ok {
+			return fmt.Errorf("target Session backend does not support track events for Session %q", entry.SessionKey)
+		}
+		for track, history := range currentCopy.Tracks {
+			if history == nil {
+				continue
+			}
+			for index := range history.Events {
+				if time.Until(lease.LeaseUntil) < m.leaseTTL/3 {
+					renewed, err := m.leaser.RenewSessionExecutionLease(ctx, *lease, m.leaseTTL)
+					if err != nil {
+						return fmt.Errorf("renew Session %q migration lease: %w", entry.SessionKey, err)
+					}
+					*lease = renewed
+				}
+				trackEvent := history.Events[index]
+				if err := trackTarget.AppendTrackEvent(ctx, created, &trackEvent); err != nil {
+					return fmt.Errorf("copy Session %q track %q event %d: %w", entry.SessionKey, track, index, err)
+				}
+			}
 		}
 	}
 	// Summaries are derived data. The authoritative state and complete event
@@ -381,15 +647,17 @@ func sessionMigrationDigest(current *session.Session) [sha256.Size]byte {
 	if current == nil {
 		return sha256.Sum256(nil)
 	}
+	current = current.Clone()
 	payload, _ := json.Marshal(struct {
 		AppName string
 		UserID  string
 		ID      string
 		State   session.StateMap
 		Events  any
+		Tracks  map[session.Track]*session.TrackEvents
 	}{
 		AppName: current.AppName, UserID: current.UserID, ID: current.ID,
-		State: current.SnapshotState(), Events: current.Events,
+		State: current.SnapshotState(), Events: current.Events, Tracks: current.Tracks,
 	})
 	return sha256.Sum256(payload)
 }

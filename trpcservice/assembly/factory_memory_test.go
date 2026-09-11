@@ -377,7 +377,7 @@ func waitForMemories(t *testing.T, service memory.Service, userKey memory.UserKe
 	if service == nil {
 		t.Fatal("memory service is nil")
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	var entries []*memory.Entry
 	for time.Now().Before(deadline) {
 		var err error

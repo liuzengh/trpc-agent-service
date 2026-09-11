@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-ROOT="$(cd "$(dirname "$0")" && pwd)"
-cd "$ROOT"
-
-go test ./... -coverprofile=coverage.out
-go tool cover -func=coverage.out
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$ROOT/scripts/coverage.sh" "$@"

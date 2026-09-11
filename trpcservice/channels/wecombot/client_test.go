@@ -4,15 +4,78 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"golang.org/x/net/websocket"
 )
+
+func TestCardActionExecutorBoundsConcurrentHandlers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	executor := newCardActionExecutor(ctx)
+	defer executor.close()
+
+	release := make(chan struct{})
+	var active atomic.Int32
+	var maximum atomic.Int32
+	var completed atomic.Int32
+	handler := func(context.Context, channels.InboundMessage) error {
+		current := active.Add(1)
+		for {
+			seen := maximum.Load()
+			if current <= seen || maximum.CompareAndSwap(seen, current) {
+				break
+			}
+		}
+		<-release
+		active.Add(-1)
+		completed.Add(1)
+		return nil
+	}
+
+	for index := range cardActionWorkers {
+		if !executor.submit(ctx, channels.InboundMessage{MessageID: fmt.Sprintf("card-%d", index)}, handler) {
+			t.Fatalf("submit(%d) = false", index)
+		}
+	}
+	deadline := time.Now().Add(time.Second)
+	for active.Load() < cardActionWorkers && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := maximum.Load(); got != cardActionWorkers {
+		t.Fatalf("maximum concurrent card handlers = %d, want %d", got, cardActionWorkers)
+	}
+	for index := range cardActionQueue {
+		messageID := fmt.Sprintf("queued-%d", index)
+		if !executor.submit(ctx, channels.InboundMessage{MessageID: messageID}, handler) {
+			t.Fatalf("submit(%s) = false", messageID)
+		}
+	}
+	started := time.Now()
+	if executor.submit(ctx, channels.InboundMessage{MessageID: "overflow"}, handler) {
+		t.Fatal("saturated executor accepted another card action")
+	}
+	if elapsed := time.Since(started); elapsed > 50*time.Millisecond {
+		t.Fatalf("saturated submit blocked for %s", elapsed)
+	}
+
+	close(release)
+	deadline = time.Now().Add(time.Second)
+	wantCompleted := int32(cardActionWorkers + cardActionQueue)
+	for completed.Load() < wantCompleted && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := completed.Load(); got != wantCompleted {
+		t.Fatalf("completed card handlers = %d, want %d", got, wantCompleted)
+	}
+}
 
 func TestReconnectBackoffMatchesProviderSchedule(t *testing.T) {
 	t.Parallel()
@@ -391,4 +454,28 @@ func TestWeComBot_CardActionBypassesBlockedMessageAndUpdatesWithinCallback(t *te
 		t.Fatal("card action was blocked behind ordinary message handling")
 	}
 	close(releaseNormal)
+}
+
+func TestCardActionExecutorSurvivesHandlerPanics(t *testing.T) {
+	executor := newCardActionExecutor(context.Background())
+	t.Cleanup(executor.close)
+	for i := 0; i < cardActionWorkers; i++ {
+		if !executor.submit(context.Background(), channels.InboundMessage{MessageID: fmt.Sprintf("panic-%d", i)}, func(context.Context, channels.InboundMessage) error {
+			panic("bad card callback")
+		}) {
+			t.Fatalf("submit panic job %d failed", i)
+		}
+	}
+	processed := make(chan struct{})
+	if !executor.submit(context.Background(), channels.InboundMessage{MessageID: "healthy"}, func(context.Context, channels.InboundMessage) error {
+		close(processed)
+		return nil
+	}) {
+		t.Fatal("submit healthy job failed")
+	}
+	select {
+	case <-processed:
+	case <-time.After(time.Second):
+		t.Fatal("card action workers stopped after handler panics")
+	}
 }

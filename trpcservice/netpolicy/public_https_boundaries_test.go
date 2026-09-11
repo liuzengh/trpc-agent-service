@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -82,6 +83,38 @@ func TestSafeDialRejectsMalformedLookupAndPrivateTargets(t *testing.T) {
 	})
 	if _, err := dial(context.Background(), "tcp", "example.com:443"); err == nil {
 		t.Fatal("safe dial accepted a loopback resolution")
+	}
+}
+
+func TestSafeDialFallsBackAcrossPublicAddresses(t *testing.T) {
+	t.Parallel()
+	addresses := []net.IPAddr{
+		{IP: net.ParseIP("203.0.113.10")},
+		{IP: net.ParseIP("198.51.100.20")},
+	}
+	var attempts []string
+	dial := safeDialContextWithDialer(
+		func(context.Context, string) ([]net.IPAddr, error) { return addresses, nil },
+		func(_ context.Context, _ string, address string) (net.Conn, error) {
+			attempts = append(attempts, address)
+			if len(attempts) == 1 {
+				return nil, errors.New("first address unreachable")
+			}
+			client, peer := net.Pipe()
+			_ = peer.Close()
+			return client, nil
+		},
+	)
+	connection, err := dial(context.Background(), "tcp", "example.com:443")
+	if err != nil {
+		t.Fatalf("safe dial fallback error = %v", err)
+	}
+	_ = connection.Close()
+	if len(attempts) != 2 {
+		t.Fatalf("dial attempts = %v, want both resolved addresses", attempts)
+	}
+	if !strings.HasPrefix(attempts[0], "203.0.113.10:") || !strings.HasPrefix(attempts[1], "198.51.100.20:") {
+		t.Fatalf("dial order = %v", attempts)
 	}
 }
 

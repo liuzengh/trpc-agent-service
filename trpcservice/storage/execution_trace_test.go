@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -48,6 +49,90 @@ func TestMemoryStateStorePersistsExecutionTraceProjection(t *testing.T) {
 	got, err = store.GetExecutionTrace(context.Background(), "tenant-a", "wecom", "wecom-a", "message-1")
 	if err != nil || got.Trace.RootInvocationID != "inv-2" {
 		t.Fatalf("wecom trace with same message ID = %#v, %v", got, err)
+	}
+}
+
+func TestMemoryStateStoreExecutionTraceValidationAndCloneIsolation(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStateStore()
+	base := ExecutionTraceRecord{
+		TenantID: "tenant-a", AppCode: "support", Channel: "web", BindingID: "web-console", MessageID: "message-1", TraceID: "trace-1",
+		Trace: AgentExecutionTrace{
+			Status: "completed",
+			Usage:  &ExecutionTraceUsage{PromptTokens: 10},
+			Steps: []ExecutionTraceStep{{
+				StepID: "step-1", PredecessorStepIDs: []string{"before"}, AppliedSurfaceIDs: []string{"surface-1"},
+				Usage: &ExecutionTraceUsage{CompletionTokens: 4},
+			}},
+		},
+	}
+	if err := store.RecordExecutionTrace(context.Background(), base); err != nil {
+		t.Fatal(err)
+	}
+	base.Trace.Usage.PromptTokens = 999
+	base.Trace.Steps[0].PredecessorStepIDs[0] = "mutated"
+	base.Trace.Steps[0].Usage.CompletionTokens = 999
+	got, err := store.GetExecutionTrace(context.Background(), "tenant-a", "web", "web-console", "message-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Trace.Usage.PromptTokens != 10 || got.Trace.Steps[0].PredecessorStepIDs[0] != "before" || got.Trace.Steps[0].Usage.CompletionTokens != 4 {
+		t.Fatalf("stored trace mutated through caller input: %#v", got)
+	}
+	got.Trace.Steps[0].AppliedSurfaceIDs[0] = "changed"
+	again, err := store.GetExecutionTrace(context.Background(), "tenant-a", "web", "web-console", "message-1")
+	if err != nil || again.Trace.Steps[0].AppliedSurfaceIDs[0] != "surface-1" {
+		t.Fatalf("stored trace mutated through returned clone: %#v, %v", again, err)
+	}
+
+	for _, mutate := range []func(*ExecutionTraceRecord){
+		func(record *ExecutionTraceRecord) { record.TenantID = "" },
+		func(record *ExecutionTraceRecord) { record.AppCode = "" },
+		func(record *ExecutionTraceRecord) { record.Channel = "" },
+		func(record *ExecutionTraceRecord) { record.BindingID = "" },
+		func(record *ExecutionTraceRecord) { record.MessageID = "" },
+		func(record *ExecutionTraceRecord) { record.TraceID = "" },
+		func(record *ExecutionTraceRecord) { record.Trace.Status = "unknown" },
+	} {
+		invalid := base
+		invalid.TenantID, invalid.AppCode, invalid.Channel, invalid.BindingID, invalid.MessageID, invalid.TraceID = "tenant-a", "support", "web", "web-console", "message-x", "trace-x"
+		invalid.Trace.Status = "completed"
+		mutate(&invalid)
+		if err := store.RecordExecutionTrace(context.Background(), invalid); err == nil {
+			t.Fatal("RecordExecutionTrace() accepted invalid record")
+		}
+	}
+}
+
+func TestMemoryStateStoreExecutionTraceValidatesReadsAndContext(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStateStore()
+	for _, args := range [][4]string{
+		{"", "web", "web-console", "message"},
+		{"tenant-a", "", "web-console", "message"},
+		{"tenant-a", "web", "", "message"},
+		{"tenant-a", "web", "web-console", ""},
+	} {
+		if _, err := store.GetExecutionTrace(context.Background(), args[0], args[1], args[2], args[3]); err == nil {
+			t.Fatalf("GetExecutionTrace(%q,%q,%q,%q) error = nil", args[0], args[1], args[2], args[3])
+		}
+	}
+	if records, err := store.ListExecutionTraces(context.Background(), "tenant-a", nil); err != nil || records != nil {
+		t.Fatalf("ListExecutionTraces(empty) = %#v, %v", records, err)
+	}
+	if _, err := store.ListExecutionTraces(context.Background(), "", []ExecutionTraceRef{{Channel: "web", BindingID: "b", MessageID: "m"}}); err == nil {
+		t.Fatal("ListExecutionTraces() accepted blank tenant")
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.RecordExecutionTrace(cancelled, ExecutionTraceRecord{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled record error = %v", err)
+	}
+	if _, err := store.GetExecutionTrace(cancelled, "tenant-a", "web", "b", "m"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled get error = %v", err)
+	}
+	if _, err := store.ListExecutionTraces(cancelled, "tenant-a", []ExecutionTraceRef{{Channel: "web", BindingID: "b", MessageID: "m"}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled list error = %v", err)
 	}
 }
 

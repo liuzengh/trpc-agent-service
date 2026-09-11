@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { claimFingerprint, enrichClaimFromExecution, executionKey, executionProcessCount, executionTraceUsage, formatCacheRate, formatExecutionText, formatExecutionTime, formatTokenCompact, formatTokenPair, listRunStatus, mergeClaimsWithExecutionDetails, nextSelectedKey, orderExecutionSteps, replyFromExecution, runSettled, runStatus, sameJSON, stepSubject, tokenParts, visibleExecutionTraceSteps } from './execution'
+import { claimFingerprint, enrichClaimFromExecution, executionKey, executionProcessCount, executionTimelineItems, executionTraceUsage, executionViewSettled, formatCacheRate, formatExecutionText, formatExecutionTime, formatTokenCompact, formatTokenPair, listRunStatus, mergeClaimsWithExecutionDetails, nextSelectedKey, orderExecutionSteps, replyFromExecution, runSettled, runStatus, sameJSON, stepSubject, tokenParts, visibleExecutionTraceSteps } from './execution'
 import { outboxReplyText, type ExecutionTrace } from './types'
 
 const detail: ExecutionTrace = {
@@ -58,8 +58,17 @@ describe('execution view', () => {
     expect(formatExecutionText(detail)).toContain('出 42')
     expect(formatExecutionText(detail)).toContain('缓存 66.7%')
     expect(formatExecutionText(detail)).not.toContain('推理')
-    expect(formatExecutionText(detail)).toContain('发送 已送达')
+    expect(formatExecutionText(detail)).toContain('消息发送  已送达')
     expect(formatExecutionText(detail)).toContain('关联 trace-abc')
+  })
+
+  it('keeps refreshing a completed run until its outbox delivery settles', () => {
+    expect(executionViewSettled(detail)).toBe(true)
+    expect(executionViewSettled({
+      ...detail,
+      outbox: detail.outbox?.map((entry) => ({ ...entry, DeliveredAt: null })),
+    })).toBe(false)
+    expect(executionViewSettled({ ...detail, outbox: [] })).toBe(true)
   })
 
   it('uses durable tool executions when the framework trace is only an aggregate agent step', () => {
@@ -89,10 +98,133 @@ describe('execution view', () => {
       ],
     }
     expect(visibleExecutionTraceSteps(aggregateOnly)).toEqual([])
-    expect(executionProcessCount(aggregateOnly)).toBe(2)
+    expect(executionProcessCount(aggregateOnly)).toBe(3)
     expect(formatExecutionText(aggregateOnly)).toContain('duckduckgo_search')
     expect(formatExecutionText(aggregateOnly)).toContain('context7_query-docs')
     expect(formatExecutionText(aggregateOnly)).not.toContain('机器人处理')
+    expect(formatExecutionText(aggregateOnly)).toContain('消息发送')
+  })
+
+  it('builds a platform timeline from approval, tool, and delivery evidence', () => {
+    const aggregateOnly: ExecutionTrace = {
+      ...detail,
+      agent_trace: {
+        ...detail.agent_trace!,
+        started_at: '2026-09-09T01:00:00Z',
+        ended_at: '2026-09-09T01:00:12Z',
+        steps: [{
+          step_id: 'agent-1', invocation_id: 'inv-root', agent_name: 'assistant', node_id: 'assistant', node_type: 'agent',
+          started_at: '2026-09-09T01:00:00Z', ended_at: '2026-09-09T01:00:12Z',
+        }],
+      },
+      audit_events: [
+        {
+          ID: 'approval-1', TenantID: 'example', TraceID: 'trace-abc', RequestID: 'msg-1', Channel: 'wecom', ToolName: 'request_refund',
+          Action: 'approval.requested', Result: 'pending', Decision: 'pending', Detail: '', CreatedAt: '2026-09-09T01:00:02Z',
+        },
+        {
+          ID: 'approval-2', TenantID: 'example', TraceID: 'trace-abc', RequestID: 'msg-1', Channel: 'wecom', ToolName: 'request_refund',
+          Action: 'approval.approved', Result: 'approved', Decision: 'approved', LatencyMS: 5000, Detail: '', CreatedAt: '2026-09-09T01:00:07Z',
+        },
+      ],
+      tool_executions: [{
+        request_id: 'msg-1', tool_call_id: 'call-1', tool_name: 'request_refund', status: 'completed', trace_id: 'trace-abc',
+        started_at: '2026-09-09T01:00:07Z', completed_at: '2026-09-09T01:00:08Z',
+      }],
+      outbox: [{
+        ID: 'out-1', TenantID: 'example', AggregateKey: 'k', Type: 'channel_reply.wecom', Payload: '{}',
+        CreatedAt: '2026-09-09T01:00:12Z', DeliveredAt: '2026-09-09T01:00:12.300Z',
+      }],
+    }
+    const timeline = executionTimelineItems(aggregateOnly)
+    expect(timeline.map((item) => [item.kind, item.title, item.subject])).toEqual([
+      ['approval', '审批通过', 'request_refund'],
+      ['tool', '工具调用', 'request_refund'],
+      ['delivery', '消息发送', '已送达'],
+    ])
+    expect(timeline[0].started_at).toBe('2026-09-09T01:00:02Z')
+    expect(timeline[0].ended_at).toBe('2026-09-09T01:00:07Z')
+    expect(formatExecutionText(aggregateOnly)).toContain('审批通过  request_refund')
+  })
+
+  it('keeps a legacy aggregate LLMAgent step honest when no per-call model evidence exists', () => {
+    const direct: ExecutionTrace = {
+      ...detail,
+      outbox: [],
+      tool_executions: [],
+      audit_events: [],
+      agent_trace: {
+        ...detail.agent_trace!,
+        steps: [{
+          step_id: 'agent-1', invocation_id: 'inv-root', agent_name: 'assistant', node_id: 'assistant', node_type: 'agent',
+          started_at: '2026-09-09T01:00:00Z', ended_at: '2026-09-09T01:00:02Z', usage: detail.agent_trace!.usage,
+        }],
+      },
+    }
+    expect(executionTimelineItems(direct).map((item) => item.title)).toEqual(['机器人运行'])
+  })
+
+  it('shows each persisted model invocation around a real tool call', () => {
+    const traced: ExecutionTrace = {
+      ...detail,
+      agent_trace: {
+        ...detail.agent_trace!,
+        steps: [{
+          step_id: 'agent-1', invocation_id: 'inv-root', agent_name: 'assistant', node_id: 'assistant', node_type: 'agent',
+          started_at: '2026-09-09T01:00:00Z', ended_at: '2026-09-09T01:00:05Z',
+        }],
+      },
+      audit_events: [
+        { ID: 'm1-start', TenantID: 'example', TraceID: 'trace-abc', RequestID: 'msg-1', AgentName: 'assistant', Action: 'model.requested', Result: 'running', Detail: '', CreatedAt: '2026-09-09T01:00:00Z' },
+        { ID: 'm1-end', TenantID: 'example', TraceID: 'trace-abc', RequestID: 'msg-1', AgentName: 'assistant', Action: 'model.completed', Result: 'completed', Detail: '', CreatedAt: '2026-09-09T01:00:01Z' },
+        { ID: 'm2-start', TenantID: 'example', TraceID: 'trace-abc', RequestID: 'msg-1', AgentName: 'assistant', Action: 'model.requested', Result: 'running', Detail: '', CreatedAt: '2026-09-09T01:00:03Z' },
+        { ID: 'm2-end', TenantID: 'example', TraceID: 'trace-abc', RequestID: 'msg-1', AgentName: 'assistant', Action: 'model.completed', Result: 'completed', Detail: '', CreatedAt: '2026-09-09T01:00:04Z' },
+      ],
+      tool_executions: [{
+        request_id: 'msg-1', tool_call_id: 'call-1', tool_name: 'query_order', status: 'completed', trace_id: 'trace-abc',
+        started_at: '2026-09-09T01:00:02Z', completed_at: '2026-09-09T01:00:02.500Z',
+      }],
+      outbox: [{
+        ID: 'out-1', TenantID: 'example', AggregateKey: 'k', Type: 'channel_reply.web', Payload: '{}',
+        CreatedAt: '2026-09-09T01:00:05Z', DeliveredAt: '2026-09-09T01:00:05.100Z',
+      }],
+    }
+    expect(executionTimelineItems(traced).map((item) => [item.kind, item.title, item.subject])).toEqual([
+      ['model', '模型调用', 'assistant'],
+      ['tool', '工具调用', 'query_order'],
+      ['model', '模型调用', 'assistant'],
+      ['delivery', '消息发送', '已送达'],
+    ])
+  })
+
+  it('shows an expired approval instead of the aggregate agent wrapper', () => {
+    const expired: ExecutionTrace = {
+      ...detail,
+      agent_trace: {
+        ...detail.agent_trace!,
+        started_at: '2026-09-09T01:00:00Z',
+        ended_at: '2026-09-09T01:10:08Z',
+        steps: [{
+          step_id: 'agent-1', invocation_id: 'inv-root', agent_name: 'assistant', node_id: 'assistant', node_type: 'agent',
+          started_at: '2026-09-09T01:00:00Z', ended_at: '2026-09-09T01:10:08Z',
+        }],
+      },
+      tool_executions: [],
+      audit_events: [
+        {
+          ID: 'approval-start', TenantID: 'example', TraceID: 'trace-abc', RequestID: 'msg-1', ToolName: 'request_refund',
+          Action: 'approval.requested', Result: 'pending', Decision: 'pending', Detail: '', CreatedAt: '2026-09-09T01:00:02Z',
+        },
+        {
+          ID: 'approval-expired', TenantID: 'example', TraceID: 'trace-abc', RequestID: 'msg-1', ToolName: 'request_refund',
+          Action: 'approval.expired', Result: 'failed', Decision: 'failed', ErrorType: 'approval_expired', LatencyMS: 600000,
+          Detail: '', CreatedAt: '2026-09-09T01:10:02Z',
+        },
+      ],
+    }
+    const timeline = executionTimelineItems(expired)
+    expect(timeline[0]).toMatchObject({ kind: 'approval', title: '审批过期', subject: 'request_refund', status: 'failed' })
+    expect(timeline.some((item) => item.title === '机器人处理' || item.title === '模型调用')).toBe(false)
   })
 
   it('splits usage into input, output, and cache hit rate', () => {
@@ -163,6 +295,8 @@ describe('execution view', () => {
     expect(listRunStatus(detail.claim!)).toBe('completed')
     expect(listRunStatus({ ...detail.claim!, failed: true })).toBe('failed')
     expect(listRunStatus({ ...detail.claim!, status: 'processing', failed: true })).toBe('running')
+    expect(listRunStatus({ ...detail.claim!, status: 'failed' })).toBe('failed')
+    expect(runStatus({ ...detail, status: undefined, agent_trace: undefined, claim: { ...detail.claim!, status: 'failed' } })).toBe('failed')
   })
 
   it('applies list updates only when claim content changes', () => {

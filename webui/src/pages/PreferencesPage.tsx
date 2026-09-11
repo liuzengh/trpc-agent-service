@@ -17,7 +17,12 @@ import './PlatformDataPage.css'
 export function PreferencesPage() {
   const { apps, appsLoading, appsError, tenant, activeAppKey, user } = useAppContext()
   const selectedApp = useMemo(
-    () => apps.find((entry) => `${entry.Config.tenant_id}/${entry.Config.app_code}` === activeAppKey && entry.Config.tenant_id === tenant),
+    () =>
+      apps.find(
+        (entry) =>
+          (`${entry.Config.tenant_id}/${entry.Config.app_code}` === activeAppKey || entry.Config.app_code === activeAppKey) &&
+          entry.Config.tenant_id === tenant,
+      ),
     [activeAppKey, apps, tenant],
   )
   const appCode = selectedApp?.Config.app_code ?? ''
@@ -32,7 +37,8 @@ export function PreferencesPage() {
     queryFn: ({ signal }) => getMemories({ tenant, app: appCode, query, kind: 'fact', signal }),
     enabled: Boolean(tenant && appCode && user?.platform_user_id),
   })
-  const memories: MemoryEntry[] = memoriesQuery.data ?? []
+  const memories: MemoryEntry[] = memoriesQuery.data?.memories ?? []
+  const managedExternally = Boolean(memoriesQuery.data?.managed_externally)
 
   const removeMemory = async () => {
     if (!memoryToDelete) return
@@ -79,6 +85,12 @@ export function PreferencesPage() {
 
         {memoriesQuery.isLoading ? (
           <LoadingState label="正在读取我的偏好…" />
+        ) : managedExternally ? (
+          <EmptyState
+            icon={<MemoryIcon size={48} />}
+            title="长期偏好由外部服务托管"
+            description="当前机器人使用外部 Memory 服务。平台负责运行时接入，但不在这里直接浏览或删除外部服务中的长期偏好。"
+          />
         ) : memories.length === 0 ? (
           <EmptyState
             icon={<MemoryIcon size={48} />}

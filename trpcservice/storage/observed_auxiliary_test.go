@@ -23,7 +23,7 @@ func TestObservedExecutionDedupStoreLifecycle(t *testing.T) {
 		t.Fatalf("NewObservedExecutionDedupStore() error = %v", err)
 	}
 	ctx := context.Background()
-	result, err := store.Begin(ctx, "tenant-a", "web", "console", "message-1", "trace-1", time.Minute)
+	result, err := store.Begin(ctx, "tenant-a", "support", "web", "console", "message-1", "trace-1", time.Minute)
 	if err != nil || result != ExecutionFresh {
 		t.Fatalf("Begin() = %q, %v", result, err)
 	}

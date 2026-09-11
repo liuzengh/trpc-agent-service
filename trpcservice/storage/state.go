@@ -207,6 +207,22 @@ type OutboxEvent struct {
 	LastDeliveryError string
 }
 
+type OutboxBacklog struct {
+	Pending         int64
+	OldestCreatedAt time.Time
+}
+
+type OutboxBacklogStore interface {
+	OutboxBacklog(context.Context, string, string) (OutboxBacklog, error)
+}
+
+// OutboxRetentionStore removes only successfully delivered events after their
+// operational replay/debug window has elapsed. Pending events are never
+// eligible for retention cleanup.
+type OutboxRetentionStore interface {
+	PurgeDeliveredOutboxBefore(context.Context, string, time.Time, int) (int64, error)
+}
+
 // StateStore persists the session, audit, and outbox effects of one execution
 // atomically. Production implementations must perform RecordExecution in one
 // database transaction.
@@ -228,6 +244,9 @@ type AuditRecorder interface {
 }
 
 type AuditRetentionStore interface {
+	// PurgeAuditBefore removes expired audit records and storage-owned
+	// operational evidence that is safe to forget without weakening billing,
+	// message idempotency, or unknown-side-effect protection.
 	PurgeAuditBefore(context.Context, string, time.Time) (int64, error)
 }
 
@@ -379,7 +398,9 @@ func (s *MemoryStateStore) RecordExecution(ctx context.Context, record Execution
 		s.inboundRoutes[inboundMessageRouteKey(route.TenantID, route.Channel, route.BindingID, route.MessageID)] = route
 	}
 	if record.ModelUsage != nil {
-		s.usage[record.TenantID+"\x00"+record.Channel+"\x00"+record.BindingID+"\x00"+record.MessageID] = *record.ModelUsage
+		usage := *record.ModelUsage
+		usage.Breakdown = append([]ModelUsageSegment(nil), record.ModelUsage.Breakdown...)
+		s.usage[record.TenantID+"\x00"+record.Channel+"\x00"+record.BindingID+"\x00"+record.MessageID] = usage
 	}
 	if record.ExecutionTrace != nil {
 		s.traces[executionTraceKey(record.TenantID, record.Channel, record.BindingID, record.MessageID)] = cloneExecutionTraceRecord(ExecutionTraceRecord{
@@ -421,8 +442,53 @@ func (s *MemoryStateStore) ResolveSession(ctx context.Context, route SessionRout
 				existing.OwnerPlatformUserID = ""
 				s.sessions[key] = existing
 			}
+			return activeSession, nil
 		}
-		return activeSession, nil
+		key := tenantSessionKey(route.TenantID, activeSession)
+		existing := s.sessions[key]
+		if existing.OwnerPlatformUserID != "" && route.OwnerPlatformUserID != "" && existing.OwnerPlatformUserID != route.OwnerPlatformUserID {
+			return "", ErrSessionOwnedByAnotherUser
+		}
+		if existing.SubjectID == route.SubjectID && existing.OwnerPlatformUserID == route.OwnerPlatformUserID {
+			return activeSession, nil
+		}
+		if route.OwnerPlatformUserID != "" {
+			s.claimChannelIdentityHistoryLocked(route)
+			existing = s.sessions[key]
+			if existing.SubjectID == route.SubjectID && existing.OwnerPlatformUserID == route.OwnerPlatformUserID {
+				return activeSession, nil
+			}
+		}
+
+		now := s.now().UTC()
+		for historyKey, current := range s.conversations {
+			if current.TenantID != route.TenantID || current.SessionKey != activeSession || current.EndedAt != nil || sessionConversationRouteKey(current) != routeKey {
+				continue
+			}
+			endedAt := now
+			current.EndedAt = &endedAt
+			current.UpdatedAt = now
+			s.conversations[historyKey] = current
+		}
+		delete(s.conversationActive, routeKey)
+		activeElsewhere := false
+		for _, current := range s.conversations {
+			if current.TenantID == route.TenantID && current.SessionKey == activeSession && current.EndedAt == nil {
+				activeElsewhere = true
+				break
+			}
+		}
+		if !activeElsewhere {
+			old := s.sessions[key]
+			archivedAt := now
+			old.Status = "archived"
+			old.ArchivedAt = &archivedAt
+			old.UpdatedAt = now
+			s.sessions[key] = old
+		}
+	}
+	if route.Scope == "direct" && route.OwnerPlatformUserID != "" {
+		s.claimChannelIdentityHistoryLocked(route)
 	}
 
 	sessionKey := preferred
@@ -440,6 +506,24 @@ func (s *MemoryStateStore) ResolveSession(ctx context.Context, route SessionRout
 		}
 	}
 	return sessionKey, nil
+}
+
+func (s *MemoryStateStore) claimChannelIdentityHistoryLocked(route SessionRoute) {
+	if route.Scope != "direct" || strings.TrimSpace(route.OwnerPlatformUserID) == "" || strings.TrimSpace(route.ExternalUserID) == "" {
+		return
+	}
+	for _, conversation := range s.conversations {
+		if conversation.TenantID != route.TenantID || conversation.AppCode != route.AppCode || conversation.Channel != route.Channel ||
+			conversation.BindingID != route.BindingID || conversation.ExternalUserID != route.ExternalUserID || conversation.Scope != "direct" {
+			continue
+		}
+		key := tenantSessionKey(route.TenantID, conversation.SessionKey)
+		session := s.sessions[key]
+		if session.OwnerPlatformUserID == "" {
+			session.OwnerPlatformUserID = route.OwnerPlatformUserID
+			s.sessions[key] = session
+		}
+	}
 }
 
 func (s *MemoryStateStore) SwitchSession(ctx context.Context, request SessionSwitchRequest) (SessionSwitchResult, error) {
@@ -522,8 +606,19 @@ func (s *MemoryStateStore) ArchiveSession(ctx context.Context, tenantID, session
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if strings.TrimSpace(tenantID) == "" {
+		return fmt.Errorf("archive tenant ID is required")
+	}
+	if strings.TrimSpace(sessionKey) == "" {
+		return fmt.Errorf("archive session key is required")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	key := tenantSessionKey(tenantID, sessionKey)
+	session, found := s.sessions[key]
+	if !found {
+		return ErrSessionNotFound
+	}
 	now := s.now().UTC()
 	for key, conversation := range s.conversations {
 		if conversation.TenantID != tenantID || conversation.SessionKey != sessionKey || conversation.EndedAt != nil {
@@ -534,8 +629,6 @@ func (s *MemoryStateStore) ArchiveSession(ctx context.Context, tenantID, session
 		s.conversations[key] = conversation
 		delete(s.conversationActive, sessionConversationRouteKey(conversation))
 	}
-	key := tenantSessionKey(tenantID, sessionKey)
-	session := s.sessions[key]
 	session.TenantID = tenantID
 	session.SessionKey = sessionKey
 	session.Status = "archived"
@@ -929,6 +1022,28 @@ func (s *MemoryStateStore) ListPendingOutbox(ctx context.Context, tenantID strin
 	return events, nil
 }
 
+func (s *MemoryStateStore) OutboxBacklog(ctx context.Context, tenantID, eventType string) (OutboxBacklog, error) {
+	if err := ctx.Err(); err != nil {
+		return OutboxBacklog{}, err
+	}
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(eventType) == "" {
+		return OutboxBacklog{}, fmt.Errorf("outbox backlog tenant and event type are required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var backlog OutboxBacklog
+	for _, event := range s.outbox {
+		if event.TenantID != tenantID || event.Type != eventType || event.DeliveredAt != nil {
+			continue
+		}
+		backlog.Pending++
+		if backlog.OldestCreatedAt.IsZero() || event.CreatedAt.Before(backlog.OldestCreatedAt) {
+			backlog.OldestCreatedAt = event.CreatedAt
+		}
+	}
+	return backlog, nil
+}
+
 // MarkOutboxDelivered completes one tenant-owned outbox event.
 func (s *MemoryStateStore) MarkOutboxDelivered(ctx context.Context, tenantID, eventID string) error {
 	if err := ctx.Err(); err != nil {
@@ -946,6 +1061,45 @@ func (s *MemoryStateStore) MarkOutboxDelivered(ctx context.Context, tenantID, ev
 		s.outbox[eventID] = event
 	}
 	return nil
+}
+
+func (s *MemoryStateStore) PurgeDeliveredOutboxBefore(ctx context.Context, tenantID string, before time.Time, limit int) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return 0, fmt.Errorf("outbox retention tenant ID is required")
+	}
+	if before.IsZero() {
+		return 0, fmt.Errorf("outbox retention cutoff is required")
+	}
+	if limit <= 0 {
+		return 0, fmt.Errorf("outbox retention limit must be positive")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0)
+	for id, event := range s.outbox {
+		if event.TenantID == tenantID && event.DeliveredAt != nil && event.DeliveredAt.Before(before) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		left := s.outbox[ids[i]].DeliveredAt
+		right := s.outbox[ids[j]].DeliveredAt
+		if left.Equal(*right) {
+			return ids[i] < ids[j]
+		}
+		return left.Before(*right)
+	})
+	if len(ids) > limit {
+		ids = ids[:limit]
+	}
+	for _, id := range ids {
+		delete(s.outbox, id)
+	}
+	return int64(len(ids)), nil
 }
 
 // Redact removes common credential forms before data becomes durable audit text.
@@ -1048,4 +1202,16 @@ type ModelUsage struct {
 	CompletionTokens   int
 	TotalTokens        int
 	CostMicros         int64
+	Breakdown          []ModelUsageSegment
+}
+
+type ModelUsageSegment struct {
+	ProviderID         string `json:"provider_id"`
+	ModelName          string `json:"model_name"`
+	ReportedModel      string `json:"reported_model,omitempty"`
+	PromptTokens       int    `json:"prompt_tokens"`
+	CachedPromptTokens int    `json:"cached_prompt_tokens"`
+	CompletionTokens   int    `json:"completion_tokens"`
+	TotalTokens        int    `json:"total_tokens"`
+	CostMicros         int64  `json:"cost_micros"`
 }

@@ -182,7 +182,7 @@ func (m *Migrator) reindex(ctx context.Context, status storage.KnowledgeMigratio
 		src := &snapshotSource{name: canonical.Name, sourceType: "snapshot", metadata: metadata, documents: documents}
 		count, loadErr := m.pipeline.LoadKnowledgeSource(ctx, storage.KnowledgeLoadRequest{
 			TenantID: status.TenantID, AppCode: status.AppCode, DocumentID: canonical.DocumentID,
-			JobID: status.ID, Owner: "knowledge-migration", Backend: status.Target,
+			JobID: status.ID, Owner: "knowledge-migration", ProfileID: status.TargetProfileID, Backend: status.Target,
 		}, src)
 		if loadErr != nil {
 			return index, fmt.Errorf("reindex knowledge document %q: %w", canonical.DocumentID, loadErr)

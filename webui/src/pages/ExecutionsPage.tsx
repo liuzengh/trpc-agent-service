@@ -1,12 +1,7 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useState } from 'react'
 import { useAppContext } from '../context'
 import { ExecutionRun } from '../components/ExecutionRun'
-import {
-  ActivityIcon,
-  AlertIcon,
-  CheckCircleIcon,
-  FileTextIcon,
-} from '../components/Icons'
+import { FileTextIcon } from '../components/Icons'
 import { PanelHeader } from '../components/PanelHeader'
 import { RefreshButton } from '../components/RefreshButton'
 import { SearchField } from '../components/SearchField'
@@ -26,7 +21,9 @@ type ListFilter = 'all' | 'running' | 'completed' | 'failed'
 
 export function ExecutionsPage() {
   const { tenant, appsError, activeAppKey } = useAppContext()
-  const appCode = activeAppKey.startsWith(`${tenant}/`) ? activeAppKey.slice(tenant.length + 1) : ''
+  const appCode = activeAppKey.includes('/')
+    ? (activeAppKey.startsWith(`${tenant}/`) ? activeAppKey.slice(tenant.length + 1) : '')
+    : activeAppKey
   const feed = useExecutionFeed(tenant, appCode)
   const [filter, setFilter] = useState<ListFilter>('all')
   const [query, setQuery] = useState('')
@@ -51,10 +48,10 @@ export function ExecutionsPage() {
       {feed.error && <FeedbackBanner tone="error">{feed.error}</FeedbackBanner>}
 
       <dl className="execution-summary" aria-label="执行记录汇总">
-        <ExecutionSummaryCard icon={<FileTextIcon size={22} />} label="当前记录" value={feed.claims.length} tone="info" />
-        <ExecutionSummaryCard icon={<ActivityIcon size={22} />} label="处理中" value={processing} tone="warning" />
-        <ExecutionSummaryCard icon={<CheckCircleIcon size={22} />} label="已完成" value={completed} tone="success" />
-        <ExecutionSummaryCard icon={<AlertIcon size={22} />} label="失败" value={failed} tone="danger" />
+        <ExecutionSummaryItem label="当前记录" value={feed.claims.length} />
+        <ExecutionSummaryItem label="处理中" value={processing} tone="running" />
+        <ExecutionSummaryItem label="已完成" value={completed} tone="completed" />
+        <ExecutionSummaryItem label="失败" value={failed} tone="failed" />
       </dl>
 
       <div className="execution-workspace">
@@ -87,8 +84,9 @@ export function ExecutionsPage() {
             />
             {feed.loadingList && !feed.claims.length && <span className="toolbar-note">正在读取…</span>}
           </div>
-          <table>
-            <thead>
+          <div className="table-scroll execution-table-scroll">
+            <table className="ui-table">
+              <thead>
               <tr>
                 <th>渠道</th>
                 <th className="execution-status-column">状态</th>
@@ -125,7 +123,8 @@ export function ExecutionsPage() {
                 )
               })}
             </tbody>
-          </table>
+            </table>
+          </div>
           <div className="execution-list-footer">
             <span>{query.trim() || filter !== 'all' ? `显示 ${visibleClaims.length} / 共 ${feed.claims.length} 条` : `共 ${feed.claims.length} 条记录`}</span>
           </div>
@@ -154,25 +153,19 @@ export function ExecutionsPage() {
   )
 }
 
-function ExecutionSummaryCard({
-  icon,
+function ExecutionSummaryItem({
   label,
   value,
-  tone,
+  tone = 'default',
 }: {
-  icon: ReactNode
   label: string
   value: number
-  tone: 'info' | 'warning' | 'success' | 'danger'
+  tone?: 'default' | 'running' | 'completed' | 'failed'
 }) {
   return (
-    <div className={`execution-summary-card tone-${tone}`}>
-      <span className="execution-summary-icon" aria-hidden="true">{icon}</span>
-      <div>
-        <dt>{label}</dt>
-        <dd>{value}</dd>
-      </div>
-      <span className="execution-summary-decoration" aria-hidden="true" />
+    <div className={`execution-summary-item tone-${tone}`}>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
     </div>
   )
 }

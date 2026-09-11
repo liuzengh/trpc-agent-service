@@ -23,7 +23,7 @@ async function clickWeComLogin(page) {
   await button.click()
   await page.waitForURL(/\/console\/?(?:\?.*)?$/, { timeout: 20000 })
   await page.waitForSelector('.sidebar-user-name', { timeout: 15000 })
-  expect((await page.getByRole('tab', { name: '租户', exact: true }).count()) === 1, '企微引导账号应获得系统管理导航权限')
+  expect((await page.getByRole('tab', { name: '租户', exact: true }).count()) === 0, '外部登录身份不应隐式获得系统管理员权限')
 }
 
 async function scenarioMock(page) {
@@ -35,12 +35,17 @@ async function scenarioMock(page) {
   await page.waitForURL(/\/console\/?(?:\?.*)?$/, { timeout: 10000 })
   await page.waitForSelector('.sidebar-user-name', { timeout: 10000 })
   expect((await page.locator('.sidebar-user-name').innerText()).trim() === 'Mock Admin', 'Mock 登录用户应为默认测试用户')
-  expect((await page.getByRole('tab', { name: '租户', exact: true }).count()) === 1, '默认 Mock 测试用户应获得系统管理导航权限')
+  expect((await page.getByRole('tab', { name: '租户', exact: true }).count()) === 0, 'Mock 身份只用于测试登录，不应隐式获得系统管理员权限')
 }
 
 async function scenarioWeCom(page) {
   await clickWeComLogin(page)
-  await page.getByRole('combobox', { name: '当前机器人' }).waitFor({ timeout: 15000 })
+  expect((await page.getByRole('combobox', { name: '当前机器人' }).count()) === 0, '零租户外部登录用户不应看到机器人选择器')
+  await page.getByLabel('打开账号菜单').click()
+  await page.getByRole('button', { name: '账号设置', exact: true }).click()
+  const accountHeading = page.getByRole('heading', { name: '账号', exact: true })
+  await accountHeading.waitFor({ timeout: 10000 })
+  expect(await accountHeading.isVisible(), '零租户外部登录用户仍应能进入账号设置')
 
   await page.getByLabel('打开账号菜单').click()
   await page.getByRole('button', { name: '退出登录', exact: true }).click()
@@ -51,7 +56,7 @@ async function scenarioWeCom(page) {
 async function scenarioExpiry(page) {
   await clickWeComLogin(page)
   await page.waitForTimeout(7000)
-  await page.locator('.nav-item', { hasText: '执行记录' }).first().click()
+  await page.getByRole('button', { name: '账号设置', exact: true }).click()
   await page.waitForURL(/expired=1/, { timeout: 10000 })
   const banner = page.locator('.error-banner')
   await banner.waitFor({ timeout: 10000 })

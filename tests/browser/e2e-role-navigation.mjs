@@ -48,14 +48,15 @@ try {
 
   assert.equal(await nav.getByText('工作区', { exact: true }).count(), 1)
   assert.equal(await nav.getByText('对话', { exact: true }).count(), 1)
-  assert.equal(await nav.getByText('我的会话', { exact: true }).count(), 1)
+  assert.equal(await nav.getByText('我的偏好', { exact: true }).count(), 1)
+  assert.equal(await nav.getByText('我的会话', { exact: true }).count(), 0)
   assert.equal(await nav.getByText('机器人', { exact: true }).count(), 0)
-  assert.equal(await nav.getByText('知识与偏好', { exact: true }).count(), 0)
+  assert.equal(await nav.getByText('知识库', { exact: true }).count(), 0)
   assert.equal(await nav.getByText('执行记录', { exact: true }).count(), 0)
   assert.equal(await nav.getByText('模型资产', { exact: true }).count(), 0)
   assert.equal(await nav.getByText('系统状态', { exact: true }).count(), 0)
   assert.equal(await page.getByText('系统管理员', { exact: true }).count(), 0)
-  assert.equal(await page.getByText('普通成员', { exact: true }).count(), 1)
+  assert.equal(await page.getByText('租户成员', { exact: true }).count(), 1)
   assert.equal(await page.getByRole('button', { name: '新建机器人' }).count(), 0)
   assert.equal(await page.getByRole('button', { name: '新建', exact: true }).count(), 0)
 

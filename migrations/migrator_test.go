@@ -102,6 +102,51 @@ func TestSplitStatementsKeepsSemicolonsInDollarQuotedBodies(t *testing.T) {
 	}
 }
 
+func TestSplitStatementsSupportsTaggedDollarQuotes(t *testing.T) {
+	t.Parallel()
+	source := "CREATE FUNCTION f() RETURNS void AS $fn_1$ BEGIN PERFORM 1; PERFORM '$x$'; END; $fn_1$ LANGUAGE plpgsql; SELECT 2;"
+	statements := splitStatements(source)
+	if len(statements) != 2 || !strings.Contains(statements[0], "$fn_1$ BEGIN PERFORM 1; PERFORM '$x$'; END; $fn_1$") || statements[1] != "SELECT 2" {
+		t.Fatalf("tagged dollar statements = %#v", statements)
+	}
+}
+
+func TestDollarQuoteDelimiterValidation(t *testing.T) {
+	t.Parallel()
+	valid := map[string]string{
+		"$$body$$":       "$$",
+		"$fn$body$fn$":   "$fn$",
+		"$_x1$body$_x1$": "$_x1$",
+		"$A9$body$A9$":   "$A9$",
+	}
+	for input, want := range valid {
+		got, ok := dollarQuoteDelimiter(input)
+		if !ok || got != want {
+			t.Fatalf("dollarQuoteDelimiter(%q) = %q, %v; want %q, true", input, got, ok, want)
+		}
+	}
+	for _, input := range []string{"", "$", "x$tag$", "$1bad$", "$bad-tag$", "$unterminated"} {
+		if got, ok := dollarQuoteDelimiter(input); ok || got != "" {
+			t.Fatalf("dollarQuoteDelimiter(%q) = %q, %v; want invalid", input, got, ok)
+		}
+	}
+	for _, value := range []byte{'a', 'Z', '_'} {
+		if !isDollarQuoteTagStart(value) {
+			t.Fatalf("isDollarQuoteTagStart(%q) = false", value)
+		}
+	}
+	for _, value := range []byte{'0', '9'} {
+		if isDollarQuoteTagStart(value) || !isDollarQuoteTagPart(value) {
+			t.Fatalf("tag digit classification for %q is wrong", value)
+		}
+	}
+	for _, value := range []byte{'-', ' ', '$'} {
+		if isDollarQuoteTagPart(value) {
+			t.Fatalf("isDollarQuoteTagPart(%q) = true", value)
+		}
+	}
+}
+
 func TestSplitStatementsIgnoresNestedBlockCommentSemicolons(t *testing.T) {
 	t.Parallel()
 	source := "/* outer; /* inner; */ still outer; */ SELECT 1;"

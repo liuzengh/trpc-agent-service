@@ -1,11 +1,12 @@
 import {
-  outboxReplyText,
+	 outboxReplyPayload,
   type AuditEvent,
   type Claim,
   type ExecutionTrace,
   type ChatRequest,
   type Snapshot,
   type SSEEvent,
+  type InteractiveCard,
   type SystemStatus,
   type ModelConfig,
   type ToolPolicy,
@@ -57,6 +58,16 @@ export interface TenantModelGrant {
 export interface TenantModelPolicy {
   tenant_id: string
   models: TenantModelGrant[]
+}
+
+export interface TenantToolGrant {
+  name: string
+}
+
+export interface TenantToolPolicy {
+  tenant_id: string
+  tools: TenantToolGrant[]
+  catalog: import('./types').ToolInfo[]
 }
 
 export interface TenantBackendPolicy {
@@ -196,8 +207,10 @@ async function requestResponse(path: string, init?: RequestInit): Promise<Respon
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await requestResponse(path, init)
-  if (response.status === 204) return undefined as T
-  return (await response.json()) as T
+  if (response.status === 204 || response.status === 205) return undefined as T
+  const body = await response.text()
+  if (!body.trim()) return undefined as T
+  return JSON.parse(body) as T
 }
 
 // ---- 登录域 -------------------------------------------------------------
@@ -269,8 +282,8 @@ export function createTenant(tenant_id: string, display_name: string, initial_ad
 }
 
 export function updateTenantStatus(tenant_id: string, status: 'active' | 'suspended'): Promise<void> {
-  return request<void>('/api/v1/tenants', {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenant_id, status }),
+  return request<void>(`/api/v1/tenants/${encodeURIComponent(tenant_id)}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }),
   })
 }
 
@@ -289,20 +302,41 @@ export function replaceTenantModelPolicy(tenant: string, models: TenantModelGran
   })
 }
 
+export function getTenantToolPolicy(tenant: string, signal?: AbortSignal): Promise<TenantToolPolicy> {
+  return request<TenantToolPolicy>(`/api/v1/tenant-tool-policy?tenant=${encodeURIComponent(tenant)}`, { signal }).then((result) => ({
+    tenant_id: result.tenant_id,
+    tools: result.tools ?? [],
+    catalog: result.catalog ?? [],
+  }))
+}
+
+export function replaceTenantToolPolicy(tenant: string, tools: TenantToolGrant[]): Promise<TenantToolPolicy> {
+  return request<TenantToolPolicy>(`/api/v1/tenant-tool-policy?tenant=${encodeURIComponent(tenant)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tenant_id: tenant, tools }),
+  }).then((result) => ({ tenant_id: result.tenant_id, tools: result.tools ?? [], catalog: result.catalog ?? [] }))
+}
+
+export function getBackendDrivers(signal?: AbortSignal): Promise<import('./types').BackendDriverSpec[]> {
+  return request<{ drivers: import('./types').BackendDriverSpec[] }>('/api/v1/backend-drivers', { signal })
+    .then((result) => result.drivers ?? [])
+}
+
 export function getBackendProfiles(signal?: AbortSignal): Promise<import('./types').BackendProfile[]> {
   return request<{ profiles: import('./types').BackendProfile[] }>('/api/v1/backend-profiles', { signal })
     .then((result) => result.profiles ?? [])
 }
 
-export function createBackendProfile(profile: Pick<import('./types').BackendProfile, 'profile_id' | 'display_name' | 'driver'> & { connection_ref?: string }): Promise<import('./types').BackendProfile> {
+export function createBackendProfile(profile: Pick<import('./types').BackendProfile, 'profile_id' | 'display_name' | 'driver' | 'domains'> & { connection_ref?: string }): Promise<import('./types').BackendProfile> {
   return request<import('./types').BackendProfile>('/api/v1/backend-profiles', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profile),
   })
 }
 
-export function updateBackendProfile(profileID: string, profile: Pick<import('./types').BackendProfile, 'display_name' | 'driver' | 'status'> & { connection_ref?: string }): Promise<import('./types').BackendProfile> {
+export function updateBackendProfile(profileID: string, profile: Pick<import('./types').BackendProfile, 'display_name' | 'status'>): Promise<import('./types').BackendProfile> {
   return request<import('./types').BackendProfile>(`/api/v1/backend-profiles/${encodeURIComponent(profileID)}`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...profile, profile_id: profileID }),
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profile),
   })
 }
 
@@ -606,14 +640,15 @@ export function getMemories(params: {
   timeBefore?: string
   order?: 'event_time'
   signal?: AbortSignal
-}): Promise<MemoryEntry[]> {
+}): Promise<{ memories: MemoryEntry[]; managed_externally: boolean }> {
   const query = new URLSearchParams({ tenant: params.tenant, app: params.app })
   if (params.query?.trim()) query.set('query', params.query.trim())
   if (params.kind) query.set('kind', params.kind)
   if (params.timeAfter) query.set('time_after', params.timeAfter)
   if (params.timeBefore) query.set('time_before', params.timeBefore)
   if (params.order) query.set('order', params.order)
-  return request<{ memories: MemoryEntry[] }>(`/api/v1/memory?${query}`, { signal: params.signal }).then((result) => result.memories)
+  return request<{ memories: MemoryEntry[]; managed_externally?: boolean }>(`/api/v1/memory?${query}`, { signal: params.signal })
+    .then((result) => ({ memories: result.memories ?? [], managed_externally: Boolean(result.managed_externally) }))
 }
 
 export function deleteMemory(tenant: string, app: string, memoryId: string): Promise<void> {
@@ -760,6 +795,7 @@ class RetryableChatStreamError extends Error {}
 interface ChatStreamResult {
   lastEventID: string
   reply: string
+  card?: InteractiveCard
   done: boolean
   sawDelta: boolean
 }
@@ -769,6 +805,7 @@ interface ChatStreamResult {
 // occurs. Event IDs prevent duplicate delta rendering after a reconnect.
 export interface ChatResult {
   reply: string
+  card?: InteractiveCard
   eventId: string
   sessionKey: string
 }
@@ -802,11 +839,12 @@ export async function postChat(
   if (!queued.stream_url) throw new ApiError(500, 'chat stream URL missing')
   const eventId = queued.event_id ?? requestId
   const sessionKey = queued.session_key ?? ''
-  const resultOf = (text: string): ChatResult => ({ reply: text, eventId, sessionKey })
+  const resultOf = (text: string, card?: InteractiveCard): ChatResult => ({ reply: text, card, eventId, sessionKey })
 
   let lastEventID = ''
   let sawDelta = false
   let reply = ''
+  let card: InteractiveCard | undefined
   const seenEventIDs = new Set<string>()
   for (let attempt = 0; attempt < CHAT_STREAM_MAX_ATTEMPTS; attempt += 1) {
     try {
@@ -814,9 +852,10 @@ export async function postChat(
       lastEventID = result.lastEventID
       sawDelta = sawDelta || result.sawDelta
       if (result.reply) reply = result.reply
+      if (result.card) card = result.card
       if (result.done) {
         if (!sawDelta && result.reply) onDelta(result.reply)
-        return resultOf(result.reply)
+        return resultOf(result.reply, result.card)
       }
     } catch (error) {
       if (signal?.aborted || (error as Error).name === 'AbortError') throw error
@@ -832,10 +871,11 @@ export async function postChat(
       const trace = await getExecution(body.tenant_id, 'web', 'web-console', eventId, sessionKey)
       if (trace.outbox && trace.outbox.length > 0) {
         for (const out of trace.outbox) {
-          const text = outboxReplyText(out.Payload)
-          if (text) {
+          const payload = outboxReplyPayload(out.Payload)
+          if (payload && (payload.text || payload.card)) {
+            const text = payload.text
             if (!sawDelta) onDelta(text)
-            return resultOf(text)
+            return resultOf(text, payload.card)
           }
         }
       }
@@ -844,7 +884,7 @@ export async function postChat(
     }
   }
 
-  if (reply) return resultOf(reply)
+  if (reply || card) return resultOf(reply, card)
   throw new ApiError(504, 'chat stream reconnect limit reached')
 }
 
@@ -865,6 +905,7 @@ async function readChatStream(
   let buffer = ''
   let nextEventID = lastEventID
   let reply = ''
+  let card: InteractiveCard | undefined
   let sawDelta = false
   for (;;) {
     const { done, value } = await reader.read()
@@ -911,7 +952,8 @@ async function readChatStream(
         onDelta(event.content)
       } else if (event.type === 'done') {
         const finalReply = event.reply || reply
-        return { lastEventID: nextEventID, reply: finalReply, done: true, sawDelta }
+        card = event.card
+        return { lastEventID: nextEventID, reply: finalReply, card, done: true, sawDelta }
       } else if (event.type === 'error') {
         const message = event.message ?? 'agent execution failed'
         if (message.includes('timed out') || message.includes('stream closed')) {

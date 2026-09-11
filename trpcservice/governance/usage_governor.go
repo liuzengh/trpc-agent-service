@@ -56,6 +56,13 @@ type UsageGovernor interface {
 	SettleUnknown(context.Context, UsageReservation) error
 }
 
+// UsageReservationRetention owns bounded cleanup of the ephemeral reservation
+// table. Durable historical usage lives in model_usage_ledger; reservations
+// exist only to coordinate concurrency and the current token-budget window.
+type UsageReservationRetention interface {
+	PurgeUsageReservationsBefore(context.Context, string, string, time.Time, int) (int64, error)
+}
+
 type PostgresUsageGovernor struct {
 	database *sql.DB
 	now      func() time.Time
@@ -173,6 +180,45 @@ func (g *PostgresUsageGovernor) SettleKnown(ctx context.Context, reservation Usa
 func (g *PostgresUsageGovernor) SettleUnknown(ctx context.Context, reservation UsageReservation) error {
 	return g.settle(ctx, reservation, false, SettledUsage{})
 }
+
+func (g *PostgresUsageGovernor) PurgeUsageReservationsBefore(ctx context.Context, tenantID, appCode string, before time.Time, limit int) (int64, error) {
+	tenantID, appCode = strings.TrimSpace(tenantID), strings.TrimSpace(appCode)
+	if tenantID == "" || appCode == "" || before.IsZero() || limit <= 0 {
+		return 0, errors.New("usage reservation retention requires tenant, app, cutoff and positive limit")
+	}
+	tx, err := dbscope.BeginTenantTransaction(ctx, g.database, tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("begin usage reservation retention: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
+WITH candidates AS (
+    SELECT reservation_id
+    FROM model_usage_reservations
+    WHERE tenant_id = $1 AND app_code = $2 AND period_start < $3
+      AND (status <> 'pending' OR lease_until <= $4)
+    ORDER BY period_start, reservation_id
+    LIMIT $5
+    FOR UPDATE SKIP LOCKED
+)
+DELETE FROM model_usage_reservations AS reservation
+USING candidates
+WHERE reservation.reservation_id = candidates.reservation_id`,
+		tenantID, appCode, before.UTC(), g.now().UTC(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("purge model usage reservations: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("inspect model usage reservation retention: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit model usage reservation retention: %w", err)
+	}
+	return deleted, nil
+}
+
+var _ UsageReservationRetention = (*PostgresUsageGovernor)(nil)
 
 func (g *PostgresUsageGovernor) settle(ctx context.Context, reservation UsageReservation, known bool, usage SettledUsage) error {
 	if strings.TrimSpace(reservation.ID) == "" || strings.TrimSpace(reservation.TenantID) == "" {

@@ -6,6 +6,7 @@ import {
   formatChatListTime,
   messagesFromTranscript,
   threadFromSession,
+  visibleUserMessage,
   useChatWorkspace,
   type ChatMessage,
   type ChatThread,
@@ -13,6 +14,7 @@ import {
 import type { ChatRequest } from '../types'
 import { AlertIcon, BotIcon, ChevronDownIcon, FileTextIcon, PaperclipIcon, SendIcon, TrashIcon, XIcon } from '../components/Icons'
 import { FeedbackBanner } from '../components/FeedbackBanner'
+import { ChatCard } from '../components/ChatCard'
 import { Toast, type ToastTone } from '../components/Toast'
 import { useDismissibleLayer } from '../hooks/useDismissibleLayer'
 
@@ -32,7 +34,10 @@ export function ChatPage() {
     [apps, tenant],
   )
   const selected = useMemo(
-    () => activeApps.find((app) => `${app.Config.tenant_id}/${app.Config.app_code}` === activeAppKey) ?? activeApps[0],
+    () =>
+      activeApps.find(
+        (app) => `${app.Config.tenant_id}/${app.Config.app_code}` === activeAppKey || app.Config.app_code === activeAppKey,
+      ) ?? activeApps[0],
     [activeApps, activeAppKey],
   )
   const tenantId = selected?.Config.tenant_id ?? ''
@@ -220,7 +225,7 @@ export function ChatPage() {
       )
       if (streamTimer) window.clearTimeout(streamTimer)
       flushStream()
-      updateMessage(workspaceKey, threadId, assistantId, (message) => ({ ...message, content: result.reply || message.content }))
+      updateMessage(workspaceKey, threadId, assistantId, (message) => ({ ...message, content: result.reply || message.content, card: result.card }))
       if (result.sessionKey) setThreadSession(workspaceKey, threadId, result.sessionKey)
     } catch (error) {
       cancelBufferedStream()
@@ -477,6 +482,9 @@ const ChatMessageRow = memo(function ChatMessageRow({
   assistantName: string
   streaming: boolean
 }) {
+  const visible = message.role === 'user'
+    ? visibleUserMessage(message.content, message.attachments)
+    : { content: message.content, attachments: message.attachments }
   return (
     <div className={`msg ${message.role}`}>
       {message.role === 'user' ? (
@@ -491,9 +499,9 @@ const ChatMessageRow = memo(function ChatMessageRow({
           <span className="msg-name">{message.role === 'user' ? '你' : message.role === 'assistant' ? assistantName : '执行错误'}</span>
           <span className="msg-time">{message.time}</span>
         </div>
-        {message.attachments && message.attachments.length > 0 && (
+        {visible.attachments && visible.attachments.length > 0 && (
           <div className="message-attachments">
-            {message.attachments.map((attachment) => (
+            {visible.attachments.map((attachment) => (
               <span key={`${attachment.name}-${attachment.size}`} className="message-attachment">
                 <FileTextIcon size={13} />
                 <span>{attachment.name}</span>
@@ -501,17 +509,27 @@ const ChatMessageRow = memo(function ChatMessageRow({
             ))}
           </div>
         )}
-        {message.content ? (
+        {visible.content ? (
           <div className={`msg-text ${message.role === 'assistant' ? 'is-markdown' : ''}`}>
             {message.role === 'assistant' ? (
-              <Suspense fallback={<span>{message.content}</span>}>
-                <Markdown content={message.content} />
+              <Suspense fallback={<span>{visible.content}</span>}>
+                <Markdown content={visible.content} />
               </Suspense>
-            ) : message.content}
+            ) : visible.content}
           </div>
         ) : message.role === 'assistant' && streaming ? (
           <div className="msg-text"><span className="thinking">正在思考…</span></div>
         ) : null}
+        {message.role === 'assistant' && message.card && (
+          <ChatCard
+            card={message.card}
+            body={(
+              <Suspense fallback={<span>{message.card.body}</span>}>
+                <Markdown content={message.card.body} />
+              </Suspense>
+            )}
+          />
+        )}
       </div>
     </div>
   )

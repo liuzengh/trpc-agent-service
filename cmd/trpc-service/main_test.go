@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -54,5 +55,15 @@ func TestRunCommandRejectsUnknownCommand(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "unknown command") {
 		t.Fatalf("runCommand() error = %v, want unknown command", err)
+	}
+}
+
+func TestRunMigrationsAppliesCurrentBaseline(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("TEST_POSTGRES_DSN is not set")
+	}
+	if err := runMigrations(context.Background(), mapEnvironment(map[string]string{"DATABASE_URL": dsn})); err != nil {
+		t.Fatalf("runMigrations() error = %v", err)
 	}
 }

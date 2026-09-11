@@ -3,8 +3,11 @@ package governance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
 )
 
@@ -25,13 +28,17 @@ func (RoleApprovalReviewer) Review(ctx context.Context, _ *review.Request) (*rev
 // The Worker never sees channel credentials; it only waits for a decision.
 type InteractiveApprovalReviewer struct {
 	broker ApprovalRequester
+	audits storage.AuditRecorder
 }
 
-func NewInteractiveApprovalReviewer(broker ApprovalRequester) (*InteractiveApprovalReviewer, error) {
+func NewInteractiveApprovalReviewer(broker ApprovalRequester, audits storage.AuditRecorder) (*InteractiveApprovalReviewer, error) {
 	if broker == nil {
 		return nil, errors.New("interactive approval broker is required")
 	}
-	return &InteractiveApprovalReviewer{broker: broker}, nil
+	if audits == nil {
+		return nil, errors.New("interactive approval audit recorder is required")
+	}
+	return &InteractiveApprovalReviewer{broker: broker, audits: audits}, nil
 }
 
 func (r *InteractiveApprovalReviewer) Review(ctx context.Context, request *review.Request) (*review.Decision, error) {
@@ -41,20 +48,63 @@ func (r *InteractiveApprovalReviewer) Review(ctx context.Context, request *revie
 	}
 	execution := invocation.Execution
 	if execution.Channel == "web" {
-		return (RoleApprovalReviewer{}).Review(ctx, request)
+		if err := r.recordAudit(ctx, execution, request.Action.ToolName, "approval.rejected", "rejected", "web_approval_unavailable", 0, time.Now().UTC()); err != nil {
+			return nil, err
+		}
+		return &review.Decision{Approved: false, RiskLevel: "high", Reason: "web interactive approval is unavailable"}, nil
+	}
+	started := time.Now().UTC()
+	if err := r.recordAudit(ctx, execution, request.Action.ToolName, "approval.requested", "pending", "", 0, started); err != nil {
+		return nil, err
 	}
 	approved, err := r.broker.Request(ctx, ApprovalRequest{
 		TenantID: execution.TenantID, AppCode: execution.AppCode, ConfigVersion: execution.ConfigVersion,
+		RequestID: execution.RequestID, TraceID: execution.TraceID,
 		Channel: execution.Channel, BindingID: execution.BindingID, ConversationID: execution.ConversationID,
 		ConversationScope: execution.ConversationScope, ExternalUserID: execution.ExternalUserID,
+		RequesterUserID:   execution.UserID,
 		ProgressMessageID: execution.ProgressMessageID, ProviderReplyToken: execution.ProviderReplyToken,
 		ToolName: request.Action.ToolName, ToolDescription: request.Action.ToolDescription,
 	})
 	if err != nil {
+		if errors.Is(err, ErrApprovalExpired) {
+			if auditErr := r.recordAudit(ctx, execution, request.Action.ToolName, "approval.expired", "rejected", "approval_expired", time.Since(started), time.Now().UTC()); auditErr != nil {
+				return nil, errors.Join(err, auditErr)
+			}
+			return &review.Decision{Approved: false, RiskLevel: "high", Reason: "approval request expired"}, nil
+		}
+		if auditErr := r.recordAudit(ctx, execution, request.Action.ToolName, "approval.failed", "failed", "approval_failed", time.Since(started), time.Now().UTC()); auditErr != nil {
+			return nil, errors.Join(err, auditErr)
+		}
 		return nil, err
 	}
 	if !approved {
+		if err := r.recordAudit(ctx, execution, request.Action.ToolName, "approval.rejected", "rejected", "", time.Since(started), time.Now().UTC()); err != nil {
+			return nil, err
+		}
 		return &review.Decision{Approved: false, RiskLevel: "high", Reason: "user rejected tool execution"}, nil
 	}
+	if err := r.recordAudit(ctx, execution, request.Action.ToolName, "approval.approved", "approved", "", time.Since(started), time.Now().UTC()); err != nil {
+		return nil, err
+	}
 	return &review.Decision{Approved: true, RiskLevel: "low", Reason: "user approved tool execution"}, nil
+}
+
+func (r *InteractiveApprovalReviewer) recordAudit(
+	ctx context.Context,
+	execution ExecutionContext,
+	toolName, action, decision, errorType string,
+	latency time.Duration,
+	createdAt time.Time,
+) error {
+	if err := r.audits.RecordAudit(ctx, storage.AuditEvent{
+		TenantID: execution.TenantID, TraceID: execution.TraceID, RequestID: execution.RequestID,
+		Channel: execution.Channel, UserID: execution.UserID, SessionID: execution.SessionID,
+		AgentName: execution.AgentName, ToolName: toolName,
+		Action: action, Result: decision, Decision: decision, ErrorType: errorType,
+		LatencyMS: latency.Milliseconds(), CreatedAt: createdAt,
+	}); err != nil {
+		return fmt.Errorf("record approval audit: %w", err)
+	}
+	return nil
 }

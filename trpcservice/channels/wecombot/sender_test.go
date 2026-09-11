@@ -64,8 +64,8 @@ func TestSenderStreamsAgainstInboundReplyToken(t *testing.T) {
 	if stream["id"] != receipt.ExternalMessageID || stream["finish"] != false {
 		t.Fatalf("progress stream = %#v", stream)
 	}
-	if _, exists := stream["content"]; exists {
-		t.Fatalf("initial progress must not render placeholder content: %#v", stream)
+	if stream["content"] != "正在处理…" {
+		t.Fatalf("initial progress content = %#v, want a visible processing state", stream["content"])
 	}
 	if err := sender.UpdateProgress(context.Background(), target, receipt.ExternalMessageID, "已经完成一半"); err != nil {
 		t.Fatalf("UpdateProgress() error = %v", err)
@@ -168,6 +168,35 @@ func TestSenderAddsApprovalCardToExistingProgressStream(t *testing.T) {
 		if sent.command == "aibot_send_msg" {
 			t.Fatalf("approval created a second visible message: %#v", sent)
 		}
+	}
+}
+
+func TestSenderApprovalCardKeepsInitialProgressVisibleWithoutModelText(t *testing.T) {
+	requester := &fakeRequester{}
+	sender := newSender(requester, 16<<20)
+	target := channels.ReplyTarget{
+		Channel: channels.WeCom, ConversationID: "chat-1", ProviderReplyToken: "callback-req-1",
+	}
+	receipt, err := sender.StartProgress(context.Background(), target)
+	if err != nil {
+		t.Fatalf("StartProgress() error = %v", err)
+	}
+	card := channels.InteractiveCard{
+		Title: "确认执行操作", Body: "提交退款申请",
+		Actions: []channels.CardAction{
+			{ActionID: "approval:approve:token-1", Label: "确认执行", Style: "primary"},
+			{ActionID: "approval:reject:token-1", Label: "取消", Style: "danger"},
+		},
+	}
+	if err := sender.UpdateProgressCard(context.Background(), target, receipt.ExternalMessageID, card); err != nil {
+		t.Fatalf("UpdateProgressCard() error = %v", err)
+	}
+	if len(requester.calls) != 2 {
+		t.Fatalf("calls = %#v, want start + approval update", requester.calls)
+	}
+	stream, _ := requester.calls[1].body["stream"].(map[string]any)
+	if stream["content"] != "正在处理…" || stream["finish"] != false {
+		t.Fatalf("approval stream = %#v, want visible unfinished progress", stream)
 	}
 }
 

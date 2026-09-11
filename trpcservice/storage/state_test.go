@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -67,6 +68,35 @@ func TestMemoryStateStoreAtomicallyRecordsSessionAuditAndOutbox(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Fatalf("pending outbox after delivery = %d, want 0", len(pending))
+	}
+}
+
+func TestMemoryStateStoreArchiveSessionMatchesPostgresContract(t *testing.T) {
+	t.Parallel()
+	store := NewMemoryStateStore()
+	if err := store.ArchiveSession(context.Background(), "", "session-1"); err == nil {
+		t.Fatal("ArchiveSession() accepted empty tenant")
+	}
+	if err := store.ArchiveSession(context.Background(), "tenant-a", ""); err == nil {
+		t.Fatal("ArchiveSession() accepted empty session key")
+	}
+	if err := store.ArchiveSession(context.Background(), "tenant-a", "missing-session"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("ArchiveSession(missing) error = %v, want ErrSessionNotFound", err)
+	}
+
+	sessionKey, err := store.ResolveSession(context.Background(), SessionRoute{
+		TenantID: "tenant-a", AppCode: "support", Channel: "web", BindingID: "web-console",
+		ConversationID: "conversation-archive", ExternalUserID: "support-user", SubjectID: "support-user", Scope: "direct",
+	}, "tenant-a/support/session/archive-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ArchiveSession(context.Background(), "tenant-a", sessionKey); err != nil {
+		t.Fatalf("ArchiveSession() error = %v", err)
+	}
+	archived, err := store.GetSession(context.Background(), "tenant-a", sessionKey)
+	if err != nil || archived.Status != "archived" || archived.ArchivedAt == nil {
+		t.Fatalf("archived session = %+v, %v", archived, err)
 	}
 }
 
@@ -159,6 +189,92 @@ func TestMemoryStateStoreEndOwnedRouteStartsNewChannelSession(t *testing.T) {
 	}
 	if first == second {
 		t.Fatalf("ended channel route unexpectedly reused session %q", first)
+	}
+}
+
+func TestMemoryStateStorePromotesAnonymousDirectIdentityWithoutChangingHistoricalSubject(t *testing.T) {
+	store := NewMemoryStateStore()
+	ctx := context.Background()
+	anonymousRoute := SessionRoute{
+		TenantID: "trailforge", AppCode: "assistant", Channel: "telegram", BindingID: "tg-main",
+		ConversationID: "42", ExternalUserID: "42", SubjectID: "external:telegram:tg-main:42", Scope: "direct",
+	}
+	oldKey := "trailforge/assistant/session/anonymous"
+	if resolved, err := store.ResolveSession(ctx, anonymousRoute, oldKey); err != nil || resolved != oldKey {
+		t.Fatalf("anonymous ResolveSession() = %q, %v", resolved, err)
+	}
+
+	linkedRoute := anonymousRoute
+	linkedRoute.SubjectID = "platform-1"
+	linkedRoute.OwnerPlatformUserID = "platform-1"
+	newKey := "trailforge/assistant/session/canonical"
+	resolved, err := store.ResolveSession(ctx, linkedRoute, newKey)
+	if err != nil || resolved != newKey {
+		t.Fatalf("linked ResolveSession() = %q, %v; want %q", resolved, err, newKey)
+	}
+	oldSession, err := store.GetSession(ctx, "trailforge", oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldSession.SubjectID != anonymousRoute.SubjectID || oldSession.OwnerPlatformUserID != "platform-1" || oldSession.Status != "archived" {
+		t.Fatalf("claimed historical session = %+v", oldSession)
+	}
+	newSession, err := store.GetSession(ctx, "trailforge", newKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newSession.SubjectID != "platform-1" || newSession.OwnerPlatformUserID != "platform-1" || newSession.Status != "active" {
+		t.Fatalf("canonical session = %+v", newSession)
+	}
+	if again, err := store.ResolveSession(ctx, linkedRoute, "trailforge/assistant/session/unused"); err != nil || again != newKey {
+		t.Fatalf("canonical route reuse = %q, %v; want %q", again, err, newKey)
+	}
+}
+
+func TestMemoryStateStoreDoesNotExposeOwnedDirectSessionAfterIdentityBecomesAnonymous(t *testing.T) {
+	store := NewMemoryStateStore()
+	ctx := context.Background()
+	ownedRoute := SessionRoute{
+		TenantID: "trailforge", AppCode: "assistant", Channel: "telegram", BindingID: "tg-main",
+		ConversationID: "42", ExternalUserID: "42", SubjectID: "platform-1", OwnerPlatformUserID: "platform-1", Scope: "direct",
+	}
+	ownedKey := "trailforge/assistant/session/owned"
+	if resolved, err := store.ResolveSession(ctx, ownedRoute, ownedKey); err != nil || resolved != ownedKey {
+		t.Fatalf("owned ResolveSession() = %q, %v", resolved, err)
+	}
+
+	anonymousRoute := ownedRoute
+	anonymousRoute.SubjectID = "external:telegram:tg-main:42"
+	anonymousRoute.OwnerPlatformUserID = ""
+	anonymousKey := "trailforge/assistant/session/anonymous-after-unlink"
+	resolved, err := store.ResolveSession(ctx, anonymousRoute, anonymousKey)
+	if err != nil || resolved != anonymousKey {
+		t.Fatalf("anonymous ResolveSession() = %q, %v; want %q", resolved, err, anonymousKey)
+	}
+	oldSession, err := store.GetSession(ctx, "trailforge", ownedKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldSession.Status != "archived" || oldSession.OwnerPlatformUserID != "platform-1" {
+		t.Fatalf("previous owned session = %+v", oldSession)
+	}
+}
+
+func TestMemoryStateStoreRejectsDirectSessionOwnerTakeover(t *testing.T) {
+	store := NewMemoryStateStore()
+	ctx := context.Background()
+	first := SessionRoute{
+		TenantID: "trailforge", AppCode: "assistant", Channel: "telegram", BindingID: "tg-main",
+		ConversationID: "42", ExternalUserID: "42", SubjectID: "platform-1", OwnerPlatformUserID: "platform-1", Scope: "direct",
+	}
+	if _, err := store.ResolveSession(ctx, first, "trailforge/assistant/session/owned"); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.SubjectID = "platform-2"
+	second.OwnerPlatformUserID = "platform-2"
+	if _, err := store.ResolveSession(ctx, second, "trailforge/assistant/session/other"); !errors.Is(err, ErrSessionOwnedByAnotherUser) {
+		t.Fatalf("owner takeover error = %v, want ErrSessionOwnedByAnotherUser", err)
 	}
 }
 

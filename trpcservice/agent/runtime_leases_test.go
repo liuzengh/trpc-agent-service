@@ -38,7 +38,7 @@ func (s *failingSessionLeaseStore) AcquireSessionExecutionLease(context.Context,
 	return storage.SessionExecutionLease{}, errSessionLeaseUnavailable
 }
 
-func TestAcquireExecutionLeasesRollsBackPartialClaims(t *testing.T) {
+func TestAcquireExecutionLeasesKeepsFailedClaimRetryable(t *testing.T) {
 	idempotency := storage.NewMemoryIdempotencyStore()
 	dedup := storage.NewMemoryExecutionDedupStore()
 	runtime := &Runtime{
@@ -67,7 +67,11 @@ func TestAcquireExecutionLeasesRollsBackPartialClaims(t *testing.T) {
 	if err != nil || acquired.State != storage.LeaseAcquired {
 		t.Fatalf("idempotency after rollback = %q, %v; want acquired", acquired.State, err)
 	}
-	claim, err := dedup.Begin(context.Background(), "tenant-a", "telegram", "telegram-main", "message-1", "trace-2", time.Minute)
+	claims, err := dedup.ListClaims(context.Background(), "tenant-a", "", 10)
+	if err != nil || len(claims) != 1 || claims[0].Status != "failed" {
+		t.Fatalf("failed claim after lease error = %+v, %v", claims, err)
+	}
+	claim, err := dedup.Begin(context.Background(), "tenant-a", "support", "telegram", "telegram-main", "message-1", "trace-2", time.Minute)
 	if err != nil || claim != storage.ExecutionFresh {
 		t.Fatalf("dedup after rollback = %q, %v; want fresh", claim, err)
 	}

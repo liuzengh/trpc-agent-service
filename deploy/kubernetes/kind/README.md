@@ -1,18 +1,16 @@
-# Kind acceptance environment
+# Kind 本地 Kubernetes 验收环境
 
-This directory contains disposable, CI-only dependencies and overlays. It does
-not weaken production endpoint validation: the application talks to the mock
-OpenAI sidecar over loopback, while a separate Service verifies that the same
-mock image is deployable through Kubernetes service discovery.
+本目录包含基于 [Kind](https://kind.sigs.k8s.io/) 运行本地自动化 Kubernetes 端到端测试所需的 Overlays 与 Mock 依赖。
 
-Run the complete gate from the repository root:
+## 运行 E2E 测试套件
+
+从仓库根目录执行：
 
 ```bash
-scripts/kind-e2e.sh
+./scripts/kind-e2e.sh
 ```
 
-The script is idempotent for the `trpc-agent` Kind cluster. Evidence is written
-to `deploy/kubernetes/kind/evidence/`.
-
-For a local re-run after the images have already been loaded, use
-`KIND_SKIP_BUILD=1 scripts/kind-e2e.sh`. CI never enables this shortcut.
+- 自动创建并配置 `trpc-agent` 本地 Kind 集群；
+- 构建本地测试镜像，拉起测试中间件依赖（Postgres、Redis、Redpanda、MinIO 及 Mock OpenAI），并验证服务 Pod 健康度；
+- 测试证据与状态快照记录于 `deploy/kubernetes/kind/evidence/`；
+- 若本地镜像已完成构建与加载，可使用 `KIND_SKIP_BUILD=1 ./scripts/kind-e2e.sh` 加速重复执行。

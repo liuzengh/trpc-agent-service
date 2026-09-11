@@ -11,6 +11,11 @@ import (
 
 var ErrSessionExecutionLeaseLost = errors.New("session execution lease lost")
 
+const (
+	sessionLeaseRetryInitial = 100 * time.Millisecond
+	sessionLeaseRetryMax     = 2 * time.Second
+)
+
 // SessionExecutionLease is the exclusive ownership proof for one session run.
 // FencingToken increases whenever ownership moves to a new execution attempt.
 type SessionExecutionLease struct {
@@ -119,6 +124,7 @@ func (s *PostgresStateStore) AcquireSessionExecutionLease(ctx context.Context, t
 	if ttlMilliseconds <= 0 {
 		ttlMilliseconds = 1
 	}
+	retryDelay := sessionLeaseRetryInitial
 	for {
 		var lease SessionExecutionLease
 		lease.TenantID, lease.SessionKey, lease.OwnerID = tenantID, sessionKey, ownerID
@@ -138,14 +144,25 @@ RETURNING fencing_token, lease_until`, tenantID, sessionKey, ownerID, ttlMillise
 		if !errors.Is(err, sql.ErrNoRows) {
 			return SessionExecutionLease{}, fmt.Errorf("acquire session execution lease: %w", err)
 		}
-		timer := time.NewTimer(20 * time.Millisecond)
+		timer := time.NewTimer(retryDelay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return SessionExecutionLease{}, ctx.Err()
 		case <-timer.C:
 		}
+		retryDelay = nextSessionLeaseRetryDelay(retryDelay)
 	}
+}
+
+func nextSessionLeaseRetryDelay(current time.Duration) time.Duration {
+	if current < sessionLeaseRetryInitial {
+		return sessionLeaseRetryInitial
+	}
+	if current >= sessionLeaseRetryMax/2 {
+		return sessionLeaseRetryMax
+	}
+	return current * 2
 }
 
 func (s *PostgresStateStore) RenewSessionExecutionLease(ctx context.Context, lease SessionExecutionLease, ttl time.Duration) (SessionExecutionLease, error) {

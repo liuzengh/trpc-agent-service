@@ -21,6 +21,7 @@ import (
 const (
 	wecomUploadChunkBytes       = 512 << 10
 	wecomProgressUpdateInterval = time.Second
+	wecomInitialProgressText    = "正在处理…"
 	wecomChunkAttempts          = 3
 	wecomChunkRetryBase         = 500 * time.Millisecond
 )
@@ -152,7 +153,10 @@ func (s *Sender) StartProgress(ctx context.Context, target channels.ReplyTarget)
 	streamID := strings.ReplaceAll(uuid.NewString(), "-", "")
 	state := s.stream(streamID)
 	state.mu.Lock()
-	err := s.client.Request(ctx, "aibot_respond_msg", target.ProviderReplyToken, streamBody(streamID, "", false))
+	err := s.client.Request(ctx, "aibot_respond_msg", target.ProviderReplyToken, streamBody(streamID, wecomInitialProgressText, false))
+	if err == nil {
+		state.lastContent = wecomInitialProgressText
+	}
 	state.mu.Unlock()
 	if err != nil {
 		s.forgetStream(streamID, state)

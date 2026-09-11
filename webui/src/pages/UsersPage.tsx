@@ -142,8 +142,8 @@ export function UsersPage() {
           <span className="users-result-count">{usersQuery.hasNextPage ? `已加载 ${users.length} 个，仍有更多` : `共 ${users.length} 个结果`}</span>
         </div>
 
-        <div className="members-table-wrap">
-          <table className="members-table">
+        <div className="table-scroll members-table-wrap">
+          <table className="ui-table members-table">
             <thead><tr><th>用户</th><th>登录方式</th><th>系统权限</th><th>状态</th><th>本地凭据</th><th>最近登录</th></tr></thead>
             <tbody>
               {users.length === 0 ? <tr><td colSpan={6} className="table-empty">暂无用户</td></tr> : users.map((target) => {
@@ -155,7 +155,7 @@ export function UsersPage() {
                     <td>{memberProviderText(target)}</td>
                     <td><TogglePill active={target.is_system_admin} activeLabel="系统管理员" inactiveLabel="普通用户" disabled={busy !== '' || self} onChange={(isSystemAdmin) => void saveUser(target, target.status, isSystemAdmin)} /></td>
                     <td><TogglePill active={target.status === 'active'} activeLabel="正常" inactiveLabel="已停用" inactiveClassName="suspended" disabled={busy !== '' || self} onChange={(active) => void saveUser(target, active ? 'active' : 'suspended', target.is_system_admin)} /></td>
-                    <td>{hasLocal ? <button type="button" className="text-button" disabled={busy !== '' || self} onClick={() => void resetPassword(target)}>{busy === `reset:${target.platform_user_id}` ? '正在重置…' : '重置密码'}</button> : <span className="users-muted">非本地账号</span>}</td>
+                    <td>{hasLocal ? <button type="button" className="table-action" disabled={busy !== '' || self} onClick={() => void resetPassword(target)}>{busy === `reset:${target.platform_user_id}` ? '正在重置…' : '重置密码'}</button> : <span className="users-muted">非本地账号</span>}</td>
                     <td>{formatMemberLastLogin(target.last_login_at)}</td>
                   </tr>
                 )

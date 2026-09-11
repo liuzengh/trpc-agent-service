@@ -17,11 +17,17 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/assembly"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/backendhealth"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledgeingest"
 	platformlog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/node"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/safego"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/web"
@@ -38,15 +44,26 @@ type application struct {
 	role                     serviceRole
 	listenAddress            string
 	requestTimeout           time.Duration
+	httpReadHeaderTimeout    time.Duration
+	httpReadTimeout          time.Duration
+	httpIdleTimeout          time.Duration
 	sessionIdleArchiveAge    time.Duration
+	outboxRetentionAge       time.Duration
 	handler                  http.Handler
-	worker                   *messaging.Worker
+	workers                  []*messaging.Worker
+	kafkaCapacity            *kafkaCapacityMonitor
 	knowledgeIngestWorker    *knowledgeingest.Worker
+	sessionRepairer          *assembly.SessionMigrator
+	backendHealth            *backendhealth.Registry
+	usageRetention           governance.UsageReservationRetention
 	channelConnectors        *channelConnectorManager
 	replyOutbox              tenantOutboxDispatcher
+	outboxBacklog            storage.OutboxBacklogStore
+	capacityObserver         *metrics.OTelObserver
 	configInvalidationOutbox *tenant.ConfigInvalidationDispatcher
 	configurations           tenant.Repository
 	auditRetention           storage.AuditRetentionStore
+	outboxRetention          storage.OutboxRetentionStore
 	sessionArchiver          storage.IdleSessionArchiver
 	nodeLifecycle            *node.Lifecycle
 	closeFuncs               []func()
@@ -78,11 +95,16 @@ func buildApplication(ctx context.Context, getenv environment) (*application, er
 	if err != nil {
 		return nil, err
 	}
+	// Model/provider endpoints are deployment-controlled infrastructure and may
+	// legitimately live on a private corporate network. They therefore do not
+	// use the public-only SSRF client reserved for tenant-supplied remote URLs,
+	// but they must still have a bounded request lifetime.
+	infrastructureHTTPClient := &http.Client{Timeout: serviceConfig.Service.RequestTimeout.Duration}
 	syncModels := func(ctx context.Context) ([]web.ModelProviderInfo, error) {
 		providers := resources.modelCatalog.Providers()
 		infos := make([]web.ModelProviderInfo, 0, len(providers))
 		for _, provider := range providers {
-			configured, syncErr := resources.modelProvider.SyncProvider(ctx, http.DefaultClient, provider.ID)
+			configured, syncErr := resources.modelProvider.SyncProvider(ctx, infrastructureHTTPClient, provider.ID)
 			syncError := ""
 			if syncErr != nil {
 				slog.Warn("model provider sync failed", "provider", provider.ID, "error", syncErr)
@@ -142,50 +164,22 @@ func buildApplication(ctx context.Context, getenv environment) (*application, er
 
 	var handler http.Handler
 	if role.runsGateway() {
+		consoleDependencies := buildConsoleDependencies(resources, web.SystemInfo{
+			Version:               trpcservice.Version,
+			ListenAddress:         serviceConfig.Service.ListenAddress,
+			KafkaTopic:            getenv("KAFKA_TOPIC"),
+			KafkaBrokers:          getenv("KAFKA_BROKERS"),
+			RedisAddress:          getenv("REDIS_ADDR"),
+			ModelProviders:        initialModelProviders,
+			ChannelCredentialRefs: append([]string(nil), serviceConfig.Service.ChannelCredentialRefs...),
+			ToolCredentialRefs:    append([]string(nil), serviceConfig.Service.ToolCredentialRefs...),
+		}, syncModels, removeModel)
 		handler, err = NewKafkaHTTPHandler(KafkaHTTPDependencies{
-			Observer:                resources.observer,
-			Configurations:          resources.repository,
-			Producer:                resources.producer,
-			ExecutionManifests:      resources.executionManifests,
-			StateStore:              resources.stateStore,
-			ExecutionDedup:          resources.executionDedup,
-			RetryTracker:            resources.retryTracker,
-			ToolExecutions:          resources.toolExecutions,
-			WebIdempotency:          resources.webIdempotency,
-			KnowledgeIngest:         resources.knowledgeIngestQueue,
-			KnowledgeMigrationStore: resources.knowledgeMigrationStore,
-			KnowledgeMigrator:       resources.knowledgeMigrator,
-			BackendProfiles:         resources.backendProfiles,
-			ConsoleSystem: web.SystemInfo{
-				Version:               trpcservice.Version,
-				ListenAddress:         serviceConfig.Service.ListenAddress,
-				KafkaTopic:            getenv("KAFKA_TOPIC"),
-				KafkaBrokers:          getenv("KAFKA_BROKERS"),
-				RedisAddress:          getenv("REDIS_ADDR"),
-				ModelProviders:        initialModelProviders,
-				ChannelCredentialRefs: append([]string(nil), serviceConfig.Service.ChannelCredentialRefs...),
-				ToolCredentialRefs:    append([]string(nil), serviceConfig.Service.ToolCredentialRefs...),
-			},
-			ChannelStatuses:       resources.channelConnectors,
-			ConsoleProbes:         resources.probes,
-			Nodes:                 resources.nodes,
-			ConsoleFS:             webui.FS(),
-			AuthHandler:           resources.authHandler,
-			Sessions:              resources.sessions,
-			Identities:            resources.identities,
-			Audits:                resources.authAudits,
-			WebReplySubscriber:    resources.webReplyHub,
-			Knowledge:             resources.platformStores,
-			KnowledgeSourcePolicy: resources.knowledgeSourcePolicy,
-			AgentMemory:           resources.agentMemory,
-			ArtifactServices:      resources.platformStores,
-			AgentSessions:         resources.agentSessions,
-			SessionMigrationStore: resources.sessionMigrationStore,
-			SessionMigrator:       resources.sessionMigrator,
-			ApplicationValidator:  resources.applicationValidator,
-			ToolCatalog:           resources.toolCatalog,
-			ModelSyncer:           syncModels,
-			ModelRemover:          removeModel,
+			Observer:    resources.observer,
+			Console:     consoleDependencies,
+			ConsoleFS:   webui.FS(),
+			AuthHandler: resources.authHandler,
+			Audits:      resources.authAudits,
 		})
 		if err != nil {
 			resources.Close()
@@ -195,14 +189,27 @@ func buildApplication(ctx context.Context, getenv environment) (*application, er
 		handler = NewWorkerHTTPHandler(resources.observer, resources.probes)
 	}
 	handler = mountPrometheus(handler, resources.metricsHandler)
+	var replyOutbox tenantOutboxDispatcher
+	if resources.replyOutbox != nil {
+		replyOutbox = resources.replyOutbox
+	}
 	return &application{
-		role:                     role,
-		listenAddress:            serviceConfig.Service.ListenAddress,
-		replyOutbox:              resources.replyOutbox,
+		role:          role,
+		listenAddress: serviceConfig.Service.ListenAddress,
+		replyOutbox:   replyOutbox,
+		outboxBacklog: func() storage.OutboxBacklogStore {
+			backlog, _ := resources.stateStore.(storage.OutboxBacklogStore)
+			return backlog
+		}(),
+		capacityObserver:         resources.observer,
 		configInvalidationOutbox: resources.configInvalidationOutbox,
 		configurations:           resources.repository,
 		auditRetention: func() storage.AuditRetentionStore {
 			retention, _ := resources.stateStore.(storage.AuditRetentionStore)
+			return retention
+		}(),
+		outboxRetention: func() storage.OutboxRetentionStore {
+			retention, _ := resources.stateStore.(storage.OutboxRetentionStore)
 			return retention
 		}(),
 		sessionArchiver: func() storage.IdleSessionArchiver {
@@ -210,14 +217,82 @@ func buildApplication(ctx context.Context, getenv environment) (*application, er
 			return archiver
 		}(),
 		sessionIdleArchiveAge: serviceConfig.Service.SessionIdleArchiveAge.Duration,
+		outboxRetentionAge:    serviceConfig.Service.OutboxRetentionAge.Duration,
 		requestTimeout:        serviceConfig.Service.RequestTimeout.Duration,
+		httpReadHeaderTimeout: effectiveHTTPReadHeaderTimeout(serviceConfig.Service),
+		httpReadTimeout:       effectiveHTTPReadTimeout(serviceConfig.Service),
+		httpIdleTimeout:       effectiveHTTPIdleTimeout(serviceConfig.Service),
 		handler:               handler,
-		worker:                resources.worker,
+		workers:               resources.workers,
+		kafkaCapacity:         resources.kafkaCapacity,
 		knowledgeIngestWorker: resources.knowledgeIngestWorker,
+		sessionRepairer:       resources.sessionRepairer,
+		backendHealth:         resources.backendHealth,
+		usageRetention:        resources.usageRetention,
 		channelConnectors:     resources.channelConnectors,
 		nodeLifecycle:         resources.nodeLifecycle,
 		closeFuncs:            resources.closeFuncs,
 	}, nil
+}
+
+func buildConsoleDependencies(
+	resources *infrastructure,
+	system web.SystemInfo,
+	modelSyncer func(context.Context) ([]web.ModelProviderInfo, error),
+	modelRemover func(context.Context, string, string) error,
+) web.ConsoleDependencies {
+	var sessions storage.SessionLister
+	var sessionManager storage.SessionManager
+	var replies storage.OutboxDeliveryStore
+	if resources.stateStore != nil {
+		sessions, _ = resources.stateStore.(storage.SessionLister)
+		sessionManager, _ = resources.stateStore.(storage.SessionManager)
+		replies, _ = resources.stateStore.(storage.OutboxDeliveryStore)
+	}
+	var claims storage.ClaimLister
+	if resources.executionDedup != nil {
+		claims, _ = resources.executionDedup.(storage.ClaimLister)
+	}
+	var attempts storage.AttemptLister
+	if resources.retryTracker != nil {
+		attempts, _ = resources.retryTracker.(storage.AttemptLister)
+	}
+	return web.ConsoleDependencies{
+		Configurations:          resources.repository,
+		ExecutionManifests:      resources.executionManifests,
+		Identities:              resources.identities,
+		InboundIdentities:       resources.identityIngress,
+		LoginSessions:           resources.sessions,
+		Producer:                resources.producer,
+		Sessions:                sessions,
+		AgentSessions:           resources.agentSessions,
+		SessionMigrationStore:   resources.sessionMigrationStore,
+		SessionMigrator:         resources.sessionMigrator,
+		SessionManager:          sessionManager,
+		Claims:                  claims,
+		State:                   resources.stateStore,
+		Attempts:                attempts,
+		ToolExecutions:          resources.toolExecutions,
+		WebIdempotency:          resources.webIdempotency,
+		KnowledgeIngest:         resources.knowledgeIngestQueue,
+		KnowledgeMigrationStore: resources.knowledgeMigrationStore,
+		KnowledgeMigrator:       resources.knowledgeMigrator,
+		BackendProfiles:         resources.backendProfiles,
+		System:                  system,
+		Probes:                  resources.probes,
+		Nodes:                   resources.nodes,
+		ChannelStatuses:         resources.channelConnectors,
+		Replies:                 replies,
+		ReplySubscriber:         resources.webReplyHub,
+		Knowledge:               resources.platformStores,
+		KnowledgeSourcePolicy:   resources.knowledgeSourcePolicy,
+		AgentMemory:             resources.agentMemory,
+		ArtifactServices:        resources.platformStores,
+		ApplicationValidator:    resources.applicationValidator,
+		ToolCatalog:             resources.toolCatalog,
+		ModelSyncer:             modelSyncer,
+		ModelRemover:            modelRemover,
+	}
 }
 
 func modelCredentialRefs(provider config.ModelProviderConfig) []string {
@@ -265,7 +340,7 @@ func (a *application) Run(ctx context.Context) error {
 	if role == "" {
 		role = roleAll
 	}
-	if role.runsWorker() && a.worker == nil {
+	if role.runsWorker() && len(a.workers) == 0 {
 		return fmt.Errorf("application is not fully configured")
 	}
 	if a.nodeLifecycle != nil {
@@ -284,72 +359,65 @@ func (a *application) Run(ctx context.Context) error {
 	defer stopServer()
 	defer stopWorker()
 	defer stopBackground()
-	server := &http.Server{Handler: a.handler, ReadHeaderTimeout: a.requestTimeout}
-	workerErrors := make(chan error, 1)
-	workerDone := make(chan struct{})
+	server := newHTTPServer(a.handler, a.httpReadHeaderTimeout, a.httpReadTimeout, a.httpIdleTimeout)
+	var workerErrors <-chan error
+	var workerDone <-chan struct{}
 	var background sync.WaitGroup
-	startBackground := func(run func(context.Context)) {
+	startBackground := func(component string, run func(context.Context)) {
 		background.Add(1)
 		go func() {
 			defer background.Done()
-			run(backgroundCtx)
+			_ = safego.Run(component, func() { run(backgroundCtx) })
 		}()
 	}
+	if a.backendHealth != nil {
+		startBackground("backend health monitor", a.backendHealth.Run)
+	}
 	if role.runsWorker() {
-		go func() {
-			defer close(workerDone)
-			retry := newWorkerRetryBackoff()
-			for {
-				err := a.worker.RunOnce(workerCtx)
-				if err == nil {
-					retry.Reset()
-					continue
-				}
-				if errors.Is(err, messaging.ErrWorkerDraining) {
-					return
-				}
-				if errors.Is(err, messaging.ErrRetryScheduled) {
-					if !waitRetryDelay(workerCtx, retry) {
-						return
-					}
-					continue
-				}
-				if workerCtx.Err() != nil {
-					return
-				}
-				workerErrors <- err
-				return
-			}
-		}()
-		if a.knowledgeIngestWorker != nil {
-			startBackground(a.knowledgeIngestWorker.Run)
+		workerErrors, workerDone = startKafkaWorkers(workerCtx, a.workers)
+		if a.kafkaCapacity != nil {
+			startBackground("Kafka capacity monitor", a.kafkaCapacity.Run)
 		}
-	} else {
-		close(workerDone)
+		if a.knowledgeIngestWorker != nil {
+			startBackground("knowledge ingest worker", a.knowledgeIngestWorker.Run)
+		}
+		if a.sessionRepairer != nil {
+			startBackground("Session migration repair worker", a.sessionRepairer.RunRepairs)
+		}
+		if a.usageRetention != nil && a.configurations != nil {
+			startBackground("usage reservation retention", a.enforceUsageReservationRetention)
+		}
 	}
 	if role.runsChannel() {
 		if a.channelConnectors != nil {
-			startBackground(a.channelConnectors.Run)
+			startBackground("channel connector manager", a.channelConnectors.Run)
 		}
 	}
 	if role.runsGateway() || role.runsChannel() {
 		if a.replyOutbox != nil {
-			startBackground(a.dispatchReplyOutbox)
+			startBackground("reply outbox dispatcher", a.dispatchReplyOutbox)
 		}
 	}
 	if role.runsGateway() {
 		if a.configInvalidationOutbox != nil && a.configurations != nil {
-			startBackground(a.dispatchConfigInvalidationOutbox)
+			startBackground("configuration invalidation outbox", a.dispatchConfigInvalidationOutbox)
 		}
 		if a.auditRetention != nil && a.configurations != nil {
-			startBackground(a.enforceAuditRetention)
+			startBackground("audit retention", a.enforceAuditRetention)
+		}
+		if a.outboxRetention != nil && a.configurations != nil {
+			startBackground("outbox retention", a.enforceOutboxRetention)
 		}
 		if a.sessionArchiver != nil {
-			startBackground(a.archiveIdleSessions)
+			startBackground("session archiver", a.archiveIdleSessions)
 		}
 	}
 	serverErrors := make(chan error, 1)
-	go func() { serverErrors <- ServeHTTPServer(serverCtx, server, listener) }()
+	go func() {
+		if panicErr := safego.Run("HTTP server supervisor", func() { serverErrors <- ServeHTTPServer(serverCtx, server, listener) }); panicErr != nil {
+			serverErrors <- panicErr
+		}
+	}()
 	var workerErrorInput <-chan error
 	if role.runsWorker() {
 		workerErrorInput = workerErrors
@@ -360,8 +428,12 @@ func (a *application) Run(ctx context.Context) error {
 	case err := <-serverErrors:
 		result = err
 		serverStopped = true
-	case err := <-workerErrorInput:
-		result = fmt.Errorf("Kafka worker stopped: %w", err)
+	case err, ok := <-workerErrorInput:
+		if ok {
+			result = fmt.Errorf("Kafka worker stopped: %w", err)
+		} else if ctx.Err() == nil {
+			result = errors.New("Kafka workers stopped unexpectedly")
+		}
 	case <-ctx.Done():
 	}
 
@@ -378,8 +450,8 @@ func (a *application) Run(ctx context.Context) error {
 	}
 	stopServer()
 	if role.runsWorker() {
-		a.worker.BeginDrain()
-		if err := a.worker.WaitDrain(shutdownCtx); err != nil && result == nil {
+		beginWorkerDrain(a.workers)
+		if err := waitWorkerDrain(shutdownCtx, a.workers); err != nil && result == nil {
 			result = fmt.Errorf("drain Kafka worker: %w", err)
 		}
 	}
@@ -395,22 +467,77 @@ func (a *application) Run(ctx context.Context) error {
 			return fmt.Errorf("%w: HTTP server did not stop", result)
 		}
 	}
-	select {
-	case <-workerDone:
-	case <-shutdownCtx.Done():
-		return fmt.Errorf("%w: Kafka worker did not stop", result)
+	if role.runsWorker() {
+		select {
+		case <-workerDone:
+		case <-shutdownCtx.Done():
+			return fmt.Errorf("%w: Kafka worker did not stop", result)
+		}
 	}
 	backgroundDone := make(chan struct{})
-	go func() {
+	safego.Go("background task join", func() {
 		background.Wait()
 		close(backgroundDone)
-	}()
+	})
 	select {
 	case <-backgroundDone:
 	case <-shutdownCtx.Done():
 		return fmt.Errorf("%w: background tasks did not stop", result)
 	}
 	return result
+}
+
+const (
+	usageReservationRetentionAge   = 24 * time.Hour
+	usageReservationRetentionBatch = 1000
+)
+
+func (a *application) enforceUsageReservationRetention(ctx context.Context) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		if err := a.enforceUsageReservationRetentionOnce(ctx, time.Now().UTC()); err != nil {
+			logBackgroundError("model usage reservation retention", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (a *application) enforceUsageReservationRetentionOnce(ctx context.Context, now time.Time) error {
+	if a == nil || a.usageRetention == nil || a.configurations == nil {
+		return errors.New("usage reservation retention and configuration lister are required")
+	}
+	snapshots, err := a.configurations.ListApplications(ctx, "")
+	if err != nil {
+		return fmt.Errorf("list applications for usage reservation retention: %w", err)
+	}
+	cutoff := now.UTC().Add(-usageReservationRetentionAge)
+	seen := make(map[string]struct{}, len(snapshots))
+	for _, snapshot := range snapshots {
+		tenantID, appCode := snapshot.Config.TenantID, snapshot.Config.AppCode
+		key := tenantID + "\x00" + appCode
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			deleted, err := a.usageRetention.PurgeUsageReservationsBefore(ctx, tenantID, appCode, cutoff, usageReservationRetentionBatch)
+			if err != nil {
+				return fmt.Errorf("purge usage reservations for %s/%s: %w", tenantID, appCode, err)
+			}
+			if deleted < usageReservationRetentionBatch {
+				break
+			}
+		}
+	}
+	return nil
 }
 
 func (a *application) enforceAuditRetention(ctx context.Context) {
@@ -448,6 +575,66 @@ func (a *application) enforceAuditRetentionOnce(ctx context.Context, now time.Ti
 		before := now.Add(-time.Duration(days) * 24 * time.Hour)
 		if _, err := a.auditRetention.PurgeAuditBefore(ctx, tenantID, before); err != nil {
 			return fmt.Errorf("purge audit for tenant %q: %w", tenantID, err)
+		}
+	}
+	return nil
+}
+
+const (
+	defaultOutboxRetentionAge  = 7 * 24 * time.Hour
+	outboxRetentionBatch       = 1000
+	outboxRetentionCheckPeriod = 6 * time.Hour
+)
+
+func (a *application) enforceOutboxRetention(ctx context.Context) {
+	ticker := time.NewTicker(outboxRetentionCheckPeriod)
+	defer ticker.Stop()
+	for {
+		if err := a.enforceOutboxRetentionOnce(ctx, time.Now().UTC()); err != nil {
+			logBackgroundError("outbox retention", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (a *application) enforceOutboxRetentionOnce(ctx context.Context, now time.Time) error {
+	if a == nil || a.outboxRetention == nil || a.configurations == nil {
+		return errors.New("outbox retention and configuration lister are required")
+	}
+	age := a.outboxRetentionAge
+	if age == 0 {
+		age = defaultOutboxRetentionAge
+	}
+	snapshots, err := a.configurations.ListApplications(ctx, "")
+	if err != nil {
+		return fmt.Errorf("list applications for outbox retention: %w", err)
+	}
+	cutoff := now.Add(-age)
+	seen := make(map[string]struct{})
+	for _, snapshot := range snapshots {
+		tenantID := strings.TrimSpace(snapshot.Config.TenantID)
+		if tenantID == "" {
+			continue
+		}
+		if _, exists := seen[tenantID]; exists {
+			continue
+		}
+		seen[tenantID] = struct{}{}
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			deleted, err := a.outboxRetention.PurgeDeliveredOutboxBefore(ctx, tenantID, cutoff, outboxRetentionBatch)
+			if err != nil {
+				return fmt.Errorf("purge delivered outbox for tenant %q: %w", tenantID, err)
+			}
+			if deleted < outboxRetentionBatch {
+				break
+			}
 		}
 	}
 	return nil
@@ -510,7 +697,48 @@ func (a *application) dispatchReplyOutboxOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list applications for reply outbox: %w", err)
 	}
-	return dispatchTenantOutboxes(ctx, a.replyOutbox, tenantIDsForSnapshots(snapshots), "reply")
+	tenantIDs := tenantIDsForSnapshots(snapshots)
+	dispatchErr := dispatchTenantOutboxes(ctx, a.replyOutbox, tenantIDs, "reply")
+	capacityErr := a.observeOutboxBacklog(ctx, tenantIDs)
+	return errors.Join(dispatchErr, capacityErr)
+}
+
+func (a *application) observeOutboxBacklog(ctx context.Context, tenantIDs []string) error {
+	if a.outboxBacklog == nil || a.capacityObserver == nil {
+		return nil
+	}
+	role := a.role
+	if role == "" {
+		role = roleAll
+	}
+	var observedChannels []channels.Channel
+	switch role {
+	case roleGateway:
+		observedChannels = []channels.Channel{channels.Web}
+	case roleChannel:
+		observedChannels = []channels.Channel{channels.Telegram, channels.WeCom, channels.Feishu}
+	default:
+		observedChannels = []channels.Channel{channels.Web, channels.Telegram, channels.WeCom, channels.Feishu}
+	}
+	now := time.Now().UTC()
+	var failures []error
+	for _, tenantID := range tenantIDs {
+		for _, channel := range observedChannels {
+			backlog, err := a.outboxBacklog.OutboxBacklog(ctx, tenantID, messaging.ChannelReplyEventType(channel))
+			if err != nil {
+				failures = append(failures, fmt.Errorf("read %s outbox backlog for tenant %q: %w", channel, tenantID, err))
+				continue
+			}
+			age := time.Duration(0)
+			if !backlog.OldestCreatedAt.IsZero() && now.After(backlog.OldestCreatedAt) {
+				age = now.Sub(backlog.OldestCreatedAt)
+			}
+			a.capacityObserver.RecordOutboxBacklog(ctx, metrics.OutboxBacklogAttributes{
+				TenantID: tenantID, Channel: string(channel), Pending: backlog.Pending, OldestAge: age,
+			})
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func tenantIDsForSnapshots(snapshots []tenant.Snapshot) []string {

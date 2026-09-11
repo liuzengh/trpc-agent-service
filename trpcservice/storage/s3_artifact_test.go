@@ -3,12 +3,24 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 	"time"
 
 	agentartifact "trpc.group/trpc-go/trpc-agent-go/artifact"
+	artifactinmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
 )
+
+type closableArtifactService struct {
+	agentartifact.Service
+	closes *int
+}
+
+func (s *closableArtifactService) Close() error {
+	(*s.closes)++
+	return nil
+}
 
 func TestParseS3ConfigRequiresBucketAndKeys(t *testing.T) {
 	if _, err := ParseS3Config(`{"region":"us-east-1"}`); err == nil {
@@ -45,21 +57,61 @@ func TestParseCOSConfigRequiresBucketURLAndKeys(t *testing.T) {
 func TestArtifactBackendsOpenRegisteredDriversAndRejectUnknown(t *testing.T) {
 	backends := newArtifactBackends(&PostgresArtifactService{})
 	names := backends.DriverNames()
-	if len(names) < 3 || names[0] != ArtifactDriverPostgres || names[1] != ArtifactDriverS3 || names[2] != ArtifactDriverCOS {
-		t.Fatalf("DriverNames() = %v, want postgres, s3, cos", names)
+	if len(names) < 4 || names[0] != ArtifactDriverInMemory || names[1] != ArtifactDriverPostgres || names[2] != ArtifactDriverS3 || names[3] != ArtifactDriverCOS {
+		t.Fatalf("DriverNames() = %v, want inmemory, postgres, s3, cos", names)
 	}
-	if _, err := backends.Open(context.Background(), "gcs", ""); err == nil {
+	if _, err := backends.Open(context.Background(), "test-gcs", "gcs", ""); err == nil {
 		t.Fatal("Open(gcs) error = nil, want unsupported driver")
 	}
-	if _, err := backends.Open(context.Background(), ArtifactDriverS3, ""); err == nil {
+	if _, err := backends.Open(context.Background(), "test-s3", ArtifactDriverS3, ""); err == nil {
 		t.Fatal("Open(s3) error = nil, want missing connection")
 	}
-	service, err := backends.Open(context.Background(), "", "")
+	service, err := backends.Open(context.Background(), "test-default", "", "")
 	if err != nil {
 		t.Fatalf("Open(default) error = %v", err)
 	}
 	if _, err := service.SaveArtifact(context.Background(), agentartifact.SessionInfo{}, "invalid", nil); err == nil {
 		t.Fatal("SaveArtifact(nil) error = nil, want platform artifact validation")
+	}
+}
+
+func TestArtifactBackendsReuseAndCloseOwnedAdapters(t *testing.T) {
+	backends := newArtifactBackends(&PostgresArtifactService{})
+	opens, closes := 0, 0
+	backends.register(artifactDriver{
+		name: "owned-test", needsSecret: true, owned: true,
+		open: func(context.Context, string) (agentartifact.Service, error) {
+			opens++
+			return &closableArtifactService{Service: artifactinmemory.NewService(), closes: &closes}, nil
+		},
+	})
+
+	if _, err := backends.Open(context.Background(), "profile-a", "owned-test", "secret-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backends.Open(context.Background(), "profile-a", "owned-test", "secret-a"); err != nil {
+		t.Fatal(err)
+	}
+	if opens != 1 {
+		t.Fatalf("same immutable backend opened %d times, want 1", opens)
+	}
+	if _, err := backends.Open(context.Background(), "profile-a", "owned-test", "secret-b"); err != nil {
+		t.Fatal(err)
+	}
+	if opens != 2 {
+		t.Fatalf("rotated backend opened %d times, want 2", opens)
+	}
+	if err := backends.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if closes != 2 {
+		t.Fatalf("owned backend closes = %d, want 2", closes)
+	}
+	if err := backends.Close(); err != nil || closes != 2 {
+		t.Fatalf("second Close() = %v, closes = %d", err, closes)
+	}
+	if _, err := backends.Open(context.Background(), "profile-a", "owned-test", "secret-a"); !errors.Is(err, ErrArtifactBackendsClosed) {
+		t.Fatalf("Open() after Close() = %v, want ErrArtifactBackendsClosed", err)
 	}
 }
 

@@ -26,16 +26,19 @@ const (
 )
 
 var (
-	ErrSessionMigrationNotFound = errors.New("Session migration not found")
-	ErrSessionMigrationConflict = errors.New("Session migration conflict")
+	ErrSessionMigrationNotFound       = errors.New("Session migration not found")
+	ErrSessionMigrationConflict       = errors.New("Session migration conflict")
+	ErrSessionMigrationRepairsPending = errors.New("Session migration repairs are pending")
 )
 
 type SessionBackendRef struct {
+	ProfileID     string `json:"-"`
 	Driver        string `json:"driver"`
 	ConnectionRef string `json:"connection_ref,omitempty"`
 }
 
 func (b SessionBackendRef) Normalize(defaultDriver string) SessionBackendRef {
+	b.ProfileID = strings.TrimSpace(b.ProfileID)
 	b.Driver = strings.ToLower(strings.TrimSpace(b.Driver))
 	if b.Driver == "" {
 		b.Driver = defaultDriver
@@ -66,20 +69,25 @@ type SessionMigrationStatus struct {
 }
 
 type SessionMigrationRoute struct {
-	Reader  SessionBackendRef
-	Writers []SessionBackendRef
+	MigrationID    string
+	TenantID       string
+	AppCode        string
+	Generation     uint64
+	Reader         SessionBackendRef
+	PrimaryWriter  SessionBackendRef
+	ReplicaWriters []SessionBackendRef
 }
 
 func (s SessionMigrationStatus) Route() (SessionMigrationRoute, error) {
 	switch s.Phase {
 	case SessionMigrationPrepared, SessionMigrationRolledBack:
-		return SessionMigrationRoute{Reader: s.Source, Writers: []SessionBackendRef{s.Source}}, nil
+		return SessionMigrationRoute{MigrationID: s.ID, TenantID: s.TenantID, AppCode: s.AppCode, Generation: s.Generation, Reader: s.Source, PrimaryWriter: s.Source}, nil
 	case SessionMigrationDualWrite, SessionMigrationBackfill, SessionMigrationVerify:
-		return SessionMigrationRoute{Reader: s.Source, Writers: []SessionBackendRef{s.Source, s.Target}}, nil
+		return SessionMigrationRoute{MigrationID: s.ID, TenantID: s.TenantID, AppCode: s.AppCode, Generation: s.Generation, Reader: s.Source, PrimaryWriter: s.Source, ReplicaWriters: []SessionBackendRef{s.Target}}, nil
 	case SessionMigrationCutRead:
-		return SessionMigrationRoute{Reader: s.Target, Writers: []SessionBackendRef{s.Target, s.Source}}, nil
+		return SessionMigrationRoute{MigrationID: s.ID, TenantID: s.TenantID, AppCode: s.AppCode, Generation: s.Generation, Reader: s.Target, PrimaryWriter: s.Target, ReplicaWriters: []SessionBackendRef{s.Source}}, nil
 	case SessionMigrationStopOldWrite, SessionMigrationDone:
-		return SessionMigrationRoute{Reader: s.Target, Writers: []SessionBackendRef{s.Target}}, nil
+		return SessionMigrationRoute{MigrationID: s.ID, TenantID: s.TenantID, AppCode: s.AppCode, Generation: s.Generation, Reader: s.Target, PrimaryWriter: s.Target}, nil
 	default:
 		return SessionMigrationRoute{}, fmt.Errorf("unsupported Session migration phase %q", s.Phase)
 	}
@@ -194,6 +202,32 @@ func (s *PostgresSessionMigrationStore) UpdateSessionMigration(ctx context.Conte
 		return SessionMigrationStatus{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var currentGeneration uint64
+	if err := tx.QueryRowContext(ctx, `
+SELECT generation
+FROM session_backend_migrations
+WHERE tenant_id=$1 AND app_code=$2 AND migration_id=$3
+FOR UPDATE`, status.TenantID, status.AppCode, status.ID).Scan(&currentGeneration); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return SessionMigrationStatus{}, ErrSessionMigrationNotFound
+		}
+		return SessionMigrationStatus{}, fmt.Errorf("lock Session migration update: %w", err)
+	}
+	if currentGeneration != expectedGeneration {
+		return SessionMigrationStatus{}, ErrSessionMigrationConflict
+	}
+	if sessionMigrationPhaseRequiresRepairDrain(status.Phase) {
+		var pending int
+		if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM session_migration_repairs
+WHERE tenant_id=$1 AND migration_id=$2`, status.TenantID, status.ID).Scan(&pending); err != nil {
+			return SessionMigrationStatus{}, fmt.Errorf("count Session migration repairs before phase change: %w", err)
+		}
+		if pending != 0 {
+			return SessionMigrationStatus{}, fmt.Errorf("%w: %d repair(s)", ErrSessionMigrationRepairsPending, pending)
+		}
+	}
 	nextGeneration := expectedGeneration + 1
 	updatedAt := time.Now().UTC()
 	result, err := tx.ExecContext(ctx, `
@@ -219,6 +253,15 @@ WHERE tenant_id=$7 AND app_code=$8 AND migration_id=$9 AND generation=$10`,
 	status.Generation = nextGeneration
 	status.UpdatedAt = updatedAt
 	return status, nil
+}
+
+func sessionMigrationPhaseRequiresRepairDrain(phase SessionMigrationPhase) bool {
+	switch phase {
+	case SessionMigrationCutRead, SessionMigrationStopOldWrite, SessionMigrationDone, SessionMigrationRolledBack:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *PostgresSessionMigrationStore) ActiveSessionMigration(ctx context.Context, tenantID, appCode string) (SessionMigrationStatus, bool, error) {
@@ -316,6 +359,8 @@ func scanSessionMigration(row sessionMigrationScanner) (SessionMigrationStatus, 
 	if err != nil {
 		return SessionMigrationStatus{}, fmt.Errorf("scan Session migration: %w", err)
 	}
+	status.Source.ProfileID = status.SourceProfileID
+	status.Target.ProfileID = status.TargetProfileID
 	return status, nil
 }
 

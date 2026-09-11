@@ -25,25 +25,23 @@ export type BotSaveResult = {
 export function BotModal({
   mode,
   app,
-  tenants,
   currentTenant,
   onClose,
   onSaved,
 }: {
   mode: 'create' | 'edit'
   app: Snapshot | null
-  tenants: string[]
   currentTenant: string
   onClose: () => void
   onSaved: (result: BotSaveResult) => void | Promise<void>
 }) {
   const queryClient = useQueryClient()
   const form = useForm<BotDraft>({
-    defaultValues: botDraftFromSnapshot(app, currentTenant),
+    defaultValues: botDraftFromSnapshot(app),
     mode: 'onSubmit',
   })
   const { control, getValues, handleSubmit, register, setValue, formState: { isSubmitting } } = form
-  const tenantID = useWatch({ control, name: 'tenant_id' })
+  const tenantID = app?.Config.tenant_id ?? currentTenant
   const appCode = useWatch({ control, name: 'app_code' })
   const instruction = useWatch({ control, name: 'instruction' })
   const providerID = useWatch({ control, name: 'provider_id' })
@@ -52,7 +50,6 @@ export function BotModal({
   const memoryProfileID = useWatch({ control, name: 'memory_profile_id' })
   const knowledgeProfileID = useWatch({ control, name: 'knowledge_profile_id' })
   const artifactProfileID = useWatch({ control, name: 'artifact_profile_id' })
-  const [newTenant, setNewTenant] = useState(false)
   const [error, setError] = useState('')
 
   const catalogQuery = useQuery({
@@ -124,7 +121,7 @@ export function BotModal({
     setError('')
     try {
       if (!selectedModel) throw new Error('请选择平台模型目录中的可用模型')
-      const payload = applicationPayloadFromDraft({ draft, mode, app, capabilities: selectedCapabilities })
+      const payload = applicationPayloadFromDraft({ draft, tenantID, mode, app, capabilities: selectedCapabilities })
       let saved: Snapshot
       if (mode === 'create') saved = await createApplication(payload)
       else if (app && stageCandidate) saved = await stageApplicationVersion(app.Config.tenant_id, app.Config.app_code, payload)
@@ -168,20 +165,7 @@ export function BotModal({
                 <section className="bot-form-section">
                   <PanelHeader level={3} icon={<FileTextIcon size={18} />} title="基本信息" description="定义机器人的基本信息、业务场景和回答规则。" />
                   <div className="bot-section-content">
-                    <div className="bot-two-column">
-                      <div className="bot-field">
-                        <label htmlFor="bot-tenant">
-                          所属租户
-                          {!newTenant ? (
-                            <SelectControl id="bot-tenant" value={tenantID} disabled={mode === 'edit'} onValueChange={(value) => setValue('tenant_id', value, { shouldDirty: true })} options={tenants.map((entry) => ({ value: entry, label: entry }))} />
-                          ) : (
-                            <input id="bot-tenant" disabled={mode === 'edit'} placeholder="输入新租户标识" {...register('tenant_id')} />
-                          )}
-                        </label>
-                        {mode === 'create' && <label className="checkbox bot-inline-option"><input type="checkbox" checked={newTenant} onChange={(event) => setNewTenant(event.target.checked)} />使用新租户</label>}
-                      </div>
-                      <label>机器人标识<input disabled={mode === 'edit'} placeholder="例如 support" {...register('app_code')} /></label>
-                    </div>
+                    <label>机器人标识<input disabled={mode === 'edit'} placeholder="例如 support" {...register('app_code')} /></label>
                     <label className="bot-instruction-field">业务指令<textarea rows={4} maxLength={2000} placeholder="描述机器人的角色、业务范围和回答规则。" {...register('instruction')} /></label>
                     <div className="bot-field-meta"><span>用于定义机器人的业务场景、角色和回答规则。</span><span>{instruction.length}/2000</span></div>
                   </div>
@@ -260,6 +244,11 @@ function BackendProfileSelect({
   const options = profiles
     .filter((profile) => profile.available && profile.domains.includes(domain))
     .map((profile) => ({ value: profile.profile_id, label: `${profile.display_name} · ${profile.driver}` }))
+  const selectedProfile = profiles.find((profile) => profile.profile_id === value)
+  const capabilityWarnings = selectedProfile ? [
+    !selectedProfile.capabilities.multi_node ? '仅适合单节点/本地运行，不应用于多副本生产部署。' : '',
+    domain === 'memory' && !selectedProfile.capabilities.memory_console_browsing ? 'Agent 可使用该长期偏好后端，但控制台不能直接浏览其中的记忆。' : '',
+  ].filter(Boolean) : []
   if (value && !options.some((option) => option.value === value)) {
     options.unshift({ value, label: `${value} · 当前不可用` })
   }
@@ -273,6 +262,7 @@ function BackendProfileSelect({
         options={options}
         onValueChange={(next) => setValue(field, next, { shouldDirty: true })}
       />
+      {capabilityWarnings.length > 0 && <span className="bot-backend-capability-warning">{capabilityWarnings.join(' ')}</span>}
     </label>
   )
 }

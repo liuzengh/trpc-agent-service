@@ -38,6 +38,9 @@ jobs:
       - name: Run static analysis
         run: go vet ./...
 
+      - name: Test capacity tooling
+        run: node --test tests/capacity/*.test.mjs
+
       - name: Run tests with race detection
         run: go test -race ./...
 
@@ -131,7 +134,7 @@ jobs:
           AUDIT_HMAC_KEY=browser-e2e-audit-key-at-least-32-bytes
           LOGIN_SESSION_TTL=24h
           LOGIN_STATE_SECRET=e2e-state-secret
-          DATABASE_URL=postgres://trpc_test:test-postgres-password@127.0.0.1:15432/trpc_agent_test?sslmode=disable
+          DATABASE_URL=postgres://trpc_platform:test-platform-password@127.0.0.1:15432/trpc_agent_test?sslmode=disable
           REDIS_ADDR=127.0.0.1:16379
           KAFKA_BROKERS=127.0.0.1:29092
           TEST_KAFKA_BROKERS=127.0.0.1:29092

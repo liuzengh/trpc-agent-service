@@ -59,3 +59,21 @@ func TestObservedFrameworkPostgresClientRecordsComponentWithoutSQL(t *testing.T)
 		t.Fatalf("store errors = %#v", observer.errors)
 	}
 }
+
+func TestFrameworkTenantPostgresScopeRequiresApplicationInsideTenant(t *testing.T) {
+	t.Parallel()
+
+	valid := FrameworkTenantPostgresScope("session", "tenant-a", "tenant-a/support").(frameworkPostgresScope)
+	if err := validateFrameworkTenantScope(valid); err != nil {
+		t.Fatalf("valid tenant scope rejected: %v", err)
+	}
+
+	for _, scope := range []frameworkPostgresScope{
+		FrameworkTenantPostgresScope("session", "tenant-a", "tenant-b/support").(frameworkPostgresScope),
+		FrameworkTenantPostgresScope("session", "tenant-a", "").(frameworkPostgresScope),
+	} {
+		if err := validateFrameworkTenantScope(scope); err == nil {
+			t.Fatalf("invalid tenant scope accepted: %+v", scope)
+		}
+	}
+}

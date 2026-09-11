@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric"
@@ -14,6 +16,40 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+func collectMetrics(t *testing.T, reader *metric.ManualReader) metricdata.ResourceMetrics {
+	t.Helper()
+	var resourceMetrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &resourceMetrics); err != nil {
+		t.Fatal(err)
+	}
+	return resourceMetrics
+}
+
+func intMetricValue(t *testing.T, resourceMetrics metricdata.ResourceMetrics, name string) int64 {
+	t.Helper()
+	for _, scopeMetrics := range resourceMetrics.ScopeMetrics {
+		for _, metricData := range scopeMetrics.Metrics {
+			if metricData.Name != name {
+				continue
+			}
+			switch data := metricData.Data.(type) {
+			case metricdata.Sum[int64]:
+				if len(data.DataPoints) == 0 {
+					return 0
+				}
+				return data.DataPoints[0].Value
+			case metricdata.Gauge[int64]:
+				if len(data.DataPoints) == 0 {
+					return 0
+				}
+				return data.DataPoints[0].Value
+			}
+		}
+	}
+	t.Fatalf("metric %q not found", name)
+	return 0
+}
 
 // TestOTelObserverRecordsExecutionTelemetry verifies that a handled execution
 // increments the counter, records a duration, and exports a span carrying only
@@ -79,6 +115,140 @@ func TestOTelObserverRecordsExecutionTelemetry(t *testing.T) {
 	}
 	if got := attributeValue(attributes, "external.request.id"); got != "tg-update-42" {
 		t.Fatalf("span external.request.id = %q, want tg-update-42", got)
+	}
+}
+
+func TestOTelObserverTracksActiveExecutions(t *testing.T) {
+	reader := metric.NewManualReader()
+	meterProvider := metric.NewMeterProvider(metric.WithReader(reader))
+	observer, err := NewOTelObserver(sdktrace.NewTracerProvider().Tracer("platform-tests"), meterProvider.Meter("platform-tests"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, finish := observer.StartExecution(context.Background(), ExecutionAttributes{
+		TenantID: "tenant-a", AppCode: "support", Channel: "web", ConfigVersion: 1,
+	})
+	if got := intMetricValue(t, collectMetrics(t, reader), "agent.execution.active"); got != 1 {
+		t.Fatalf("active executions = %d, want 1", got)
+	}
+	finish(nil)
+	if got := intMetricValue(t, collectMetrics(t, reader), "agent.execution.active"); got != 0 {
+		t.Fatalf("active executions after finish = %d, want 0", got)
+	}
+}
+
+func TestOTelObserverExportsDatabaseAndRedisPoolSaturation(t *testing.T) {
+	reader := metric.NewManualReader()
+	meterProvider := metric.NewMeterProvider(metric.WithReader(reader))
+	observer, err := NewOTelObserver(sdktrace.NewTracerProvider().Tracer("platform-tests"), meterProvider.Meter("platform-tests"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := observer.ObserveDatabasePool(func() DatabasePoolStats {
+		return DatabasePoolStats{
+			MaxOpenConnections: 100, OpenConnections: 37, InUse: 31, Idle: 6,
+			WaitCount: 42, WaitDuration: 1250 * time.Millisecond,
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := observer.ObserveRedisPool(func() RedisPoolStats {
+		return RedisPoolStats{Hits: 90, Misses: 10, Timeouts: 3, WaitCount: 11, WaitDuration: 750 * time.Millisecond, TotalConnections: 20, IdleConnections: 7, StaleConnections: 2}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := observer.ObserveWorkerCapacity(func() int64 { return 8 }); err != nil {
+		t.Fatal(err)
+	}
+	metrics := collectMetrics(t, reader)
+	for name, want := range map[string]int64{
+		"database.pool.connections.max":    100,
+		"database.pool.connections.open":   37,
+		"database.pool.connections.in_use": 31,
+		"database.pool.connections.idle":   6,
+		"database.pool.waits":              42,
+		"database.pool.wait_duration.ms":   1250,
+		"redis.pool.hits":                  90,
+		"redis.pool.misses":                10,
+		"redis.pool.timeouts":              3,
+		"redis.pool.waits":                 11,
+		"redis.pool.wait_duration.ms":      750,
+		"redis.pool.connections.total":     20,
+		"redis.pool.connections.idle":      7,
+		"redis.pool.connections.stale":     2,
+		"worker.execution.slots":           8,
+	} {
+		if got := intMetricValue(t, metrics, name); got != want {
+			t.Fatalf("%s = %d, want %d", name, got, want)
+		}
+	}
+}
+
+func TestOTelObserverRecordsKafkaCapacity(t *testing.T) {
+	reader := metric.NewManualReader()
+	meterProvider := metric.NewMeterProvider(metric.WithReader(reader))
+	observer, err := NewOTelObserver(sdktrace.NewTracerProvider().Tracer("platform-tests"), meterProvider.Meter("platform-tests"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer.RecordKafkaCapacity(context.Background(), KafkaCapacityAttributes{
+		Topic: "agent.inbound.v1", ConsumerGroup: "trpc-agent-worker", Lag: 37, Partitions: 80,
+	})
+	metrics := collectMetrics(t, reader)
+	if got := intMetricValue(t, metrics, "messaging.kafka.consumer.lag"); got != 37 {
+		t.Fatalf("Kafka lag = %d, want 37", got)
+	}
+	if got := intMetricValue(t, metrics, "messaging.kafka.topic.partitions"); got != 80 {
+		t.Fatalf("Kafka partitions = %d, want 80", got)
+	}
+	observer.RecordKafkaCapacityFailure(context.Background(), "agent.inbound.v1", "trpc-agent-worker")
+	metrics = collectMetrics(t, reader)
+	if got := intMetricValue(t, metrics, "messaging.kafka.capacity.sample.failures"); got != 1 {
+		t.Fatalf("Kafka capacity sample failures = %d, want 1", got)
+	}
+}
+
+func TestOTelObserverRecordsOutboxBacklog(t *testing.T) {
+	reader := metric.NewManualReader()
+	meterProvider := metric.NewMeterProvider(metric.WithReader(reader))
+	observer, err := NewOTelObserver(sdktrace.NewTracerProvider().Tracer("platform-tests"), meterProvider.Meter("platform-tests"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer.RecordOutboxBacklog(context.Background(), OutboxBacklogAttributes{
+		TenantID: "tenant-a", Channel: "telegram", Pending: 12, OldestAge: 45 * time.Second,
+	})
+	metrics := collectMetrics(t, reader)
+	if got := intMetricValue(t, metrics, "outbox.pending.events"); got != 12 {
+		t.Fatalf("outbox pending = %d, want 12", got)
+	}
+	if got := intMetricValue(t, metrics, "outbox.oldest.age.seconds"); got != 45 {
+		t.Fatalf("outbox oldest age = %d, want 45", got)
+	}
+}
+
+func TestOTelObserverRecordsGovernanceToolAndDeadLetterMetrics(t *testing.T) {
+	reader := metric.NewManualReader()
+	meterProvider := metric.NewMeterProvider(metric.WithReader(reader))
+	observer, err := NewOTelObserver(sdktrace.NewTracerProvider().Tracer("platform-tests"), meterProvider.Meter("platform-tests"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	observer.RecordDeadLetter(ctx, DeadLetterAttributes{TenantID: "tenant-a", ErrorClass: "permanent"})
+	observer.RecordToolExecution(ctx, ToolExecutionAttributes{TenantID: "tenant-a", ToolName: "request_refund", Outcome: "failed", Latency: 125 * time.Millisecond})
+	observer.RecordGovernanceRejection(ctx, GovernanceRejectionAttributes{TenantID: "tenant-a", AppCode: "support", Reason: "token_budget"})
+
+	metrics := collectMetrics(t, reader)
+	for name, want := range map[string]int64{
+		"messaging.dlq.messages":  1,
+		"tool.execution.total":    1,
+		"tool.execution.failures": 1,
+		"governance.rejections":   1,
+	} {
+		if got := intMetricValue(t, metrics, name); got != want {
+			t.Fatalf("%s = %d, want %d", name, got, want)
+		}
 	}
 }
 
@@ -205,5 +375,57 @@ func TestOTelObserverWrapsHTTPWithoutRecordingRequestContent(t *testing.T) {
 		if string(attribute.Key) == "url.path" || string(attribute.Key) == "http.target" || string(attribute.Key) == "http.request.body" {
 			t.Fatalf("HTTP span contains unsafe request attribute %q", attribute.Key)
 		}
+	}
+}
+
+func TestOTelObserverTracksActiveSSERequestsSeparately(t *testing.T) {
+	reader := metric.NewManualReader()
+	meterProvider := metric.NewMeterProvider(metric.WithReader(reader))
+	observer, err := NewOTelObserver(sdktrace.NewTracerProvider().Tracer("platform-tests"), meterProvider.Meter("platform-tests"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	handler := observer.WrapHTTP(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		once.Do(func() { close(started) })
+		<-release
+	}))
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/chat/stream?tenant=support", nil))
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP handler did not start")
+	}
+	metrics := collectMetrics(t, reader)
+	found := false
+	for _, scopeMetrics := range metrics.ScopeMetrics {
+		for _, metricData := range scopeMetrics.Metrics {
+			if metricData.Name != "http.server.active_requests" {
+				continue
+			}
+			for _, point := range metricData.Data.(metricdata.Sum[int64]).DataPoints {
+				attrs := point.Attributes.ToSlice()
+				for _, attr := range attrs {
+					if string(attr.Key) == "http.route" && attr.Value.AsString() == "/api/v1/chat/stream" && point.Value == 1 {
+						found = true
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("active SSE request metric not found")
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP handler did not finish")
 	}
 }

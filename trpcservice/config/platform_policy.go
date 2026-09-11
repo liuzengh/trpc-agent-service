@@ -291,10 +291,6 @@ func validateCustomToolCredentials(policy ToolPolicy, allowed map[string]struct{
 	return nil
 }
 
-func (c TenantConfig) validatePlatformPolicy(location string, providers map[string]ModelProviderConfig, allowedSecrets map[string]struct{}) error {
-	return c.validatePlatformPolicyWithDynamic(location, providers, allowedSecrets, nil, nil)
-}
-
 func (c TenantConfig) validatePlatformPolicyWithDynamic(location string, providers map[string]ModelProviderConfig, allowedSecrets map[string]struct{}, dynamicModels map[string]map[string]struct{}, artifactDrivers []string) error {
 	values := []string{c.Model.ProviderID, c.Model.Name}
 	populated := 0
@@ -543,32 +539,6 @@ func validateToolCredential(location, reference string, allowedSecrets map[strin
 	return nil
 }
 
-func validateBackend(location string, backend BackendConfig, allowedSecrets map[string]struct{}, supported ...string) error {
-	driver := strings.TrimSpace(backend.Driver)
-	if driver == "" {
-		if backend.ConnectionRef != "" {
-			return fmt.Errorf("%s.driver is required with connection_ref", location)
-		}
-		return nil
-	}
-	valid := false
-	for _, candidate := range supported {
-		valid = valid || driver == candidate
-	}
-	if !valid {
-		return fmt.Errorf("%s has unsupported driver %q", location, driver)
-	}
-	if backend.ConnectionRef != "" && !strings.HasPrefix(backend.ConnectionRef, "env:") {
-		return fmt.Errorf("%s.connection_ref must use an env: reference", location)
-	}
-	if backend.ConnectionRef != "" {
-		if _, ok := allowedSecrets[backend.ConnectionRef]; !ok {
-			return fmt.Errorf("%s.connection_ref is not managed by the platform", location)
-		}
-	}
-	return nil
-}
-
 func validateBackendProfileRef(location string, profile BackendProfileRef) error {
 	profileID := strings.TrimSpace(profile.ProfileID)
 	if profileID == "" {
@@ -576,42 +546,6 @@ func validateBackendProfileRef(location string, profile BackendProfileRef) error
 	}
 	if strings.ContainsAny(profileID, " /\\") {
 		return fmt.Errorf("%s.profile_id contains invalid characters", location)
-	}
-	return nil
-}
-
-func validateFrameworkBackend(location string, backend BackendConfig, allowedSecrets map[string]struct{}, defaultDriver string, supported, connectionRequired []string) error {
-	driver := strings.ToLower(strings.TrimSpace(backend.Driver))
-	if driver == "" {
-		driver = defaultDriver
-	}
-	valid := false
-	for _, candidate := range supported {
-		if driver == candidate {
-			valid = true
-			break
-		}
-	}
-	if !valid {
-		return fmt.Errorf("%s has unsupported driver %q", location, driver)
-	}
-	reference := strings.TrimSpace(backend.ConnectionRef)
-	if driver == "inmemory" && reference != "" {
-		return fmt.Errorf("%s.connection_ref is not valid for inmemory", location)
-	}
-	for _, candidate := range connectionRequired {
-		if driver == candidate && reference == "" {
-			return fmt.Errorf("%s.connection_ref is required for driver %q", location, driver)
-		}
-	}
-	if reference == "" {
-		return nil
-	}
-	if !strings.HasPrefix(reference, "env:") {
-		return fmt.Errorf("%s.connection_ref must use an env: reference", location)
-	}
-	if _, ok := allowedSecrets[reference]; !ok {
-		return fmt.Errorf("%s.connection_ref is not managed by the platform", location)
 	}
 	return nil
 }

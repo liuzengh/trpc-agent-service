@@ -11,7 +11,11 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
-func seedCanonicalLoginUser(t *testing.T, ctx context.Context, identities identity.IdentityStore, subjectID string) identity.PlatformUser {
+func seedCanonicalLoginUser(t *testing.T, ctx context.Context, identities interface {
+	identity.LoginProviderRegistrar
+	ResolveLoginIdentity(context.Context, identity.Identity) (identity.PlatformUser, error)
+	CreateTenant(context.Context, string, string, string) error
+}, subjectID string) identity.PlatformUser {
 	t.Helper()
 	if err := identities.UpsertLoginProvider(ctx, identity.ProviderDescriptor{
 		ProviderID: "wecom-login", Type: identity.ProviderWeCom, DisplayName: "企业微信",
@@ -87,20 +91,15 @@ func TestResolveInboundSessionKeepsGroupSubjectSeparateFromActor(t *testing.T) {
 	ctx := context.Background()
 	identities := identity.NewMemoryIdentityStore()
 	user := seedCanonicalLoginUser(t, ctx, identities, "ming")
-	if err := identities.LinkChannelIdentity(ctx, identity.ChannelIdentity{
-		TenantID: "trailforge", Channel: channels.Feishu, BindingID: "fs-main", ExternalUserID: "ou_ming", PlatformUserID: user.PlatformUserID,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	snapshot := tenant.Snapshot{Config: config.TenantConfig{TenantID: "trailforge", AppCode: "assistant", ConfigVersion: 1, Status: config.AgentActive, Channels: []config.ChannelBinding{{Type: "feishu", BindingID: "fs-main"}}}}
-	_, inbound, err := ResolveInboundSession(ctx, storage.NewMemoryStateStore(), identities, snapshot, "fs-main", channels.InboundMessage{
-		MessageID: "fs-1", Channel: channels.Feishu, ConversationID: "oc_group", SenderID: "ou_ming",
+	snapshot := tenant.Snapshot{Config: config.TenantConfig{TenantID: "trailforge", AppCode: "assistant", ConfigVersion: 1, Status: config.AgentActive, Channels: []config.ChannelBinding{{Type: "wecom", BindingID: "wecom-main", TrustedEnterpriseID: "corp-trailforge"}}}}
+	_, inbound, err := ResolveInboundSession(ctx, storage.NewMemoryStateStore(), identities, snapshot, "wecom-main", channels.InboundMessage{
+		MessageID: "wx-group-1", Channel: channels.WeCom, ConversationID: "group-1", SenderID: "ming",
 		ConversationScope: channels.ConversationGroup, TriggerType: channels.TriggerMention, Text: "@bot hello",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inbound.SubjectID != "group:feishu:fs-main:oc_group" || inbound.OwnerPlatformUserID != "" || inbound.ActorPlatformUserID != user.PlatformUserID {
+	if inbound.SubjectID != "group:wecom:wecom-main:group-1" || inbound.OwnerPlatformUserID != "" || inbound.ActorPlatformUserID != user.PlatformUserID {
 		t.Fatalf("group inbound = %+v", inbound)
 	}
 }
@@ -157,16 +156,23 @@ func TestResolveInboundSessionEnforcesBindingAccessPolicies(t *testing.T) {
 		t.Fatalf("binding without access policy must preserve public access: %v", err)
 	}
 
-	if err := identities.LinkChannelIdentity(ctx, identity.ChannelIdentity{TenantID: "trailforge", Channel: channels.Telegram, BindingID: "public", ExternalUserID: "blocked", PlatformUserID: outsider.PlatformUserID}); err != nil {
+	trustedPublic := base
+	trustedPublic.Channels = []config.ChannelBinding{{Type: "wecom", BindingID: "trusted-public", TrustedEnterpriseID: "corp-trailforge", AccessPolicy: config.ChannelAccessPublic}}
+	if err := identities.GrantMembership(ctx, "trailforge", outsider.PlatformUserID, identity.RoleMember); err != nil {
 		t.Fatal(err)
+	}
+	if _, inbound, err := ResolveInboundSession(ctx, state, identities, tenant.Snapshot{Config: trustedPublic}, "trusted-public", channels.InboundMessage{
+		MessageID: "m5-prime", Channel: channels.WeCom, ConversationID: "outsider", SenderID: "outsider", Text: "hi",
+	}); err != nil || inbound.ActorPlatformUserID != outsider.PlatformUserID {
+		t.Fatalf("trusted public identity was not resolved before suspension: %+v, %v", inbound, err)
 	}
 	if err := identities.UpdatePlatformUserAccess(ctx, outsider.PlatformUserID, "suspended", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ResolveInboundSession(ctx, state, identities, tenant.Snapshot{Config: public}, "public", channels.InboundMessage{
-		MessageID: "m5", Channel: channels.Telegram, ConversationID: "blocked", SenderID: "blocked", Text: "hi",
+	if _, _, err := ResolveInboundSession(ctx, state, identities, tenant.Snapshot{Config: trustedPublic}, "trusted-public", channels.InboundMessage{
+		MessageID: "m5", Channel: channels.WeCom, ConversationID: "outsider", SenderID: "outsider", Text: "hi",
 	}); err == nil {
-		t.Fatal("public binding must reject an explicitly linked suspended platform user")
+		t.Fatal("public binding must reject a trusted external identity already resolved to a suspended platform user")
 	}
 
 	_ = member

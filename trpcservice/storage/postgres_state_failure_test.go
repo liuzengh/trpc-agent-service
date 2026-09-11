@@ -53,6 +53,18 @@ func TestPostgresStateStoreRejectsIncompleteTenantKeysBeforeDatabase(t *testing.
 		}, want: "audit cutoff"},
 		{name: "outbox tenant", call: func() error { return store.MarkOutboxDelivered(context.Background(), "", "event") }, want: "outbox tenant ID"},
 		{name: "outbox event", call: func() error { return store.MarkOutboxDelivered(context.Background(), "tenant", "") }, want: "outbox event ID"},
+		{name: "outbox retention tenant", call: func() error {
+			_, err := store.PurgeDeliveredOutboxBefore(context.Background(), "", time.Now(), 1)
+			return err
+		}, want: "outbox retention tenant ID"},
+		{name: "outbox retention cutoff", call: func() error {
+			_, err := store.PurgeDeliveredOutboxBefore(context.Background(), "tenant", time.Time{}, 1)
+			return err
+		}, want: "outbox retention cutoff"},
+		{name: "outbox retention limit", call: func() error {
+			_, err := store.PurgeDeliveredOutboxBefore(context.Background(), "tenant", time.Now(), 0)
+			return err
+		}, want: "outbox retention limit"},
 		{name: "archive tenant", call: func() error { return store.ArchiveSession(context.Background(), "", "session") }, want: "archive tenant ID"},
 		{name: "archive key", call: func() error { return store.ArchiveSession(context.Background(), "tenant", "") }, want: "archive session key"},
 	}
@@ -83,6 +95,10 @@ func TestPostgresStateStoreWrapsUnavailableDatabaseErrors(t *testing.T) {
 		{name: "outbox", call: func() error { _, err := store.ListPendingOutbox(context.Background(), "tenant", 1); return err }, want: "list pending outbox"},
 		{name: "sessions", call: func() error { _, err := store.ListSessions(context.Background(), "tenant", 1); return err }, want: "list sessions"},
 		{name: "delivered", call: func() error { return store.MarkOutboxDelivered(context.Background(), "tenant", "event") }, want: "mark outbox delivered"},
+		{name: "outbox retention", call: func() error {
+			_, err := store.PurgeDeliveredOutboxBefore(context.Background(), "tenant", time.Now(), 1)
+			return err
+		}, want: "purge delivered outbox events"},
 		{name: "active", call: func() error {
 			_, err := store.ResolveSession(context.Background(), SessionRoute{
 				TenantID: "tenant", AppCode: "app", Channel: "web", BindingID: "web-console",

@@ -15,10 +15,27 @@ type tenantBackendPolicyResponse struct {
 }
 
 type backendProfileCreateRequest struct {
-	ProfileID     string `json:"profile_id"`
-	DisplayName   string `json:"display_name"`
-	Driver        string `json:"driver"`
-	ConnectionRef string `json:"connection_ref,omitempty"`
+	ProfileID     string   `json:"profile_id"`
+	DisplayName   string   `json:"display_name"`
+	Driver        string   `json:"driver"`
+	ConnectionRef string   `json:"connection_ref,omitempty"`
+	Domains       []string `json:"domains"`
+}
+
+type backendProfileUpdateRequest struct {
+	DisplayName string `json:"display_name"`
+	Status      string `json:"status"`
+}
+
+func (c *consoleAPI) backendDrivers(writer http.ResponseWriter, request *http.Request) {
+	if !requireSystemAdmin(writer, request) {
+		return
+	}
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, http.MethodGet)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"drivers": storage.BackendDriverCatalog()})
 }
 
 func (c *consoleAPI) backendProfiles(writer http.ResponseWriter, request *http.Request) {
@@ -45,9 +62,9 @@ func (c *consoleAPI) backendProfiles(writer http.ResponseWriter, request *http.R
 		}
 		profile := storage.BackendProfile{
 			ProfileID: body.ProfileID, DisplayName: body.DisplayName, Driver: body.Driver,
-			ConnectionRef: body.ConnectionRef, Status: storage.BackendProfileActive,
+			ConnectionRef: body.ConnectionRef, Domains: body.Domains, Status: storage.BackendProfileActive,
 		}
-		created, err := c.dependencies.BackendProfiles.UpsertBackendProfile(request.Context(), profile)
+		created, err := c.dependencies.BackendProfiles.CreateBackendProfile(request.Context(), profile)
 		if err != nil {
 			badRequest(writer, err.Error())
 			return
@@ -73,18 +90,20 @@ func (c *consoleAPI) backendProfile(writer http.ResponseWriter, request *http.Re
 	}
 	switch request.Method {
 	case http.MethodPut:
-		var profile storage.BackendProfile
-		if err := decodeJSONBody(request, &profile); err != nil {
+		var body backendProfileUpdateRequest
+		if err := decodeJSONBody(request, &body); err != nil {
 			badRequest(writer, err.Error())
 			return
 		}
-		if strings.TrimSpace(profile.ProfileID) != "" && strings.TrimSpace(profile.ProfileID) != profileID {
-			badRequest(writer, "profile_id does not match request path")
-			return
-		}
-		profile.ProfileID = profileID
-		updated, err := c.dependencies.BackendProfiles.UpsertBackendProfile(request.Context(), profile)
+		updated, err := c.dependencies.BackendProfiles.UpdateBackendProfile(request.Context(), profileID, storage.BackendProfileUpdate{
+			DisplayName: body.DisplayName,
+			Status:      body.Status,
+		})
 		if err != nil {
+			if errors.Is(err, storage.ErrBackendProfileNotFound) {
+				notFound(writer, "backend profile does not exist")
+				return
+			}
 			badRequest(writer, err.Error())
 			return
 		}

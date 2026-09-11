@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/internal/testutil"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
@@ -26,6 +27,36 @@ type recordingModelProvider struct {
 func (p *recordingModelProvider) Model(context.Context, config.TenantConfig) (model.Model, error) {
 	p.calls++
 	return p.model, nil
+}
+
+type blockingModelProvider struct {
+	mu      sync.Mutex
+	calls   int
+	started chan struct{}
+	release chan struct{}
+	model   model.Model
+}
+
+func (p *blockingModelProvider) Model(ctx context.Context, _ config.TenantConfig) (model.Model, error) {
+	p.mu.Lock()
+	p.calls++
+	first := p.calls == 1
+	p.mu.Unlock()
+	if first {
+		close(p.started)
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-p.release:
+		return p.model, nil
+	}
+}
+
+func (p *blockingModelProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
 }
 
 type recordingKnowledgeProvider struct{ calls int }
@@ -150,6 +181,55 @@ func TestFactoryUsesTenantModelProviderOncePerConfigVersion(t *testing.T) {
 	}
 	if provider.calls != 2 {
 		t.Fatalf("provider calls = %d, want 2", provider.calls)
+	}
+}
+
+func TestFactoryCoalescesConcurrentColdRunnerBuilds(t *testing.T) {
+	provider := &blockingModelProvider{
+		started: make(chan struct{}), release: make(chan struct{}), model: testutil.NewFakeModel("tenant reply"),
+	}
+	factory := NewFactoryWithModelProvider(provider, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() { _ = factory.Close() })
+	tenantConfig := config.TenantConfig{
+		TenantID: "acme", AppCode: "support", Status: config.AgentActive, ConfigVersion: 1,
+		Model: config.ModelConfig{ProviderID: "primary", Name: "support"},
+	}
+
+	const callers = 24
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var workers sync.WaitGroup
+	workers.Add(callers)
+	for range callers {
+		go func() {
+			defer workers.Done()
+			<-start
+			_, release, err := factory.Acquire(context.Background(), tenantConfig)
+			if err == nil {
+				release()
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("runner build did not start")
+	}
+	// Give the other callers time to encounter the same cold cache while the
+	// first construction is deliberately held in the model provider.
+	time.Sleep(20 * time.Millisecond)
+	close(provider.release)
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Acquire() error = %v", err)
+		}
+	}
+	if got := provider.callCount(); got != 1 {
+		t.Fatalf("model provider calls = %d, want one coalesced cold build", got)
 	}
 }
 

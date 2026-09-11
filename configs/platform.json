@@ -2,6 +2,9 @@
   "service": {
     "listen_address": ":8080",
     "request_timeout": "15s",
+    "http_read_header_timeout": "15s",
+    "http_read_timeout": "5m",
+    "http_idle_timeout": "2m",
     "max_inbound_bytes": 1048576,
     "docling_endpoint": "http://127.0.0.1:5001",
     "document_extract_timeout": "5m",
@@ -12,7 +15,7 @@
       "reranker": {"type": "topk", "top_n": 5},
       "allowed_source_hosts": ["github.com", "raw.githubusercontent.com"]
     },
-    "allowed_secret_refs": ["env:ZHIPU_API_KEY", "env:TELEGRAM_EXAMPLE_CONFIG_JSON", "env:WECOM_TRAILFORGE_CONFIG_JSON", "env:FEISHU_TRAILFORGE_CONFIG_JSON", "env:TELEGRAM_TRAILFORGE_CONFIG_JSON"],
+    "allowed_secret_refs": ["env:ZHIPU_API_KEY", "env:DEEPSEEK_API_KEY", "env:TELEGRAM_EXAMPLE_CONFIG_JSON", "env:WECOM_TRAILFORGE_CONFIG_JSON", "env:FEISHU_TRAILFORGE_CONFIG_JSON", "env:TELEGRAM_TRAILFORGE_CONFIG_JSON"],
     "channel_credential_refs": ["env:TELEGRAM_EXAMPLE_CONFIG_JSON", "env:WECOM_TRAILFORGE_CONFIG_JSON", "env:FEISHU_TRAILFORGE_CONFIG_JSON", "env:TELEGRAM_TRAILFORGE_CONFIG_JSON"]
   },
   "model_providers": [
@@ -27,6 +30,38 @@
           "capabilities": {
             "input": {"image": true}
           }
+        }
+      ]
+    },
+    {
+      "id": "deepseek",
+      "type": "openai",
+      "base_url": "https://api.deepseek.com",
+      "api_key_ref": "env:DEEPSEEK_API_KEY",
+      "models": [
+        {
+          "name": "deepseek-flash",
+          "capabilities": {
+            "reasoning_efforts": ["low", "high", "max"],
+            "thinking_toggle": true
+          }
+        },
+        {
+          "name": "deepseek-v4-pro",
+          "capabilities": {
+            "reasoning_efforts": ["low", "high", "max"],
+            "thinking_toggle": true
+          }
+        },
+        {
+          "name": "deepseek-chat",
+          "prompt_cost_micros_per_million_tokens": 200000,
+          "completion_cost_micros_per_million_tokens": 800000
+        },
+        {
+          "name": "deepseek-reasoner",
+          "prompt_cost_micros_per_million_tokens": 550000,
+          "completion_cost_micros_per_million_tokens": 2190000
         }
       ]
     }

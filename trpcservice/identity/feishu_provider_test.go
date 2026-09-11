@@ -35,6 +35,57 @@ func TestFeishuBeginUsesConfiguredRedirectURIExactly(t *testing.T) {
 	}
 }
 
+func TestFeishuProviderDescriptorMetadataAndQRBegin(t *testing.T) {
+	t.Parallel()
+	provider, err := NewFeishuProvider(FeishuConfig{
+		ProviderID: " feishu-main ", DisplayName: " 客服飞书 ", AppID: " cli_test ", AppSecret: " secret ", TenantKey: " tenant-key ",
+		RedirectURI: testFeishuRedirectURI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor := provider.Descriptor()
+	if descriptor.ProviderID != "feishu-main" || descriptor.Type != ProviderFeishu || descriptor.DisplayName != "客服飞书" {
+		t.Fatalf("Descriptor() = %#v", descriptor)
+	}
+	metadata := provider.ConfigurationMetadata()
+	if metadata["app_id"] != "cli_test" || metadata["tenant_key"] != "tenant-key" || len(metadata) != 2 {
+		t.Fatalf("ConfigurationMetadata() = %#v", metadata)
+	}
+	qrURL, err := provider.BeginQR(AuthRequest{State: "state-qr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(qrURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	if query.Get("client_id") != "cli_test" || query.Get("redirect_uri") != testFeishuRedirectURI || query.Get("state") != "state-qr" || query.Get("response_type") != "code" {
+		t.Fatalf("BeginQR() query = %#v", query)
+	}
+	if _, err := provider.BeginQR(AuthRequest{}); err == nil {
+		t.Fatal("BeginQR() accepted empty state")
+	}
+}
+
+func TestFeishuProviderMetadataOmitsEmptyTenantKeyAndUsesDefaultName(t *testing.T) {
+	t.Parallel()
+	provider, err := NewFeishuProvider(FeishuConfig{
+		ProviderID: "feishu-main", AppID: "cli_test", AppSecret: "secret", RedirectURI: testFeishuRedirectURI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.Descriptor().DisplayName != "飞书" {
+		t.Fatalf("default display name = %q", provider.Descriptor().DisplayName)
+	}
+	metadata := provider.ConfigurationMetadata()
+	if _, ok := metadata["tenant_key"]; ok || metadata["app_id"] != "cli_test" {
+		t.Fatalf("ConfigurationMetadata() = %#v", metadata)
+	}
+}
+
 func TestFeishuExchangeReusesAuthorizationRedirectURI(t *testing.T) {
 	var tokenRedirectURI string
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

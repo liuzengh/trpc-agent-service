@@ -133,7 +133,8 @@ type KnowledgeMigrationManager interface {
 // ConsoleDependencies are the read-mostly data sources for the console API.
 type ConsoleDependencies struct {
 	Configurations          tenant.Repository
-	Identities              identity.IdentityStore
+	Identities              identity.ConsoleIdentityStore
+	InboundIdentities       messaging.ChannelIdentityResolver
 	Producer                messaging.Producer
 	ExecutionManifests      *messaging.ExecutionManifestCodec
 	Sessions                storage.SessionLister
@@ -228,6 +229,9 @@ func NewConsoleHandler(dependencies ConsoleDependencies) (http.Handler, error) {
 	if dependencies.ApplicationValidator == nil {
 		return nil, fmt.Errorf("console application policy validator is required")
 	}
+	if dependencies.InboundIdentities == nil {
+		return nil, fmt.Errorf("console inbound identity resolver is required")
+	}
 
 	console := &consoleAPI{dependencies: dependencies}
 	mux := http.NewServeMux()
@@ -240,6 +244,7 @@ func NewConsoleHandler(dependencies ConsoleDependencies) (http.Handler, error) {
 	mux.HandleFunc("/api/v1/users/local/reset", console.resetLocalPassword)
 	mux.HandleFunc("/api/v1/tenant-members", console.tenantMembers)
 	mux.HandleFunc("/api/v1/tenant-model-policy", console.tenantModelPolicy)
+	mux.HandleFunc("/api/v1/tenant-tool-policy", console.tenantToolPolicy)
 	mux.HandleFunc("/api/v1/account/profile", console.accountProfile)
 	mux.HandleFunc("/api/v1/sessions", console.listTenantSessions)
 	mux.HandleFunc("/api/v1/sessions/mine", console.listMySessions)
@@ -261,6 +266,7 @@ func NewConsoleHandler(dependencies ConsoleDependencies) (http.Handler, error) {
 	mux.HandleFunc("/api/v1/catalog", console.tenantCatalog)
 	mux.HandleFunc("/api/v1/models", console.models)
 	mux.HandleFunc("/api/v1/models/sync", console.syncModels)
+	mux.HandleFunc("/api/v1/backend-drivers", console.backendDrivers)
 	mux.HandleFunc("/api/v1/backend-profiles", console.backendProfiles)
 	mux.HandleFunc("/api/v1/backend-profiles/", console.backendProfile)
 	mux.HandleFunc("/api/v1/tenant-backend-policy", console.tenantBackendPolicy)
@@ -302,13 +308,18 @@ func (c *consoleAPI) tenantCatalog(writer http.ResponseWriter, request *http.Req
 		serverError(writer, "list tenant backend profiles", err)
 		return
 	}
+	tools, err := c.tenantTools(request.Context(), tenantID)
+	if err != nil {
+		c.writeTenantToolPolicyError(writer, err)
+		return
+	}
 
 	writeJSON(writer, http.StatusOK, TenantCatalog{
 		ModelProviders:        providers,
 		BackendProfiles:       backendProfiles,
 		ChannelCredentialRefs: append([]string{}, c.dependencies.System.ChannelCredentialRefs...),
 		ToolCredentialRefs:    append([]string{}, c.dependencies.System.ToolCredentialRefs...),
-		Tools:                 append([]ToolInfo{}, c.dependencies.ToolCatalog...),
+		Tools:                 tools,
 	})
 }
 
@@ -367,7 +378,7 @@ func (c *consoleAPI) buildWebInbound(ctx context.Context, body chatRequest, user
 	if c.dependencies.State == nil {
 		return tenant.Snapshot{}, "", channels.InboundMessage{}, errors.New("session routing state store is required")
 	}
-	sessionKey, inbound, err := messaging.ResolveInboundSession(ctx, c.dependencies.State, c.dependencies.Identities, snapshot, "web-console", inbound)
+	sessionKey, inbound, err := messaging.ResolveInboundSession(ctx, c.dependencies.State, c.dependencies.InboundIdentities, snapshot, "web-console", inbound)
 	if err != nil {
 		return tenant.Snapshot{}, "", channels.InboundMessage{}, fmt.Errorf("resolve session: %w", err)
 	}

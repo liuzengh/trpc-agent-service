@@ -5,6 +5,7 @@ import {
   mergeChatThreads,
   messagesFromTranscript,
   threadFromSession,
+  visibleUserMessage,
   type ChatThread,
 } from './chatState'
 
@@ -26,7 +27,7 @@ describe('web chat session restore', () => {
   it('maps a listed session into a thread without inventing messages', () => {
     const mapped = threadFromSession({
       SessionKey: 'acme/support/web/conversation-1',
-      Preview: '订单到哪了',
+      preview: '订单到哪了',
       UpdatedAt: '2026-09-09T09:00:00Z',
     })
     expect(mapped.id).toBe('acme/support/web/conversation-1')
@@ -53,12 +54,12 @@ describe('web chat session restore', () => {
     const remote = [
       threadFromSession({
         SessionKey: 'acme/support/web/conversation-1',
-        Preview: '订单到哪了',
+        preview: '订单到哪了',
         UpdatedAt: '2026-09-09T09:00:00Z',
       }),
       threadFromSession({
         SessionKey: 'acme/support/web/conversation-2',
-        Preview: '退款进度',
+        preview: '退款进度',
         UpdatedAt: '2026-09-08T09:00:00Z',
       }),
     ]
@@ -78,5 +79,21 @@ describe('web chat session restore', () => {
       { id: 'u1', role: 'user', content: '你好' },
       { id: 'a1', role: 'assistant', content: '你好，我是助手' },
     ])
+  })
+
+  it('keeps restored attachment metadata from transcript messages', () => {
+    expect(messagesFromTranscript([
+      { id: 'u1', role: 'user', content: '回答我的问题。', time: '2026-09-09T09:00:00Z', attachments: [{ name: 'question.txt' }] },
+    ])[0]).toMatchObject({
+      content: '回答我的问题。',
+      attachments: [{ name: 'question.txt' }],
+    })
+  })
+
+  it('restores the legacy expanded attachment block on the client as a UI fallback', () => {
+    expect(visibleUserMessage('回答我的问题。\n\n附件「question.txt」内容：\n你是谁？')).toEqual({
+      content: '回答我的问题。',
+      attachments: [{ name: 'question.txt' }],
+    })
   })
 })

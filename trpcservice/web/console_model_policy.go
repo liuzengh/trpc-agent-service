@@ -173,6 +173,9 @@ func (c *consoleAPI) validateApplication(ctx context.Context, tenantConfig confi
 	if err := c.validateApplicationModelPolicy(ctx, tenantConfig); err != nil {
 		return err
 	}
+	if err := c.validateApplicationToolPolicy(ctx, tenantConfig); err != nil {
+		return err
+	}
 	return c.validateApplicationStoragePolicy(ctx, tenantConfig)
 }
 

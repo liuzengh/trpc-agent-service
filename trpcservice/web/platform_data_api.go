@@ -67,6 +67,10 @@ func (c *consoleAPI) memory(writer http.ResponseWriter, request *http.Request) {
 	}
 	reader, err := c.agentMemoryReader(request.Context(), tenantID, application.AppCode)
 	if err != nil {
+		if errors.Is(err, storage.ErrMemoryDirectAccessUnsupported) {
+			writeJSON(writer, http.StatusOK, map[string]any{"memories": []any{}, "managed_externally": true})
+			return
+		}
 		badRequest(writer, err.Error())
 		return
 	}
@@ -317,7 +321,8 @@ func (c *consoleAPI) knowledge(writer http.ResponseWriter, request *http.Request
 			TenantID: tenantID, AppCode: appCode, DocumentID: documentID, Name: name,
 			Filename: filename, ContentType: contentType, Data: data,
 			ChunkSize: body.ChunkSize, Overlap: body.Overlap, Metadata: metadata,
-			Backend: normalizedKnowledgeBackend(backend),
+			ProfileID: application.Storage.Knowledge.ProfileID,
+			Backend:   normalizedKnowledgeBackend(backend),
 		})
 		if err != nil {
 			if errors.Is(err, storage.ErrKnowledgeIngestActive) {
@@ -440,7 +445,8 @@ func (c *consoleAPI) enqueueKnowledgeUpload(writer http.ResponseWriter, request 
 		TenantID: tenantID, AppCode: appCode, DocumentID: documentID, Name: name,
 		Filename: header.Filename, ContentType: header.Header.Get("Content-Type"), Data: data,
 		ChunkSize: chunkSize, Overlap: overlap, Metadata: metadata,
-		Backend: normalizedKnowledgeBackend(backend),
+		ProfileID: application.Storage.Knowledge.ProfileID,
+		Backend:   normalizedKnowledgeBackend(backend),
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrKnowledgeIngestActive) {
@@ -564,7 +570,8 @@ func (c *consoleAPI) artifacts(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	user, _ := sessionUser(request)
-	if !canWriteTenant(user, tenantID) && !canReadSession(user, entry) {
+	contentAudit := !canReadSession(user, entry)
+	if contentAudit && !canAuditConversationContent(user, tenantID) {
 		writeJSON(writer, http.StatusForbidden, map[string]any{"error": "forbidden: session artifacts are not visible"})
 		return
 	}
@@ -584,6 +591,12 @@ func (c *consoleAPI) artifacts(writer http.ResponseWriter, request *http.Request
 		for _, key := range keys {
 			if !strings.HasPrefix(key, "input/") {
 				visible = append(visible, key)
+			}
+		}
+		if contentAudit {
+			if err := c.recordConversationArtifactRead(request, user, entry); err != nil {
+				serverError(writer, "record conversation artifact audit", err)
+				return
 			}
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"artifacts": visible})
@@ -615,6 +628,12 @@ func (c *consoleAPI) artifacts(writer http.ResponseWriter, request *http.Request
 	if artifact == nil {
 		notFound(writer, "artifact version does not exist")
 		return
+	}
+	if contentAudit {
+		if err := c.recordConversationArtifactRead(request, user, entry); err != nil {
+			serverError(writer, "record conversation artifact audit", err)
+			return
+		}
 	}
 	writer.Header().Set("Content-Type", artifact.MimeType)
 	writer.Header().Set("X-Artifact-Version", strconv.Itoa(targetVersion))

@@ -6,6 +6,9 @@ import (
 	"io"
 	"testing"
 	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 )
 
 // scriptedConsumer is a deterministic Consumer that replays a prepared queue and
@@ -14,6 +17,14 @@ type scriptedConsumer struct {
 	deliveries []Delivery
 	commits    int
 	dlqs       []DeadLetter
+}
+
+type recordingDeadLetterObserver struct {
+	observations []metrics.DeadLetterAttributes
+}
+
+func (o *recordingDeadLetterObserver) RecordDeadLetter(_ context.Context, observation metrics.DeadLetterAttributes) {
+	o.observations = append(o.observations, observation)
 }
 
 func (c *scriptedConsumer) Receive(ctx context.Context) (Delivery, error) {
@@ -91,15 +102,45 @@ func TestWorkerRetryableErrorLeavesMessageUncommitted(t *testing.T) {
 	}
 }
 
+func TestWorkerDeferredConflictDoesNotConsumeRetryBudget(t *testing.T) {
+	t.Parallel()
+
+	consumer := &scriptedConsumer{deliveries: []Delivery{{Envelope: validEnvelope(0)}}}
+	calls := 0
+	worker, err := NewWorker(consumer, ProcessorFunc(func(context.Context, Envelope) error {
+		calls++
+		if calls == 1 {
+			return Deferred(errors.New("execution still owned by another worker"))
+		}
+		return nil
+	}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.RunOnce(context.Background()); !errors.Is(err, ErrRetryScheduled) {
+		t.Fatalf("first deferred RunOnce() error = %v, want ErrRetryScheduled", err)
+	}
+	if consumer.commits != 0 || len(consumer.dlqs) != 0 {
+		t.Fatalf("deferred conflict committed/DLQed: commits=%d dlq=%d", consumer.commits, len(consumer.dlqs))
+	}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce() error = %v", err)
+	}
+	if consumer.commits != 1 || len(consumer.dlqs) != 0 {
+		t.Fatalf("resolved deferred conflict commits=%d dlq=%d, want 1/0", consumer.commits, len(consumer.dlqs))
+	}
+}
+
 func TestWorkerPermanentErrorGoesToDLQAndCommits(t *testing.T) {
 	t.Parallel()
 
 	envelope := validEnvelope(0)
 	envelope.TraceParent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	consumer := &scriptedConsumer{deliveries: []Delivery{{Envelope: envelope}}}
-	worker, err := NewWorker(consumer, ProcessorFunc(func(context.Context, Envelope) error {
+	observer := &recordingDeadLetterObserver{}
+	worker, err := NewWorkerWithRetryTracker(consumer, ProcessorFunc(func(context.Context, Envelope) error {
 		return Permanent(errors.New("poison message"))
-	}), 3)
+	}), 3, storage.NewMemoryRetryTracker(), observer)
 	if err != nil {
 		t.Fatalf("NewWorker() error = %v", err)
 	}
@@ -111,6 +152,9 @@ func TestWorkerPermanentErrorGoesToDLQAndCommits(t *testing.T) {
 	}
 	if len(consumer.dlqs) != 1 || consumer.dlqs[0].ErrorClass != "permanent" {
 		t.Fatalf("DLQ = %+v, want one permanent dead letter", consumer.dlqs)
+	}
+	if len(observer.observations) != 1 || observer.observations[0].TenantID != envelope.TenantID || observer.observations[0].ErrorClass != "permanent" {
+		t.Fatalf("DLQ observations = %+v", observer.observations)
 	}
 	// The dead letter must preserve the original trace context so a later
 	// replay can resume the same distributed trace.

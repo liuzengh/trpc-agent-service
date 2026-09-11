@@ -83,16 +83,32 @@ export interface TenantModelProviderInfo {
 
 export type BackendDomain = 'session' | 'memory' | 'knowledge' | 'artifact'
 
-export interface TenantBackendProfile {
+export interface BackendDriverCapabilities {
+  multi_node: boolean
+  memory_console_browsing: boolean
+}
+
+export interface BackendDriverSpec {
+  driver: string
+  domains: BackendDomain[]
+  connection_policy: 'none' | 'optional' | 'required'
+  capabilities: BackendDriverCapabilities
+}
+
+export interface BackendProfileDescriptor {
   profile_id: string
   display_name: string
   driver: string
   status: 'active' | 'disabled'
   domains: BackendDomain[]
+  capabilities: BackendDriverCapabilities
+}
+
+export interface TenantBackendProfile extends BackendProfileDescriptor {
   available: boolean
 }
 
-export interface BackendProfile extends TenantBackendProfile {
+export interface BackendProfile extends BackendProfileDescriptor {
   connection_ref?: string
   created_at?: string
   updated_at?: string
@@ -208,6 +224,7 @@ export interface ExecutionTrace {
   attempts: number
   claim?: Claim
   outbox?: OutboxEvent[]
+  audit_events?: AuditEvent[]
   agent_trace?: AgentExecutionTrace
   tool_executions?: ToolExecution[]
 }
@@ -359,8 +376,8 @@ export interface PlatformSession {
   UpdatedAt: string
   ArchivedAt?: string | null
   Conversations?: SessionConversation[]
-  Summary?: string
-  Preview?: string
+  summary?: string
+  preview?: string
 }
 
 export interface SessionConversation {
@@ -382,6 +399,12 @@ export interface SessionChatMessage {
   role: 'user' | 'assistant'
   content: string
   time: string
+  attachments?: Array<{
+    name: string
+    size?: number
+    type?: string
+  }>
+  card?: InteractiveCard
   source?: {
     channel: 'web' | 'telegram' | 'wecom' | 'feishu'
     binding_id: string
@@ -397,7 +420,22 @@ export interface SSEEvent {
   type: 'delta' | 'done' | 'error'
   content?: string
   reply?: string
+  card?: InteractiveCard
   message?: string
+}
+
+export interface CardAction {
+  action_id?: string
+  label: string
+  style?: string
+  url?: string
+}
+
+export interface InteractiveCard {
+  title?: string
+  body: string
+  actions?: CardAction[]
+  state?: string
 }
 
 export interface MemoryValue {
@@ -450,7 +488,15 @@ export function decodeBase64JSON<T>(encoded: string): T | null {
   }
 }
 
+export function outboxReplyPayload(payload: string): { text: string; card?: InteractiveCard } | null {
+  const decoded = decodeBase64JSON<{ text?: string; card?: InteractiveCard }>(payload)
+  if (!decoded) return null
+  return {
+    text: typeof decoded.text === 'string' ? decoded.text : '',
+    card: decoded.card,
+  }
+}
+
 export function outboxReplyText(payload: string): string {
-  const decoded = decodeBase64JSON<{ text?: string }>(payload)
-  return typeof decoded?.text === 'string' ? decoded.text : ''
+  return outboxReplyPayload(payload)?.text ?? ''
 }

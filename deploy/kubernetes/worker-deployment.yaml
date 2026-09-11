@@ -49,6 +49,7 @@ spec:
               valueFrom: {secretKeyRef: {name: trpc-agent-service-secrets, key: kafka-brokers}}
             - {name: KAFKA_TOPIC, value: agent.inbound.v1}
             - {name: KAFKA_GROUP_ID, value: trpc-agent-worker}
+            - {name: WORKER_CONCURRENCY, value: "4"}
             - name: MODEL_API_KEY
               valueFrom: {secretKeyRef: {name: trpc-agent-service-secrets, key: model-api-key}}
             - name: AUDIT_HMAC_KEY

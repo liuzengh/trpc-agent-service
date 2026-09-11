@@ -11,11 +11,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/messaging"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	agentartifact "trpc.group/trpc-go/trpc-agent-go/artifact"
 )
+
+var errChannelIngressRejected = errors.New("channel ingress rejected by policy")
 
 type channelIngress struct {
 	repository    tenant.Repository
@@ -52,6 +55,12 @@ func (i *channelIngress) publishReliably(ctx context.Context, bindingID string, 
 	for {
 		err := i.publish(ctx, bindingID, inbound)
 		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errChannelIngressRejected) {
+			slog.Info("channel inbound rejected by policy",
+				"channel", inbound.Channel, "binding_id", bindingID,
+				"message_id", inbound.MessageID, "error", err)
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -140,6 +149,16 @@ func (i *channelIngress) handleNewSession(ctx context.Context, snapshot tenant.S
 	route, normalized, err := messaging.PrepareInboundSessionRoute(ctx, i.identities, snapshot, bindingID, inbound)
 	if err != nil {
 		return err
+	}
+	if normalized.ConversationScope == channels.ConversationGroup {
+		actorPlatformUserID := strings.TrimSpace(normalized.ActorPlatformUserID)
+		if actorPlatformUserID == "" {
+			return fmt.Errorf("%w: group /new requires a tenant administrator", errChannelIngressRejected)
+		}
+		role, roleErr := i.identities.RoleFor(ctx, snapshot.Config.TenantID, actorPlatformUserID)
+		if roleErr != nil || role != identity.RoleAdmin {
+			return fmt.Errorf("%w: group /new requires a tenant administrator", errChannelIngressRejected)
+		}
 	}
 	var progress *inboundProgressHandle
 	if normalized.Channel == channels.WeCom {

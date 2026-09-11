@@ -354,6 +354,7 @@ textarea {
 
 .panel-header-copy {
   min-width: 0;
+  text-align: left;
 }
 
 .panel-header h2,

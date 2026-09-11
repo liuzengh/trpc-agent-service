@@ -12,6 +12,9 @@ import (
 
 var ErrExecutionTraceNotFound = errors.New("execution trace not found")
 
+// ExecutionTraceUsage is the persisted, content-free subset of framework
+// model.Usage. Keep this explicit projection instead of serializing framework
+// trace structs so new upstream fields cannot silently become persisted data.
 type ExecutionTraceUsage struct {
 	PromptTokens        int `json:"prompt_tokens"`
 	CompletionTokens    int `json:"completion_tokens"`
@@ -38,6 +41,10 @@ type ExecutionTraceStep struct {
 	Failed             bool                 `json:"failed,omitempty"`
 }
 
+// AgentExecutionTrace is a privacy-reduced persistence projection of
+// trpc-agent-go's execution trace. It intentionally omits model/tool input,
+// output, and raw error text while retaining topology, timing, and usage.
+// It is not a second execution-tracing domain model.
 type AgentExecutionTrace struct {
 	Status           string               `json:"status"`
 	RootAgentName    string               `json:"root_agent_name,omitempty"`

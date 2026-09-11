@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -24,7 +27,7 @@ type replayedExecutionContextKey struct{}
 // The fail-closed guarantee comes from two places outside this file: tools are
 // only ever registered at the single agent assembly site, and the agent-level
 // integration test pins that a deny-all policy results in zero delegate calls.
-func NewGovernanceCallbacks(policy governance.ToolPolicy, audit governance.AuditSink, ledger ExecutionLedger, timeout time.Duration) (*agenttool.Callbacks, error) {
+func NewGovernanceCallbacks(policy governance.ToolPolicy, audit governance.AuditSink, ledger ExecutionLedger, timeout time.Duration, observers ...metrics.ToolExecutionObserver) (*agenttool.Callbacks, error) {
 	if policy == nil {
 		return nil, fmt.Errorf("tool policy is required")
 	}
@@ -36,6 +39,13 @@ func NewGovernanceCallbacks(policy governance.ToolPolicy, audit governance.Audit
 	}
 	if timeout <= 0 {
 		return nil, fmt.Errorf("tool timeout must be positive")
+	}
+	var observer metrics.ToolExecutionObserver
+	for _, candidate := range observers {
+		if candidate != nil {
+			observer = candidate
+			break
+		}
 	}
 	return &agenttool.Callbacks{
 		BeforeTool: []agenttool.BeforeToolCallbackStructured{func(ctx context.Context, args *agenttool.BeforeToolArgs) (*agenttool.BeforeToolResult, error) {
@@ -63,11 +73,18 @@ func NewGovernanceCallbacks(policy governance.ToolPolicy, audit governance.Audit
 			}
 			switch decision.Status {
 			case ExecutionCompleted:
+				replayResult, replayErr := restoreReplayedToolResult(ctx, args.ToolName, decision.Result)
+				if replayErr != nil {
+					if auditErr := recordToolAudit(ctx, audit, invocation, request, governance.ToolOutcomeFailed, 0, replayErr); auditErr != nil {
+						return nil, errors.Join(replayErr, auditErr)
+					}
+					return nil, replayErr
+				}
 				replayContext := context.WithValue(ctx, replayedExecutionContextKey{}, true)
 				if auditErr := recordToolAudit(ctx, audit, invocation, request, governance.ToolOutcomeAllowed, 0, nil); auditErr != nil {
 					return nil, auditErr
 				}
-				return &agenttool.BeforeToolResult{Context: replayContext, CustomResult: decision.Result}, nil
+				return &agenttool.BeforeToolResult{Context: replayContext, CustomResult: replayResult}, nil
 			case ExecutionOutcomeUnknown:
 				err := fmt.Errorf("%w: tool %q may already have produced a side effect", ErrToolOutcomeUnknown, args.ToolName)
 				if auditErr := recordToolAudit(ctx, audit, invocation, request, governance.ToolOutcomeFailed, 0, err); auditErr != nil {
@@ -135,7 +152,12 @@ func NewGovernanceCallbacks(policy governance.ToolPolicy, audit governance.Audit
 			if executionKey == "" {
 				ledgerErr = errors.New("tool execution key is missing after execution")
 			} else if args.Error == nil {
-				ledgerErr = ledger.Complete(context.WithoutCancel(ctx), invocation.Execution.TenantID, executionKey, args.Result)
+				ledgerResult, resultErr := durableToolResult(args)
+				if resultErr != nil {
+					ledgerErr = resultErr
+				} else {
+					ledgerErr = ledger.Complete(context.WithoutCancel(ctx), invocation.Execution.TenantID, executionKey, ledgerResult)
+				}
 			} else {
 				// A tool error does not prove that the remote system rejected the
 				// operation before applying it. Preserve the reservation as unknown
@@ -144,6 +166,14 @@ func NewGovernanceCallbacks(policy governance.ToolPolicy, audit governance.Audit
 			}
 			if err := recordToolAudit(ctx, audit, invocation, request, outcome, latency, args.Error); err != nil {
 				ledgerErr = errors.Join(ledgerErr, fmt.Errorf("record tool audit: %w", err))
+			}
+			if observer != nil {
+				observer.RecordToolExecution(ctx, metrics.ToolExecutionAttributes{
+					TenantID: invocation.Execution.TenantID,
+					ToolName: args.ToolName,
+					Outcome:  string(outcome),
+					Latency:  time.Duration(latency) * time.Millisecond,
+				})
 			}
 			if ledgerErr != nil {
 				return nil, ledgerErr
@@ -154,6 +184,60 @@ func NewGovernanceCallbacks(policy governance.ToolPolicy, audit governance.Audit
 }
 
 const finalizationGrace = 5 * time.Second
+
+type presentedCardLedgerResult struct {
+	Result any                      `json:"result"`
+	Card   channels.InteractiveCard `json:"card"`
+}
+
+func durableToolResult(args *agenttool.AfterToolArgs) (any, error) {
+	if args == nil || args.ToolName != PresentCardToolName {
+		if args == nil {
+			return nil, nil
+		}
+		return args.Result, nil
+	}
+	card, err := parsePresentedCard(args.Arguments)
+	if err != nil {
+		return nil, fmt.Errorf("persist presented card replay state: %w", err)
+	}
+	return presentedCardLedgerResult{Result: args.Result, Card: card}, nil
+}
+
+func restoreReplayedToolResult(ctx context.Context, toolName string, stored any) (any, error) {
+	if toolName != PresentCardToolName {
+		return stored, nil
+	}
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		return nil, fmt.Errorf("encode presented card replay state: %w", err)
+	}
+	var persisted struct {
+		Result json.RawMessage          `json:"result"`
+		Card   channels.InteractiveCard `json:"card"`
+	}
+	if err := json.Unmarshal(encoded, &persisted); err != nil {
+		return nil, fmt.Errorf("decode presented card replay state: %w", err)
+	}
+	actions := make([]presentCardAction, 0, len(persisted.Card.Actions))
+	for _, action := range persisted.Card.Actions {
+		actions = append(actions, presentCardAction{Label: action.Label, URL: action.URL, Style: action.Style})
+	}
+	card, err := validatePresentedCard(presentCardArguments{Title: persisted.Card.Title, Body: persisted.Card.Body, Actions: actions})
+	if err != nil {
+		return nil, fmt.Errorf("validate presented card replay state: %w", err)
+	}
+	if err := recordPresentedCard(ctx, card); err != nil {
+		return nil, fmt.Errorf("restore presented card replay state: %w", err)
+	}
+	var result any
+	if len(persisted.Result) > 0 && string(persisted.Result) != "null" {
+		if err := json.Unmarshal(persisted.Result, &result); err != nil {
+			return nil, fmt.Errorf("decode presented card model result: %w", err)
+		}
+	}
+	return result, nil
+}
 
 func recordToolAudit(ctx context.Context, audit governance.AuditSink, invocation governance.Invocation, request governance.ToolRequest, outcome governance.ToolOutcome, latencyMS int64, callErr error) error {
 	sum := sha256.Sum256(request.Arguments)

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/safego"
+
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/redis/go-redis/v9"
 )
@@ -88,7 +90,7 @@ func (h *RedisIMProgressHub) Subscribe(ctx context.Context) (<-chan IMProgressEv
 			_ = pubsub.Close()
 		})
 	}
-	go func() {
+	safego.Go("IM progress subscriber", func() {
 		defer close(output)
 		defer closeFn()
 		for {
@@ -110,7 +112,7 @@ func (h *RedisIMProgressHub) Subscribe(ctx context.Context) (<-chan IMProgressEv
 				}
 			}
 		}
-	}()
+	})
 	return output, closeFn, nil
 }
 

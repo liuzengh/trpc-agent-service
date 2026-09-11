@@ -257,7 +257,7 @@ func (c *consoleAPI) executionTrace(writer http.ResponseWriter, request *http.Re
 	if !requireTenantWrite(writer, request, tenantID) {
 		return
 	}
-	trace := map[string]any{"event_id": eventID, "attempts": 0, "tool_executions": []any{}}
+	trace := map[string]any{"event_id": eventID, "attempts": 0, "tool_executions": []any{}, "audit_events": []any{}}
 	if c.dependencies.State != nil {
 		agentTrace, err := c.dependencies.State.GetExecutionTrace(request.Context(), tenantID, channel, bindingID, eventID)
 		switch {
@@ -304,13 +304,27 @@ func (c *consoleAPI) executionTrace(writer http.ResponseWriter, request *http.Re
 				trace["trace_id"] = claim.TraceID
 			}
 			if _, ok := trace["status"]; !ok {
-				if claim.Status == "completed" {
+				switch claim.Status {
+				case "completed":
 					trace["status"] = "completed"
-				} else {
+				case "failed":
+					trace["status"] = "failed"
+				default:
 					trace["status"] = "incomplete"
 				}
 			}
 			break
+		}
+	}
+	if c.dependencies.State != nil {
+		traceID, _ := trace["trace_id"].(string)
+		if strings.TrimSpace(traceID) != "" {
+			auditEvents, err := c.dependencies.State.ListAudit(request.Context(), tenantID, traceID)
+			if err != nil {
+				serverError(writer, "list execution audit events", err)
+				return
+			}
+			trace["audit_events"] = auditEvents
 		}
 	}
 	var outboxReplies []storage.OutboxEvent

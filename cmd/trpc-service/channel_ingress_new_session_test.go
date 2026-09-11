@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
@@ -12,6 +14,39 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
+
+type newSessionIdentityResolver struct {
+	platformUserID string
+	role           identity.Role
+}
+
+func (r newSessionIdentityResolver) ResolveChannelIdentity(_ context.Context, tenantID string, channel channels.Channel, bindingID, externalUserID, trustedEnterpriseID string) (identity.ChannelIdentity, bool, error) {
+	if r.platformUserID == "" {
+		return identity.ChannelIdentity{TenantID: tenantID, Channel: channel, BindingID: bindingID, ExternalUserID: externalUserID, TrustedEnterpriseID: trustedEnterpriseID}, false, nil
+	}
+	return identity.ChannelIdentity{
+		TenantID: tenantID, Channel: channel, BindingID: bindingID, ExternalUserID: externalUserID,
+		PlatformUserID: r.platformUserID, TrustedEnterpriseID: trustedEnterpriseID,
+	}, true, nil
+}
+
+func (r newSessionIdentityResolver) ResolveSessionUser(_ context.Context, platformUserID string) (identity.SessionUser, error) {
+	if r.platformUserID == "" || platformUserID != r.platformUserID {
+		return identity.SessionUser{}, errors.New("user not found")
+	}
+	return identity.SessionUser{PlatformUserID: platformUserID}, nil
+}
+
+func (r newSessionIdentityResolver) RoleFor(_ context.Context, _ string, platformUserID string) (identity.Role, error) {
+	if r.platformUserID == "" || platformUserID != r.platformUserID || r.role == "" {
+		return "", errors.New("membership not found")
+	}
+	return r.role, nil
+}
+
+func (newSessionIdentityResolver) TenantStatus(context.Context, string) (string, error) {
+	return identity.TenantActive, nil
+}
 
 type newSessionProgressSender struct {
 	starts int
@@ -108,4 +143,58 @@ func TestWeComNewCommandSwitchesNextMessageToFreshSession(t *testing.T) {
 	if got := channels.RoutePlatformCommand(command); got != channels.PlatformCommandNewSession {
 		t.Fatalf("RoutePlatformCommand(/new) = %q, want %q", got, channels.PlatformCommandNewSession)
 	}
+}
+
+func TestGroupNewCommandRequiresTenantAdministrator(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	snapshot := tenant.Snapshot{Config: config.TenantConfig{
+		TenantID: "trailforge", AppCode: "assistant", Status: config.AgentActive, ConfigVersion: 1,
+		Channels: []config.ChannelBinding{{
+			Type: config.ChannelTelegram, BindingID: "telegram-main", AccessPolicy: config.ChannelAccessPublic,
+		}},
+	}}
+	command := channels.InboundMessage{
+		MessageID: "group-new-1", Channel: channels.Telegram, ConversationID: "group-1", SenderID: "member-1",
+		ConversationScope: channels.ConversationGroup, TriggerType: channels.TriggerCommand, Text: "/new",
+	}
+
+	t.Run("ordinary member denied", func(t *testing.T) {
+		state := storage.NewMemoryStateStore()
+		ingress := &channelIngress{
+			sessions:   state,
+			identities: newSessionIdentityResolver{platformUserID: "platform-member", role: identity.RoleMember},
+		}
+		err := ingress.handleNewSession(ctx, snapshot, "telegram-main", command)
+		if !errors.Is(err, errChannelIngressRejected) || !strings.Contains(err.Error(), "group /new requires a tenant administrator") {
+			t.Fatalf("handleNewSession(member) error = %v", err)
+		}
+		pending, listErr := state.ListPendingOutbox(ctx, snapshot.Config.TenantID, 10)
+		if listErr != nil || len(pending) != 0 {
+			t.Fatalf("member /new outbox = %#v, %v", pending, listErr)
+		}
+	})
+
+	t.Run("anonymous sender denied", func(t *testing.T) {
+		state := storage.NewMemoryStateStore()
+		ingress := &channelIngress{sessions: state, identities: newSessionIdentityResolver{}}
+		if err := ingress.handleNewSession(ctx, snapshot, "telegram-main", command); !errors.Is(err, errChannelIngressRejected) {
+			t.Fatalf("handleNewSession(anonymous) error = %v", err)
+		}
+	})
+
+	t.Run("tenant administrator allowed", func(t *testing.T) {
+		state := storage.NewMemoryStateStore()
+		ingress := &channelIngress{
+			sessions:   state,
+			identities: newSessionIdentityResolver{platformUserID: "platform-admin", role: identity.RoleAdmin},
+		}
+		if err := ingress.handleNewSession(ctx, snapshot, "telegram-main", command); err != nil {
+			t.Fatalf("handleNewSession(admin) error = %v", err)
+		}
+		pending, err := state.ListPendingOutbox(ctx, snapshot.Config.TenantID, 10)
+		if err != nil || len(pending) != 1 {
+			t.Fatalf("admin /new outbox = %#v, %v", pending, err)
+		}
+	})
 }

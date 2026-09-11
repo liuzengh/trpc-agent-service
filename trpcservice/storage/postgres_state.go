@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -171,16 +172,20 @@ INSERT INTO outbox_events (
 			totalTokens = record.ModelUsage.TotalTokens
 			costMicros = record.ModelUsage.CostMicros
 		}
+		breakdown, err := json.Marshal(record.ModelUsage.Breakdown)
+		if err != nil {
+			return OutboxEvent{}, fmt.Errorf("encode model usage breakdown: %w", err)
+		}
 		if _, err := transaction.ExecContext(ctx, `
 INSERT INTO model_usage_ledger (
     id, tenant_id, app_code, channel_type, binding_id, message_id, trace_id,
     provider_id, model_name, usage_known, prompt_tokens, cached_prompt_tokens, completion_tokens, total_tokens,
-    cost_micros, created_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+    cost_micros, usage_breakdown, created_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17)
 ON CONFLICT (tenant_id, channel_type, binding_id, message_id) DO NOTHING`,
 			usageID, record.TenantID, record.AppCode, record.Channel, record.BindingID, record.MessageID, record.TraceID,
 			record.ModelUsage.ProviderID, record.ModelUsage.ModelName, record.ModelUsage.Known, promptTokens,
-			cachedPromptTokens, completionTokens, totalTokens, costMicros, now,
+			cachedPromptTokens, completionTokens, totalTokens, costMicros, string(breakdown), now,
 		); err != nil {
 			return OutboxEvent{}, fmt.Errorf("insert model usage ledger: %w", err)
 		}

@@ -193,10 +193,40 @@ func TestSourceFactoryEnforcesRemoteAndDirectoryPolicy(t *testing.T) {
 	}}); !errors.Is(err, ErrSourceRejected) {
 		t.Fatalf("outside directory error = %v, want ErrSourceRejected", err)
 	}
-	if _, _, err := factory.Build(context.Background(), storage.KnowledgeIngestJob{DocumentID: "dir", Metadata: map[string]string{
-		"source_type": "dir", "source_url": allowed,
-	}}); err != nil {
+	nested := filepath.Join(allowed, "nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(allowed, "faq.md"), []byte("# FAQ\n\nRefund within seven days."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "handler.go"), []byte("package support\n\nfunc RefundAllowed() bool { return true }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src, cleanup, err := factory.Build(context.Background(), storage.KnowledgeIngestJob{
+		DocumentID: "dir", ChunkSize: 64, Overlap: 8, Metadata: map[string]string{
+			"source_type": "dir", "source_url": allowed,
+		},
+	})
+	if err != nil {
 		t.Fatalf("allowed directory Build() error = %v", err)
+	}
+	defer cleanup()
+	documents, err := src.ReadDocuments(context.Background())
+	if err != nil {
+		t.Fatalf("allowed directory ReadDocuments() error = %v", err)
+	}
+	var content strings.Builder
+	for _, document := range documents {
+		if document != nil {
+			content.WriteString(document.Content)
+			content.WriteByte('\n')
+		}
+	}
+	for _, want := range []string{"Refund within seven days", "RefundAllowed"} {
+		if !strings.Contains(content.String(), want) {
+			t.Fatalf("directory source content missing %q: %q", want, content.String())
+		}
 	}
 }
 

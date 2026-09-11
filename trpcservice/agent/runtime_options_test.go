@@ -10,6 +10,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
 type coverageRateLimiter struct{}
@@ -83,8 +84,13 @@ func TestRuntimeDependencyOptionsRejectNil(t *testing.T) {
 		{name: "tenant role resolver", option: WithTenantRoleResolver(nil)},
 		{name: "model cost calculator", option: WithModelCostCalculator(nil)},
 		{name: "usage governor", option: WithUsageGovernor(nil)},
+		{name: "invocation factory", option: WithInvocationFactory(nil)},
+		{name: "observer", option: WithObserver(nil)},
+		{name: "execution dedup", option: WithExecutionDedup(nil)},
 		{name: "reply delta publisher", option: WithReplyDeltaPublisher(nil)},
 		{name: "IM reply delta publisher", option: WithIMReplyDeltaPublisher(nil)},
+		{name: "artifact provider", option: WithArtifactProvider(nil)},
+		{name: "model input validator", option: WithModelInputValidator(nil)},
 		{name: "document input extractor", option: WithDocumentInputExtractor(nil)},
 	}
 	for _, test := range tests {
@@ -95,6 +101,34 @@ func TestRuntimeDependencyOptionsRejectNil(t *testing.T) {
 				t.Fatal("option accepted a nil dependency")
 			}
 		})
+	}
+}
+
+func TestRuntimeContextHelpersHandleMissingValues(t *testing.T) {
+	t.Parallel()
+	if snapshot, ok := snapshotFromContext(nil); ok || snapshot.Config.TenantID != "" {
+		t.Fatalf("snapshotFromContext(nil) = %+v, %v", snapshot, ok)
+	}
+	if snapshot, ok := snapshotFromContext(context.Background()); ok || snapshot.Config.TenantID != "" {
+		t.Fatalf("snapshotFromContext(background) = %+v, %v", snapshot, ok)
+	}
+	invalidSnapshotContext := context.WithValue(context.Background(), snapshotContextKey{}, tenant.Snapshot{})
+	if _, ok := snapshotFromContext(invalidSnapshotContext); ok {
+		t.Fatal("snapshotFromContext() accepted incomplete snapshot")
+	}
+	validSnapshot := tenant.Snapshot{Config: config.TenantConfig{TenantID: "tenant-a", AppCode: "support", ConfigVersion: 1}}
+	if snapshot, ok := snapshotFromContext(WithConfigurationSnapshot(context.Background(), validSnapshot)); !ok || snapshot.Config.ConfigVersion != 1 {
+		t.Fatalf("snapshotFromContext(valid) = %+v, %v", snapshot, ok)
+	}
+	if key := resolvedSessionKeyFromContext(nil); key != "" {
+		t.Fatalf("resolvedSessionKeyFromContext(nil) = %q", key)
+	}
+	if key := resolvedSessionKeyFromContext(context.Background()); key != "" {
+		t.Fatalf("resolvedSessionKeyFromContext(background) = %q", key)
+	}
+	ctx := WithResolvedSessionKey(context.Background(), "  tenant-a/support/session/1  ")
+	if key := resolvedSessionKeyFromContext(ctx); key != "tenant-a/support/session/1" {
+		t.Fatalf("resolved session key = %q", key)
 	}
 }
 

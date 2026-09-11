@@ -3,10 +3,10 @@ import { useQuery } from '@tanstack/react-query'
 import { getClaims, getExecution } from './api'
 import {
   claimFingerprint,
+  executionViewSettled,
   executionKey,
   mergeClaimsWithExecutionDetails,
   nextSelectedKey,
-  runSettled,
 } from './execution'
 import type { Claim } from './types'
 
@@ -56,7 +56,7 @@ export function useExecutionFeed(tenant: string, appCode = '') {
     enabled: Boolean(tenant && selectedRawClaim),
     refetchInterval: (query) => {
       const detail = query.state.data
-      return detail && runSettled(detail) ? false : POLL_INTERVAL_MS
+      return detail && executionViewSettled(detail) ? false : POLL_INTERVAL_MS
     },
     staleTime: 0,
   })

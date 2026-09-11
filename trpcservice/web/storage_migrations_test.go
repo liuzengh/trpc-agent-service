@@ -34,20 +34,28 @@ func (s *consoleSessionMigrationStore) ListSessionMigrations(context.Context, st
 }
 
 type consoleSessionMigrator struct {
-	status storage.SessionMigrationStatus
+	status        storage.SessionMigrationStatus
+	startedTarget string
+	actions       []string
 }
 
-func (m *consoleSessionMigrator) StartSessionMigration(context.Context, string, string, string) (storage.SessionMigrationStatus, error) {
+func (m *consoleSessionMigrator) StartSessionMigration(_ context.Context, _, _, targetProfileID string) (storage.SessionMigrationStatus, error) {
+	m.startedTarget = targetProfileID
 	return m.status, nil
 }
 func (m *consoleSessionMigrator) AdvanceSessionMigration(_ context.Context, _, _, _ string, generation uint64) (storage.SessionMigrationStatus, error) {
 	if generation != m.status.Generation {
 		return storage.SessionMigrationStatus{}, storage.ErrSessionMigrationConflict
 	}
+	m.actions = append(m.actions, "advance")
 	return m.status, nil
 }
 func (m *consoleSessionMigrator) RollbackSessionMigration(ctx context.Context, tenantID, appCode, id string, generation uint64) (storage.SessionMigrationStatus, error) {
-	return m.AdvanceSessionMigration(ctx, tenantID, appCode, id, generation)
+	if generation != m.status.Generation {
+		return storage.SessionMigrationStatus{}, storage.ErrSessionMigrationConflict
+	}
+	m.actions = append(m.actions, "rollback")
+	return m.status, nil
 }
 
 type consoleKnowledgeMigrationStore struct {
@@ -78,17 +86,85 @@ func (s *consoleKnowledgeMigrationStore) WithKnowledgeMigrationLock(_ context.Co
 }
 
 type consoleKnowledgeMigrator struct {
-	status storage.KnowledgeMigrationStatus
+	status        storage.KnowledgeMigrationStatus
+	startedTarget string
+	actions       []string
 }
 
-func (m *consoleKnowledgeMigrator) StartKnowledgeMigration(context.Context, string, string, string) (storage.KnowledgeMigrationStatus, error) {
+func (m *consoleKnowledgeMigrator) StartKnowledgeMigration(_ context.Context, _, _, targetProfileID string) (storage.KnowledgeMigrationStatus, error) {
+	m.startedTarget = targetProfileID
 	return m.status, nil
 }
 func (m *consoleKnowledgeMigrator) AdvanceKnowledgeMigration(context.Context, string, string, string, uint64) (storage.KnowledgeMigrationStatus, error) {
+	m.actions = append(m.actions, "advance")
 	return m.status, nil
 }
 func (m *consoleKnowledgeMigrator) RollbackKnowledgeMigration(context.Context, string, string, string, uint64) (storage.KnowledgeMigrationStatus, error) {
+	m.actions = append(m.actions, "rollback")
 	return m.status, nil
+}
+
+func TestConsoleStorageMigrationHappyPaths(t *testing.T) {
+	sessionStatus := storage.SessionMigrationStatus{
+		ID: "session-migration-1", TenantID: "example", AppCode: "support", Generation: 4,
+		SourceProfileID: "platform-postgres", TargetProfileID: "session-redis",
+		Phase: storage.SessionMigrationDualWrite,
+	}
+	knowledgeStatus := storage.KnowledgeMigrationStatus{
+		ID: "knowledge-migration-1", TenantID: "example", AppCode: "support", Generation: 5,
+		SourceProfileID: "platform-pgvector", TargetProfileID: "knowledge-qdrant",
+		Phase: storage.KnowledgeMigrationReindexed,
+	}
+	sessionStore := &consoleSessionMigrationStore{status: sessionStatus}
+	sessionMigrator := &consoleSessionMigrator{status: sessionStatus}
+	knowledgeStore := &consoleKnowledgeMigrationStore{status: knowledgeStatus}
+	knowledgeMigrator := &consoleKnowledgeMigrator{status: knowledgeStatus}
+	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
+		dependencies.SessionMigrationStore = sessionStore
+		dependencies.SessionMigrator = sessionMigrator
+		dependencies.KnowledgeMigrationStore = knowledgeStore
+		dependencies.KnowledgeMigrator = knowledgeMigrator
+	})
+
+	sessionList := handler.request(t, http.MethodGet, "/api/v1/storage/session-migrations?tenant=example&app=support&limit=10", "")
+	if sessionList.Code != http.StatusOK || !strings.Contains(sessionList.Body.String(), "session-migration-1") {
+		t.Fatalf("list Session migrations = %d: %s", sessionList.Code, sessionList.Body.String())
+	}
+	sessionStart := handler.request(t, http.MethodPost, "/api/v1/storage/session-migrations",
+		`{"tenant_id":"example","app_code":"support","target_profile_id":"session-redis"}`)
+	if sessionStart.Code != http.StatusCreated || sessionMigrator.startedTarget != "session-redis" {
+		t.Fatalf("start Session migration = %d target=%q body=%s", sessionStart.Code, sessionMigrator.startedTarget, sessionStart.Body.String())
+	}
+	for _, action := range []string{"advance", "rollback"} {
+		response := handler.request(t, http.MethodPatch, "/api/v1/storage/session-migrations",
+			`{"tenant_id":"example","app_code":"support","migration_id":"session-migration-1","generation":4,"action":"`+action+`"}`)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s Session migration = %d: %s", action, response.Code, response.Body.String())
+		}
+	}
+	if strings.Join(sessionMigrator.actions, ",") != "advance,rollback" {
+		t.Fatalf("Session migration actions = %v", sessionMigrator.actions)
+	}
+
+	knowledgeList := handler.request(t, http.MethodGet, "/api/v1/storage/knowledge-migrations?tenant=example&app=support&limit=10", "")
+	if knowledgeList.Code != http.StatusOK || !strings.Contains(knowledgeList.Body.String(), "knowledge-migration-1") {
+		t.Fatalf("list knowledge migrations = %d: %s", knowledgeList.Code, knowledgeList.Body.String())
+	}
+	knowledgeStart := handler.request(t, http.MethodPost, "/api/v1/storage/knowledge-migrations",
+		`{"tenant_id":"example","app_code":"support","target_profile_id":"knowledge-qdrant"}`)
+	if knowledgeStart.Code != http.StatusCreated || knowledgeMigrator.startedTarget != "knowledge-qdrant" {
+		t.Fatalf("start knowledge migration = %d target=%q body=%s", knowledgeStart.Code, knowledgeMigrator.startedTarget, knowledgeStart.Body.String())
+	}
+	for _, action := range []string{"advance", "rollback"} {
+		response := handler.request(t, http.MethodPatch, "/api/v1/storage/knowledge-migrations",
+			`{"tenant_id":"example","app_code":"support","migration_id":"knowledge-migration-1","generation":5,"action":"`+action+`"}`)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s knowledge migration = %d: %s", action, response.Code, response.Body.String())
+		}
+	}
+	if strings.Join(knowledgeMigrator.actions, ",") != "advance,rollback" {
+		t.Fatalf("knowledge migration actions = %v", knowledgeMigrator.actions)
+	}
 }
 
 func TestConsoleStorageMigrationAPIsPreserveGenerationFenceAndSnakeCase(t *testing.T) {

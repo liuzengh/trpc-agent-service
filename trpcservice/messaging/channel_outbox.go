@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/leaseheartbeat"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"go.opentelemetry.io/otel/propagation"
@@ -111,6 +112,7 @@ type channelReplyPayload struct {
 	WebOwnerID         string                     `json:"web_owner_id,omitempty"`
 	Artifacts          []OutboundArtifactRef      `json:"artifacts,omitempty"`
 	Text               string                     `json:"text"`
+	Card               *channels.InteractiveCard  `json:"card,omitempty"`
 	TraceParent        string                     `json:"traceparent,omitempty"`
 }
 
@@ -181,7 +183,7 @@ func (d *ChannelOutboxDispatcher) Dispatch(ctx context.Context, event storage.Ou
 	if strings.TrimSpace(payload.TraceParent) != "" {
 		ctx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": payload.TraceParent})
 	}
-	if !payload.Channel.Supported() || strings.TrimSpace(payload.ConversationID) == "" || strings.TrimSpace(payload.Text) == "" {
+	if !payload.Channel.Supported() || strings.TrimSpace(payload.ConversationID) == "" || (strings.TrimSpace(payload.Text) == "" && payload.Card == nil) {
 		return channels.SendReceipt{}, fmt.Errorf("invalid channel outbox payload")
 	}
 	key := channels.BindingKey{Channel: payload.Channel, BindingID: payload.BindingID}
@@ -217,7 +219,7 @@ func (d *ChannelOutboxDispatcher) Dispatch(ctx context.Context, event storage.Ou
 		TenantID: event.TenantID, Channel: payload.Channel, BindingID: payload.BindingID,
 		ConversationID: payload.ConversationID, ConversationScope: payload.ConversationScope,
 		ProviderReplyToken: payload.ProviderReplyToken, WebOwnerID: payload.WebOwnerID,
-	}, channels.OutboundMessage{Text: payload.Text, Files: outboundFiles, UpdateMessageID: payload.ProgressMessageID, IdempotencyKey: idempotencyKey})
+	}, channels.OutboundMessage{Text: payload.Text, Card: payload.Card, Files: outboundFiles, UpdateMessageID: payload.ProgressMessageID, IdempotencyKey: idempotencyKey})
 	finish(sendErr)
 	if sendErr != nil {
 		finalizeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -237,44 +239,22 @@ func (d *ChannelOutboxDispatcher) sendWithLease(ctx context.Context, event stora
 	}
 	sendContext, cancelSend := context.WithCancel(ctx)
 	defer cancelSend()
-	stopped := make(chan struct{})
-	renewed := make(chan struct{})
-	renewalFailure := make(chan error, 1)
 	interval := d.lease / 3
 	if interval <= 0 {
 		interval = time.Nanosecond
 	}
-	go func() {
-		defer close(renewed)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopped:
-				return
-			case <-sendContext.Done():
-				return
-			case <-ticker.C:
-				if err := d.store.RenewOutboxDelivery(ctx, event.TenantID, event.ID, d.owner, d.lease); err != nil {
-					select {
-					case renewalFailure <- err:
-					default:
-					}
-					cancelSend()
-					return
-				}
-			}
-		}
-	}()
+	heartbeat := leaseheartbeat.Start(sendContext, "channel outbox lease renewer", struct{}{}, interval, 0,
+		func(renewCtx context.Context, value struct{}) (struct{}, error) {
+			return value, d.store.RenewOutboxDelivery(renewCtx, event.TenantID, event.ID, d.owner, d.lease)
+		})
+	sendContext = heartbeat.Context()
 	segments := []string{message.Text}
 	files := append([]channels.OutboundFile(nil), message.Files...)
 	var err error
-	if d.policy != nil {
+	if d.policy != nil && strings.TrimSpace(message.Text) != "" {
 		segments, err = d.policy.Segments(target.Channel, message.Text)
 		if err != nil {
-			cancelSend()
-			close(stopped)
-			<-renewed
+			heartbeat.Stop()
 			return channels.SendReceipt{}, err
 		}
 	}
@@ -288,6 +268,9 @@ func (d *ChannelOutboxDispatcher) sendWithLease(ctx context.Context, event stora
 		part := message
 		part.Text = text
 		part.Files = nil
+		if len(segments) > 1 && index < len(segments)-1 {
+			part.Card = nil
+		}
 		if len(segments) > 1 {
 			part.IdempotencyKey = fmt.Sprintf("%s:part:%d", message.IdempotencyKey, index)
 			if index > 0 {
@@ -306,12 +289,9 @@ func (d *ChannelOutboxDispatcher) sendWithLease(ctx context.Context, event stora
 		fileMessage := channels.OutboundMessage{Files: files, IdempotencyKey: message.IdempotencyKey + ":files"}
 		receipt, err = sender.Send(sendContext, target, fileMessage)
 	}
-	close(stopped)
-	<-renewed
-	select {
-	case renewErr := <-renewalFailure:
+	heartbeat.Stop()
+	if renewErr := heartbeat.Err(); renewErr != nil {
 		return channels.SendReceipt{}, fmt.Errorf("renew outbox delivery lease: %w", renewErr)
-	default:
 	}
 	if err != nil {
 		return channels.SendReceipt{}, err

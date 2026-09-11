@@ -260,9 +260,9 @@ func TestLoadServiceConfigReportsMissingFile(t *testing.T) {
 func TestApplicationRunRejectsIncompleteComposition(t *testing.T) {
 	tests := []*application{
 		nil,
-		{listenAddress: "127.0.0.1:0", worker: &messaging.Worker{}},
+		{listenAddress: "127.0.0.1:0", workers: []*messaging.Worker{{}}},
 		{listenAddress: "127.0.0.1:0", handler: http.NotFoundHandler()},
-		{handler: http.NotFoundHandler(), worker: &messaging.Worker{}},
+		{handler: http.NotFoundHandler(), workers: []*messaging.Worker{{}}},
 	}
 	for index, app := range tests {
 		if err := app.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "not fully configured") {
@@ -277,7 +277,7 @@ func TestApplicationRunReportsListenFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	app := &application{listenAddress: listener.Addr().String(), handler: http.NotFoundHandler(), worker: &messaging.Worker{}}
+	app := &application{listenAddress: listener.Addr().String(), handler: http.NotFoundHandler(), workers: []*messaging.Worker{{}}}
 	if err := app.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "listen HTTP") {
 		t.Fatalf("error = %v, want listen HTTP", err)
 	}

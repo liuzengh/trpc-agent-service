@@ -57,6 +57,35 @@ func TestRedisReplyHubReplaysDeltaAndDoneEvents(t *testing.T) {
 	}
 }
 
+func TestRedisReplyHubReplaysCardOnlyDoneEvent(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	hub, err := NewRedisReplyHub(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := &channels.InteractiveCard{
+		Title: "订单信息", Body: "订单已经找到。",
+		Actions: []channels.CardAction{{Label: "查看订单", URL: "https://support.example.test/orders/42"}},
+	}
+	receipt, err := hub.Send(context.Background(), channels.ReplyTarget{
+		Channel: channels.Web, TenantID: "tenant-a", WebOwnerID: "owner-a",
+	}, channels.OutboundMessage{IdempotencyKey: "request-card", Card: card})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, cancel, err := hub.Subscribe(context.Background(), "tenant-a", "owner-a", "request-card", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	event := receiveWebStreamEvent(t, events)
+	if event.ID != receipt.ExternalMessageID || event.Type != "done" || event.Reply != "" || event.Card == nil ||
+		event.Card.Title != "订单信息" || len(event.Card.Actions) != 1 {
+		t.Fatalf("card event = %#v", event)
+	}
+}
+
 func TestRedisReplyHubSkipsMalformedStreamEvents(t *testing.T) {
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})

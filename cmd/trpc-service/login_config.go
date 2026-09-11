@@ -123,7 +123,7 @@ type feishuLoginOptions struct {
 	QRAuthorizeURL string
 }
 
-func composeIdentityProviders(ctx context.Context, getenv environment, store identity.IdentityStore, httpClient *http.Client, tokenCache credential.TokenCache, secrets credential.SecretResolver, feishu feishuLoginOptions) (map[string]identity.IdentityProvider, error) {
+func composeIdentityProviders(ctx context.Context, getenv environment, store identity.LoginProviderRegistrar, httpClient *http.Client, tokenCache credential.TokenCache, secrets credential.SecretResolver, feishu feishuLoginOptions) (map[string]identity.IdentityProvider, error) {
 	mode := strings.ToLower(strings.TrimSpace(getenv("LOGIN_PROVIDER")))
 	hasProviderConfig := strings.TrimSpace(getenv("LOGIN_PROVIDERS_JSON")) != "" || strings.TrimSpace(getenv("LOGIN_PROVIDERS_FILE")) != ""
 	if !hasProviderConfig {
@@ -148,7 +148,7 @@ func composeIdentityProviders(ctx context.Context, getenv environment, store ide
 	return composeSelectedIdentityProviders(ctx, getenv, configuration, store, httpClient, tokenCache, secrets, feishu)
 }
 
-func composeSelectedIdentityProviders(ctx context.Context, getenv environment, configuration loginProviderFile, store identity.IdentityStore, httpClient *http.Client, tokenCache credential.TokenCache, secrets credential.SecretResolver, feishu feishuLoginOptions) (map[string]identity.IdentityProvider, error) {
+func composeSelectedIdentityProviders(ctx context.Context, getenv environment, configuration loginProviderFile, store identity.LoginProviderRegistrar, httpClient *http.Client, tokenCache credential.TokenCache, secrets credential.SecretResolver, feishu feishuLoginOptions) (map[string]identity.IdentityProvider, error) {
 	providers := make(map[string]identity.IdentityProvider, len(configuration.Providers))
 	callbackURL := ""
 	for _, item := range configuration.Providers {

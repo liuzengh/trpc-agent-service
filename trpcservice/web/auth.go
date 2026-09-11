@@ -20,7 +20,7 @@ const (
 type AuthDependencies struct {
 	Providers                map[string]identity.IdentityProvider
 	Sessions                 identity.SessionStore
-	Users                    identity.IdentityStore
+	Users                    identity.AuthIdentityStore
 	Audits                   identity.AuditRecorder
 	LocalEnabled             bool
 	LocalRegistrationEnabled bool

@@ -3,6 +3,9 @@ import { AlertTriangle } from 'reicon-react/icons/AlertTriangle'
 import { CheckCircle } from 'reicon-react/icons/CheckCircle'
 import { ChevronDown } from 'reicon-react/icons/ChevronDown'
 import { Cpu } from 'reicon-react/icons/Cpu'
+import { Cloud } from 'reicon-react/icons/Cloud'
+import { Data } from 'reicon-react/icons/Data'
+import { VectorSquare } from 'reicon-react/icons/VectorSquare'
 import { Database } from 'reicon-react/icons/Database'
 import { FileText } from 'reicon-react/icons/FileText'
 import { Globe } from 'reicon-react/icons/Globe'
@@ -42,6 +45,9 @@ export const BotIcon = uiIcon(MessageProgramming)
 export const ShareIcon = uiIcon(Share)
 export const XIcon = uiIcon(X)
 export const CpuIcon = uiIcon(Cpu)
+export const CloudIcon = uiIcon(Cloud)
+export const DataIcon = uiIcon(Data)
+export const VectorIcon = uiIcon(VectorSquare)
 export const ServerIcon = uiIcon(Server)
 export const ChevronDownIcon = uiIcon(ChevronDown)
 export const GlobeIcon = uiIcon(Globe)

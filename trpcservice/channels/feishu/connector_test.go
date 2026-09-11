@@ -54,6 +54,30 @@ func (f *fakeRuntimeChannel) Start(ctx context.Context) error {
 
 func (f *fakeRuntimeChannel) Stop(context.Context) error { return nil }
 
+func TestDefaultResourceNameAndConnectorStopBoundaries(t *testing.T) {
+	t.Parallel()
+	for mediaType, want := range map[string]string{
+		"image": "image.jpg", "audio": "audio", "video": "video", "file": "attachment", "": "attachment",
+	} {
+		if got := defaultResourceName(mediaType); got != want {
+			t.Fatalf("defaultResourceName(%q) = %q, want %q", mediaType, got, want)
+		}
+	}
+	var nilConnector *Connector
+	if err := nilConnector.Stop(context.Background()); err != nil {
+		t.Fatalf("nil Connector.Stop() = %v", err)
+	}
+	connector := &Connector{}
+	if err := connector.Stop(context.Background()); err != nil {
+		t.Fatalf("empty Connector.Stop() = %v", err)
+	}
+	fake := &fakeRuntimeChannel{}
+	connector = newConnectorWithChannel(fake)
+	if err := connector.Stop(context.Background()); err != nil {
+		t.Fatalf("Connector.Stop() = %v", err)
+	}
+}
+
 func TestConnectorNormalizesDirectMessage(t *testing.T) {
 	fake := &fakeRuntimeChannel{message: &channeltypes.NormalizedMessage{
 		EventID: "evt-1", MessageID: "om-1", ChatID: "oc-1", ChatType: "p2p",

@@ -13,16 +13,19 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/redis/go-redis/v9"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/liuzengh/trpc-agent-service/migrations"
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/assembly"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/backendhealth"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/credential"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/dbscope"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/knowledgeingest"
@@ -42,7 +45,8 @@ type infrastructure struct {
 	channelConnectors        *channelConnectorManager
 	producer                 messaging.Producer
 	executionManifests       *messaging.ExecutionManifestCodec
-	worker                   *messaging.Worker
+	workers                  []*messaging.Worker
+	kafkaCapacity            *kafkaCapacityMonitor
 	replyOutbox              *messaging.ChannelOutboxDispatcher
 	configInvalidationOutbox *tenant.ConfigInvalidationDispatcher
 	stateStore               storage.StateStore
@@ -52,6 +56,7 @@ type infrastructure struct {
 	toolExecutions           tool.ExecutionLister
 	knowledgeIngestQueue     storage.KnowledgeIngestQueue
 	knowledgeIngestWorker    *knowledgeingest.Worker
+	usageRetention           governance.UsageReservationRetention
 	knowledgeSourcePolicy    *knowledgeingest.SourceFactory
 	knowledgeMigrationStore  storage.KnowledgeMigrationStore
 	knowledgeMigrator        web.KnowledgeMigrationManager
@@ -67,12 +72,15 @@ type infrastructure struct {
 	authHandler              http.Handler
 	sessions                 identity.SessionStore
 	authAudits               identity.AuditRecorder
-	identities               identity.IdentityStore
+	identities               identity.ConsoleIdentityStore
+	identityIngress          messaging.ChannelIdentityResolver
 	webReplyHub              *web.RedisReplyHub
 	agentMemory              web.AgentMemoryProvider
 	agentSessions            web.AgentSessionProvider
 	sessionMigrationStore    storage.SessionMigrationStore
 	sessionMigrator          web.SessionMigrationManager
+	sessionRepairer          *assembly.SessionMigrator
+	backendHealth            *backendhealth.Registry
 	toolCatalog              []web.ToolInfo
 	observer                 *metrics.OTelObserver
 	metricsHandler           http.Handler
@@ -132,6 +140,7 @@ type infrastructureBuilder struct {
 
 	// Provider layer.
 	observer              *metrics.OTelObserver
+	backendHealth         *backendhealth.Registry
 	metricsHandler        http.Handler
 	environmentSecrets    *credential.EnvironmentSecretResolver
 	secretResolver        credential.SecretResolver
@@ -152,7 +161,8 @@ type infrastructureBuilder struct {
 	// Role-specific components.
 	channelConnectors        *channelConnectorManager
 	producer                 messaging.Producer
-	worker                   *messaging.Worker
+	workers                  []*messaging.Worker
+	kafkaCapacity            *kafkaCapacityMonitor
 	replyOutbox              *messaging.ChannelOutboxDispatcher
 	configInvalidationOutbox *tenant.ConfigInvalidationDispatcher
 	runners                  *assembly.Factory
@@ -160,8 +170,10 @@ type infrastructureBuilder struct {
 	authHandler              http.Handler
 	loginSessions            identity.SessionStore
 	identityStore            *identity.PostgresIdentityStore
+	identityIngress          messaging.ChannelIdentityResolver
 	kafkaProbe               web.DependencyProbe
 	knowledgeIngestWorker    *knowledgeingest.Worker
+	usageRetention           governance.UsageReservationRetention
 	toolCatalog              []web.ToolInfo
 	nodeStore                node.Store
 	nodeLifecycle            *node.Lifecycle
@@ -191,6 +203,9 @@ func (b *infrastructureBuilder) composeStorage() error {
 	b.database.SetConnMaxLifetime(5 * time.Minute)
 	if err := b.database.PingContext(b.ctx); err != nil {
 		return fmt.Errorf("ping PostgreSQL: %w", err)
+	}
+	if err := dbscope.ValidatePlatformRole(b.ctx, b.database); err != nil {
+		return fmt.Errorf("validate PostgreSQL platform role: %w", err)
 	}
 	if envBool(b.getenv, "AUTO_MIGRATE") {
 		if err := migrations.Apply(b.ctx, b.database); err != nil {
@@ -260,7 +275,11 @@ func (b *infrastructureBuilder) composeStorage() error {
 	if err != nil {
 		return err
 	}
-	b.approvalBroker, err = governance.NewRedisApprovalBroker(b.redisClient, 10*time.Minute)
+	approvalStore, approvalStoreErr := governance.NewPostgresApprovalStore(b.database)
+	if approvalStoreErr != nil {
+		return fmt.Errorf("construct approval store: %w", approvalStoreErr)
+	}
+	b.approvalBroker, err = governance.NewRedisApprovalBroker(b.redisClient, approvalStore, 10*time.Minute)
 	if err != nil {
 		return fmt.Errorf("construct approval broker: %w", err)
 	}
@@ -281,6 +300,38 @@ func (b *infrastructureBuilder) composeProviders() error {
 	b.cleanups = append(b.cleanups, telemetryRuntime.Close)
 	b.observer = telemetryRuntime.Observer
 	b.metricsHandler = telemetryRuntime.PrometheusHandler
+	b.backendHealth, err = backendhealth.NewRegistry(backendhealth.DefaultConfig(), backendhealth.WithObserver(b.observer))
+	if err != nil {
+		return fmt.Errorf("construct backend health registry: %w", err)
+	}
+	if err := b.observer.ObserveDatabasePool(func() metrics.DatabasePoolStats {
+		stats := b.database.Stats()
+		return metrics.DatabasePoolStats{
+			MaxOpenConnections: stats.MaxOpenConnections,
+			OpenConnections:    stats.OpenConnections,
+			InUse:              stats.InUse,
+			Idle:               stats.Idle,
+			WaitCount:          stats.WaitCount,
+			WaitDuration:       stats.WaitDuration,
+		}
+	}); err != nil {
+		return fmt.Errorf("observe PostgreSQL pool: %w", err)
+	}
+	if err := b.observer.ObserveRedisPool(func() metrics.RedisPoolStats {
+		stats := b.redisClient.PoolStats()
+		return metrics.RedisPoolStats{
+			Hits:             stats.Hits,
+			Misses:           stats.Misses,
+			Timeouts:         stats.Timeouts,
+			WaitCount:        stats.WaitCount,
+			WaitDuration:     time.Duration(stats.WaitDurationNs),
+			TotalConnections: stats.TotalConns,
+			IdleConnections:  stats.IdleConns,
+			StaleConnections: stats.StaleConns,
+		}
+	}); err != nil {
+		return fmt.Errorf("observe Redis pool: %w", err)
+	}
 	if err := storage.ObserveFrameworkPostgres(b.observer); err != nil {
 		return fmt.Errorf("observe framework PostgreSQL clients: %w", err)
 	}
@@ -317,7 +368,12 @@ func (b *infrastructureBuilder) composeProviders() error {
 	if err != nil {
 		return fmt.Errorf("construct model catalog: %w", err)
 	}
-	b.modelProvider, err = assembly.NewManagedModelProvider(b.secretResolver, b.modelCatalog)
+	b.modelProvider, err = assembly.NewManagedModelProvider(
+		b.secretResolver,
+		b.modelCatalog,
+		assembly.WithModelAuditRecorder(b.stateStore),
+		assembly.WithModelBackendHealth(b.backendHealth),
+	)
 	if err != nil {
 		return fmt.Errorf("construct model provider: %w", err)
 	}
@@ -344,7 +400,11 @@ func (b *infrastructureBuilder) composeProviders() error {
 	if err != nil {
 		return fmt.Errorf("construct Session migration store: %w", err)
 	}
-	b.sessionProvider, err = assembly.NewManagedSessionProvider(b.databaseURL, b.secretResolver, b.backendProfiles, dynamicSummarizer, b.sessionMigrationStore)
+	b.sessionProvider, err = assembly.NewManagedSessionProvider(
+		b.databaseURL, b.secretResolver, b.backendProfiles, dynamicSummarizer, b.sessionMigrationStore,
+		assembly.WithSessionBackendHealth(b.backendHealth),
+		assembly.WithSessionMigrationRepairs(b.sessionMigrationStore),
+	)
 	if err != nil {
 		return fmt.Errorf("construct Session provider: %w", err)
 	}
@@ -354,17 +414,26 @@ func (b *infrastructureBuilder) composeProviders() error {
 		return fmt.Errorf("construct Session migrator: %w", err)
 	}
 	httpClient := &http.Client{Timeout: b.serviceConfig.Service.RequestTimeout.Duration}
-	b.memoryProvider, err = assembly.NewManagedMemoryProvider(b.databaseURL, b.secretResolver, b.backendProfiles, httpClient)
-	if err != nil {
-		return fmt.Errorf("construct Memory provider: %w", err)
-	}
-	b.cleanups = append(b.cleanups, func() { _ = b.memoryProvider.Close() })
 	b.storeFactory, err = storage.NewPlatformStoreFactory(
 		b.database, b.databaseURL, b.serviceConfig.Service.Knowledge, b.serviceConfig.ModelProviders, b.backendProfiles, b.secretResolver, httpClient,
+		storage.WithBackendHealth(b.backendHealth),
 	)
 	if err != nil {
 		return fmt.Errorf("construct platform store factory: %w", err)
 	}
+	b.cleanups = append(b.cleanups, func() { _ = b.storeFactory.Close() })
+	b.memoryProvider, err = assembly.NewManagedMemoryProvider(
+		b.databaseURL,
+		b.secretResolver,
+		b.backendProfiles,
+		httpClient,
+		assembly.WithMemoryEmbedderProvider(b.storeFactory),
+		assembly.WithMemoryBackendHealth(b.backendHealth),
+	)
+	if err != nil {
+		return fmt.Errorf("construct Memory provider: %w", err)
+	}
+	b.cleanups = append(b.cleanups, func() { _ = b.memoryProvider.Close() })
 	extractTimeout := b.serviceConfig.Service.DocumentExtractTimeout.Duration
 	if extractTimeout <= 0 {
 		extractTimeout = 5 * time.Minute
@@ -397,8 +466,8 @@ func (b *infrastructureBuilder) composeGatewayAndChannels() error {
 	b.brokers = brokers
 	b.topic = topic
 
-	// Tenant-selectable tools have one source of truth. The same registry feeds
-	// runtime assembly, configuration validation, and the console catalog.
+	// Platform tools have one source of truth. The registry exposes both the
+	// complete governed runtime surface and the tenant-selectable subset.
 	b.toolRegistry, err = assembly.NewToolRegistry(
 		map[string]agenttool.CallableTool{},
 		assembly.WithToolSecretResolver(b.secretResolver),
@@ -447,6 +516,7 @@ func (b *infrastructureBuilder) composeGatewayAndChannels() error {
 				return fmt.Errorf("construct channel identity store: %w", err)
 			}
 		}
+		b.identityIngress = b.identityStore
 		feishuTokenCache, cacheErr := feishu.NewRedisCache(b.redisClient)
 		if cacheErr != nil {
 			return cacheErr
@@ -459,6 +529,10 @@ func (b *infrastructureBuilder) composeGatewayAndChannels() error {
 		b.producer, err = messaging.NewFranzProducer(producerClient, topic)
 		if err != nil {
 			return err
+		}
+		b.producer, err = messaging.NewObservedProducer(b.producer, b.observer)
+		if err != nil {
+			return fmt.Errorf("observe Kafka ingress producer: %w", err)
 		}
 		httpClient := &http.Client{Timeout: b.serviceConfig.Service.RequestTimeout.Duration}
 		b.channelConnectors, err = newChannelConnectorManager(
@@ -522,12 +596,18 @@ func (b *infrastructureBuilder) composeWorkerAndNode() error {
 		if auditErr != nil {
 			return fmt.Errorf("construct tool audit sinks: %w", auditErr)
 		}
-		toolPolicy := governance.NewStaticToolPolicy(assembly.GovernedToolNames(b.toolNames...), []string{"password", "token", "secret", "api_key", "authorization"})
-		toolCallbacks, toolErr := tool.NewGovernanceCallbacks(toolPolicy, auditSink, b.toolExecutionLedger, b.serviceConfig.Service.RequestTimeout.Duration)
+		baseToolPolicy := governance.NewStaticToolPolicy(assembly.GovernedToolNames(b.toolNames...), []string{"password", "token", "secret", "api_key", "authorization"})
+		toolPolicy, policyErr := governance.NewTenantToolPolicy(baseToolPolicy, b.toolRegistry.SelectableNames(), func(ctx context.Context, tenantID, toolName string) (bool, error) {
+			return b.identityStore.TenantToolGranted(ctx, tenantID, toolName)
+		})
+		if policyErr != nil {
+			return fmt.Errorf("construct tenant tool policy: %w", policyErr)
+		}
+		toolCallbacks, toolErr := tool.NewGovernanceCallbacks(toolPolicy, auditSink, b.toolExecutionLedger, b.serviceConfig.Service.RequestTimeout.Duration, b.observer)
 		if toolErr != nil {
 			return fmt.Errorf("construct governance tool callbacks: %w", toolErr)
 		}
-		approvalReviewer, approvalErr := governance.NewInteractiveApprovalReviewer(b.approvalBroker)
+		approvalReviewer, approvalErr := governance.NewInteractiveApprovalReviewer(b.approvalBroker, b.stateStore)
 		if approvalErr != nil {
 			return fmt.Errorf("construct interactive approval reviewer: %w", approvalErr)
 		}
@@ -549,6 +629,7 @@ func (b *infrastructureBuilder) composeWorkerAndNode() error {
 		if usageErr != nil {
 			return fmt.Errorf("construct model usage governor: %w", usageErr)
 		}
+		b.usageRetention = usageGovernor
 		runtime, runtimeErr := agent.NewRuntime(
 			b.repository,
 			b.runners,
@@ -576,25 +657,58 @@ func (b *infrastructureBuilder) composeWorkerAndNode() error {
 		if groupErr != nil {
 			return groupErr
 		}
-		consumerClient, consumerErr := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.ConsumerGroup(groupID), kgo.ConsumeTopics(topic), kgo.DisableAutoCommit(), kgo.AllowAutoTopicCreation())
-		if consumerErr != nil {
-			return fmt.Errorf("construct Kafka consumer client: %w", consumerErr)
-		}
-		b.cleanups = append(b.cleanups, consumerClient.Close)
-		consumer, consumerErr := messaging.NewFranzConsumer(consumerClient, topic+".dlq")
-		if consumerErr != nil {
-			return consumerErr
-		}
 		processor, processorErr := agent.NewKafkaProcessor(runtime, b.repository, b.executionManifests)
 		if processorErr != nil {
 			return processorErr
 		}
-		b.worker, err = messaging.NewWorkerWithRetryTracker(consumer, processor, 3, b.retryTracker)
-		if err != nil {
-			return err
+		concurrency, concurrencyErr := workerConcurrency(b.getenv)
+		if concurrencyErr != nil {
+			return concurrencyErr
 		}
-		if b.kafkaProbe == nil {
-			b.kafkaProbe = consumerClient.Ping
+		partitionRequirement, explicitPartitionRequirement, partitionErr := kafkaPartitionRequirement(b.getenv, concurrency)
+		if partitionErr != nil {
+			return partitionErr
+		}
+		if err := b.observer.ObserveWorkerCapacity(func() int64 { return int64(len(b.workers)) }); err != nil {
+			return fmt.Errorf("observe worker capacity: %w", err)
+		}
+		b.workers = make([]*messaging.Worker, 0, concurrency)
+		for index := 0; index < concurrency; index++ {
+			consumerClient, consumerErr := kgo.NewClient(
+				kgo.SeedBrokers(brokers...),
+				kgo.ConsumerGroup(groupID),
+				kgo.ConsumeTopics(topic),
+				kgo.DisableAutoCommit(),
+				kgo.AllowAutoTopicCreation(),
+			)
+			if consumerErr != nil {
+				return fmt.Errorf("construct Kafka consumer client %d: %w", index, consumerErr)
+			}
+			b.cleanups = append(b.cleanups, consumerClient.Close)
+			consumer, consumerErr := messaging.NewFranzConsumer(consumerClient, topic+".dlq")
+			if consumerErr != nil {
+				return consumerErr
+			}
+			worker, workerErr := messaging.NewWorkerWithRetryTracker(consumer, processor, 3, b.retryTracker, b.observer)
+			if workerErr != nil {
+				return workerErr
+			}
+			b.workers = append(b.workers, worker)
+			if b.kafkaProbe == nil {
+				b.kafkaProbe = consumerClient.Ping
+			}
+			if b.kafkaCapacity == nil {
+				admin := kadm.NewClient(consumerClient)
+				if explicitPartitionRequirement {
+					if err := validateKafkaTopicCapacity(b.ctx, admin, topic, partitionRequirement); err != nil {
+						return err
+					}
+				}
+				b.kafkaCapacity, err = newKafkaCapacityMonitor(admin, b.observer, topic, groupID, 10*time.Second)
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
 
@@ -617,12 +731,7 @@ func (b *infrastructureBuilder) composeWorkerAndNode() error {
 	b.nodeLifecycle, err = node.NewLifecycle(b.nodeStore, node.LifecycleConfig{
 		NodeID: nodeID, Role: string(b.role), BuildVersion: trpcservice.Version,
 		HeartbeatInterval: 5 * time.Second, OfflineAfter: 15 * time.Second,
-		Inflight: func() int {
-			if b.worker == nil {
-				return 0
-			}
-			return b.worker.ActiveDeliveries()
-		},
+		Inflight: func() int { return activeWorkerDeliveries(b.workers) },
 	})
 	if err != nil {
 		return fmt.Errorf("construct node lifecycle: %w", err)
@@ -636,7 +745,8 @@ func (b *infrastructureBuilder) build() *infrastructure {
 		channelConnectors:        b.channelConnectors,
 		producer:                 b.producer,
 		executionManifests:       b.executionManifests,
-		worker:                   b.worker,
+		workers:                  b.workers,
+		kafkaCapacity:            b.kafkaCapacity,
 		replyOutbox:              b.replyOutbox,
 		configInvalidationOutbox: b.configInvalidationOutbox,
 		stateStore:               b.stateStore,
@@ -646,6 +756,7 @@ func (b *infrastructureBuilder) build() *infrastructure {
 		toolExecutions:           b.toolExecutionLedger,
 		knowledgeIngestQueue:     b.knowledgeIngestQueue,
 		knowledgeIngestWorker:    b.knowledgeIngestWorker,
+		usageRetention:           b.usageRetention,
 		knowledgeSourcePolicy:    b.knowledgeSourcePolicy,
 		knowledgeMigrationStore:  b.knowledgeMigrationStore,
 		knowledgeMigrator:        b.knowledgeMigrator,
@@ -661,11 +772,14 @@ func (b *infrastructureBuilder) build() *infrastructure {
 		sessions:                 b.loginSessions,
 		authAudits:               b.identityStore,
 		identities:               b.identityStore,
+		identityIngress:          b.identityIngress,
 		webReplyHub:              b.webReplyHub,
 		agentMemory:              b.memoryProvider,
 		agentSessions:            b.sessionProvider,
 		sessionMigrationStore:    b.sessionMigrationStore,
 		sessionMigrator:          b.sessionMigrator,
+		sessionRepairer:          b.sessionMigrator,
+		backendHealth:            b.backendHealth,
 		toolCatalog:              b.toolCatalog,
 		observer:                 b.observer,
 		metricsHandler:           b.metricsHandler,

@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/backendhealth"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/credential"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/failover"
 	"trpc.group/trpc-go/trpc-agent-go/model/huggingface"
@@ -24,14 +26,34 @@ type ModelInputCapabilityProvider interface {
 	GuaranteedInputCapabilities(config.ModelConfig) (config.ModelInputCapabilities, bool)
 }
 
+type ModelCallbackProvider interface {
+	ModelCallbacks(config.TenantConfig) *model.Callbacks
+}
+
 // ManagedModelProvider resolves opaque secret references only when building
 // a tenant Runner. The resolved keys are never stored in TenantConfig or errors.
 type ManagedModelProvider struct {
 	secrets credential.SecretResolver
 	catalog *config.ModelCatalog
+	audits  storage.AuditRecorder
+	health  *backendhealth.Registry
 }
 
-func NewManagedModelProvider(secrets credential.SecretResolver, catalog *config.ModelCatalog) (*ManagedModelProvider, error) {
+type ManagedModelProviderOption func(*ManagedModelProvider)
+
+func WithModelAuditRecorder(audits storage.AuditRecorder) ManagedModelProviderOption {
+	return func(provider *ManagedModelProvider) {
+		provider.audits = audits
+	}
+}
+
+func WithModelBackendHealth(registry *backendhealth.Registry) ManagedModelProviderOption {
+	return func(provider *ManagedModelProvider) {
+		provider.health = registry
+	}
+}
+
+func NewManagedModelProvider(secrets credential.SecretResolver, catalog *config.ModelCatalog, options ...ManagedModelProviderOption) (*ManagedModelProvider, error) {
 	if secrets == nil {
 		return nil, fmt.Errorf("secret resolver is required")
 	}
@@ -41,7 +63,13 @@ func NewManagedModelProvider(secrets credential.SecretResolver, catalog *config.
 	if len(catalog.Providers()) == 0 {
 		return nil, fmt.Errorf("at least one managed model provider is required")
 	}
-	return &ManagedModelProvider{secrets: secrets, catalog: catalog}, nil
+	provider := &ManagedModelProvider{secrets: secrets, catalog: catalog}
+	for _, option := range options {
+		if option != nil {
+			option(provider)
+		}
+	}
+	return provider, nil
 }
 
 // SyncProvider refreshes framework-discoverable model IDs and reports whether
@@ -96,7 +124,7 @@ func (p *ManagedModelProvider) Model(ctx context.Context, tenantConfig config.Te
 		return nil, err
 	}
 	if len(modelConfig.FailoverCandidates) == 0 {
-		return newInputValidatingModel(primary, p.catalog, modelConfig), nil
+		return newAuditedModel(primary, p.audits), nil
 	}
 
 	candidates := make([]model.Model, 0, 1+len(modelConfig.FailoverCandidates))
@@ -113,7 +141,14 @@ func (p *ManagedModelProvider) Model(ctx context.Context, tenantConfig config.Te
 	if err != nil {
 		return nil, fmt.Errorf("construct failover model for tenant %q: %w", tenantConfig.AppName(), err)
 	}
-	return newInputValidatingModel(failoverModel, p.catalog, modelConfig), nil
+	return newAuditedModel(failoverModel, p.audits), nil
+}
+
+func (p *ManagedModelProvider) ModelCallbacks(tenantConfig config.TenantConfig) *model.Callbacks {
+	if p == nil {
+		return nil
+	}
+	return newInputValidationCallbacks(p.catalog, tenantConfig.Model)
 }
 
 func (p *ManagedModelProvider) GuaranteedInputCapabilities(modelConfig config.ModelConfig) (config.ModelInputCapabilities, bool) {
@@ -138,12 +173,13 @@ func (p *ManagedModelProvider) buildSingleModel(ctx context.Context, tenantName,
 		if err != nil {
 			return nil, fmt.Errorf("resolve model key for tenant %q: %w", tenantName, err)
 		}
-		return openaimodel.New(
+		configured := observeModel(openaimodel.New(
 			modelName,
 			openaimodel.WithBaseURL(provider.BaseURL),
 			openaimodel.WithAPIKey(apiKey),
 			openaimodel.WithEnableTokenTailoring(true),
-		), nil
+		), p.health, providerID, providerType)
+		return observeActualModelUsage(configured, providerID, modelName), nil
 	}
 
 	if providerType == config.ModelProviderHunyuan {
@@ -163,7 +199,8 @@ func (p *ManagedModelProvider) buildSingleModel(ctx context.Context, tenantName,
 		if strings.TrimSpace(provider.BaseURL) != "" {
 			opts = append(opts, hunyuan.WithBaseUrl(provider.BaseURL))
 		}
-		return hunyuan.New(modelName, opts...), nil
+		configured := observeModel(hunyuan.New(modelName, opts...), p.health, providerID, providerType)
+		return observeActualModelUsage(configured, providerID, modelName), nil
 	}
 	if providerType == config.ModelProviderHuggingFace {
 		apiKey, err := p.resolveSecret(ctx, provider.APIKeyRef)
@@ -177,7 +214,12 @@ func (p *ManagedModelProvider) buildSingleModel(ctx context.Context, tenantName,
 		if strings.TrimSpace(provider.BaseURL) != "" {
 			opts = append(opts, huggingface.WithBaseURL(provider.BaseURL))
 		}
-		return huggingface.New(modelName, opts...)
+		configured, err := huggingface.New(modelName, opts...)
+		if err != nil {
+			return nil, err
+		}
+		observed := observeModel(configured, p.health, providerID, providerType)
+		return observeActualModelUsage(observed, providerID, modelName), nil
 	}
 
 	return nil, fmt.Errorf("tenant %q model provider %q has unsupported type %q", tenantName, providerID, provider.Type)

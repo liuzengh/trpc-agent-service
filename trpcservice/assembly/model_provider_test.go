@@ -11,6 +11,8 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/credential"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -123,6 +125,70 @@ func TestManagedModelProviderBuildsOpenAIAndHunyuanAndFailover(t *testing.T) {
 	}
 	if _, err := mp.Model(context.Background(), unmanagedModelCfg); err == nil {
 		t.Fatal("mp.Model(unmanagedModelCfg) error = nil, want unmanaged model error")
+	}
+}
+
+func TestManagedModelProviderPersistsEachInvocationModelCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/chat/completions" {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"id": "response-1", "object": "chat.completion", "created": 1, "model": "support-model",
+			"choices": []any{map[string]any{
+				"index": 0, "message": map[string]any{"role": "assistant", "content": "收到"}, "finish_reason": "stop",
+			}},
+		})
+	}))
+	t.Cleanup(server.Close)
+	secrets, err := credential.NewEnvironmentSecretResolver(func(key string) string {
+		if key == "MODEL_KEY" {
+			return "test-key"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	audits := storage.NewMemoryStateStore()
+	provider, err := NewManagedModelProvider(secrets, mustAssemblyModelCatalog(t, []config.ModelProviderConfig{{
+		ID: "primary", Type: config.ModelProviderOpenAI, BaseURL: server.URL, APIKeyRef: "env:MODEL_KEY",
+		Models: []config.ModelPricingConfig{{Name: "support-model"}},
+	}}), WithModelAuditRecorder(audits))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured, err := provider.Model(context.Background(), config.TenantConfig{
+		TenantID: "tenant-a", AppCode: "support", Status: config.AgentActive, ConfigVersion: 1,
+		Model: config.ModelConfig{ProviderID: "primary", Name: "support-model"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := governance.WithInvocation(context.Background(), governance.Invocation{
+		Execution: governance.ExecutionContext{
+			TenantID: "tenant-a", AppCode: "support", Role: "member", TraceID: "trace-1", RequestID: "message-1", PolicyVersion: "1",
+			Channel: "web", BindingID: "web-console", AgentName: "assistant", SessionID: "tenant-a/support/session/1",
+		},
+		Budget: governance.NewCallBudget(1),
+	})
+	responses, err := configured.GenerateContent(ctx, &model.Request{
+		Messages: []model.Message{model.NewUserMessage("你好")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range responses {
+	}
+	events, err := audits.ListAudit(context.Background(), "tenant-a", "trace-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Action != "model.requested" || events[1].Action != "model.completed" ||
+		events[0].RequestID != "message-1" || events[1].LatencyMS < 0 {
+		t.Fatalf("model audit events = %+v", events)
 	}
 }
 

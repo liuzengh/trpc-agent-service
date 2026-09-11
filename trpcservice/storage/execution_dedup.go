@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,10 +30,14 @@ const (
 type ExecutionDedupStore interface {
 	// Begin claims one inbound message. window bounds how long a processing row
 	// may stay live before another node is allowed to take it over.
-	Begin(ctx context.Context, tenantID, channel, bindingID, messageID, traceID string, window time.Duration) (BeginResult, error)
+	Begin(ctx context.Context, tenantID, appCode, channel, bindingID, messageID, traceID string, window time.Duration) (BeginResult, error)
 	// Abort releases a processing claim after a failed execution. The trace
 	// fence prevents one node from deleting a takeover owned by another.
 	Abort(ctx context.Context, tenantID, channel, bindingID, messageID, traceID string) error
+	// Fail preserves a dashboard-visible terminal/intermediate failure while
+	// keeping the message retryable. A later Begin may atomically transition a
+	// failed claim back to processing under a new trace owner.
+	Fail(ctx context.Context, tenantID, channel, bindingID, messageID, traceID string) error
 	// Renew extends a processing claim only when the same trace still owns it.
 	Renew(ctx context.Context, tenantID, channel, bindingID, messageID, traceID string) error
 }
@@ -74,11 +79,11 @@ func NewPostgresExecutionDedupStore(database *sql.DB) (*PostgresExecutionDedupSt
 // Begin implements ExecutionDedupStore. The INSERT claim is atomic; on conflict
 // a completed row reports ExecutionCompleted, a live processing row reports
 // ExecutionInProgress, and a stale processing row is atomically taken over.
-func (s *PostgresExecutionDedupStore) Begin(ctx context.Context, tenantID, channel, bindingID, messageID, traceID string, window time.Duration) (BeginResult, error) {
+func (s *PostgresExecutionDedupStore) Begin(ctx context.Context, tenantID, appCode, channel, bindingID, messageID, traceID string, window time.Duration) (BeginResult, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if err := validateDedupArguments(tenantID, channel, bindingID, messageID, traceID); err != nil {
+	if err := validateBeginArguments(tenantID, appCode, channel, bindingID, messageID, traceID); err != nil {
 		return "", err
 	}
 	if window <= 0 {
@@ -86,10 +91,10 @@ func (s *PostgresExecutionDedupStore) Begin(ctx context.Context, tenantID, chann
 	}
 	result, err := s.database.ExecContext(ctx, `
 INSERT INTO messages (
-    tenant_id, channel_type, binding_id, message_id, status, trace_id
-) VALUES ($1, $2, $3, $4, 'processing', $5)
+    tenant_id, app_code, channel_type, binding_id, message_id, status, trace_id
+) VALUES ($1, $2, $3, $4, $5, 'processing', $6)
 ON CONFLICT (tenant_id, channel_type, binding_id, message_id) DO NOTHING`,
-		tenantID, channel, bindingID, messageID, traceID,
+		tenantID, appCode, channel, bindingID, messageID, traceID,
 	)
 	if err != nil {
 		return "", fmt.Errorf("claim message execution: %w", err)
@@ -102,14 +107,14 @@ ON CONFLICT (tenant_id, channel_type, binding_id, message_id) DO NOTHING`,
 		return ExecutionFresh, nil
 	}
 
-	var status string
+	var status, storedAppCode string
 	var updatedAt time.Time
 	err = s.database.QueryRowContext(ctx, `
-SELECT status, updated_at
+SELECT app_code, status, updated_at
 FROM messages
 WHERE tenant_id = $1 AND channel_type = $2 AND binding_id = $3 AND message_id = $4`,
 		tenantID, channel, bindingID, messageID,
-	).Scan(&status, &updatedAt)
+	).Scan(&storedAppCode, &status, &updatedAt)
 	if err == sql.ErrNoRows {
 		// The row disappeared between the insert attempt and this read; the
 		// claiming node may retry and claim fresh.
@@ -118,8 +123,31 @@ WHERE tenant_id = $1 AND channel_type = $2 AND binding_id = $3 AND message_id = 
 	if err != nil {
 		return "", fmt.Errorf("read execution state: %w", err)
 	}
+	if storedAppCode != appCode {
+		return "", fmt.Errorf("execution claim application mismatch: stored %q, requested %q", storedAppCode, appCode)
+	}
 	if status == "completed" {
 		return ExecutionCompleted, nil
+	}
+	if status == "failed" {
+		retry, err := s.database.ExecContext(ctx, `
+UPDATE messages
+SET status = 'processing', trace_id = $5, updated_at = NOW()
+WHERE tenant_id = $1 AND channel_type = $2 AND binding_id = $3 AND message_id = $4
+  AND status = 'failed'`,
+			tenantID, channel, bindingID, messageID, traceID,
+		)
+		if err != nil {
+			return "", fmt.Errorf("retry failed execution: %w", err)
+		}
+		claimed, err := retry.RowsAffected()
+		if err != nil {
+			return "", fmt.Errorf("read failed execution retry result: %w", err)
+		}
+		if claimed == 1 {
+			return ExecutionFresh, nil
+		}
+		return ExecutionInProgress, nil
 	}
 	takeover, err := s.database.ExecContext(ctx, `
 UPDATE messages
@@ -162,6 +190,27 @@ WHERE tenant_id = $1 AND channel_type = $2 AND binding_id = $3 AND message_id = 
 	return nil
 }
 
+// Fail preserves the current owner's failed execution so the Console can show
+// it. The trace fence prevents a stale owner from overwriting a takeover.
+func (s *PostgresExecutionDedupStore) Fail(ctx context.Context, tenantID, channel, bindingID, messageID, traceID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateDedupArguments(tenantID, channel, bindingID, messageID, traceID); err != nil {
+		return err
+	}
+	if _, err := s.database.ExecContext(ctx, `
+UPDATE messages
+SET status = 'failed', updated_at = NOW()
+WHERE tenant_id = $1 AND channel_type = $2 AND binding_id = $3 AND message_id = $4
+  AND status = 'processing' AND trace_id = $5`,
+		tenantID, channel, bindingID, messageID, traceID,
+	); err != nil {
+		return fmt.Errorf("mark execution failed: %w", err)
+	}
+	return nil
+}
+
 // ListClaims implements ClaimLister for the durable store: newest updated
 // claims first, capped at limit.
 func (s *PostgresExecutionDedupStore) ListClaims(ctx context.Context, tenantID, appCode string, limit int) ([]Claim, error) {
@@ -174,14 +223,10 @@ func (s *PostgresExecutionDedupStore) ListClaims(ctx context.Context, tenantID, 
 	}
 	rows, err := s.database.QueryContext(ctx, `
 SELECT m.channel_type, m.binding_id, m.message_id, m.status, m.trace_id, m.updated_at,
-       COALESCE(r.app_code, t.app_code, '')
+       m.app_code
 FROM messages m
-LEFT JOIN inbound_message_routes r
-  ON r.tenant_id=m.tenant_id AND r.channel_type=m.channel_type AND r.binding_id=m.binding_id AND r.message_id=m.message_id
-LEFT JOIN execution_traces t
-  ON t.tenant_id=m.tenant_id AND t.channel_type=m.channel_type AND t.binding_id=m.binding_id AND t.message_id=m.message_id
 WHERE m.tenant_id = $1
-  AND ($2 = '' OR COALESCE(r.app_code, t.app_code, '') = $2)
+  AND ($2 = '' OR m.app_code = $2)
 ORDER BY m.updated_at DESC, m.message_id
 LIMIT $3`, tenantID, appCode, limit)
 	if err != nil {
@@ -216,6 +261,13 @@ func validateDedupArguments(tenantID, channel, bindingID, messageID, traceID str
 	return nil
 }
 
+func validateBeginArguments(tenantID, appCode, channel, bindingID, messageID, traceID string) error {
+	if strings.TrimSpace(appCode) == "" {
+		return fmt.Errorf("execution claim application code is required")
+	}
+	return validateDedupArguments(tenantID, channel, bindingID, messageID, traceID)
+}
+
 // MemoryExecutionDedupStore is a deterministic in-process implementation for
 // tests and local development. It is not durable.
 type MemoryExecutionDedupStore struct {
@@ -225,6 +277,7 @@ type MemoryExecutionDedupStore struct {
 }
 
 type memoryExecutionClaim struct {
+	appCode   string
 	status    string
 	traceID   string
 	updatedAt time.Time
@@ -241,11 +294,11 @@ func memoryClaimKey(tenantID, channel, bindingID, messageID string) string {
 
 // Begin implements ExecutionDedupStore with wall-clock semantics matching the
 // PostgreSQL implementation.
-func (s *MemoryExecutionDedupStore) Begin(ctx context.Context, tenantID, channel, bindingID, messageID, traceID string, window time.Duration) (BeginResult, error) {
+func (s *MemoryExecutionDedupStore) Begin(ctx context.Context, tenantID, appCode, channel, bindingID, messageID, traceID string, window time.Duration) (BeginResult, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if err := validateDedupArguments(tenantID, channel, bindingID, messageID, traceID); err != nil {
+	if err := validateBeginArguments(tenantID, appCode, channel, bindingID, messageID, traceID); err != nil {
 		return "", err
 	}
 	if window <= 0 {
@@ -257,16 +310,23 @@ func (s *MemoryExecutionDedupStore) Begin(ctx context.Context, tenantID, channel
 	defer s.mu.Unlock()
 	claim, exists := s.claims[key]
 	if !exists {
-		s.claims[key] = memoryExecutionClaim{status: "processing", traceID: traceID, updatedAt: now}
+		s.claims[key] = memoryExecutionClaim{appCode: appCode, status: "processing", traceID: traceID, updatedAt: now}
 		return ExecutionFresh, nil
+	}
+	if claim.appCode != appCode {
+		return "", fmt.Errorf("execution claim application mismatch: stored %q, requested %q", claim.appCode, appCode)
 	}
 	if claim.status == "completed" {
 		return ExecutionCompleted, nil
 	}
+	if claim.status == "failed" {
+		s.claims[key] = memoryExecutionClaim{appCode: appCode, status: "processing", traceID: traceID, updatedAt: now}
+		return ExecutionFresh, nil
+	}
 	if claim.updatedAt.Add(window).After(now) {
 		return ExecutionInProgress, nil
 	}
-	s.claims[key] = memoryExecutionClaim{status: "processing", traceID: traceID, updatedAt: now}
+	s.claims[key] = memoryExecutionClaim{appCode: appCode, status: "processing", traceID: traceID, updatedAt: now}
 	return ExecutionFresh, nil
 }
 
@@ -281,6 +341,60 @@ func (s *MemoryExecutionDedupStore) Abort(_ context.Context, tenantID, channel, 
 	}
 	delete(s.claims, key)
 	return nil
+}
+
+// Fail implements ExecutionDedupStore for the in-process store.
+func (s *MemoryExecutionDedupStore) Fail(ctx context.Context, tenantID, channel, bindingID, messageID, traceID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateDedupArguments(tenantID, channel, bindingID, messageID, traceID); err != nil {
+		return err
+	}
+	key := memoryClaimKey(tenantID, channel, bindingID, messageID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	claim, exists := s.claims[key]
+	if !exists || claim.traceID != traceID || claim.status != "processing" {
+		return nil
+	}
+	claim.status = "failed"
+	claim.updatedAt = s.now().UTC()
+	s.claims[key] = claim
+	return nil
+}
+
+// ListClaims implements ClaimLister for tests and in-process development.
+func (s *MemoryExecutionDedupStore) ListClaims(_ context.Context, tenantID, appCode string, limit int) ([]Claim, error) {
+	if strings.TrimSpace(tenantID) == "" {
+		return nil, fmt.Errorf("claim list tenant ID is required")
+	}
+	if limit <= 0 {
+		return nil, fmt.Errorf("claim list limit must be positive")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	claims := make([]Claim, 0, len(s.claims))
+	for key, item := range s.claims {
+		parts := strings.Split(key, "\x00")
+		if len(parts) != 4 || parts[0] != tenantID || (appCode != "" && item.appCode != appCode) {
+			continue
+		}
+		claims = append(claims, Claim{
+			Channel: parts[1], BindingID: parts[2], MessageID: parts[3],
+			Status: item.status, TraceID: item.traceID, UpdatedAt: item.updatedAt, AppCode: item.appCode,
+		})
+	}
+	sort.Slice(claims, func(i, j int) bool {
+		if claims[i].UpdatedAt.Equal(claims[j].UpdatedAt) {
+			return claims[i].MessageID < claims[j].MessageID
+		}
+		return claims[i].UpdatedAt.After(claims[j].UpdatedAt)
+	})
+	if len(claims) > limit {
+		claims = claims[:limit]
+	}
+	return claims, nil
 }
 
 // MarkCompleted flips a processing claim to completed. It exists for tests and

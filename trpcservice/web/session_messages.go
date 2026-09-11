@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -27,13 +29,19 @@ const (
 )
 
 type chatTranscriptMessage struct {
-	ID        string             `json:"id"`
-	Role      string             `json:"role"`
-	Content   string             `json:"content"`
-	Time      string             `json:"time"`
-	Source    *chatMessageSource `json:"source,omitempty"`
-	RequestID string             `json:"-"`
-	EventTime time.Time          `json:"-"`
+	ID          string                     `json:"id"`
+	Role        string                     `json:"role"`
+	Content     string                     `json:"content"`
+	Time        string                     `json:"time"`
+	Attachments []chatTranscriptAttachment `json:"attachments,omitempty"`
+	Card        *channels.InteractiveCard  `json:"card,omitempty"`
+	Source      *chatMessageSource         `json:"source,omitempty"`
+	RequestID   string                     `json:"-"`
+	EventTime   time.Time                  `json:"-"`
+}
+
+type chatTranscriptAttachment struct {
+	Name string `json:"name"`
 }
 
 type chatMessageSource struct {
@@ -93,6 +101,14 @@ func (c *consoleAPI) getSessionMessages(writer http.ResponseWriter, request *htt
 		badRequest(writer, "before is not a valid message cursor")
 		return
 	}
+	// A revision-0 platform Session is only a route shell created before the
+	// first successful Worker execution. Authentication, authorization, and
+	// request validation still apply, but there is no framework transcript to
+	// resolve yet.
+	if entry.Revision == 0 {
+		writeJSON(writer, http.StatusOK, map[string]any{"messages": []chatTranscriptMessage{}, "next_cursor": ""})
+		return
+	}
 	service, err := c.agentSessionService(request.Context(), tenantID, entry.AppCode)
 	if err != nil {
 		serverError(writer, "resolve agent Session backend", err)
@@ -111,6 +127,11 @@ func (c *consoleAPI) getSessionMessages(writer http.ResponseWriter, request *htt
 		return
 	}
 	messages = c.attachChatMessageSources(request.Context(), tenantID, sessionKey, messages)
+	messages, err = c.attachChatMessageCards(request.Context(), tenantID, messages)
+	if err != nil {
+		serverError(writer, "attach chat message cards", err)
+		return
+	}
 	if contentAudit {
 		if err := c.recordConversationContentRead(request, user, entry); err != nil {
 			serverError(writer, "record conversation content audit", err)
@@ -120,15 +141,73 @@ func (c *consoleAPI) getSessionMessages(writer http.ResponseWriter, request *htt
 	writeJSON(writer, http.StatusOK, map[string]any{"messages": messages, "next_cursor": nextCursor})
 }
 
+func (c *consoleAPI) attachChatMessageCards(ctx context.Context, tenantID string, messages []chatTranscriptMessage) ([]chatTranscriptMessage, error) {
+	var finder storage.OutboxRequestBatchFinder
+	if candidate, ok := c.dependencies.Replies.(storage.OutboxRequestBatchFinder); ok {
+		finder = candidate
+	} else if candidate, ok := c.dependencies.State.(storage.OutboxRequestBatchFinder); ok {
+		finder = candidate
+	}
+	if finder == nil {
+		return messages, nil
+	}
+	requestIDs := make([]string, 0, len(messages))
+	seen := make(map[string]struct{}, len(messages))
+	for _, message := range messages {
+		if message.Role != string(model.RoleAssistant) || strings.TrimSpace(message.RequestID) == "" {
+			continue
+		}
+		if _, ok := seen[message.RequestID]; ok {
+			continue
+		}
+		seen[message.RequestID] = struct{}{}
+		requestIDs = append(requestIDs, message.RequestID)
+	}
+	if len(requestIDs) == 0 {
+		return messages, nil
+	}
+	events, err := finder.FindOutboxByRequestIDs(ctx, tenantID, requestIDs)
+	if err != nil {
+		return nil, err
+	}
+	cards := make(map[string]*channels.InteractiveCard, len(events))
+	for _, outbox := range events {
+		var payload struct {
+			Card *channels.InteractiveCard `json:"card,omitempty"`
+		}
+		if err := json.Unmarshal(outbox.Payload, &payload); err != nil {
+			return nil, fmt.Errorf("decode stored reply card: %w", err)
+		}
+		if payload.Card != nil {
+			cards[outbox.RequestID] = payload.Card
+		}
+	}
+	for index := range messages {
+		if card := cards[messages[index].RequestID]; card != nil {
+			messages[index].Card = card
+		}
+	}
+	return messages, nil
+}
+
 func (c *consoleAPI) recordConversationContentRead(request *http.Request, user identity.SessionUser, entry storage.Session) error {
+	return c.recordConversationContentAccess(request, user, entry,
+		"conversation_content_read", "authorized tenant conversation content audit read")
+}
+
+func (c *consoleAPI) recordConversationArtifactRead(request *http.Request, user identity.SessionUser, entry storage.Session) error {
+	return c.recordConversationContentAccess(request, user, entry,
+		"conversation_artifact_read", "authorized tenant conversation artifact audit read")
+}
+
+func (c *consoleAPI) recordConversationContentAccess(request *http.Request, user identity.SessionUser, entry storage.Session, action, detail string) error {
 	recorder, ok := c.dependencies.State.(storage.AuditRecorder)
 	if !ok {
 		return errors.New("tenant audit recorder is not configured")
 	}
 	return recorder.RecordAudit(request.Context(), storage.AuditEvent{
 		ID: uuid.NewString(), TenantID: entry.TenantID, TraceID: uuid.NewString(), UserID: user.PlatformUserID,
-		SessionID: entry.SessionKey, AgentName: entry.AppCode, Action: "conversation_content_read", Result: "ok",
-		Detail: "authorized tenant conversation content audit read",
+		SessionID: entry.SessionKey, AgentName: entry.AppCode, Action: action, Result: "ok", Detail: detail,
 	})
 }
 
@@ -350,8 +429,14 @@ func projectChatMessages(sess *agentsession.Session) []chatTranscriptMessage {
 
 func chatPreview(messages []chatTranscriptMessage) string {
 	for _, message := range messages {
-		if message.Role == string(model.RoleUser) && strings.TrimSpace(message.Content) != "" {
+		if message.Role != string(model.RoleUser) {
+			continue
+		}
+		if strings.TrimSpace(message.Content) != "" {
 			return message.Content
+		}
+		if len(message.Attachments) > 0 {
+			return "附件 · " + message.Attachments[0].Name
 		}
 	}
 	return ""
@@ -378,18 +463,62 @@ func chatMessageFromEvent(evt *event.Event) (chatTranscriptMessage, bool) {
 	if content == "" {
 		return chatTranscriptMessage{}, false
 	}
+	attachments := []chatTranscriptAttachment(nil)
+	if role == string(model.RoleUser) {
+		content, attachments = visibleUserContent(content)
+		if content == "" && len(attachments) == 0 {
+			return chatTranscriptMessage{}, false
+		}
+	}
 	stamp := evt.Timestamp
 	if stamp.IsZero() {
 		stamp = time.Now().UTC()
 	}
 	return chatTranscriptMessage{
-		ID:        evt.ID,
-		Role:      role,
-		Content:   content,
-		Time:      stamp.UTC().Format(time.RFC3339),
-		RequestID: evt.RequestID,
-		EventTime: stamp.UTC(),
+		ID:          evt.ID,
+		Role:        role,
+		Content:     content,
+		Time:        stamp.UTC().Format(time.RFC3339),
+		Attachments: attachments,
+		RequestID:   evt.RequestID,
+		EventTime:   stamp.UTC(),
 	}, true
+}
+
+func visibleUserContent(content string) (string, []chatTranscriptAttachment) {
+	const marker = "附件「"
+	first := strings.Index(content, marker)
+	if first < 0 || (first > 0 && !strings.HasSuffix(content[:first], "\n\n")) {
+		return strings.TrimSpace(content), nil
+	}
+	visible := strings.TrimSpace(content[:first])
+	rest := content[first:]
+	attachments := make([]chatTranscriptAttachment, 0, 1)
+	for {
+		if !strings.HasPrefix(rest, marker) {
+			break
+		}
+		nameEnd := strings.Index(rest[len(marker):], "」内容：\n")
+		if nameEnd < 0 {
+			break
+		}
+		nameEnd += len(marker)
+		name := strings.TrimSpace(rest[len(marker):nameEnd])
+		if name == "" {
+			break
+		}
+		attachments = append(attachments, chatTranscriptAttachment{Name: name})
+		bodyStart := nameEnd + len("」内容：\n")
+		next := strings.Index(rest[bodyStart:], "\n\n"+marker)
+		if next < 0 {
+			break
+		}
+		rest = rest[bodyStart+next+2:]
+	}
+	if len(attachments) == 0 {
+		return strings.TrimSpace(content), nil
+	}
+	return visible, attachments
 }
 
 func matchListedSession(entry storage.Session, appCode, channel, subject, status string) bool {

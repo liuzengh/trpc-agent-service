@@ -14,15 +14,14 @@ import (
 )
 
 var (
-	ErrPlatformUserNotFound     = errors.New("platform user not found")
-	ErrChannelIdentityConflict  = errors.New("channel identity belongs to another platform user")
-	ErrChannelIdentityNotLinked = errors.New("channel identity is not linked to the platform user")
-	ErrLastSystemAdmin          = errors.New("cannot remove the last usable system administrator")
-	ErrLastTenantAdmin          = errors.New("cannot remove the last active tenant administrator")
-	ErrTenantNotFound           = errors.New("tenant not found")
-	ErrTenantNeedsAdmin         = errors.New("active tenant requires an active tenant administrator")
-	ErrLoginIdentityConflict    = errors.New("login identity belongs to another platform user")
-	ErrLastLoginIdentity        = errors.New("cannot remove the last usable login identity")
+	ErrPlatformUserNotFound    = errors.New("platform user not found")
+	ErrChannelIdentityConflict = errors.New("channel identity belongs to another platform user")
+	ErrLastSystemAdmin         = errors.New("cannot remove the last usable system administrator")
+	ErrLastTenantAdmin         = errors.New("cannot remove the last active tenant administrator")
+	ErrTenantNotFound          = errors.New("tenant not found")
+	ErrTenantNeedsAdmin        = errors.New("active tenant requires an active tenant administrator")
+	ErrLoginIdentityConflict   = errors.New("login identity belongs to another platform user")
+	ErrLastLoginIdentity       = errors.New("cannot remove the last usable login identity")
 )
 
 const (
@@ -59,7 +58,8 @@ type LoginMethod struct {
 }
 
 // LoginProviderActivityStore exposes provider-level login activity for
-// administrative verification surfaces without widening the core IdentityStore
+// administrative verification surfaces without widening authentication-facing
+// identity contracts
 // contract used by runtime identity resolution.
 type LoginProviderActivityStore interface {
 	LatestLoginAtForProvider(ctx context.Context, providerID string) (time.Time, bool, error)
@@ -87,6 +87,12 @@ type TenantSummary struct {
 type TenantModelGrant struct {
 	ProviderID string `json:"provider_id"`
 	ModelName  string `json:"name"`
+}
+
+// TenantToolGrant authorizes one tenant-selectable platform tool for one tenant.
+// Custom HTTP/MCP tools remain application-owned and are not represented here.
+type TenantToolGrant struct {
+	ToolName string `json:"name"`
 }
 
 type MemberSummary struct {
@@ -118,9 +124,9 @@ type MemberPage struct {
 }
 
 // ChannelIdentity is one concrete external messaging identity observed through
-// a binding. TrustedEnterpriseID is only needed by in-memory/test stores; the
-// PostgreSQL store derives it from channel_bindings so the durable identity
-// row does not duplicate routing metadata.
+// a binding. It is not a login identity and has no user-managed linking flow.
+// PlatformUserID is populated only when a trusted provider boundary can resolve
+// the external sender deterministically to an existing Platform User.
 type ChannelIdentity struct {
 	TenantID            string
 	Channel             channels.Channel
@@ -131,12 +137,17 @@ type ChannelIdentity struct {
 	LinkedAt            time.Time
 }
 
-// IdentityStore owns canonical people, login identities, memberships,
-// tenant summaries, and channel-side identity projections used by ingress.
-type IdentityStore interface {
+// LoginProviderRegistrar is the startup-only seam used to persist configured
+// enterprise login providers. Provider composition does not need access to
+// users, tenants, memberships, or channel identities.
+type LoginProviderRegistrar interface {
 	UpsertLoginProvider(ctx context.Context, descriptor ProviderDescriptor, enterpriseID string) error
+}
+
+// AuthIdentityStore is the authentication-facing identity seam. It deliberately
+// excludes tenant administration and channel ingress concerns.
+type AuthIdentityStore interface {
 	ResolveLoginIdentity(ctx context.Context, identity Identity) (PlatformUser, error)
-	LookupLoginIdentity(ctx context.Context, providerID, subjectID string) (LoginIdentity, error)
 	LinkLoginIdentity(ctx context.Context, platformUserID string, identity Identity) error
 	ListLoginMethods(ctx context.Context, platformUserID string) ([]LoginMethod, error)
 	RemoveLoginIdentity(ctx context.Context, platformUserID, providerID, subjectID string) error
@@ -144,30 +155,40 @@ type IdentityStore interface {
 	LookupLocalCredential(ctx context.Context, username string) (LocalCredential, PlatformUser, error)
 	LocalCredentialForUser(ctx context.Context, platformUserID string) (LocalCredential, error)
 	SetLocalPassword(ctx context.Context, platformUserID, passwordHash string, mustChangePassword bool) error
-	HasUsableSystemAdmin(ctx context.Context) (bool, error)
 	ResolveSessionUser(ctx context.Context, platformUserID string) (SessionUser, error)
+}
+
+// LocalBootstrapStore contains only the capabilities required to provision the
+// first local System Admin during instance startup.
+type LocalBootstrapStore interface {
+	HasUsableSystemAdmin(ctx context.Context) (bool, error)
 	SetSystemAdmin(ctx context.Context, platformUserID string, enabled bool) error
-	IsSystemAdmin(ctx context.Context, platformUserID string) (bool, error)
+	CreateLocalUser(ctx context.Context, username, displayName, email, passwordHash string, mustChangePassword bool) (PlatformUser, error)
+}
+
+// ConsoleIdentityStore is the control-plane identity seam used by the Web
+// console. Login-provider registration and channel identity projection stay on
+// their own smaller contracts.
+type ConsoleIdentityStore interface {
+	ResolveSessionUser(ctx context.Context, platformUserID string) (SessionUser, error)
+	ListLoginMethods(ctx context.Context, platformUserID string) ([]LoginMethod, error)
 	ListPlatformUsers(ctx context.Context, request MemberPageRequest) (MemberPage, error)
 	UpdatePlatformUserProfile(ctx context.Context, platformUserID, displayName string) error
 	UpdatePlatformUserAccess(ctx context.Context, platformUserID, status string, systemAdmin bool) error
+	CreateLocalUser(ctx context.Context, username, displayName, email, passwordHash string, mustChangePassword bool) (PlatformUser, error)
+	SetLocalPassword(ctx context.Context, platformUserID, passwordHash string, mustChangePassword bool) error
 	CreateTenant(ctx context.Context, tenantID, displayName, initialAdminPlatformUserID string) error
-	TenantStatus(ctx context.Context, tenantID string) (string, error)
 	SetTenantStatus(ctx context.Context, tenantID, status string) error
 	ListTenantModelGrants(ctx context.Context, tenantID string) ([]TenantModelGrant, error)
 	ReplaceTenantModelGrants(ctx context.Context, tenantID string, grants []TenantModelGrant) error
-	GrantMembership(ctx context.Context, tenantID, platformUserID string, role Role) error
+	ListTenantToolGrants(ctx context.Context, tenantID string) ([]TenantToolGrant, error)
+	ReplaceTenantToolGrants(ctx context.Context, tenantID string, grants []TenantToolGrant) error
 	SetTenantMembership(ctx context.Context, tenantID, platformUserID string, role Role, status string) error
 	SetConversationContentAudit(ctx context.Context, tenantID, platformUserID string, enabled bool) error
-	ListTenantMemberships(ctx context.Context, platformUserID string) ([]TenantMembership, error)
 	ListTenantMembers(ctx context.Context, tenantID string, request MemberPageRequest) (MemberPage, error)
 	ListTenantMemberCandidates(ctx context.Context, tenantID string, request MemberPageRequest) (MemberPage, error)
 	RoleFor(ctx context.Context, tenantID, platformUserID string) (Role, error)
 	ListTenantSummaries(ctx context.Context, platformUserID string, includeAll bool) ([]TenantSummary, error)
-	ResolveChannelIdentity(ctx context.Context, tenantID string, channel channels.Channel, bindingID, externalUserID, trustedEnterpriseID string) (ChannelIdentity, bool, error)
-	LinkChannelIdentity(ctx context.Context, identity ChannelIdentity) error
-	UnlinkChannelIdentity(ctx context.Context, identity ChannelIdentity) error
-	ListChannelIdentities(ctx context.Context, tenantID, platformUserID string) ([]ChannelIdentity, error)
 }
 
 // PostgresIdentityStore is the durable canonical identity store.
@@ -244,7 +265,8 @@ WHERE li.provider_id=$1 AND li.subject_id=$2`, external.ProviderID, external.Sub
 		if err := tx.QueryRowContext(ctx, `
 UPDATE platform_users SET
     email=COALESCE(NULLIF($2,''), email),
-    last_login_at=NOW()
+    last_login_at=NOW(),
+    updated_at=NOW()
 WHERE platform_user_id=$1
 RETURNING platform_user_id, display_name, email, status, first_seen_at, last_login_at`, user.PlatformUserID, strings.TrimSpace(external.Email)).
 			Scan(&user.PlatformUserID, &user.DisplayName, &user.Email, &user.Status, &user.FirstSeenAt, &user.LastLoginAt); err != nil {
@@ -667,7 +689,7 @@ func (s *PostgresIdentityStore) UpdatePlatformUserProfile(ctx context.Context, p
 	if displayName == "" || len([]rune(displayName)) > 80 {
 		return errors.New("display name must be between 1 and 80 characters")
 	}
-	result, err := s.database.ExecContext(ctx, `UPDATE platform_users SET display_name=$2 WHERE platform_user_id=$1`, platformUserID, displayName)
+	result, err := s.database.ExecContext(ctx, `UPDATE platform_users SET display_name=$2, updated_at=NOW() WHERE platform_user_id=$1`, platformUserID, displayName)
 	if err != nil {
 		return fmt.Errorf("update platform user profile: %w", err)
 	}
@@ -740,7 +762,7 @@ SELECT EXISTS(
 			return ErrLastTenantAdmin
 		}
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE platform_users SET status=$2 WHERE platform_user_id=$1`, platformUserID, status)
+	result, err := tx.ExecContext(ctx, `UPDATE platform_users SET status=$2, updated_at=NOW() WHERE platform_user_id=$1`, platformUserID, status)
 	if err != nil {
 		return fmt.Errorf("set platform user status: %w", err)
 	}
@@ -841,7 +863,7 @@ WHERE tm.tenant_id=$1 AND tm.role='admin' AND tm.status='active'`, tenantID).Sca
 		}
 	}
 	if current != status {
-		if _, err := tx.ExecContext(ctx, `UPDATE tenants SET status=$2 WHERE id=$1`, tenantID, status); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE tenants SET status=$2, updated_at=NOW() WHERE id=$1`, tenantID, status); err != nil {
 			return fmt.Errorf("set tenant status: %w", err)
 		}
 	}
@@ -945,6 +967,117 @@ func normalizeTenantModelGrants(grants []TenantModelGrant) ([]TenantModelGrant, 
 	return result, nil
 }
 
+func (s *PostgresIdentityStore) ListTenantToolGrants(ctx context.Context, tenantID string) ([]TenantToolGrant, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return nil, errors.New("tenant ID is required")
+	}
+	var exists bool
+	if err := s.database.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tenants WHERE id=$1)`, tenantID).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("check tenant tool policy tenant: %w", err)
+	}
+	if !exists {
+		return nil, ErrTenantNotFound
+	}
+	rows, err := s.database.QueryContext(ctx, `
+SELECT tool_name
+FROM tenant_tool_allowlist
+WHERE tenant_id=$1
+ORDER BY tool_name`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("list tenant tool grants: %w", err)
+	}
+	defer rows.Close()
+	grants := make([]TenantToolGrant, 0)
+	for rows.Next() {
+		var grant TenantToolGrant
+		if err := rows.Scan(&grant.ToolName); err != nil {
+			return nil, fmt.Errorf("scan tenant tool grant: %w", err)
+		}
+		grants = append(grants, grant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return grants, nil
+}
+
+// TenantToolGranted checks one platform-tool grant through the allow-list
+// primary key. Runtime governance uses this path so revocation is observed on
+// the next tool call without loading the tenant's entire grant set.
+func (s *PostgresIdentityStore) TenantToolGranted(ctx context.Context, tenantID, toolName string) (bool, error) {
+	tenantID, toolName = strings.TrimSpace(tenantID), strings.TrimSpace(toolName)
+	if tenantID == "" || toolName == "" {
+		return false, errors.New("tenant ID and tool name are required")
+	}
+	var granted bool
+	if err := s.database.QueryRowContext(ctx, `
+SELECT EXISTS(
+    SELECT 1 FROM tenant_tool_allowlist
+    WHERE tenant_id=$1 AND tool_name=$2
+)`, tenantID, toolName).Scan(&granted); err != nil {
+		return false, fmt.Errorf("check tenant tool grant: %w", err)
+	}
+	return granted, nil
+}
+
+func (s *PostgresIdentityStore) ReplaceTenantToolGrants(ctx context.Context, tenantID string, grants []TenantToolGrant) error {
+	tenantID = strings.TrimSpace(tenantID)
+	normalized, err := normalizeTenantToolGrants(grants)
+	if err != nil {
+		return err
+	}
+	if tenantID == "" {
+		return errors.New("tenant ID is required")
+	}
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tenant tool policy update: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "tenant-tools:"+tenantID); err != nil {
+		return fmt.Errorf("lock tenant tool policy: %w", err)
+	}
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tenants WHERE id=$1)`, tenantID).Scan(&exists); err != nil {
+		return fmt.Errorf("check tenant tool policy tenant: %w", err)
+	}
+	if !exists {
+		return ErrTenantNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tenant_tool_allowlist WHERE tenant_id=$1`, tenantID); err != nil {
+		return fmt.Errorf("clear tenant tool grants: %w", err)
+	}
+	for _, grant := range normalized {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO tenant_tool_allowlist (tenant_id, tool_name)
+VALUES ($1,$2)`, tenantID, grant.ToolName); err != nil {
+			return fmt.Errorf("insert tenant tool grant: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tenant tool policy update: %w", err)
+	}
+	return nil
+}
+
+func normalizeTenantToolGrants(grants []TenantToolGrant) ([]TenantToolGrant, error) {
+	result := make([]TenantToolGrant, 0, len(grants))
+	seen := make(map[string]struct{}, len(grants))
+	for _, grant := range grants {
+		grant.ToolName = strings.TrimSpace(grant.ToolName)
+		if grant.ToolName == "" {
+			return nil, errors.New("tenant tool grant requires name")
+		}
+		if _, exists := seen[grant.ToolName]; exists {
+			return nil, fmt.Errorf("duplicate tenant tool grant %q", grant.ToolName)
+		}
+		seen[grant.ToolName] = struct{}{}
+		result = append(result, grant)
+	}
+	return result, nil
+}
+
 func (s *PostgresIdentityStore) GrantMembership(ctx context.Context, tenantID, platformUserID string, role Role) error {
 	return s.SetTenantMembership(ctx, tenantID, platformUserID, role, "active")
 }
@@ -1010,7 +1143,8 @@ ON CONFLICT (tenant_id, platform_user_id) DO UPDATE SET
     conversation_content_audit=CASE
         WHEN EXCLUDED.role='admin' AND EXCLUDED.status='active' THEN tenant_members.conversation_content_audit
         ELSE FALSE
-    END`, tenantID, platformUserID, string(role), status); err != nil {
+    END,
+    updated_at=NOW()`, tenantID, platformUserID, string(role), status); err != nil {
 		return fmt.Errorf("grant tenant membership: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1027,7 +1161,7 @@ func (s *PostgresIdentityStore) SetConversationContentAudit(ctx context.Context,
 	}
 	result, err := s.database.ExecContext(ctx, `
 UPDATE tenant_members
-SET conversation_content_audit=$3
+SET conversation_content_audit=$3, updated_at=NOW()
 WHERE tenant_id=$1 AND platform_user_id=$2 AND role='admin' AND status='active'`, tenantID, platformUserID, enabled)
 	if err != nil {
 		return fmt.Errorf("set conversation content audit permission: %w", err)
@@ -1186,7 +1320,10 @@ ORDER BY t.display_name, t.id`
 }
 
 func (s *PostgresIdentityStore) ResolveChannelIdentity(ctx context.Context, tenantID string, channel channels.Channel, bindingID, externalUserID, trustedEnterpriseID string) (ChannelIdentity, bool, error) {
-	base := ChannelIdentity{TenantID: tenantID, Channel: channel, BindingID: bindingID, ExternalUserID: externalUserID}
+	base := ChannelIdentity{
+		TenantID: tenantID, Channel: channel, BindingID: bindingID, ExternalUserID: externalUserID,
+		TrustedEnterpriseID: strings.TrimSpace(trustedEnterpriseID),
+	}
 	var platformUserID sql.NullString
 	var linkedAt sql.NullTime
 	err := s.database.QueryRowContext(ctx, `
@@ -1206,7 +1343,8 @@ WHERE tenant_id=$1 AND channel_type=$2 AND binding_id=$3 AND external_user_id=$4
 		return ChannelIdentity{}, false, fmt.Errorf("resolve channel identity: %w", err)
 	}
 	trustedPlatformUserID := ""
-	if channel == channels.WeCom && strings.TrimSpace(trustedEnterpriseID) != "" {
+	providerType, trustedChannel := trustedLoginProviderType(channel)
+	if trustedChannel && strings.TrimSpace(trustedEnterpriseID) != "" {
 		rows, lookupErr := s.database.QueryContext(ctx, `
 SELECT DISTINCT ci.platform_user_id
 FROM channel_identities ci
@@ -1216,18 +1354,18 @@ JOIN platform_users p
   ON p.platform_user_id=ci.platform_user_id AND p.status='active'
 JOIN tenant_members tm
   ON tm.tenant_id=ci.tenant_id AND tm.platform_user_id=ci.platform_user_id AND tm.status='active'
-WHERE ci.tenant_id=$1 AND ci.channel_type='wecom' AND ci.external_user_id=$2
-  AND ci.platform_user_id IS NOT NULL AND cb.trusted_enterprise_id=$3
-LIMIT 2`, tenantID, strings.TrimSpace(externalUserID), strings.TrimSpace(trustedEnterpriseID))
+WHERE ci.tenant_id=$1 AND ci.channel_type=$2 AND ci.external_user_id=$3
+  AND ci.platform_user_id IS NOT NULL AND cb.trusted_enterprise_id=$4
+LIMIT 2`, tenantID, string(channel), strings.TrimSpace(externalUserID), strings.TrimSpace(trustedEnterpriseID))
 		if lookupErr != nil {
-			return ChannelIdentity{}, false, fmt.Errorf("resolve linked WeCom enterprise identity: %w", lookupErr)
+			return ChannelIdentity{}, false, fmt.Errorf("resolve linked %s enterprise identity: %w", channel, lookupErr)
 		}
 		linkedUsers := make([]string, 0, 2)
 		for rows.Next() {
 			var linkedUser string
 			if scanErr := rows.Scan(&linkedUser); scanErr != nil {
 				_ = rows.Close()
-				return ChannelIdentity{}, false, fmt.Errorf("scan linked WeCom enterprise identity: %w", scanErr)
+				return ChannelIdentity{}, false, fmt.Errorf("scan linked %s enterprise identity: %w", channel, scanErr)
 			}
 			if linkedUser = strings.TrimSpace(linkedUser); linkedUser != "" {
 				linkedUsers = append(linkedUsers, linkedUser)
@@ -1235,7 +1373,7 @@ LIMIT 2`, tenantID, strings.TrimSpace(externalUserID), strings.TrimSpace(trusted
 		}
 		if rowsErr := rows.Err(); rowsErr != nil {
 			_ = rows.Close()
-			return ChannelIdentity{}, false, fmt.Errorf("iterate linked WeCom enterprise identities: %w", rowsErr)
+			return ChannelIdentity{}, false, fmt.Errorf("iterate linked %s enterprise identities: %w", channel, rowsErr)
 		}
 		_ = rows.Close()
 		if len(linkedUsers) > 1 {
@@ -1245,17 +1383,17 @@ LIMIT 2`, tenantID, strings.TrimSpace(externalUserID), strings.TrimSpace(trusted
 			trustedPlatformUserID = linkedUsers[0]
 		}
 	}
-	if trustedPlatformUserID == "" && channel == channels.WeCom && strings.TrimSpace(trustedEnterpriseID) != "" {
+	if trustedPlatformUserID == "" && trustedChannel && strings.TrimSpace(trustedEnterpriseID) != "" {
 		err = s.database.QueryRowContext(ctx, `
 SELECT li.platform_user_id
 FROM login_providers lp
 JOIN login_identities li ON li.provider_id=lp.provider_id
 JOIN platform_users p ON p.platform_user_id=li.platform_user_id AND p.status='active'
 JOIN tenant_members tm ON tm.platform_user_id=li.platform_user_id AND tm.tenant_id=$1 AND tm.status='active'
-WHERE lp.provider_type='wecom' AND lp.enterprise_id=$2 AND lp.enabled=TRUE AND li.subject_id=$3
-LIMIT 1`, tenantID, strings.TrimSpace(trustedEnterpriseID), strings.TrimSpace(externalUserID)).Scan(&trustedPlatformUserID)
+WHERE lp.provider_type=$2 AND lp.enterprise_id=$3 AND lp.enabled=TRUE AND li.subject_id=$4
+LIMIT 1`, tenantID, string(providerType), strings.TrimSpace(trustedEnterpriseID), strings.TrimSpace(externalUserID)).Scan(&trustedPlatformUserID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return ChannelIdentity{}, false, fmt.Errorf("resolve trusted WeCom identity: %w", err)
+			return ChannelIdentity{}, false, fmt.Errorf("resolve trusted %s identity: %w", channel, err)
 		}
 	}
 	if trustedPlatformUserID == "" {
@@ -1292,67 +1430,15 @@ WHERE channel_identities.platform_user_id IS NULL`, tenantID, string(channel), b
 	return base, true, nil
 }
 
-func (s *PostgresIdentityStore) LinkChannelIdentity(ctx context.Context, identity ChannelIdentity) error {
-	if err := validateChannelIdentity(identity); err != nil {
-		return err
+func trustedLoginProviderType(channel channels.Channel) (ProviderType, bool) {
+	switch channel {
+	case channels.WeCom:
+		return ProviderWeCom, true
+	case channels.Feishu:
+		return ProviderFeishu, true
+	default:
+		return "", false
 	}
-	tx, err := s.database.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin channel identity link: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	lockKey := advisoryLockKey(identity.TenantID, string(identity.Channel), identity.BindingID, identity.ExternalUserID)
-	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lockKey); err != nil {
-		return fmt.Errorf("lock channel identity: %w", err)
-	}
-	var existing sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT platform_user_id FROM channel_identities WHERE tenant_id=$1 AND channel_type=$2 AND binding_id=$3 AND external_user_id=$4`,
-		identity.TenantID, string(identity.Channel), identity.BindingID, identity.ExternalUserID).Scan(&existing)
-	if err == nil {
-		if existing.Valid && existing.String != identity.PlatformUserID {
-			return ErrChannelIdentityConflict
-		}
-		if !existing.Valid {
-			if _, err := tx.ExecContext(ctx, `UPDATE channel_identities SET platform_user_id=$5, linked_at=NOW() WHERE tenant_id=$1 AND channel_type=$2 AND binding_id=$3 AND external_user_id=$4`, identity.TenantID, string(identity.Channel), identity.BindingID, identity.ExternalUserID, identity.PlatformUserID); err != nil {
-				return fmt.Errorf("link existing external identity: %w", err)
-			}
-		}
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("read channel identity before link: %w", err)
-	} else if _, err := tx.ExecContext(ctx, `
-INSERT INTO channel_identities (tenant_id, channel_type, binding_id, external_user_id, platform_user_id)
-VALUES ($1,$2,$3,$4,$5)`, identity.TenantID, string(identity.Channel), identity.BindingID, identity.ExternalUserID, identity.PlatformUserID); err != nil {
-		return fmt.Errorf("link channel identity: %w", err)
-	}
-	if identity.Channel == channels.WeCom && strings.TrimSpace(identity.TrustedEnterpriseID) != "" {
-		var conflict bool
-		if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (
-  SELECT 1
-  FROM channel_bindings cb
-  JOIN channel_identities ci
-    ON ci.tenant_id=cb.tenant_id AND ci.channel_type=cb.channel_type AND ci.binding_id=cb.external_binding_id
-  WHERE cb.tenant_id=$1 AND cb.channel_type='wecom' AND cb.trusted_enterprise_id=$2
-    AND ci.external_user_id=$3 AND ci.platform_user_id IS NOT NULL AND ci.platform_user_id <> $4
-)`, identity.TenantID, strings.TrimSpace(identity.TrustedEnterpriseID), identity.ExternalUserID, identity.PlatformUserID).Scan(&conflict); err != nil {
-			return fmt.Errorf("check WeCom enterprise identity conflict: %w", err)
-		}
-		if conflict {
-			return ErrChannelIdentityConflict
-		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO channel_identities (tenant_id, channel_type, binding_id, external_user_id, platform_user_id, linked_at)
-SELECT cb.tenant_id, 'wecom', cb.external_binding_id, $3, $4, NOW()
-FROM channel_bindings cb
-WHERE cb.tenant_id=$1 AND cb.channel_type='wecom' AND cb.trusted_enterprise_id=$2
-ON CONFLICT (tenant_id, channel_type, binding_id, external_user_id) DO UPDATE
-SET platform_user_id=EXCLUDED.platform_user_id, linked_at=EXCLUDED.linked_at
-WHERE channel_identities.platform_user_id IS NULL OR channel_identities.platform_user_id=EXCLUDED.platform_user_id`,
-			identity.TenantID, strings.TrimSpace(identity.TrustedEnterpriseID), identity.ExternalUserID, identity.PlatformUserID); err != nil {
-			return fmt.Errorf("propagate WeCom enterprise identity: %w", err)
-		}
-	}
-	return tx.Commit()
 }
 
 // advisoryLockKey builds a PostgreSQL-text-safe, collision-free tuple encoding.
@@ -1369,56 +1455,6 @@ func advisoryLockKey(parts ...string) string {
 	return builder.String()
 }
 
-func (s *PostgresIdentityStore) UnlinkChannelIdentity(ctx context.Context, identity ChannelIdentity) error {
-	if err := validateChannelIdentity(identity); err != nil {
-		return err
-	}
-	result, err := s.database.ExecContext(ctx, `
-UPDATE channel_identities SET platform_user_id=NULL, linked_at=NULL
-WHERE tenant_id=$1 AND channel_type=$2 AND binding_id=$3 AND external_user_id=$4 AND platform_user_id=$5`,
-		identity.TenantID, string(identity.Channel), identity.BindingID, identity.ExternalUserID, identity.PlatformUserID)
-	if err != nil {
-		return fmt.Errorf("unlink channel identity: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("read unlink result: %w", err)
-	}
-	if rows == 0 {
-		return ErrChannelIdentityNotLinked
-	}
-	return nil
-}
-
-func (s *PostgresIdentityStore) ListChannelIdentities(ctx context.Context, tenantID, platformUserID string) ([]ChannelIdentity, error) {
-	rows, err := s.database.QueryContext(ctx, `
-SELECT tenant_id, channel_type, binding_id, external_user_id, platform_user_id, linked_at
-FROM channel_identities WHERE tenant_id=$1 AND platform_user_id=$2
-ORDER BY channel_type, binding_id, external_user_id`, tenantID, platformUserID)
-	if err != nil {
-		return nil, fmt.Errorf("list channel identities: %w", err)
-	}
-	defer rows.Close()
-	result := make([]ChannelIdentity, 0)
-	for rows.Next() {
-		var item ChannelIdentity
-		var channel string
-		if err := rows.Scan(&item.TenantID, &channel, &item.BindingID, &item.ExternalUserID, &item.PlatformUserID, &item.LinkedAt); err != nil {
-			return nil, fmt.Errorf("scan channel identity: %w", err)
-		}
-		item.Channel = channels.Channel(channel)
-		result = append(result, item)
-	}
-	return result, rows.Err()
-}
-
-func validateChannelIdentity(identity ChannelIdentity) error {
-	if strings.TrimSpace(identity.TenantID) == "" || !identity.Channel.Supported() || identity.Channel == channels.Web || strings.TrimSpace(identity.BindingID) == "" || strings.TrimSpace(identity.ExternalUserID) == "" || strings.TrimSpace(identity.PlatformUserID) == "" {
-		return errors.New("channel identity is incomplete")
-	}
-	return nil
-}
-
 func validateExternalIdentity(identity Identity) error {
 	if strings.TrimSpace(identity.ProviderID) == "" || strings.TrimSpace(identity.EnterpriseID) == "" || strings.TrimSpace(identity.SubjectID) == "" {
 		return errors.New("login identity is incomplete")
@@ -1431,4 +1467,7 @@ func validateExternalIdentity(identity Identity) error {
 	}
 }
 
-var _ IdentityStore = (*PostgresIdentityStore)(nil)
+var _ LoginProviderRegistrar = (*PostgresIdentityStore)(nil)
+var _ AuthIdentityStore = (*PostgresIdentityStore)(nil)
+var _ LocalBootstrapStore = (*PostgresIdentityStore)(nil)
+var _ ConsoleIdentityStore = (*PostgresIdentityStore)(nil)

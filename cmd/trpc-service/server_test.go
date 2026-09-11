@@ -108,3 +108,59 @@ func TestServeHTTPServerStopsAfterRootContextCancellation(t *testing.T) {
 		t.Fatal("ServeHTTPServer() did not return after cancellation")
 	}
 }
+
+func TestServeHTTPServerRecoversHandlerPanicAndKeepsServing(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/panic" {
+			panic("malformed request state")
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	})}
+	finished := make(chan error, 1)
+	go func() { finished <- ServeHTTPServer(ctx, server, listener) }()
+	client := &http.Client{Timeout: time.Second}
+	baseURL := "http://" + listener.Addr().String()
+
+	var panicResponse *http.Response
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		panicResponse, err = client.Get(baseURL + "/panic")
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("panic request failed: %v", err)
+	}
+	_ = panicResponse.Body.Close()
+	if panicResponse.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("panic status = %d, want 500", panicResponse.StatusCode)
+	}
+	response, err := client.Get(baseURL + "/healthy")
+	if err != nil {
+		t.Fatalf("request after panic failed: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("status after panic = %d, want 204", response.StatusCode)
+	}
+	if server.ErrorLog == nil {
+		t.Fatal("ServeHTTPServer did not install ErrorLog")
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("ServeHTTPServer() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ServeHTTPServer did not stop")
+	}
+}

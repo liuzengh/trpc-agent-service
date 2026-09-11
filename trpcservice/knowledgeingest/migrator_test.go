@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
@@ -103,8 +104,8 @@ func (p *recordingMigrationPipeline) ListKnowledgeDocuments(context.Context, str
 func testKnowledgeBackendProfiles(t *testing.T) *storage.MemoryBackendProfileStore {
 	t.Helper()
 	profiles := storage.NewMemoryBackendProfileStore()
-	if _, err := profiles.UpsertBackendProfile(context.Background(), storage.BackendProfile{
-		ProfileID: "knowledge-qdrant", DisplayName: "Knowledge Qdrant", Driver: "qdrant",
+	if _, err := profiles.CreateBackendProfile(context.Background(), storage.BackendProfile{
+		ProfileID: "knowledge-qdrant", DisplayName: "Knowledge Qdrant", Driver: "qdrant", Domains: []string{storage.BackendDomainKnowledge},
 		ConnectionRef: "env:QDRANT_URL", Status: storage.BackendProfileActive,
 	}); err != nil {
 		t.Fatal(err)
@@ -204,6 +205,41 @@ func TestKnowledgeMigratorDoesNotPublishWhenVerificationFails(t *testing.T) {
 	}
 	if published.Config.ConfigVersion != 1 || published.Config.Storage.Knowledge.ProfileID != "platform-pgvector" {
 		t.Fatalf("verification failure published config = %#v", published.Config)
+	}
+}
+
+func TestKnowledgeMigratorRollbackBoundaries(t *testing.T) {
+	t.Parallel()
+	base := storage.KnowledgeMigrationStatus{
+		ID: "migration-1", TenantID: "tenant-a", AppCode: "support", Generation: 3,
+		Phase: storage.KnowledgeMigrationReindexed, LastError: "previous error",
+	}
+	store := &memoryKnowledgeMigrationStore{status: base}
+	migrator := &Migrator{store: store}
+
+	if _, err := migrator.RollbackKnowledgeMigration(context.Background(), "tenant-a", "support", base.ID, 0); !errors.Is(err, storage.ErrKnowledgeMigrationConflict) {
+		t.Fatalf("Rollback(expected=0) error = %v", err)
+	}
+	if _, err := migrator.RollbackKnowledgeMigration(context.Background(), "tenant-a", "support", base.ID, 2); !errors.Is(err, storage.ErrKnowledgeMigrationConflict) {
+		t.Fatalf("Rollback(stale generation) error = %v", err)
+	}
+	rolled, err := migrator.RollbackKnowledgeMigration(context.Background(), "tenant-a", "support", base.ID, 3)
+	if err != nil || rolled.Phase != storage.KnowledgeMigrationRolledBack || rolled.Generation != 4 || rolled.LastError != "" {
+		t.Fatalf("Rollback() = %#v, %v", rolled, err)
+	}
+	// Already rolled back is idempotent and does not bump generation again.
+	again, err := migrator.RollbackKnowledgeMigration(context.Background(), "tenant-a", "support", base.ID, rolled.Generation)
+	if err != nil || again.Generation != rolled.Generation || again.Phase != storage.KnowledgeMigrationRolledBack {
+		t.Fatalf("Rollback(idempotent) = %#v, %v", again, err)
+	}
+
+	store.status = base
+	store.status.Phase = storage.KnowledgeMigrationDone
+	if _, err := migrator.RollbackKnowledgeMigration(context.Background(), "tenant-a", "support", base.ID, base.Generation); err == nil || !strings.Contains(err.Error(), "cannot be rolled back") {
+		t.Fatalf("Rollback(done) error = %v", err)
+	}
+	if _, err := migrator.RollbackKnowledgeMigration(context.Background(), "tenant-a", "support", "missing", base.Generation); err == nil {
+		t.Fatal("Rollback(missing) error = nil")
 	}
 }
 

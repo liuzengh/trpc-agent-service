@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func registerTestWeComProvider(t *testing.T, store IdentityStore, _ string, providerID, corpID string) {
+func registerTestWeComProvider(t *testing.T, store LoginProviderRegistrar, _ string, providerID, corpID string) {
 	t.Helper()
 	if err := store.UpsertLoginProvider(context.Background(), ProviderDescriptor{
 		ProviderID: providerID, Type: ProviderWeCom, DisplayName: "企业微信",

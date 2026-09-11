@@ -76,6 +76,42 @@ VALUES ($1,$2,$3,$4,'Refund policy','refund.md','fixture'::bytea,'pgvector','run
 	if err := writer.Add(ctx, &document.Document{ID: "chunk-0", Name: "Refund policy", Content: "refunds are available for seven days"}, embedding); err != nil {
 		t.Fatalf("framework VectorStore Add() under active lease: %v", err)
 	}
+	stored, storedEmbedding, err := writer.Get(ctx, "chunk-0")
+	if err != nil || stored == nil || stored.ID != "chunk-0" || stored.Content != "refunds are available for seven days" || len(storedEmbedding) != len(embedding) {
+		t.Fatalf("framework VectorStore Get() = %#v embedding=%d err=%v", stored, len(storedEmbedding), err)
+	}
+	if err := writer.Update(ctx, &document.Document{ID: "chunk-0", Name: "Refund policy", Content: "refunds are available for fourteen days"}, embedding); err != nil {
+		t.Fatalf("framework VectorStore Update() under active lease: %v", err)
+	}
+	stored, _, err = writer.Get(ctx, "chunk-0")
+	if err != nil || stored == nil || stored.Content != "refunds are available for fourteen days" {
+		t.Fatalf("framework VectorStore Get(after update) = %#v, %v", stored, err)
+	}
+	metadata, err := writer.GetMetadata(ctx, vectorstore.WithGetMetadataIDs([]string{"chunk-0"}), vectorstore.WithGetMetadataLimit(10))
+	if err != nil {
+		t.Fatalf("framework VectorStore GetMetadata() error = %v", err)
+	}
+	if _, ok := metadata["chunk-0"]; !ok {
+		t.Fatalf("framework VectorStore GetMetadata() = %#v, want chunk-0", metadata)
+	}
+	if err := writer.Delete(ctx, "chunk-0"); err != nil {
+		t.Fatalf("framework VectorStore Delete() error = %v", err)
+	}
+	if count, err := writer.Count(ctx, vectorstore.WithCountFilter(map[string]any{knowledgeParentMetadataKey: documentID})); err != nil || count != 0 {
+		t.Fatalf("framework VectorStore Count(after delete) = %d, %v; want 0, nil", count, err)
+	}
+	if err := writer.Add(ctx, &document.Document{ID: "chunk-0", Name: "Refund policy", Content: "refunds are available for fourteen days"}, embedding); err != nil {
+		t.Fatalf("framework VectorStore re-Add() error = %v", err)
+	}
+	if err := writer.DeleteByFilter(ctx, vectorstore.WithDeleteDocumentIDs([]string{"chunk-0"})); err != nil {
+		t.Fatalf("framework VectorStore DeleteByFilter() error = %v", err)
+	}
+	if count, err := writer.Count(ctx, vectorstore.WithCountFilter(map[string]any{knowledgeParentMetadataKey: documentID})); err != nil || count != 0 {
+		t.Fatalf("framework VectorStore Count(after filtered delete) = %d, %v; want 0, nil", count, err)
+	}
+	if err := writer.Add(ctx, &document.Document{ID: "chunk-0", Name: "Refund policy", Content: "refunds are available for fourteen days"}, embedding); err != nil {
+		t.Fatalf("framework VectorStore final Add() error = %v", err)
+	}
 	if count, err := writer.Count(ctx, vectorstore.WithCountFilter(map[string]any{knowledgeParentMetadataKey: documentID})); err != nil || count != 1 {
 		t.Fatalf("fenced writer Count() = %d, %v; want 1, nil", count, err)
 	}
@@ -122,7 +158,7 @@ SELECT current_user, current_setting('app.tenant_id', true), current_setting('ap
 		t.Fatalf("ready framework vector visibility count = %d, %v; want 1, nil", count, err)
 	}
 	result, err := reader.Search(ctx, &vectorstore.SearchQuery{Vector: embedding, Limit: 10, SearchMode: vectorstore.SearchModeVector})
-	if err != nil || len(result.Results) != 1 || result.Results[0].Document.Content != "refunds are available for seven days" {
+	if err != nil || len(result.Results) != 1 || result.Results[0].Document.Content != "refunds are available for fourteen days" {
 		t.Fatalf("framework pgvector retrieval after ready = %#v, %v", result, err)
 	}
 

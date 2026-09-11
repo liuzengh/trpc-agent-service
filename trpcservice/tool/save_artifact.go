@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
@@ -83,9 +82,6 @@ func (t *SaveArtifactTool) Call(ctx context.Context, arguments []byte) (any, err
 	default:
 		if request.Text == "" {
 			return nil, fmt.Errorf("text or data_base64 is required")
-		}
-		if !utf8.ValidString(request.Text) {
-			return nil, fmt.Errorf("text must be valid UTF-8")
 		}
 		data = []byte(request.Text)
 		if mimeType == "" {

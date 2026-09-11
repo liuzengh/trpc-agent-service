@@ -13,13 +13,12 @@ import {
   type LoginProvider,
   type SessionUser,
 } from './api'
-import { AppProvider, useAppContext } from './context'
+import { AppProvider, useAppContext, STORAGE_KEY_ACTIVE_APP, STORAGE_KEY_ACTIVE_TENANT } from './context'
 import { useDismissibleLayer } from './hooks/useDismissibleLayer'
 import { ChatWorkspaceProvider } from './chatState'
 import { ChatPage } from './pages/ChatPage'
 import { ChannelBrandIcon } from './components/ChannelBrand'
 import { FeedbackBanner } from './components/FeedbackBanner'
-import { RefreshButton } from './components/RefreshButton'
 import { FeishuQRPanel } from './components/FeishuQRPanel'
 import {
   AccountIcon,
@@ -68,7 +67,6 @@ const NAV: { section: string; items: NavItem[] }[] = [
   {
     section: '租户管理',
     items: [
-      { id: 'bots', label: '机器人', icon: BotIcon, scope: 'tenant' },
       { id: 'members', label: '成员', icon: AccountIcon, scope: 'members' },
       { id: 'data', label: '知识库', icon: DatabaseIcon, scope: 'tenant' },
       { id: 'executions', label: '执行记录', icon: ActivityIcon, scope: 'tenant' },
@@ -103,7 +101,7 @@ const TAB_META: Record<Tab, { section: string; title: string }> = {
   system: { section: '系统管理', title: '系统状态' },
 }
 
-const APP_SCOPED_TABS = new Set<Tab>(['chat', 'data', 'executions'])
+const APP_SCOPED_TABS = new Set<Tab>(['chat', 'preferences', 'data', 'executions'])
 const APP_SWITCHER_TABS = new Set<Tab>(['chat', 'preferences', 'data', 'executions'])
 
 function initialTab(): Tab {
@@ -184,6 +182,10 @@ export default function App() {
     } catch {
       // 服务端已无会话时也正常清本地状态。
     }
+    try {
+      localStorage.removeItem(STORAGE_KEY_ACTIVE_APP)
+      localStorage.removeItem(STORAGE_KEY_ACTIVE_TENANT)
+    } catch {}
     setUser(null)
   }, [])
 
@@ -195,7 +197,7 @@ export default function App() {
             <span className="logo-mark large">
               <SparklesIcon size={20} />
             </span>
-            <h1>Agent 平台</h1>
+            <h1>tRPC Agent</h1>
             <p>正在验证登录状态…</p>
           </div>
         </div>
@@ -248,6 +250,37 @@ function Shell({
     }
   }, [activeTab, fallbackTab, setTab, tab, tenantsLoading])
 
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    let changed = false
+    if (url.searchParams.get('tab') !== activeTab) {
+      url.searchParams.set('tab', activeTab)
+      changed = true
+    }
+    if (APP_SWITCHER_TABS.has(activeTab)) {
+      const appCode = activeAppKey.includes('/') ? activeAppKey.split('/')[1] : activeAppKey
+      if (appCode && url.searchParams.get('app') !== appCode) {
+        url.searchParams.set('app', appCode)
+        changed = true
+      }
+    } else if (url.searchParams.has('app')) {
+      url.searchParams.delete('app')
+      changed = true
+    }
+    if (tenant && user.active_tenant_id && tenant !== user.active_tenant_id) {
+      if (url.searchParams.get('tenant') !== tenant) {
+        url.searchParams.set('tenant', tenant)
+        changed = true
+      }
+    } else if (url.searchParams.has('tenant')) {
+      url.searchParams.delete('tenant')
+      changed = true
+    }
+    if (changed) {
+      window.history.replaceState(window.history.state, '', url)
+    }
+  }, [activeAppKey, activeTab, tenant, user.active_tenant_id])
+
   const itemLabel = (item: NavItem) => !tenantManager && item.memberLabel ? item.memberLabel : item.label
   return (
     <div className="shell">
@@ -257,7 +290,7 @@ function Shell({
             <SparklesIcon size={16} />
           </span>
           <div>
-            <div className="logo-title">Agent 平台</div>
+            <div className="logo-title">tRPC Agent</div>
           </div>
         </div>
         <nav className="sidebar-nav" aria-label="主导航">
@@ -403,7 +436,12 @@ function Header({
   const { apps, tenant, tenantSummaries, setTenant, activeAppKey, setActiveAppKey } = useAppContext()
   const activeApps = apps.filter((app) => app.Config.status === 'active')
   const tenantApps = activeApps.filter((app) => app.Config.tenant_id === tenant)
-  const selectedApp = activeApps.find((app) => `${app.Config.tenant_id}/${app.Config.app_code}` === activeAppKey && app.Config.tenant_id === tenant) ?? tenantApps[0]
+  const selectedApp =
+    activeApps.find(
+      (app) =>
+        (`${app.Config.tenant_id}/${app.Config.app_code}` === activeAppKey || app.Config.app_code === activeAppKey) &&
+        app.Config.tenant_id === tenant,
+    ) ?? tenantApps[0]
   const tenantNames = new Map(tenantSummaries.map((entry) => [entry.tenant_id, entry.display_name || entry.tenant_id]))
   const appGroups = [...new Set(activeApps.map((app) => app.Config.tenant_id))].map((tenantID) => ({
     id: tenantID,
@@ -474,10 +512,11 @@ function LoginScreen() {
     queryKey: ['console', 'login-providers'],
     queryFn: ({ signal }) => getLoginProviders(signal),
     staleTime: 60_000,
+    retry: 1,
+    retryDelay: 500,
   })
   const providers = providersQuery.data ?? []
   const providersError = providersQuery.error instanceof Error ? providersQuery.error.message : ''
-  const visibleLoadError = loadError || (providersError ? '无法获取登录配置，请确认服务已启动' : '')
 
   const params = new URLSearchParams(window.location.search)
   const loginError = params.get('login_error')
@@ -536,14 +575,13 @@ function LoginScreen() {
   return (
     <div className="login-screen">
       <div className="login-card">
-        <div className="login-brand">
-          <span className="login-brand-mark">
-            <SparklesIcon size={20} />
+        <div className="login-brand login-brand-product">
+          <span className="logo-mark">
+            <SparklesIcon size={16} />
           </span>
           <div className="login-brand-copy">
-            <span className="login-brand-eyebrow">TRPC AGENT SERVICE</span>
-            <h1>登录工作台</h1>
-            <p>使用你的平台账号继续。</p>
+            <h1>tRPC Agent</h1>
+            <p>{localMode === 'register' ? '创建本地账号' : '登录到工作区'}</p>
           </div>
         </div>
 
@@ -557,18 +595,39 @@ function LoginScreen() {
             <ShieldIcon size={15} /> {LOGIN_ERRORS[loginError]}
           </FeedbackBanner>
         )}
-        {visibleLoadError && (
-          <FeedbackBanner tone="error">
-            <ShieldIcon size={15} /> <span>{visibleLoadError}</span>
-            {providersError && (
-              <RefreshButton onClick={() => void providersQuery.refetch()} loading={providersQuery.isFetching} label="重新读取登录方式" />
-            )}
+        {loadError && (
+          <FeedbackBanner tone="error" className="login-inline-feedback">
+            <ShieldIcon size={15} /> <span>{loadError}</span>
           </FeedbackBanner>
         )}
 
         <div className="login-provider-list">
-          {providersQuery.isLoading && <div className="login-provider-loading">正在读取登录方式…</div>}
-          {localEnabled && localMode === 'login' && (
+          {providersQuery.isLoading && (
+            <div className="login-provider-loading" aria-live="polite">
+              <span className="login-loading-dot" aria-hidden="true" />
+              <span>正在读取登录方式…</span>
+            </div>
+          )}
+
+          {providersError && !providersQuery.isLoading && (
+            <div className="login-service-error" role="alert">
+              <span className="login-service-error-icon"><ServerIcon size={17} /></span>
+              <div className="login-service-error-copy">
+                <strong>登录服务暂时不可用</strong>
+                <span>无法读取登录方式。服务恢复后可直接重新连接。</span>
+              </div>
+              <button
+                type="button"
+                className="text-button login-service-retry"
+                disabled={providersQuery.isFetching}
+                onClick={() => void providersQuery.refetch()}
+              >
+                {providersQuery.isFetching ? '正在连接…' : '重新连接'}
+              </button>
+            </div>
+          )}
+
+          {!providersError && localEnabled && localMode === 'login' && (
             <form id="local-login-form" className="login-local-form" onSubmit={(event) => void submitLocal(event)}>
               <div className="login-local-head">
                 <div className="login-provider-copy"><strong>{localProvider?.display_name || '本地账号'}</strong><small>使用用户名和密码登录</small></div>
@@ -580,7 +639,7 @@ function LoginScreen() {
             </form>
           )}
 
-			{localEnabled && localMode === 'register' && (
+			{!providersError && localEnabled && localMode === 'register' && (
 				<form id="local-login-form" className="login-local-form" onSubmit={(event) => void submitLocalRegistration(event)}>
 					<div className="login-local-head">
 						<div className="login-provider-copy"><strong>注册本地账号</strong><small>注册后只创建平台身份，不自动加入任何租户</small></div>
@@ -595,7 +654,7 @@ function LoginScreen() {
 				</form>
 			)}
 
-          {enterpriseProviders.length > 0 && localMode === 'login' && (
+          {!providersError && enterpriseProviders.length > 0 && localMode === 'login' && (
             <div className="login-enterprise-block">
               <div className="login-enterprise-divider"><span>或使用企业账号</span></div>
               <div className="login-enterprise-list">
@@ -630,7 +689,7 @@ function LoginScreen() {
             </div>
           )}
 
-          {mockProviders.length > 0 && localMode === 'login' && (
+          {!providersError && mockProviders.length > 0 && localMode === 'login' && (
             <div className="login-development-access">
               <span>开发测试</span>
               {mockProviders.map((provider) => (

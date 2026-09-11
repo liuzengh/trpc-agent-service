@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/messaging"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
@@ -46,7 +47,11 @@ func (p *KafkaProcessor) Process(ctx context.Context, envelope messaging.Envelop
 	}
 	snapshot, err := p.configurations.GetVersion(ctx, envelope.TenantID, payload.AppCode, payload.ConfigVersion)
 	if err != nil {
-		return messaging.Permanent(fmt.Errorf("load queued tenant configuration version: %w", err))
+		wrapped := fmt.Errorf("load queued tenant configuration version: %w", err)
+		if errors.Is(err, tenant.ErrNotFound) {
+			return messaging.Permanent(wrapped)
+		}
+		return messaging.Retryable(wrapped)
 	}
 	runtimeContext := WithResolvedSessionKey(WithConfigurationSnapshot(ctx, snapshot), envelope.SessionKey)
 	if _, err := p.runtime.Handle(runtimeContext, payload.BindingID, payload.Inbound); err != nil {
@@ -54,6 +59,15 @@ func (p *KafkaProcessor) Process(ctx context.Context, envelope messaging.Envelop
 			// The first execution has already committed the durable result; a
 			// crash before Kafka offset commit must therefore acknowledge replay.
 			return nil
+		}
+		if errors.Is(err, ErrMessageInProgress) {
+			return messaging.Deferred(fmt.Errorf("process queued runtime message: %w", err))
+		}
+		if errors.Is(err, governance.ErrTenantRateLimited) || errors.Is(err, governance.ErrConcurrentRunLimit) {
+			return messaging.Deferred(fmt.Errorf("process queued runtime message: %w", err))
+		}
+		if isPermanentExecution(err) {
+			return messaging.Permanent(fmt.Errorf("process queued runtime message: %w", err))
 		}
 		return messaging.Retryable(fmt.Errorf("process queued runtime message: %w", err))
 	}

@@ -26,10 +26,12 @@ import (
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	agentartifact "trpc.group/trpc-go/trpc-agent-go/artifact"
 	artifactinmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/event"
 	agentknowledge "trpc.group/trpc-go/trpc-agent-go/knowledge"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/document"
 	agentmemory "trpc.group/trpc-go/trpc-agent-go/memory"
 	memoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 	agentsession "trpc.group/trpc-go/trpc-agent-go/session"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -43,6 +45,12 @@ type staticNodeLister []node.Record
 
 func (s staticNodeLister) List(context.Context) ([]node.Record, error) {
 	return append([]node.Record(nil), s...), nil
+}
+
+type staticChannelStatusLister []channels.BindingStatus
+
+func (s staticChannelStatusLister) ListBindingStatuses(context.Context, string, string) ([]channels.BindingStatus, error) {
+	return append([]channels.BindingStatus(nil), s...), nil
 }
 
 func (p *recordingProducer) Publish(_ context.Context, envelope messaging.Envelope) error {
@@ -87,9 +95,55 @@ type summarySessionService struct {
 	force     bool
 }
 
+type failingSessionService struct {
+	agentsession.Service
+	err error
+}
+
+func (s failingSessionService) GetSession(context.Context, agentsession.Key, ...agentsession.Option) (*agentsession.Session, error) {
+	return nil, s.err
+}
+
+type pagedPreviewSessionService struct {
+	agentsession.Service
+	page       *agentsession.Session
+	fullCalls  int
+	pagedCalls int
+}
+
+func (s *pagedPreviewSessionService) GetSession(_ context.Context, key agentsession.Key, opts ...agentsession.Option) (*agentsession.Session, error) {
+	options := agentsession.Options{}
+	for _, option := range opts {
+		option(&options)
+	}
+	if options.EventPage == nil {
+		s.fullCalls++
+		return &agentsession.Session{ID: key.SessionID, AppName: key.AppName, UserID: key.UserID}, nil
+	}
+	s.pagedCalls++
+	if options.EventPage.Offset > 0 {
+		return &agentsession.Session{ID: key.SessionID, AppName: key.AppName, UserID: key.UserID}, nil
+	}
+	return s.page, nil
+}
+
+func (s *pagedPreviewSessionService) GetSessionSummaryText(context.Context, *agentsession.Session, ...agentsession.SummaryOption) (string, bool) {
+	return "", false
+}
+
 type staticAgentSessionProvider struct{ service agentsession.Service }
 
 func (p staticAgentSessionProvider) Session(context.Context, config.TenantConfig) (agentsession.Service, error) {
+	return p.service, nil
+}
+
+type countingAgentSessionProvider struct {
+	service agentsession.Service
+	calls   int
+}
+
+func (p *countingAgentSessionProvider) Session(context.Context, config.TenantConfig) (agentsession.Service, error) {
+	p.calls++
 	return p.service, nil
 }
 
@@ -194,6 +248,16 @@ type recordingKnowledgeIngestQueue struct {
 	cancelled string
 }
 
+type recordingKnowledgeSourcePolicy struct {
+	sourceType string
+	sourceURL  string
+}
+
+func (p *recordingKnowledgeSourcePolicy) ValidateRemoteSource(_ context.Context, sourceType, sourceURL string) error {
+	p.sourceType, p.sourceURL = sourceType, sourceURL
+	return nil
+}
+
 func (q *recordingKnowledgeIngestQueue) EnqueueKnowledgeIngest(_ context.Context, request storage.KnowledgeIngestRequest) (string, error) {
 	q.request = request
 	return "job-1", nil
@@ -252,22 +316,29 @@ func testConsoleHandler(t *testing.T, repositories ...func(*ConsoleDependencies)
 	}); err != nil {
 		t.Fatalf("seed tenant model policy: %v", err)
 	}
+	if err := identities.ReplaceTenantToolGrants(context.Background(), "example", []identity.TenantToolGrant{
+		{ToolName: "query_order"},
+		{ToolName: "refund_order"},
+	}); err != nil {
+		t.Fatalf("seed tenant tool policy: %v", err)
+	}
 	backendProfiles := storage.NewMemoryBackendProfileStore()
 	if err := backendProfiles.ReplaceTenantBackendProfiles(context.Background(), "example", []string{"platform-postgres", "platform-pgvector"}); err != nil {
 		t.Fatalf("seed tenant backend policy: %v", err)
 	}
 	dependencies := ConsoleDependencies{
-		Configurations:  configurations,
-		Identities:      identities,
-		Producer:        &recordingProducer{},
-		Sessions:        &fakeSessionLister{},
-		SessionManager:  stateStore,
-		Claims:          &fakeClaimLister{},
-		State:           stateStore,
-		Attempts:        storage.NewMemoryRetryTracker(),
-		WebIdempotency:  storage.NewMemoryIdempotencyStore(),
-		KnowledgeIngest: &recordingKnowledgeIngestQueue{},
-		BackendProfiles: backendProfiles,
+		Configurations:    configurations,
+		Identities:        identities,
+		InboundIdentities: identities,
+		Producer:          &recordingProducer{},
+		Sessions:          &fakeSessionLister{},
+		SessionManager:    stateStore,
+		Claims:            &fakeClaimLister{},
+		State:             stateStore,
+		Attempts:          storage.NewMemoryRetryTracker(),
+		WebIdempotency:    storage.NewMemoryIdempotencyStore(),
+		KnowledgeIngest:   &recordingKnowledgeIngestQueue{},
+		BackendProfiles:   backendProfiles,
 		System: SystemInfo{
 			Version:               "test",
 			ModelProviders:        []ModelProviderInfo{{ID: "primary", Type: "openai", Models: []ModelInfo{{Name: "support"}, {Name: "support-v2"}}}},
@@ -300,7 +371,7 @@ func testConsoleHandler(t *testing.T, repositories ...func(*ConsoleDependencies)
 		[]string{"env:MODEL_API_KEY", "env:TOOL_TOKEN"},
 		nil,
 		[]string{"env:TOOL_TOKEN"},
-		nil,
+		[]string{"query_order", "refund_order"},
 		[]string{"postgres", "s3", "cos"},
 	)
 	if err != nil {
@@ -415,6 +486,66 @@ func TestConsoleTenantModelPolicyFiltersCatalogAndGuardsApplicationPublication(t
 	}
 }
 
+func TestConsoleTenantToolPolicyFiltersCatalogAndGuardsApplicationPublication(t *testing.T) {
+	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
+		store := dependencies.Identities.(*identity.MemoryIdentityStore)
+		if err := store.ReplaceTenantToolGrants(context.Background(), "example", []identity.TenantToolGrant{{ToolName: "query_order"}}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	tenantAdmin := identity.SessionUser{PlatformUserID: "tenant-admin", Tenants: []identity.TenantRole{{TenantID: "example", Role: identity.RoleAdmin, Status: "active"}}}
+
+	catalog := handler.requestAs(t, tenantAdmin, http.MethodGet, "/api/v1/catalog?tenant=example", "")
+	if catalog.Code != http.StatusOK {
+		t.Fatalf("catalog status = %d: %s", catalog.Code, catalog.Body.String())
+	}
+	var filtered TenantCatalog
+	if err := json.Unmarshal(catalog.Body.Bytes(), &filtered); err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.Tools) != 1 || filtered.Tools[0].Name != "query_order" {
+		t.Fatalf("tenant tool catalog = %#v, want only query_order", filtered.Tools)
+	}
+
+	unauthorized := handler.requestAs(t, tenantAdmin, http.MethodPut, "/api/v1/apps/example/support", `{
+		"status":"disabled",
+		"model":{"provider_id":"primary","name":"support"},
+		"tools":{"allowed":["refund_order"]},
+		"channels":[]
+	}`)
+	if unauthorized.Code != http.StatusBadRequest || !strings.Contains(unauthorized.Body.String(), "not authorized for tenant") {
+		t.Fatalf("unauthorized tool publication = %d: %s", unauthorized.Code, unauthorized.Body.String())
+	}
+
+	systemAdmin := identity.SessionUser{PlatformUserID: "root", IsSystemAdmin: true}
+	updated := handler.requestAs(t, systemAdmin, http.MethodPut, "/api/v1/tenant-tool-policy?tenant=example", `{
+		"tenant_id":"example",
+		"tools":[{"name":"query_order"},{"name":"refund_order"}]
+	}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("system tool policy update = %d: %s", updated.Code, updated.Body.String())
+	}
+	deniedPolicyWrite := handler.requestAs(t, tenantAdmin, http.MethodPut, "/api/v1/tenant-tool-policy?tenant=example", `{"tools":[]}`)
+	if deniedPolicyWrite.Code != http.StatusForbidden {
+		t.Fatalf("tenant admin tool policy write = %d, want 403", deniedPolicyWrite.Code)
+	}
+	invalidGrant := handler.requestAs(t, systemAdmin, http.MethodPut, "/api/v1/tenant-tool-policy?tenant=example", `{"tools":[{"name":"platform.shell"}]}`)
+	if invalidGrant.Code != http.StatusBadRequest {
+		t.Fatalf("unknown tool grant status = %d, want 400: %s", invalidGrant.Code, invalidGrant.Body.String())
+	}
+
+	catalog = handler.requestAs(t, tenantAdmin, http.MethodGet, "/api/v1/catalog?tenant=example", "")
+	if catalog.Code != http.StatusOK {
+		t.Fatalf("catalog after tool policy update = %d: %s", catalog.Code, catalog.Body.String())
+	}
+	if err := json.Unmarshal(catalog.Body.Bytes(), &filtered); err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.Tools) != 2 {
+		t.Fatalf("updated tenant tool catalog = %#v, want two tools", filtered.Tools)
+	}
+}
+
 func TestConsoleListsEmptyToolCatalogAsArray(t *testing.T) {
 	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
 		dependencies.ToolCatalog = nil
@@ -432,12 +563,21 @@ func TestConsoleListsEmptyToolCatalogAsArray(t *testing.T) {
 	}
 }
 
+func TestFilterToolGrantsByCatalogHidesRetiredPlatformCapability(t *testing.T) {
+	t.Parallel()
+	grants := []identity.TenantToolGrant{{ToolName: "query_order"}, {ToolName: "platform.present_card"}}
+	visible := filterToolGrantsByCatalog(grants, []ToolInfo{{Name: "query_order"}})
+	if len(visible) != 1 || visible[0].ToolName != "query_order" {
+		t.Fatalf("visible grants = %#v", visible)
+	}
+}
+
 func TestConsoleExplicitSessionViewsSeparateMemberAndManager(t *testing.T) {
 	sessions := &fakeSessionLister{sessions: []storage.Session{
-		{TenantID: "example", AppCode: "support", SessionKey: "owned", SubjectID: "member-1", OwnerPlatformUserID: "member-1", Status: "active", Conversations: []storage.SessionConversation{{Channel: "web", Scope: "direct"}, {Channel: "wecom", Scope: "direct"}}},
-		{TenantID: "example", AppCode: "support", SessionKey: "other", SubjectID: "member-2", OwnerPlatformUserID: "member-2", Status: "active", Conversations: []storage.SessionConversation{{Channel: "telegram", Scope: "direct"}}},
-		{TenantID: "example", AppCode: "support", SessionKey: "anonymous", SubjectID: "external:telegram:tg:42", Status: "active", Conversations: []storage.SessionConversation{{Channel: "telegram", Scope: "direct", ExternalUserID: "42"}}},
-		{TenantID: "example", AppCode: "support", SessionKey: "group", SubjectID: "group:feishu:fs:g1", Status: "active", Conversations: []storage.SessionConversation{{Channel: "feishu", Scope: "group", ConversationID: "g1"}}},
+		{TenantID: "example", AppCode: "support", SessionKey: "owned", SubjectID: "member-1", OwnerPlatformUserID: "member-1", Status: "active", Revision: 1, Conversations: []storage.SessionConversation{{Channel: "web", Scope: "direct"}, {Channel: "wecom", Scope: "direct"}}},
+		{TenantID: "example", AppCode: "support", SessionKey: "other", SubjectID: "member-2", OwnerPlatformUserID: "member-2", Status: "active", Revision: 1, Conversations: []storage.SessionConversation{{Channel: "telegram", Scope: "direct"}}},
+		{TenantID: "example", AppCode: "support", SessionKey: "anonymous", SubjectID: "external:telegram:tg:42", Status: "active", Revision: 1, Conversations: []storage.SessionConversation{{Channel: "telegram", Scope: "direct", ExternalUserID: "42"}}},
+		{TenantID: "example", AppCode: "support", SessionKey: "group", SubjectID: "group:feishu:fs:g1", Status: "active", Revision: 1, Conversations: []storage.SessionConversation{{Channel: "feishu", Scope: "group", ConversationID: "g1"}}},
 	}}
 	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) { dependencies.Sessions = sessions })
 	member := identity.SessionUser{PlatformUserID: "member-1", Tenants: []identity.TenantRole{{TenantID: "example", Role: identity.RoleMember}}}
@@ -599,7 +739,7 @@ func TestConsoleSessionsReadsSummaryFromFrameworkSessionService(t *testing.T) {
 	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
 		dependencies.Sessions = &fakeSessionLister{sessions: []storage.Session{{
 			TenantID: "example", AppCode: "support", SessionKey: sessionKey,
-			SubjectID: "user-summary", OwnerPlatformUserID: "console-admin", Status: "active", UpdatedAt: time.Now(),
+			SubjectID: "user-summary", OwnerPlatformUserID: "console-admin", Status: "active", Revision: 1, UpdatedAt: time.Now(),
 		}}}
 		dependencies.AgentSessions = staticAgentSessionProvider{service: summaries}
 	})
@@ -610,6 +750,114 @@ func TestConsoleSessionsReadsSummaryFromFrameworkSessionService(t *testing.T) {
 	tenantView := handler.request(t, http.MethodGet, "/api/v1/sessions/tenant?tenant=example", "")
 	if tenantView.Code != http.StatusOK || strings.Contains(tenantView.Body.String(), "框架生成的摘要") || strings.Contains(tenantView.Body.String(), `"summary":`) || strings.Contains(tenantView.Body.String(), `"preview":`) {
 		t.Fatalf("tenant session metadata leaked content = %d: %s", tenantView.Code, tenantView.Body.String())
+	}
+}
+
+func TestConsolePersonalSessionsResolveSessionBackendOncePerApplication(t *testing.T) {
+	framework := sessioninmemory.NewSessionService()
+	t.Cleanup(func() { _ = framework.Close() })
+	entries := make([]storage.Session, 0, 2)
+	for _, suffix := range []string{"one", "two"} {
+		sessionKey := "example/support/web/" + suffix
+		subjectID := "user-" + suffix
+		if _, err := framework.CreateSession(context.Background(), agentsession.Key{
+			AppName: "example/support", UserID: subjectID, SessionID: sessionKey,
+		}, nil); err != nil {
+			t.Fatalf("CreateSession(%s) error = %v", suffix, err)
+		}
+		entries = append(entries, storage.Session{
+			TenantID: "example", AppCode: "support", SessionKey: sessionKey, SubjectID: subjectID,
+			OwnerPlatformUserID: "console-admin", Status: "active", Revision: 1, UpdatedAt: time.Now(),
+		})
+	}
+	provider := &countingAgentSessionProvider{service: framework}
+	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
+		dependencies.Sessions = &fakeSessionLister{sessions: entries}
+		dependencies.AgentSessions = provider
+	})
+	recorder := handler.request(t, http.MethodGet, "/api/v1/sessions/mine?tenant=example", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("sessions response = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if provider.calls != 1 {
+		t.Fatalf("Session backend resolutions = %d, want 1 for one application", provider.calls)
+	}
+}
+
+func TestConsolePersonalSessionsUsePagedEventsForPreview(t *testing.T) {
+	const sessionKey = "example/support/web/conversation-preview"
+	userReply := event.NewResponseEvent("inv-preview", "user", &model.Response{
+		Choices: []model.Choice{{Message: model.NewUserMessage("第一条用户问题")}},
+	})
+	assistantReply := event.NewResponseEvent("inv-preview", "assistant", &model.Response{
+		Done: true, Object: model.ObjectTypeChatCompletion,
+		Choices: []model.Choice{{Message: model.NewAssistantMessage("第一条回答")}},
+	})
+	service := &pagedPreviewSessionService{page: &agentsession.Session{
+		ID: sessionKey, AppName: "example/support", UserID: "console-admin",
+		Events: []event.Event{*userReply, *assistantReply},
+	}}
+	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
+		dependencies.Sessions = &fakeSessionLister{sessions: []storage.Session{{
+			TenantID: "example", AppCode: "support", SessionKey: sessionKey,
+			SubjectID: "console-admin", OwnerPlatformUserID: "console-admin", Status: "active", Revision: 1, UpdatedAt: time.Now(),
+			Conversations: []storage.SessionConversation{{Channel: "web", Scope: "direct"}},
+		}}}
+		dependencies.AgentSessions = staticAgentSessionProvider{service: service}
+	})
+
+	recorder := handler.request(t, http.MethodGet, "/api/v1/sessions/mine?tenant=example&app=support&channel=web", "")
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"preview":"第一条用户问题"`) {
+		t.Fatalf("personal sessions response = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if service.fullCalls != 0 || service.pagedCalls != 1 {
+		t.Fatalf("Session reads full=%d paged=%d, want full=0 paged=1", service.fullCalls, service.pagedCalls)
+	}
+}
+
+func TestConsolePersonalSessionsDoNotSilentlyHideFrameworkReadFailures(t *testing.T) {
+	const sessionKey = "example/support/web/conversation-read-failure"
+	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
+		dependencies.Sessions = &fakeSessionLister{sessions: []storage.Session{{
+			TenantID: "example", AppCode: "support", SessionKey: sessionKey,
+			SubjectID: "console-admin", OwnerPlatformUserID: "console-admin", Status: "active", Revision: 1, UpdatedAt: time.Now(),
+			Conversations: []storage.SessionConversation{{Channel: "web", Scope: "direct"}},
+		}}}
+		dependencies.AgentSessions = staticAgentSessionProvider{service: failingSessionService{err: errors.New("temporary session read failure")}}
+	})
+
+	recorder := handler.request(t, http.MethodGet, "/api/v1/sessions/mine?tenant=example&app=support&channel=web", "")
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("personal session read status = %d, want 500: %s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), `"preview":""`) || strings.Contains(recorder.Body.String(), `"sessions":[`) {
+		t.Fatalf("framework read failure was converted into an empty session preview: %s", recorder.Body.String())
+	}
+}
+
+func TestConsolePersonalSessionsSkipUnstartedRouteShell(t *testing.T) {
+	const sessionKey = "example/support/session/unstarted"
+	provider := &countingAgentSessionProvider{service: failingSessionService{err: errors.New("must not read framework Session")}}
+	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
+		dependencies.Sessions = &fakeSessionLister{sessions: []storage.Session{{
+			TenantID: "example", AppCode: "support", SessionKey: sessionKey,
+			SubjectID: "console-admin", OwnerPlatformUserID: "console-admin", Status: "active", Revision: 0, UpdatedAt: time.Now(),
+			Conversations: []storage.SessionConversation{{Channel: "web", Scope: "direct"}},
+		}}}
+		dependencies.AgentSessions = provider
+	})
+	recorder := handler.request(t, http.MethodGet, "/api/v1/sessions/mine?tenant=example", "")
+	var response struct {
+		Sessions []personalSessionView `json:"sessions"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || len(response.Sessions) != 0 {
+		t.Fatalf("personal session shell response = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if provider.calls != 0 {
+		t.Fatalf("framework Session backend resolved %d times for revision-0 shell", provider.calls)
 	}
 }
 
@@ -766,20 +1014,39 @@ func TestConsoleManagesTenantPlatformData(t *testing.T) {
 	if _, err := handler.state.RecordExecution(context.Background(), storage.ExecutionRecord{
 		TenantID: "example", AppCode: "support", SessionKey: artifactSessionKey, SubjectID: "user-1",
 		MessageID: "artifact-message", Channel: "web", BindingID: "web-console", TraceID: "artifact-trace",
-		Action: "agent_reply", Result: "queued", OutboxType: "channel_reply",
+		Action: "agent_reply", Result: "queued", OutboxType: "channel_reply", OwnerPlatformUserID: "user-1",
 	}); err != nil {
 		t.Fatalf("seed artifact session: %v", err)
 	}
-	if version, err := handler.artifacts.SaveArtifact(context.Background(), info, "report.txt", &agentartifact.Artifact{Data: []byte("report"), MimeType: "text/plain"}); err != nil || version != 0 {
-		t.Fatalf("SaveArtifact() = %d, %v", version, err)
+	seededArtifactSession, err := handler.state.GetSession(context.Background(), "example", artifactSessionKey)
+	if err != nil || seededArtifactSession.OwnerPlatformUserID != "user-1" {
+		t.Fatalf("seeded artifact session = %+v, %v", seededArtifactSession, err)
 	}
-	listing := handler.request(t, http.MethodGet, "/api/v1/artifacts?tenant=example&app=support&session="+url.QueryEscape(artifactSessionKey), "")
-	if listing.Code != http.StatusOK || !strings.Contains(listing.Body.String(), "report.txt") {
+	if version, err := handler.artifacts.SaveArtifact(context.Background(), info, "report.txt", &agentartifact.Artifact{Data: []byte("report-v0"), MimeType: "text/plain"}); err != nil || version != 0 {
+		t.Fatalf("SaveArtifact(v0) = %d, %v", version, err)
+	}
+	if version, err := handler.artifacts.SaveArtifact(context.Background(), info, "report.txt", &agentartifact.Artifact{Data: []byte("report-v1"), MimeType: "text/plain"}); err != nil || version != 1 {
+		t.Fatalf("SaveArtifact(v1) = %d, %v", version, err)
+	}
+	if _, err := handler.artifacts.SaveArtifact(context.Background(), info, "input/request.txt", &agentartifact.Artifact{Data: []byte("private input"), MimeType: "text/plain"}); err != nil {
+		t.Fatalf("SaveArtifact(input) error = %v", err)
+	}
+	artifactOwner := identity.SessionUser{PlatformUserID: "user-1", Tenants: []identity.TenantRole{{TenantID: "example", Role: identity.RoleMember, Status: "active"}}}
+	listing := handler.requestAs(t, artifactOwner, http.MethodGet, "/api/v1/artifacts?tenant=example&app=support&session="+url.QueryEscape(artifactSessionKey), "")
+	if listing.Code != http.StatusOK || !strings.Contains(listing.Body.String(), "report.txt") || strings.Contains(listing.Body.String(), "input/request.txt") {
 		t.Fatalf("artifact listing = %d: %s", listing.Code, listing.Body.String())
 	}
-	artifact := handler.request(t, http.MethodGet, "/api/v1/artifacts?tenant=example&app=support&session="+url.QueryEscape(artifactSessionKey)+"&filename=report.txt", "")
-	if artifact.Code != http.StatusOK || artifact.Body.String() != "report" || artifact.Header().Get("Content-Type") != "text/plain" || artifact.Header().Get("X-Artifact-Version") != "0" {
-		t.Fatalf("artifact response = %d: %s", artifact.Code, artifact.Body.String())
+	artifact := handler.requestAs(t, artifactOwner, http.MethodGet, "/api/v1/artifacts?tenant=example&app=support&session="+url.QueryEscape(artifactSessionKey)+"&filename=report.txt", "")
+	if artifact.Code != http.StatusOK || artifact.Body.String() != "report-v1" || artifact.Header().Get("Content-Type") != "text/plain" || artifact.Header().Get("X-Artifact-Version") != "1" {
+		t.Fatalf("latest artifact response = %d: %s", artifact.Code, artifact.Body.String())
+	}
+	historicalArtifact := handler.requestAs(t, artifactOwner, http.MethodGet, "/api/v1/artifacts?tenant=example&app=support&session="+url.QueryEscape(artifactSessionKey)+"&filename=report.txt&version=0", "")
+	if historicalArtifact.Code != http.StatusOK || historicalArtifact.Body.String() != "report-v0" || historicalArtifact.Header().Get("X-Artifact-Version") != "0" {
+		t.Fatalf("historical artifact response = %d: %s", historicalArtifact.Code, historicalArtifact.Body.String())
+	}
+	ownedArtifact := handler.requestAs(t, artifactOwner, http.MethodGet, "/api/v1/artifacts?tenant=example&app=support&session="+url.QueryEscape(artifactSessionKey)+"&filename=report.txt", "")
+	if ownedArtifact.Code != http.StatusOK || ownedArtifact.Body.String() != "report-v1" {
+		t.Fatalf("owner artifact response = %d: %s", ownedArtifact.Code, ownedArtifact.Body.String())
 	}
 	upload := handler.request(t, http.MethodPut, "/api/v1/artifacts", `{}`)
 	if upload.Code != http.StatusMethodNotAllowed {
@@ -989,6 +1256,12 @@ func TestConsoleExecutionTraceAggregatesState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record execution: %v", err)
 	}
+	if err := stateStore.RecordAudit(context.Background(), storage.AuditEvent{
+		TenantID: "example", TraceID: "msg-1", RequestID: "msg-1", Channel: "telegram", ToolName: "request_refund",
+		Action: "approval.requested", Result: "pending", Decision: "pending", CreatedAt: time.Date(2026, 9, 9, 1, 0, 0, 500000000, time.UTC),
+	}); err != nil {
+		t.Fatalf("record approval audit: %v", err)
+	}
 	attempts := storage.NewMemoryRetryTracker()
 	if _, err := attempts.Increment(context.Background(), "example", "example/support/telegram/conv-1", "msg-1"); err != nil {
 		t.Fatalf("increment attempts: %v", err)
@@ -1021,6 +1294,21 @@ func TestConsoleExecutionTraceAggregatesState(t *testing.T) {
 	if _, exists := trace["audit"]; exists {
 		t.Fatalf("execution response must not synthesize audit as trace: %v", trace["audit"])
 	}
+	auditEvents, ok := trace["audit_events"].([]any)
+	if !ok || len(auditEvents) < 1 {
+		t.Fatalf("unexpected audit events: %v", trace["audit_events"])
+	}
+	foundApproval := false
+	for _, raw := range auditEvents {
+		auditEvent, ok := raw.(map[string]any)
+		if ok && auditEvent["Action"] == "approval.requested" && auditEvent["ToolName"] == "request_refund" {
+			foundApproval = true
+			break
+		}
+	}
+	if !foundApproval {
+		t.Fatalf("approval audit event missing: %v", auditEvents)
+	}
 	if trace["trace_id"] != "msg-1" || trace["status"] != "completed" {
 		t.Fatalf("unified execution identity = trace_id=%v status=%v", trace["trace_id"], trace["status"])
 	}
@@ -1046,6 +1334,46 @@ func TestConsoleExecutionTraceAggregatesState(t *testing.T) {
 		}
 	}
 	_ = event
+}
+
+func TestConsoleOperationsExposeChannelAuditAndPendingDeliveryState(t *testing.T) {
+	stateStore := storage.NewMemoryStateStore()
+	ctx := context.Background()
+	if _, err := stateStore.RecordExecution(ctx, storage.ExecutionRecord{
+		TenantID: "example", AppCode: "support", SessionKey: "example/support/web/operations",
+		MessageID: "message-operations", Channel: "web", BindingID: "web-console", TraceID: "trace-operations",
+		Action: "agent.reply", Result: "queued", OutboxType: "channel_reply.web",
+		OutboxRequestID: "request-operations", OutboxPayload: []byte(`{"channel":"web","text":"done"}`),
+	}); err != nil {
+		t.Fatalf("record execution: %v", err)
+	}
+	if err := stateStore.RecordAudit(ctx, storage.AuditEvent{
+		TenantID: "example", TraceID: "trace-operations", RequestID: "request-operations",
+		Channel: "web", Action: "agent.reply", Result: "completed",
+	}); err != nil {
+		t.Fatalf("record audit: %v", err)
+	}
+	changedAt := time.Date(2026, 9, 11, 6, 0, 0, 0, time.UTC)
+	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
+		dependencies.State = stateStore
+		dependencies.ChannelStatuses = staticChannelStatusLister{{
+			Channel: channels.Feishu, BindingID: "support-feishu", State: channels.ChannelStateConnected,
+			Owner: "channel-node-1", LastChangedAt: changedAt,
+		}}
+	})
+
+	status := handler.request(t, http.MethodGet, "/api/v1/channels/status?tenant=example&app=support", "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"binding_id":"support-feishu"`) || !strings.Contains(status.Body.String(), `"state":"connected"`) {
+		t.Fatalf("channel status = %d %s", status.Code, status.Body.String())
+	}
+	audit := handler.request(t, http.MethodGet, "/api/v1/audit?tenant=example&trace=trace-operations", "")
+	if audit.Code != http.StatusOK || !strings.Contains(audit.Body.String(), "trace-operations") || !strings.Contains(audit.Body.String(), "agent.reply") {
+		t.Fatalf("audit = %d %s", audit.Code, audit.Body.String())
+	}
+	outbox := handler.request(t, http.MethodGet, "/api/v1/outbox?tenant=example", "")
+	if outbox.Code != http.StatusOK || !strings.Contains(outbox.Body.String(), "request-operations") || !strings.Contains(outbox.Body.String(), "channel_reply.web") {
+		t.Fatalf("outbox = %d %s", outbox.Code, outbox.Body.String())
+	}
 }
 
 func TestConsoleListClaimsIncludesTraceSummary(t *testing.T) {
@@ -1521,6 +1849,50 @@ func TestConsoleKnowledgeMultipartUploadQueuesBinaryDocument(t *testing.T) {
 	}
 	if queue.request.TenantID != "example" || queue.request.AppCode != "support" || queue.request.DocumentID != "policy" || queue.request.Filename != "policy.pdf" || string(queue.request.Data) != "binary-pdf-fixture" {
 		t.Fatalf("queued request = %#v", queue.request)
+	}
+}
+
+func TestConsoleQueuesRemoteKnowledgeSources(t *testing.T) {
+	queue := &recordingKnowledgeIngestQueue{}
+	policy := &recordingKnowledgeSourcePolicy{}
+	handler := testConsoleHandler(t, func(dependencies *ConsoleDependencies) {
+		dependencies.KnowledgeIngest = queue
+		dependencies.KnowledgeSourcePolicy = policy
+	})
+	tests := []struct {
+		name       string
+		body       string
+		sourceType string
+		sourceURL  string
+		branch     string
+	}{
+		{
+			name: "url", sourceType: "url", sourceURL: "https://docs.example.test/support/faq",
+			body: `{"tenant_id":"example","app_code":"support","document_id":"remote-faq","source_type":"url","source_url":"https://docs.example.test/support/faq"}`,
+		},
+		{
+			name: "repo", sourceType: "repo", sourceURL: "https://git.example.test/support/docs.git", branch: "main",
+			body: `{"tenant_id":"example","app_code":"support","document_id":"support-docs","source_type":"repo","source_url":"https://git.example.test/support/docs.git","branch":"main"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			queue.request = storage.KnowledgeIngestRequest{}
+			policy.sourceType, policy.sourceURL = "", ""
+			response := handler.request(t, http.MethodPost, "/api/v1/knowledge", test.body)
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("remote knowledge status = %d: %s", response.Code, response.Body.String())
+			}
+			if policy.sourceType != test.sourceType || policy.sourceURL != test.sourceURL {
+				t.Fatalf("source validation = %q %q", policy.sourceType, policy.sourceURL)
+			}
+			if queue.request.Filename != test.sourceURL || string(queue.request.Data) != test.sourceURL || queue.request.ContentType != "application/x-"+test.sourceType {
+				t.Fatalf("queued source = %#v", queue.request)
+			}
+			if queue.request.Metadata["source_type"] != test.sourceType || queue.request.Metadata["source_url"] != test.sourceURL || queue.request.Metadata["branch"] != test.branch {
+				t.Fatalf("queued metadata = %#v", queue.request.Metadata)
+			}
+		})
 	}
 }
 

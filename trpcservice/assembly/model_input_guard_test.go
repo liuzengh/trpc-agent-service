@@ -2,24 +2,14 @@ package assembly
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-type inputGuardProbeModel struct{ calls int }
-
-func (m *inputGuardProbeModel) GenerateContent(context.Context, *model.Request) (<-chan *model.Response, error) {
-	m.calls++
-	ch := make(chan *model.Response)
-	close(ch)
-	return ch, nil
-}
-
-func (*inputGuardProbeModel) Info() model.Info { return model.Info{Name: "probe"} }
-
-func TestInputValidatingModelRejectsHistoricalUnsupportedImageBeforeProvider(t *testing.T) {
+func TestInputValidationCallbackRejectsHistoricalUnsupportedImage(t *testing.T) {
 	catalog, err := config.NewModelCatalog([]config.ModelProviderConfig{{
 		ID: "primary", Models: []config.ModelPricingConfig{{
 			Name: "text-only", Capabilities: &config.ModelCapabilities{Input: &config.ModelInputCapabilities{}},
@@ -28,19 +18,15 @@ func TestInputValidatingModelRejectsHistoricalUnsupportedImageBeforeProvider(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe := &inputGuardProbeModel{}
-	guarded := newInputValidatingModel(probe, catalog, config.ModelConfig{ProviderID: "primary", Name: "text-only"})
+	callbacks := newInputValidationCallbacks(catalog, config.ModelConfig{ProviderID: "primary", Name: "text-only"})
 	message := model.NewUserMessage("new text turn")
 	message.ContentParts = append(message.ContentParts, model.ContentPart{Type: model.ContentTypeImage})
-	if _, err := guarded.GenerateContent(context.Background(), &model.Request{Messages: []model.Message{message}}); err == nil {
-		t.Fatal("GenerateContent() error = nil, want unsupported historical image rejected")
-	}
-	if probe.calls != 0 {
-		t.Fatalf("provider calls = %d, want 0", probe.calls)
+	if _, err := callbacks.RunBeforeModel(context.Background(), &model.BeforeModelArgs{Request: &model.Request{Messages: []model.Message{message}}}); err == nil {
+		t.Fatal("RunBeforeModel() error = nil, want unsupported historical image rejected")
 	}
 }
 
-func TestInputValidatingModelAllowsDeclaredImageInput(t *testing.T) {
+func TestInputValidationCallbackAllowsDeclaredImageInput(t *testing.T) {
 	catalog, err := config.NewModelCatalog([]config.ModelProviderConfig{{
 		ID: "primary", Models: []config.ModelPricingConfig{{
 			Name: "vision", Capabilities: &config.ModelCapabilities{Input: &config.ModelInputCapabilities{Image: true}},
@@ -49,14 +35,36 @@ func TestInputValidatingModelAllowsDeclaredImageInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe := &inputGuardProbeModel{}
-	guarded := newInputValidatingModel(probe, catalog, config.ModelConfig{ProviderID: "primary", Name: "vision"})
+	callbacks := newInputValidationCallbacks(catalog, config.ModelConfig{ProviderID: "primary", Name: "vision"})
 	message := model.NewUserMessage("look")
 	message.ContentParts = append(message.ContentParts, model.ContentPart{Type: model.ContentTypeImage})
-	if _, err := guarded.GenerateContent(context.Background(), &model.Request{Messages: []model.Message{message}}); err != nil {
-		t.Fatalf("GenerateContent() error = %v", err)
+	if _, err := callbacks.RunBeforeModel(context.Background(), &model.BeforeModelArgs{Request: &model.Request{Messages: []model.Message{message}}}); err != nil {
+		t.Fatalf("RunBeforeModel() error = %v", err)
 	}
-	if probe.calls != 1 {
-		t.Fatalf("provider calls = %d, want 1", probe.calls)
+}
+
+func TestRequiredRequestInputsClassifiesAndDeduplicatesMultimodalParts(t *testing.T) {
+	if got := requiredRequestInputs(nil); got != nil {
+		t.Fatalf("requiredRequestInputs(nil) = %v", got)
+	}
+	message := model.NewUserMessage("inspect attachments")
+	message.ContentParts = []model.ContentPart{
+		{Type: model.ContentTypeImage},
+		{Type: model.ContentTypeImage},
+		{Type: model.ContentTypeAudio},
+		{Type: model.ContentTypeFile},
+		{Type: model.ContentTypeVideo},
+		{Type: model.ContentTypeText},
+	}
+	want := []config.ModelInputKind{config.ModelInputImage, config.ModelInputAudio, config.ModelInputFile}
+	if got := requiredRequestInputs(&model.Request{Messages: []model.Message{message}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("requiredRequestInputs() = %v, want %v", got, want)
+	}
+}
+
+func TestInputValidationCallbackRejectsMissingCatalog(t *testing.T) {
+	callbacks := newInputValidationCallbacks(nil, config.ModelConfig{})
+	if _, err := callbacks.RunBeforeModel(context.Background(), &model.BeforeModelArgs{Request: &model.Request{}}); err == nil {
+		t.Fatal("RunBeforeModel() accepted missing catalog")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	agentmemory "trpc.group/trpc-go/trpc-agent-go/memory"
 )
 
@@ -16,6 +17,7 @@ func TestSSEWriterEmitsProtocolFramesAndHeaders(t *testing.T) {
 	writer.begin()
 	writer.delta("partial")
 	writer.done("complete")
+	writer.doneMessageWithID("card-1", "", &channels.InteractiveCard{Title: "订单信息", Body: "已找到订单"})
 	writer.error("failed")
 	writer.keepAlive()
 
@@ -26,6 +28,8 @@ func TestSSEWriterEmitsProtocolFramesAndHeaders(t *testing.T) {
 		"\"content\":\"partial\"",
 		"\"type\":\"done\"",
 		"\"reply\":\"complete\"",
+		"\"title\":\"订单信息\"",
+		"\"body\":\"已找到订单\"",
 		"\"type\":\"error\"",
 		": keepalive\n\n",
 	} {

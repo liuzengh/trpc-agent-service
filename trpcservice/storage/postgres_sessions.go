@@ -32,7 +32,7 @@ WHERE tenant_id = $1 AND session_key = $2`, tenantID, sessionKey)
 		}
 		return Session{}, fmt.Errorf("get session: %w", err)
 	}
-	conversations, err := s.listSessionConversations(ctx, tenantID)
+	conversations, err := s.listSessionConversations(ctx, tenantID, []string{sessionKey})
 	if err != nil {
 		return Session{}, err
 	}
@@ -74,7 +74,11 @@ LIMIT $2`, tenantID, limit)
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate sessions: %w", err)
 	}
-	conversations, err := s.listSessionConversations(ctx, tenantID)
+	keys := make([]string, 0, len(sessions))
+	for _, session := range sessions {
+		keys = append(keys, session.SessionKey)
+	}
+	conversations, err := s.listSessionConversations(ctx, tenantID, keys)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +185,11 @@ LIMIT $5`, tenantID, channel, bindingID, externalUserID, limit)
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate claimable sessions: %w", err)
 	}
-	conversations, err := s.listSessionConversations(ctx, tenantID)
+	keys := make([]string, 0, len(result))
+	for _, session := range result {
+		keys = append(keys, session.SessionKey)
+	}
+	conversations, err := s.listSessionConversations(ctx, tenantID, keys)
 	if err != nil {
 		return nil, err
 	}
@@ -305,13 +313,16 @@ func (s *PostgresStateStore) ResolveSession(ctx context.Context, route SessionRo
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var sessionKey string
+	var sessionKey, subjectID, ownerPlatformUserID string
 	err = tx.QueryRowContext(ctx, `
-SELECT session_key
-FROM channel_conversations
-WHERE tenant_id=$1 AND app_code=$2 AND channel_type=$3 AND binding_id=$4
-  AND external_conversation_id=$5 AND ended_at IS NULL
-FOR UPDATE`, route.TenantID, route.AppCode, route.Channel, route.BindingID, route.ConversationID).Scan(&sessionKey)
+SELECT conversation.session_key, session.subject_id, COALESCE(session.owner_platform_user_id,'')
+FROM channel_conversations AS conversation
+JOIN sessions AS session
+  ON session.tenant_id=conversation.tenant_id AND session.session_key=conversation.session_key
+WHERE conversation.tenant_id=$1 AND conversation.app_code=$2 AND conversation.channel_type=$3 AND conversation.binding_id=$4
+  AND conversation.external_conversation_id=$5 AND conversation.ended_at IS NULL
+FOR SHARE OF conversation, session`, route.TenantID, route.AppCode, route.Channel, route.BindingID, route.ConversationID).
+		Scan(&sessionKey, &subjectID, &ownerPlatformUserID)
 	if err == nil {
 		if route.Scope == "group" {
 			if _, err := tx.ExecContext(ctx, `
@@ -321,14 +332,14 @@ WHERE tenant_id=$1 AND session_key=$2
   AND (subject_id<>$3 OR owner_platform_user_id IS NOT NULL)`, route.TenantID, sessionKey, route.SubjectID); err != nil {
 				return "", fmt.Errorf("repair group session subject: %w", err)
 			}
-		}
-		if _, err := tx.ExecContext(ctx, `
-UPDATE channel_conversations SET updated_at=NOW()
-WHERE tenant_id=$1 AND app_code=$2 AND channel_type=$3 AND binding_id=$4
-  AND external_conversation_id=$5 AND session_key=$6 AND ended_at IS NULL`,
-			route.TenantID, route.AppCode, route.Channel, route.BindingID, route.ConversationID, sessionKey,
-		); err != nil {
-			return "", fmt.Errorf("touch channel conversation: %w", err)
+		} else {
+			if ownerPlatformUserID != "" && route.OwnerPlatformUserID != "" && ownerPlatformUserID != route.OwnerPlatformUserID {
+				return "", ErrSessionOwnedByAnotherUser
+			}
+			if subjectID != route.SubjectID || ownerPlatformUserID != route.OwnerPlatformUserID {
+				_ = tx.Rollback()
+				return s.resolveSessionUnderRouteLock(ctx, route, preferred)
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			return "", fmt.Errorf("commit session route lookup: %w", err)
@@ -338,44 +349,132 @@ WHERE tenant_id=$1 AND app_code=$2 AND channel_type=$3 AND binding_id=$4
 	if !errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("read active channel conversation: %w", err)
 	}
+	_ = tx.Rollback()
+	return s.resolveSessionUnderRouteLock(ctx, route, preferred)
+}
+
+func (s *PostgresStateStore) resolveSessionUnderRouteLock(ctx context.Context, route SessionRoute, preferred string) (string, error) {
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin locked session routing transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, sessionRouteAdvisoryLockKey(route)); err != nil {
+		return "", fmt.Errorf("lock session route: %w", err)
+	}
+
+	var sessionKey, subjectID, ownerPlatformUserID string
+	err = tx.QueryRowContext(ctx, `
+SELECT conversation.session_key, session.subject_id, COALESCE(session.owner_platform_user_id,'')
+FROM channel_conversations AS conversation
+JOIN sessions AS session
+  ON session.tenant_id=conversation.tenant_id AND session.session_key=conversation.session_key
+WHERE conversation.tenant_id=$1 AND conversation.app_code=$2 AND conversation.channel_type=$3 AND conversation.binding_id=$4
+  AND conversation.external_conversation_id=$5 AND conversation.ended_at IS NULL
+FOR UPDATE OF conversation, session`, route.TenantID, route.AppCode, route.Channel, route.BindingID, route.ConversationID).
+		Scan(&sessionKey, &subjectID, &ownerPlatformUserID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("read locked active channel conversation: %w", err)
+	}
+	if err == nil {
+		if route.Scope == "group" {
+			if _, err := tx.ExecContext(ctx, `
+UPDATE sessions
+SET subject_id=$3, owner_platform_user_id=NULL
+WHERE tenant_id=$1 AND session_key=$2
+  AND (subject_id<>$3 OR owner_platform_user_id IS NOT NULL)`, route.TenantID, sessionKey, route.SubjectID); err != nil {
+				return "", fmt.Errorf("repair locked group session subject: %w", err)
+			}
+			if err := tx.Commit(); err != nil {
+				return "", fmt.Errorf("commit locked group session route: %w", err)
+			}
+			return sessionKey, nil
+		}
+		if ownerPlatformUserID != "" && route.OwnerPlatformUserID != "" && ownerPlatformUserID != route.OwnerPlatformUserID {
+			return "", ErrSessionOwnedByAnotherUser
+		}
+		if subjectID == route.SubjectID && ownerPlatformUserID == route.OwnerPlatformUserID {
+			if err := tx.Commit(); err != nil {
+				return "", fmt.Errorf("commit locked session route lookup: %w", err)
+			}
+			return sessionKey, nil
+		}
+		if route.OwnerPlatformUserID != "" {
+			if err := claimChannelIdentityHistoryTx(ctx, tx, route); err != nil {
+				return "", err
+			}
+			if subjectID == route.SubjectID && ownerPlatformUserID == "" {
+				if err := tx.Commit(); err != nil {
+					return "", fmt.Errorf("commit claimed session route: %w", err)
+				}
+				return sessionKey, nil
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE channel_conversations
+SET ended_at=NOW(), updated_at=NOW()
+WHERE tenant_id=$1 AND app_code=$2 AND channel_type=$3 AND binding_id=$4
+  AND external_conversation_id=$5 AND session_key=$6 AND ended_at IS NULL`,
+			route.TenantID, route.AppCode, route.Channel, route.BindingID, route.ConversationID, sessionKey); err != nil {
+			return "", fmt.Errorf("close stale subject channel route: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE sessions AS session
+SET status='archived', archived_at=NOW(), updated_at=NOW()
+WHERE session.tenant_id=$1 AND session.session_key=$2 AND session.status='active'
+  AND NOT EXISTS (
+    SELECT 1 FROM channel_conversations AS conversation
+    WHERE conversation.tenant_id=session.tenant_id AND conversation.session_key=session.session_key
+      AND conversation.ended_at IS NULL
+  )`, route.TenantID, sessionKey); err != nil {
+			return "", fmt.Errorf("archive stale subject session: %w", err)
+		}
+	} else if route.Scope == "direct" && route.OwnerPlatformUserID != "" {
+		if err := claimChannelIdentityHistoryTx(ctx, tx, route); err != nil {
+			return "", err
+		}
+	}
 
 	sessionKey = preferred
-
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO sessions (tenant_id, app_code, session_key, last_message_id, subject_id, owner_platform_user_id, status)
 VALUES ($1,$2,$3,'',$4,NULLIF($5,''),'active')
 ON CONFLICT (tenant_id, session_key) DO UPDATE
 SET subject_id = CASE WHEN sessions.subject_id = '' THEN EXCLUDED.subject_id ELSE sessions.subject_id END,
     owner_platform_user_id = COALESCE(sessions.owner_platform_user_id, EXCLUDED.owner_platform_user_id)`,
-		route.TenantID, route.AppCode, sessionKey, route.SubjectID, route.OwnerPlatformUserID,
-	); err != nil {
+		route.TenantID, route.AppCode, sessionKey, route.SubjectID, route.OwnerPlatformUserID); err != nil {
 		return "", fmt.Errorf("create session index: %w", err)
 	}
-
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO channel_conversations (
     tenant_id, app_code, channel_type, binding_id, external_conversation_id, external_user_id,
     session_key, scope, started_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
-ON CONFLICT DO NOTHING`, route.TenantID, route.AppCode, route.Channel, route.BindingID,
-		route.ConversationID, route.ExternalUserID, sessionKey, route.Scope,
-	); err != nil {
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())`, route.TenantID, route.AppCode, route.Channel, route.BindingID,
+		route.ConversationID, route.ExternalUserID, sessionKey, route.Scope); err != nil {
 		return "", fmt.Errorf("create channel conversation: %w", err)
 	}
-
-	if err := tx.QueryRowContext(ctx, `
-SELECT session_key
-FROM channel_conversations
-WHERE tenant_id=$1 AND app_code=$2 AND channel_type=$3 AND binding_id=$4
-  AND external_conversation_id=$5 AND ended_at IS NULL`, route.TenantID, route.AppCode, route.Channel,
-		route.BindingID, route.ConversationID,
-	).Scan(&sessionKey); err != nil {
-		return "", fmt.Errorf("read resolved channel conversation: %w", err)
-	}
 	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("commit session routing: %w", err)
+		return "", fmt.Errorf("commit locked session routing: %w", err)
 	}
 	return sessionKey, nil
+}
+
+func claimChannelIdentityHistoryTx(ctx context.Context, tx *sql.Tx, route SessionRoute) error {
+	if route.Scope != "direct" || strings.TrimSpace(route.OwnerPlatformUserID) == "" || strings.TrimSpace(route.ExternalUserID) == "" {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE sessions AS session
+SET owner_platform_user_id=$6
+FROM channel_conversations AS conversation
+WHERE conversation.tenant_id=session.tenant_id AND conversation.session_key=session.session_key
+  AND conversation.tenant_id=$1 AND conversation.app_code=$2 AND conversation.channel_type=$3
+  AND conversation.binding_id=$4 AND conversation.external_user_id=$5 AND conversation.scope='direct'
+  AND session.owner_platform_user_id IS NULL`, route.TenantID, route.AppCode, route.Channel, route.BindingID,
+		route.ExternalUserID, route.OwnerPlatformUserID); err != nil {
+		return fmt.Errorf("claim channel identity session history: %w", err)
+	}
+	return nil
 }
 
 // SwitchSession atomically closes the current channel route, creates a fresh
@@ -536,18 +635,41 @@ WHERE tenant_id=$1 AND session_key=$2 AND ended_at IS NULL`, tenantID, sessionKe
 	return nil
 }
 
-func (s *PostgresStateStore) listSessionConversations(ctx context.Context, tenantID string) (map[string][]SessionConversation, error) {
+func (s *PostgresStateStore) listSessionConversations(ctx context.Context, tenantID string, sessionKeys []string) (map[string][]SessionConversation, error) {
+	keys := make([]string, 0, len(sessionKeys))
+	seen := make(map[string]struct{}, len(sessionKeys))
+	for _, sessionKey := range sessionKeys {
+		sessionKey = strings.TrimSpace(sessionKey)
+		if sessionKey == "" {
+			continue
+		}
+		if _, exists := seen[sessionKey]; exists {
+			continue
+		}
+		seen[sessionKey] = struct{}{}
+		keys = append(keys, sessionKey)
+	}
+	result := make(map[string][]SessionConversation, len(keys))
+	if len(keys) == 0 {
+		return result, nil
+	}
+	args := make([]any, 0, len(keys)+1)
+	args = append(args, tenantID)
+	placeholders := make([]string, len(keys))
+	for index, sessionKey := range keys {
+		placeholders[index] = fmt.Sprintf("$%d", index+2)
+		args = append(args, sessionKey)
+	}
 	rows, err := s.database.QueryContext(ctx, `
 SELECT tenant_id, app_code, session_key, channel_type, binding_id,
        external_conversation_id, external_user_id, scope, started_at, updated_at, ended_at
 FROM channel_conversations
-WHERE tenant_id=$1
-ORDER BY updated_at DESC, channel_type, external_conversation_id`, tenantID)
+WHERE tenant_id=$1 AND session_key IN (`+strings.Join(placeholders, ",")+`)
+ORDER BY updated_at DESC, channel_type, external_conversation_id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list session conversations: %w", err)
 	}
 	defer rows.Close()
-	result := make(map[string][]SessionConversation)
 	for rows.Next() {
 		var conversation SessionConversation
 		if err := rows.Scan(

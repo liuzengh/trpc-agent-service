@@ -94,7 +94,8 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	src = &snapshotSource{name: src.Name(), sourceType: src.Type(), metadata: src.GetMetadata(), documents: documents}
 	totalChunks, err := w.pipeline.LoadKnowledgeSource(ctx, storage.KnowledgeLoadRequest{
 		TenantID: job.TenantID, AppCode: job.AppCode, DocumentID: job.DocumentID, JobID: job.ID, Owner: w.owner,
-		Backend: job.Backend,
+		ProfileID: job.ProfileID,
+		Backend:   job.Backend,
 	}, src)
 	if err != nil {
 		return true, w.fail(ctx, job, fmt.Errorf("load native framework knowledge source: %w", err))

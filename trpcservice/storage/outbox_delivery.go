@@ -23,6 +23,12 @@ type OutboxDeliveryStore interface {
 	FindOutboxByRequestID(context.Context, string, string) (OutboxEvent, error)
 }
 
+// OutboxRequestBatchFinder loads the small set of replies referenced by one
+// transcript page without forcing callers into an N+1 query loop.
+type OutboxRequestBatchFinder interface {
+	FindOutboxByRequestIDs(context.Context, string, []string) ([]OutboxEvent, error)
+}
+
 func (s *MemoryStateStore) ClaimPendingOutbox(ctx context.Context, tenantID, owner string, lease time.Duration, limit int) ([]OutboxEvent, error) {
 	return s.claimPendingOutbox(ctx, tenantID, owner, lease, limit, "")
 }
@@ -135,6 +141,36 @@ func (s *MemoryStateStore) FindOutboxByRequestID(ctx context.Context, tenantID, 
 	return OutboxEvent{}, ErrOutboxEventNotFound
 }
 
+func (s *MemoryStateStore) FindOutboxByRequestIDs(ctx context.Context, tenantID string, requestIDs []string) ([]OutboxEvent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(tenantID) == "" {
+		return nil, fmt.Errorf("outbox tenant ID is required")
+	}
+	wanted := make(map[string]struct{}, len(requestIDs))
+	for _, requestID := range requestIDs {
+		if requestID = strings.TrimSpace(requestID); requestID != "" {
+			wanted[requestID] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return []OutboxEvent{}, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]OutboxEvent, 0, len(wanted))
+	for _, event := range s.outbox {
+		if event.TenantID == tenantID {
+			if _, ok := wanted[event.RequestID]; ok {
+				result = append(result, cloneOutboxEvent(event))
+			}
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
+	return result, nil
+}
+
 func (s *PostgresStateStore) ClaimPendingOutbox(ctx context.Context, tenantID, owner string, lease time.Duration, limit int) ([]OutboxEvent, error) {
 	return s.claimPendingOutbox(ctx, tenantID, owner, lease, limit, "")
 }
@@ -235,6 +271,56 @@ FROM outbox_events WHERE tenant_id = $1 AND request_id = $2`, tenantID, requestI
 		return OutboxEvent{}, err
 	}
 	return event, nil
+}
+
+func (s *PostgresStateStore) FindOutboxByRequestIDs(ctx context.Context, tenantID string, requestIDs []string) ([]OutboxEvent, error) {
+	if strings.TrimSpace(tenantID) == "" {
+		return nil, fmt.Errorf("outbox tenant ID is required")
+	}
+	ids := make([]string, 0, len(requestIDs))
+	seen := make(map[string]struct{}, len(requestIDs))
+	for _, requestID := range requestIDs {
+		requestID = strings.TrimSpace(requestID)
+		if requestID == "" {
+			continue
+		}
+		if _, ok := seen[requestID]; ok {
+			continue
+		}
+		seen[requestID] = struct{}{}
+		ids = append(ids, requestID)
+	}
+	if len(ids) == 0 {
+		return []OutboxEvent{}, nil
+	}
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, tenantID)
+	placeholders := make([]string, len(ids))
+	for index, requestID := range ids {
+		placeholders[index] = fmt.Sprintf("$%d", index+2)
+		args = append(args, requestID)
+	}
+	rows, err := s.database.QueryContext(ctx, `SELECT id, request_id, tenant_id, aggregate_key, event_type,
+       payload::text, created_at, delivered_at, delivery_owner, lease_expires_at,
+       delivery_receipt, delivery_attempts, last_delivery_error
+FROM outbox_events WHERE tenant_id = $1 AND request_id IN (`+strings.Join(placeholders, ",")+`)
+ORDER BY created_at, id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("find outbox events by request IDs: %w", err)
+	}
+	defer rows.Close()
+	result := make([]OutboxEvent, 0, len(ids))
+	for rows.Next() {
+		event, scanErr := scanOutboxEvent(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		result = append(result, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate outbox events by request IDs: %w", err)
+	}
+	return result, nil
 }
 
 type outboxScanner interface{ Scan(...any) error }

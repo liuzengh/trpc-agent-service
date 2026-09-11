@@ -189,66 +189,10 @@ func buildFeishuCard(card *channels.InteractiveCard, fallbackText string, scope 
 	if body == "" {
 		return "", fmt.Errorf("%w: card body is required", ErrSendRejected)
 	}
-	if requiresFeishuCardV2(card) {
-		return buildFeishuCardV2(card, body, scope)
-	}
-	elements := []any{map[string]any{"tag": "markdown", "content": body}}
-	if len(card.Actions) > 0 {
-		actions := make([]any, 0, len(card.Actions))
-		for _, action := range card.Actions {
-			label := strings.TrimSpace(action.Label)
-			if label == "" {
-				continue
-			}
-			button := map[string]any{"tag": "button", "text": map[string]any{"tag": "plain_text", "content": label}}
-			switch action.Style {
-			case "primary", "danger":
-				button["type"] = action.Style
-			default:
-				button["type"] = "default"
-			}
-			if action.URL != "" {
-				button["url"] = action.URL
-			} else if action.ActionID != "" {
-				button["value"] = map[string]string{"action_id": action.ActionID, "conversation_scope": string(scope)}
-			} else {
-				continue
-			}
-			actions = append(actions, button)
-		}
-		if len(actions) > 0 {
-			elements = append(elements, map[string]any{"tag": "hr"})
-			elements = append(elements, map[string]any{"tag": "action", "actions": actions})
-		}
-	}
-	payload := map[string]any{"elements": elements}
-	if title := strings.TrimSpace(card.Title); title != "" {
-		payload["header"] = map[string]any{
-			"template": "grey",
-			"title":    map[string]any{"tag": "plain_text", "content": title},
-		}
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("marshal feishu card: %w", err)
-	}
-	return string(encoded), nil
-}
-
-func requiresFeishuCardV2(card *channels.InteractiveCard) bool {
-	if card == nil {
-		return false
-	}
-	switch strings.TrimSpace(card.State) {
-	case "pending", "approved", "rejected":
-		return true
-	}
-	for _, action := range card.Actions {
-		if strings.TrimSpace(action.ActionID) != "" {
-			return true
-		}
-	}
-	return false
+	// Feishu rejects patching a card whose schema differs from the original
+	// message, so every card this Sender emits — create or update, plain or
+	// interactive — must stay on card JSON 2.0.
+	return buildFeishuCardV2(card, body, scope)
 }
 
 func buildFeishuCardV2(card *channels.InteractiveCard, body string, scope channels.ConversationScope) (string, error) {
@@ -257,7 +201,8 @@ func buildFeishuCardV2(card *channels.InteractiveCard, body string, scope channe
 	for _, action := range card.Actions {
 		label := strings.TrimSpace(action.Label)
 		actionID := strings.TrimSpace(action.ActionID)
-		if label == "" || actionID == "" {
+		url := strings.TrimSpace(action.URL)
+		if label == "" || (actionID == "" && url == "") {
 			continue
 		}
 		buttonType := "default"
@@ -267,18 +212,22 @@ func buildFeishuCardV2(card *channels.InteractiveCard, body string, scope channe
 		case "danger":
 			buttonType = "danger"
 		}
-		button := map[string]any{
-			"tag":  "button",
-			"type": buttonType,
-			"size": "medium",
-			"text": map[string]any{"tag": "plain_text", "content": label},
-			"behaviors": []any{map[string]any{
+		behavior := map[string]any{"type": "open_url", "default_url": url}
+		if actionID != "" {
+			behavior = map[string]any{
 				"type": "callback",
 				"value": map[string]string{
 					"action_id":          actionID,
 					"conversation_scope": string(scope),
 				},
-			}},
+			}
+		}
+		button := map[string]any{
+			"tag":       "button",
+			"type":      buttonType,
+			"size":      "medium",
+			"text":      map[string]any{"tag": "plain_text", "content": label},
+			"behaviors": []any{behavior},
 		}
 		columns = append(columns, map[string]any{
 			"tag": "column", "width": "auto", "elements": []any{button},
@@ -311,14 +260,15 @@ func buildFeishuCardV2(card *channels.InteractiveCard, body string, scope channe
 
 func buildFeishuProgressCard() (string, error) {
 	payload := map[string]any{
-		"elements": []any{
+		"schema": "2.0",
+		"body": map[string]any{"elements": []any{
 			map[string]any{
 				"tag": "note",
 				"elements": []any{
 					map[string]any{"tag": "plain_text", "content": "正在回复…"},
 				},
 			},
-		},
+		}},
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

@@ -4,10 +4,13 @@ metadata:
   name: trpc-agent-channel
   namespace: trpc-agent
 spec:
-  replicas: 1
+  replicas: 2
   progressDeadlineSeconds: 300
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: trpc-agent-service
@@ -20,6 +23,16 @@ spec:
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: trpc-agent-service
+                    app.kubernetes.io/component: channel
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

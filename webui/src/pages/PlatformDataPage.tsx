@@ -32,7 +32,12 @@ const KNOWLEDGE_FILE_EXTENSIONS = ['.txt', '.text', '.md', '.markdown', '.json',
 export function PlatformDataPage() {
   const { apps, appsLoading, tenant, appsError, activeAppKey } = useAppContext()
   const selectedApp = useMemo(
-    () => apps.find((entry) => `${entry.Config.tenant_id}/${entry.Config.app_code}` === activeAppKey && entry.Config.tenant_id === tenant),
+    () =>
+      apps.find(
+        (entry) =>
+          (`${entry.Config.tenant_id}/${entry.Config.app_code}` === activeAppKey || entry.Config.app_code === activeAppKey) &&
+          entry.Config.tenant_id === tenant,
+      ),
     [activeAppKey, apps, tenant],
   )
   const appCode = selectedApp?.Config.app_code ?? ''
@@ -211,7 +216,7 @@ export function PlatformDataPage() {
   return (
     <div className="page-stack platform-data-page">
       {appsError && <FeedbackBanner tone="error">{appsError}</FeedbackBanner>}
-      {visibleError && <FeedbackBanner tone="error">{visibleError}</FeedbackBanner>}
+      {visibleError && !showCreateForm && <FeedbackBanner tone="error">{visibleError}</FeedbackBanner>}
       {notice && <FeedbackBanner tone="success">{notice}</FeedbackBanner>}
 
       <section className="data-panel-card">
@@ -237,7 +242,7 @@ export function PlatformDataPage() {
               description="点击右上角「上传文档」添加内容，让机器人基于您的知识进行更准确的回答。"
             />
           ) : (
-            <div className="data-table-scroll"><table className="knowledge-docs-table">
+            <div className="table-scroll data-table-scroll"><table className="ui-table knowledge-docs-table">
               <thead>
                 <tr>
                   <th>文档名称</th>
@@ -290,7 +295,7 @@ export function PlatformDataPage() {
                       <td className="knowledge-actions-col">
                         <button
                           type="button"
-                          className="secondary knowledge-delete-button"
+                          className="table-action danger knowledge-delete-button"
                           onClick={() => setDocumentToDelete(doc.document_id)}
                         >
                           删除
@@ -316,6 +321,8 @@ export function PlatformDataPage() {
                   descriptionClassName="sr-only"
                   closeLabel="关闭知识文档弹窗"
                 />
+
+                {visibleError && <FeedbackBanner tone="error">{visibleError}</FeedbackBanner>}
 
                 <SegmentedControl
                   ariaLabel="知识来源类型"

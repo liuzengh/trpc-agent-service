@@ -135,6 +135,15 @@ func (s *Sender) SetCommands(ctx context.Context, commands []BotCommand) error {
 	return s.callBool(ctx, "setMyCommands", map[string]any{"commands": commands})
 }
 
+// SetMenuButtonCommands keeps Telegram's native menu button focused on the
+// command list so users can discover /new and /help without already knowing
+// those commands exist.
+func (s *Sender) SetMenuButtonCommands(ctx context.Context) error {
+	return s.callBool(ctx, "setChatMenuButton", map[string]any{
+		"menu_button": map[string]string{"type": "commands"},
+	})
+}
+
 type BotCommand struct {
 	Command     string `json:"command"`
 	Description string `json:"description"`
@@ -142,8 +151,8 @@ type BotCommand struct {
 
 func DefaultCommands() []BotCommand {
 	return []BotCommand{
-		{Command: "start", Description: "开始使用或关联账号"},
-		{Command: "link", Description: "关联平台账号"},
+		{Command: "start", Description: "开始使用"},
+		{Command: "new", Description: "开启新会话"},
 		{Command: "help", Description: "查看帮助"},
 	}
 }

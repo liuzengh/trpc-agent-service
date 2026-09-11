@@ -17,19 +17,24 @@ func TestConsoleBackendProfileLifecycle(t *testing.T) {
 		t.Fatalf("initial backend list = %d: %s", list.Code, list.Body.String())
 	}
 
-	create := handler.request(t, http.MethodPost, "/api/v1/backend-profiles", "{\"profile_id\":\"tenant-s3-a\",\"display_name\":\"Tenant S3 A\",\"driver\":\"s3\",\"connection_ref\":\"env:TENANT_S3_A\"}")
+	create := handler.request(t, http.MethodPost, "/api/v1/backend-profiles", "{\"profile_id\":\"tenant-s3-a\",\"display_name\":\"Tenant S3 A\",\"driver\":\"s3\",\"domains\":[\"artifact\"],\"connection_ref\":\"env:TENANT_S3_A\"}")
 	if create.Code != http.StatusCreated {
 		t.Fatalf("create backend = %d: %s", create.Code, create.Body.String())
 	}
 
-	mismatch := handler.request(t, http.MethodPut, "/api/v1/backend-profiles/tenant-s3-a", "{\"profile_id\":\"different\",\"display_name\":\"Tenant S3 A\",\"driver\":\"s3\",\"connection_ref\":\"env:TENANT_S3_A\",\"status\":\"active\"}")
-	if mismatch.Code != http.StatusBadRequest {
-		t.Fatalf("mismatched backend update = %d, want 400", mismatch.Code)
+	immutable := handler.request(t, http.MethodPut, "/api/v1/backend-profiles/tenant-s3-a", "{\"display_name\":\"Tenant S3 A\",\"driver\":\"s3\",\"status\":\"active\"}")
+	if immutable.Code != http.StatusBadRequest {
+		t.Fatalf("immutable backend update = %d, want 400", immutable.Code)
 	}
 
-	update := handler.request(t, http.MethodPut, "/api/v1/backend-profiles/tenant-s3-a", "{\"display_name\":\"Tenant S3 Archive\",\"driver\":\"s3\",\"connection_ref\":\"env:TENANT_S3_A\",\"status\":\"active\"}")
+	update := handler.request(t, http.MethodPut, "/api/v1/backend-profiles/tenant-s3-a", "{\"display_name\":\"Tenant S3 Archive\",\"status\":\"active\"}")
 	if update.Code != http.StatusOK || !strings.Contains(update.Body.String(), "Tenant S3 Archive") {
 		t.Fatalf("update backend = %d: %s", update.Code, update.Body.String())
+	}
+
+	missingStatus := handler.request(t, http.MethodPut, "/api/v1/backend-profiles/tenant-s3-a", "{\"display_name\":\"Tenant S3 Archive\"}")
+	if missingStatus.Code != http.StatusBadRequest {
+		t.Fatalf("backend update without status = %d, want 400", missingStatus.Code)
 	}
 
 	deleteResponse := handler.request(t, http.MethodDelete, "/api/v1/backend-profiles/tenant-s3-a", "")

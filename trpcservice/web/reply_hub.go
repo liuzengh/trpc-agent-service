@@ -3,8 +3,11 @@ package web
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/safego"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
@@ -23,6 +26,7 @@ type WebStreamEvent struct {
 	Type    string
 	Content string
 	Reply   string
+	Card    *channels.InteractiveCard
 }
 
 // WebReplySubscriber is the narrow replayable stream seam used by the HTTP
@@ -52,10 +56,10 @@ func NewRedisReplyHub(client redis.UniversalClient) (*RedisReplyHub, error) {
 }
 
 func (h *RedisReplyHub) Send(ctx context.Context, target channels.ReplyTarget, message channels.OutboundMessage) (channels.SendReceipt, error) {
-	if target.Channel != channels.Web || strings.TrimSpace(target.TenantID) == "" || strings.TrimSpace(target.WebOwnerID) == "" || strings.TrimSpace(message.IdempotencyKey) == "" || strings.TrimSpace(message.Text) == "" {
+	if target.Channel != channels.Web || strings.TrimSpace(target.TenantID) == "" || strings.TrimSpace(target.WebOwnerID) == "" || strings.TrimSpace(message.IdempotencyKey) == "" || (strings.TrimSpace(message.Text) == "" && message.Card == nil) {
 		return channels.SendReceipt{}, fmt.Errorf("invalid web reply")
 	}
-	eventID, err := h.publishEvent(ctx, target.TenantID, target.WebOwnerID, message.IdempotencyKey, WebStreamEvent{Type: "done", Reply: message.Text})
+	eventID, err := h.publishEvent(ctx, target.TenantID, target.WebOwnerID, message.IdempotencyKey, WebStreamEvent{Type: "done", Reply: message.Text, Card: message.Card})
 	if err != nil {
 		return channels.SendReceipt{}, fmt.Errorf("publish web reply: %w", err)
 	}
@@ -85,7 +89,7 @@ func (h *RedisReplyHub) Subscribe(ctx context.Context, tenantID, ownerID, reques
 
 	streamContext, cancel := context.WithCancel(ctx)
 	output := make(chan WebStreamEvent, 32)
-	go func() {
+	safego.Go("web reply subscriber", func() {
 		defer close(output)
 		defer cancel()
 		lastID := afterID
@@ -116,7 +120,7 @@ func (h *RedisReplyHub) Subscribe(ctx context.Context, tenantID, ownerID, reques
 				}
 			}
 		}
-	}()
+	})
 	return output, cancel, nil
 }
 
@@ -127,6 +131,13 @@ func (h *RedisReplyHub) publishEvent(ctx context.Context, tenantID, ownerID, req
 	}
 	if event.Reply != "" {
 		values["reply"] = event.Reply
+	}
+	if event.Card != nil {
+		encoded, err := json.Marshal(event.Card)
+		if err != nil {
+			return "", fmt.Errorf("encode web reply card: %w", err)
+		}
+		values["card"] = string(encoded)
 	}
 	streamKey := webReplyStreamKey(tenantID, ownerID, requestID)
 	eventID, err := h.client.XAdd(ctx, &redis.XAddArgs{Stream: streamKey, Values: values}).Result()
@@ -152,7 +163,14 @@ func decodeWebStreamEvent(message redis.XMessage) (WebStreamEvent, error) {
 	if reply, ok := message.Values["reply"].(string); ok {
 		event.Reply = reply
 	}
-	if (event.Type == "delta" && event.Content == "") || (event.Type == "done" && event.Reply == "") {
+	if encoded, ok := message.Values["card"].(string); ok && encoded != "" {
+		var card channels.InteractiveCard
+		if err := json.Unmarshal([]byte(encoded), &card); err != nil {
+			return WebStreamEvent{}, fmt.Errorf("decode web reply card: %w", err)
+		}
+		event.Card = &card
+	}
+	if (event.Type == "delta" && event.Content == "") || (event.Type == "done" && event.Reply == "" && event.Card == nil) {
 		return WebStreamEvent{}, fmt.Errorf("incomplete web stream event")
 	}
 	return event, nil

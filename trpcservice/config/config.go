@@ -51,12 +51,16 @@ type Config struct {
 	ModelProviders []ModelProviderConfig `json:"model_providers,omitempty"`
 }
 
-// ServiceConfig controls inbound HTTP request limits.
+// ServiceConfig controls inbound HTTP request limits and service timeouts.
 type ServiceConfig struct {
 	ListenAddress          string          `json:"listen_address"`
 	RequestTimeout         Duration        `json:"request_timeout"`
+	HTTPReadHeaderTimeout  Duration        `json:"http_read_header_timeout,omitempty"`
+	HTTPReadTimeout        Duration        `json:"http_read_timeout,omitempty"`
+	HTTPIdleTimeout        Duration        `json:"http_idle_timeout,omitempty"`
 	MaxInboundBytes        int64           `json:"max_inbound_bytes"`
 	SessionIdleArchiveAge  Duration        `json:"session_idle_archive_age,omitempty"`
+	OutboxRetentionAge     Duration        `json:"outbox_retention_age,omitempty"`
 	DoclingEndpoint        string          `json:"docling_endpoint,omitempty"`
 	DocumentExtractTimeout Duration        `json:"document_extract_timeout,omitempty"`
 	Knowledge              KnowledgeConfig `json:"knowledge,omitempty"`
@@ -157,11 +161,23 @@ func (c Config) Validate() error {
 	if c.Service.RequestTimeout.Duration <= 0 {
 		return fmt.Errorf("service.request_timeout must be positive")
 	}
+	if c.Service.HTTPReadHeaderTimeout.Duration < 0 {
+		return fmt.Errorf("service.http_read_header_timeout must be positive when set")
+	}
+	if c.Service.HTTPReadTimeout.Duration < 0 {
+		return fmt.Errorf("service.http_read_timeout must be positive when set")
+	}
+	if c.Service.HTTPIdleTimeout.Duration < 0 {
+		return fmt.Errorf("service.http_idle_timeout must be positive when set")
+	}
 	if c.Service.MaxInboundBytes <= 0 {
 		return fmt.Errorf("service.max_inbound_bytes must be positive")
 	}
 	if c.Service.SessionIdleArchiveAge.Duration < 0 {
 		return fmt.Errorf("service.session_idle_archive_age must be positive when set")
+	}
+	if c.Service.OutboxRetentionAge.Duration < 0 {
+		return fmt.Errorf("service.outbox_retention_age must be positive when set")
 	}
 	if c.Service.DocumentExtractTimeout.Duration < 0 {
 		return fmt.Errorf("service.document_extract_timeout must be positive when set")

@@ -80,6 +80,10 @@ func TestConsoleCandidateRolloutHasOneExplicitCandidateLifecycle(t *testing.T) {
 	if response := stage("candidate-three"); response.Code != http.StatusCreated {
 		t.Fatalf("replace candidate with v3 = %d: %s", response.Code, response.Body.String())
 	}
+	versions := handler.request(t, http.MethodGet, "/api/v1/apps/example/support/versions", "")
+	if versions.Code != http.StatusOK || !strings.Contains(versions.Body.String(), `"config_version":1`) || !strings.Contains(versions.Body.String(), `"config_version":3`) {
+		t.Fatalf("list versions = %d: %s", versions.Code, versions.Body.String())
+	}
 
 	candidate := handler.request(t, http.MethodGet, "/api/v1/apps/example/support/candidate", "")
 	if candidate.Code != http.StatusOK {
@@ -109,6 +113,10 @@ func TestConsoleCandidateRolloutHasOneExplicitCandidateLifecycle(t *testing.T) {
 	if rolloutBody.Rollout.CandidateVersion != 3 || rolloutBody.Rollout.StableVersion != 1 || rolloutBody.Rollout.BasisPoints != 1000 {
 		t.Fatalf("rollout = %+v, want stable v1 -> candidate v3 at 10%%", rolloutBody.Rollout)
 	}
+	currentRollout := handler.request(t, http.MethodGet, "/api/v1/apps/example/support/rollout", "")
+	if currentRollout.Code != http.StatusOK || !strings.Contains(currentRollout.Body.String(), `"candidate_version":3`) || !strings.Contains(currentRollout.Body.String(), `"basis_points":1000`) {
+		t.Fatalf("get rollout = %d: %s", currentRollout.Code, currentRollout.Body.String())
+	}
 
 	if response := handler.request(t, http.MethodPut, "/api/v1/apps/example/support", `{"status":"active","instruction":"must-not-publish","model":{"provider_id":"primary","name":"support"},"storage":{"session":{"profile_id":"platform-postgres"},"memory":{"profile_id":"platform-postgres"},"knowledge":{"profile_id":"platform-pgvector"},"artifact":{"profile_id":"platform-postgres"}},"channels":[{"type":"telegram","binding_id":"example-support-bot"}]}`); response.Code != http.StatusConflict {
 		t.Fatalf("direct publish during rollout = %d, want 409: %s", response.Code, response.Body.String())
@@ -129,5 +137,16 @@ func TestConsoleCandidateRolloutHasOneExplicitCandidateLifecycle(t *testing.T) {
 	candidate = handler.request(t, http.MethodGet, "/api/v1/apps/example/support/candidate", "")
 	if candidate.Code != http.StatusOK || !strings.Contains(candidate.Body.String(), `"candidate":null`) {
 		t.Fatalf("candidate after promotion = %d: %s", candidate.Code, candidate.Body.String())
+	}
+
+	if response := stage("candidate-four"); response.Code != http.StatusCreated {
+		t.Fatalf("stage v4 = %d: %s", response.Code, response.Body.String())
+	}
+	if response := handler.request(t, http.MethodDelete, "/api/v1/apps/example/support/candidate", `{"expected_version":4}`); response.Code != http.StatusNoContent {
+		t.Fatalf("discard v4 candidate = %d: %s", response.Code, response.Body.String())
+	}
+	candidate = handler.request(t, http.MethodGet, "/api/v1/apps/example/support/candidate", "")
+	if candidate.Code != http.StatusOK || !strings.Contains(candidate.Body.String(), `"candidate":null`) {
+		t.Fatalf("candidate after discard = %d: %s", candidate.Code, candidate.Body.String())
 	}
 }

@@ -5,7 +5,8 @@ CREATE TABLE tenants (
     id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL DEFAULT '',
 	status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE platform_users (
@@ -14,7 +15,8 @@ CREATE TABLE platform_users (
     email TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_login_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    last_login_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_platform_users_display_name
@@ -50,6 +52,7 @@ CREATE TABLE local_credentials (
     password_hash TEXT NOT NULL,
     must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
     credential_version BIGINT NOT NULL DEFAULT 1 CHECK (credential_version > 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -65,8 +68,12 @@ CREATE TABLE tenant_members (
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
     conversation_content_audit BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, platform_user_id)
 );
+
+CREATE INDEX idx_tenant_members_user
+    ON tenant_members (platform_user_id, status, tenant_id);
 
 CREATE TABLE tenant_model_allowlist (
     tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -76,19 +83,46 @@ CREATE TABLE tenant_model_allowlist (
     PRIMARY KEY (tenant_id, provider_id, model_name)
 );
 
+CREATE TABLE tenant_tool_allowlist (
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tool_name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, tool_name)
+);
+
 CREATE TABLE backend_profiles (
     profile_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
-    driver TEXT NOT NULL CHECK (driver IN ('postgres','redis','pgvector','qdrant','s3','cos','mem0')),
+    driver TEXT NOT NULL CHECK (driver IN ('inmemory','postgres','redis','mysql','sqlite','mongodb','clickhouse','pgvector','qdrant','elasticsearch','s3','cos','mem0','chromadb','tencentdb')),
     connection_ref TEXT NOT NULL DEFAULT '',
+    domains TEXT[] NOT NULL CHECK (
+        cardinality(domains) > 0
+        AND domains <@ CASE driver
+            WHEN 'inmemory' THEN ARRAY['session','memory','artifact']::TEXT[]
+            WHEN 'postgres' THEN ARRAY['session','memory','artifact']::TEXT[]
+            WHEN 'redis' THEN ARRAY['session','memory']::TEXT[]
+            WHEN 'mysql' THEN ARRAY['session','memory']::TEXT[]
+            WHEN 'sqlite' THEN ARRAY['session']::TEXT[]
+            WHEN 'mongodb' THEN ARRAY['session']::TEXT[]
+            WHEN 'clickhouse' THEN ARRAY['session']::TEXT[]
+            WHEN 'pgvector' THEN ARRAY['knowledge']::TEXT[]
+            WHEN 'qdrant' THEN ARRAY['knowledge']::TEXT[]
+            WHEN 'elasticsearch' THEN ARRAY['knowledge']::TEXT[]
+            WHEN 's3' THEN ARRAY['artifact']::TEXT[]
+            WHEN 'cos' THEN ARRAY['artifact']::TEXT[]
+            WHEN 'mem0' THEN ARRAY['memory']::TEXT[]
+            WHEN 'chromadb' THEN ARRAY['memory']::TEXT[]
+            WHEN 'tencentdb' THEN ARRAY['memory']::TEXT[]
+        END
+    ),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-INSERT INTO backend_profiles (profile_id, display_name, driver, connection_ref, status) VALUES
-    ('platform-postgres', '平台 PostgreSQL', 'postgres', '', 'active'),
-    ('platform-pgvector', '平台 pgvector', 'pgvector', '', 'active');
+INSERT INTO backend_profiles (profile_id, display_name, driver, connection_ref, domains, status) VALUES
+    ('platform-postgres', '平台 PostgreSQL', 'postgres', '', ARRAY['session','memory','artifact'], 'active'),
+    ('platform-pgvector', '平台 pgvector', 'pgvector', '', ARRAY['knowledge'], 'active');
 
 CREATE TABLE tenant_backend_profiles (
     tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -97,10 +131,13 @@ CREATE TABLE tenant_backend_profiles (
     PRIMARY KEY (tenant_id, profile_id)
 );
 
+CREATE INDEX idx_tenant_backend_profiles_profile
+    ON tenant_backend_profiles (profile_id);
+
 CREATE TABLE service_nodes (
     node_id TEXT PRIMARY KEY,
     boot_id TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('gateway', 'worker', 'all')),
+    role TEXT NOT NULL CHECK (role IN ('gateway', 'channel', 'worker', 'all')),
     state TEXT NOT NULL CHECK (state IN ('ready', 'draining')),
     build_version TEXT NOT NULL,
     inflight INTEGER NOT NULL DEFAULT 0 CHECK (inflight >= 0),
@@ -165,6 +202,7 @@ CREATE TABLE channel_bindings (
 	access_policy TEXT NOT NULL DEFAULT 'member_only' CHECK (access_policy IN ('member_only', 'allowlist', 'public')),
 	allowlist JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(allowlist) = 'array'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (channel_type, external_binding_id),
     FOREIGN KEY (tenant_id, app_code) REFERENCES applications(tenant_id, app_code)
 );
@@ -186,6 +224,33 @@ CREATE TABLE channel_identities (
 
 CREATE INDEX idx_channel_identities_user
     ON channel_identities (tenant_id, platform_user_id, channel_type, binding_id);
+CREATE INDEX idx_channel_identities_lookup
+    ON channel_identities (tenant_id, channel_type, external_user_id);
+
+-- trpc-agent-go PostgreSQL Memory schema. Runtime Memory services use
+-- WithSkipDBInit(true); schema ownership and DDL stay in this baseline.
+CREATE TABLE memories (
+    memory_id TEXT PRIMARY KEY,
+    app_name TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    memory_data JSONB NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP NULL DEFAULT NULL
+);
+
+CREATE INDEX idx_memories_app_user
+    ON memories (app_name, user_id);
+CREATE INDEX idx_memories_updated_at
+    ON memories (updated_at DESC);
+CREATE INDEX idx_memories_deleted_at
+    ON memories (deleted_at);
+
+ALTER TABLE memories ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope_memories ON memories
+    USING (app_name = current_setting('app.app_name', true))
+    WITH CHECK (app_name = current_setting('app.app_name', true));
+ALTER TABLE memories FORCE ROW LEVEL SECURITY;
 
 -- trpc-agent-go PostgreSQL Session schema. Runtime Session services use
 -- WithSkipDBInit(true); schema ownership and DDL stay in this baseline.
@@ -195,10 +260,10 @@ CREATE TABLE session_states (
     user_id VARCHAR(255) NOT NULL,
     session_id VARCHAR(255) NOT NULL,
     state JSONB DEFAULT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP DEFAULT NULL,
-    deleted_at TIMESTAMP DEFAULT NULL
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ DEFAULT NULL,
+    deleted_at TIMESTAMPTZ DEFAULT NULL
 );
 
 CREATE UNIQUE INDEX idx_session_states_unique_active
@@ -213,10 +278,10 @@ CREATE TABLE session_events (
     user_id VARCHAR(255) NOT NULL,
     session_id VARCHAR(255) NOT NULL,
     event JSONB NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP DEFAULT NULL,
-    deleted_at TIMESTAMP DEFAULT NULL
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ DEFAULT NULL,
+    deleted_at TIMESTAMPTZ DEFAULT NULL
 );
 
 CREATE INDEX idx_session_events_lookup
@@ -231,10 +296,10 @@ CREATE TABLE session_track_events (
     session_id VARCHAR(255) NOT NULL,
     track VARCHAR(255) NOT NULL,
     event JSONB NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP DEFAULT NULL,
-    deleted_at TIMESTAMP DEFAULT NULL
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ DEFAULT NULL,
+    deleted_at TIMESTAMPTZ DEFAULT NULL
 );
 
 CREATE INDEX idx_session_track_events_lookup
@@ -249,9 +314,9 @@ CREATE TABLE session_summaries (
     session_id VARCHAR(255) NOT NULL,
     filter_key VARCHAR(255) NOT NULL DEFAULT '',
     summary JSONB DEFAULT NULL,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP DEFAULT NULL,
-    deleted_at TIMESTAMP DEFAULT NULL
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ DEFAULT NULL,
+    deleted_at TIMESTAMPTZ DEFAULT NULL
 );
 
 CREATE UNIQUE INDEX idx_session_summaries_unique_active
@@ -265,10 +330,10 @@ CREATE TABLE app_states (
     app_name VARCHAR(255) NOT NULL,
     key VARCHAR(255) NOT NULL,
     value TEXT DEFAULT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP DEFAULT NULL,
-    deleted_at TIMESTAMP DEFAULT NULL
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ DEFAULT NULL,
+    deleted_at TIMESTAMPTZ DEFAULT NULL
 );
 
 CREATE UNIQUE INDEX idx_app_states_unique_active
@@ -283,10 +348,10 @@ CREATE TABLE user_states (
     user_id VARCHAR(255) NOT NULL,
     key VARCHAR(255) NOT NULL,
     value TEXT DEFAULT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP DEFAULT NULL,
-    deleted_at TIMESTAMP DEFAULT NULL
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ DEFAULT NULL,
+    deleted_at TIMESTAMPTZ DEFAULT NULL
 );
 
 CREATE UNIQUE INDEX idx_user_states_unique_active
@@ -294,6 +359,37 @@ CREATE UNIQUE INDEX idx_user_states_unique_active
     WHERE deleted_at IS NULL;
 CREATE INDEX idx_user_states_expires
     ON user_states (expires_at) WHERE expires_at IS NOT NULL;
+
+ALTER TABLE session_states ENABLE ROW LEVEL SECURITY;
+ALTER TABLE session_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE session_track_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE session_summaries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app_states ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_states ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope_session_states ON session_states
+    USING (app_name = current_setting('app.app_name', true))
+    WITH CHECK (app_name = current_setting('app.app_name', true));
+CREATE POLICY tenant_scope_session_events ON session_events
+    USING (app_name = current_setting('app.app_name', true))
+    WITH CHECK (app_name = current_setting('app.app_name', true));
+CREATE POLICY tenant_scope_session_track_events ON session_track_events
+    USING (app_name = current_setting('app.app_name', true))
+    WITH CHECK (app_name = current_setting('app.app_name', true));
+CREATE POLICY tenant_scope_session_summaries ON session_summaries
+    USING (app_name = current_setting('app.app_name', true))
+    WITH CHECK (app_name = current_setting('app.app_name', true));
+CREATE POLICY tenant_scope_app_states ON app_states
+    USING (app_name = current_setting('app.app_name', true))
+    WITH CHECK (app_name = current_setting('app.app_name', true));
+CREATE POLICY tenant_scope_user_states ON user_states
+    USING (app_name = current_setting('app.app_name', true))
+    WITH CHECK (app_name = current_setting('app.app_name', true));
+ALTER TABLE session_states FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_track_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_summaries FORCE ROW LEVEL SECURITY;
+ALTER TABLE app_states FORCE ROW LEVEL SECURITY;
+ALTER TABLE user_states FORCE ROW LEVEL SECURITY;
 
 CREATE TABLE sessions (
     tenant_id TEXT NOT NULL REFERENCES tenants(id),
@@ -305,6 +401,7 @@ CREATE TABLE sessions (
     owner_platform_user_id TEXT REFERENCES platform_users(platform_user_id),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
     archived_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, session_key),
     FOREIGN KEY (tenant_id, app_code) REFERENCES applications(tenant_id, app_code)
@@ -333,9 +430,9 @@ CREATE TABLE session_backend_migrations (
     generation BIGINT NOT NULL CHECK (generation > 0),
     source_profile_id TEXT NOT NULL,
     target_profile_id TEXT NOT NULL,
-    source_driver TEXT NOT NULL CHECK (source_driver IN ('postgres','redis','inmemory')),
+    source_driver TEXT NOT NULL CHECK (source_driver IN ('postgres','redis','inmemory','mysql','sqlite','mongodb','clickhouse')),
     source_connection_ref TEXT NOT NULL DEFAULT '',
-    target_driver TEXT NOT NULL CHECK (target_driver IN ('postgres','redis','inmemory')),
+    target_driver TEXT NOT NULL CHECK (target_driver IN ('postgres','redis','inmemory','mysql','sqlite','mongodb','clickhouse')),
     target_connection_ref TEXT NOT NULL DEFAULT '',
     phase TEXT NOT NULL CHECK (phase IN ('prepared','dual_write','backfill','verify','cut_read','stop_old_write','done','rolled_back')),
     backfilled_sessions INTEGER NOT NULL DEFAULT 0 CHECK (backfilled_sessions >= 0),
@@ -352,6 +449,30 @@ CREATE UNIQUE INDEX uq_session_backend_migration_active
 
 CREATE INDEX idx_session_backend_migrations_app_updated
     ON session_backend_migrations (tenant_id, app_code, updated_at DESC);
+
+CREATE TABLE session_migration_repairs (
+    migration_id TEXT NOT NULL REFERENCES session_backend_migrations(migration_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    app_code TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('session','user','application')),
+    scope_key TEXT NOT NULL CHECK (btrim(scope_key) <> ''),
+    subject_id TEXT NOT NULL DEFAULT '',
+    route_generation BIGINT NOT NULL CHECK (route_generation > 0),
+    primary_profile_id TEXT NOT NULL,
+    replica_profile_id TEXT NOT NULL,
+    revision BIGINT NOT NULL CHECK (revision > 0),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_until TIMESTAMPTZ,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (migration_id, scope, scope_key, subject_id),
+    FOREIGN KEY (tenant_id, app_code) REFERENCES applications(tenant_id, app_code)
+);
+
+CREATE INDEX idx_session_migration_repairs_claim
+    ON session_migration_repairs (tenant_id, migration_id, next_attempt_at, lease_until, updated_at);
 
 CREATE TABLE channel_conversations (
     tenant_id TEXT NOT NULL,
@@ -404,15 +525,20 @@ CREATE INDEX idx_inbound_message_routes_session_message
 
 CREATE TABLE messages (
     tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    app_code TEXT NOT NULL,
     channel_type TEXT NOT NULL CHECK (channel_type IN ('telegram', 'wecom', 'feishu', 'web')),
     binding_id TEXT NOT NULL CHECK (btrim(binding_id) <> ''),
     message_id TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('processing', 'completed')),
+    status TEXT NOT NULL CHECK (status IN ('processing', 'completed', 'failed')),
     trace_id TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (tenant_id, channel_type, binding_id, message_id)
+    PRIMARY KEY (tenant_id, channel_type, binding_id, message_id),
+    FOREIGN KEY (tenant_id, app_code) REFERENCES applications(tenant_id, app_code)
 );
+
+CREATE INDEX idx_messages_tenant_updated
+    ON messages (tenant_id, updated_at DESC, message_id);
 
 CREATE TABLE message_retry_attempts (
     tenant_id TEXT NOT NULL,
@@ -431,6 +557,7 @@ CREATE TABLE execution_traces (
     message_id TEXT NOT NULL,
     trace_id TEXT NOT NULL,
     projection JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, channel_type, binding_id, message_id),
     FOREIGN KEY (tenant_id, app_code) REFERENCES applications(tenant_id, app_code)
@@ -461,6 +588,8 @@ CREATE TABLE audit_events (
 
 CREATE INDEX idx_audit_events_tenant_trace
     ON audit_events (tenant_id, trace_id, created_at);
+CREATE INDEX idx_audit_events_purge
+    ON audit_events (tenant_id, created_at);
 
 CREATE TABLE outbox_events (
     id TEXT PRIMARY KEY,
@@ -484,6 +613,9 @@ CREATE UNIQUE INDEX idx_outbox_events_tenant_request
 CREATE INDEX idx_outbox_events_dispatch_lease
     ON outbox_events (tenant_id, available_at, lease_expires_at, created_at)
     WHERE delivered_at IS NULL;
+CREATE INDEX idx_outbox_events_delivered_retention
+    ON outbox_events (tenant_id, delivered_at)
+    WHERE delivered_at IS NOT NULL;
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -495,6 +627,7 @@ CREATE TABLE knowledge_documents (
     status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready', 'indexing', 'failed')),
     total_chunks INTEGER NOT NULL DEFAULT 0,
     metadata JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, app_code, document_id),
     FOREIGN KEY (tenant_id, app_code) REFERENCES applications(tenant_id, app_code)
@@ -515,6 +648,7 @@ CREATE TABLE knowledge_document_sources (
     overlap INTEGER NOT NULL DEFAULT 0 CHECK (overlap >= 0),
     metadata JSONB NOT NULL DEFAULT '{}',
     canonical_documents JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, app_code, document_id),
     FOREIGN KEY (tenant_id, app_code, document_id)
@@ -553,7 +687,8 @@ CREATE TABLE knowledge_ingest_jobs (
     chunk_size INTEGER NOT NULL DEFAULT 0 CHECK (chunk_size >= 0),
     overlap INTEGER NOT NULL DEFAULT 0 CHECK (overlap >= 0),
     metadata JSONB NOT NULL DEFAULT '{}',
-    backend_driver TEXT NOT NULL CHECK (backend_driver IN ('pgvector','qdrant')),
+    backend_profile_id TEXT NOT NULL DEFAULT '',
+    backend_driver TEXT NOT NULL CHECK (backend_driver IN ('pgvector','qdrant','elasticsearch')),
     backend_connection_ref TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'failed')),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
@@ -610,9 +745,6 @@ CREATE TABLE artifacts (
     FOREIGN KEY (tenant_id, app_code) REFERENCES applications(tenant_id, app_code)
 );
 
-CREATE INDEX idx_artifacts_session
-    ON artifacts (tenant_id, app_code, user_id, session_id, filename, version DESC);
-
 CREATE TABLE model_usage_ledger (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -629,6 +761,7 @@ CREATE TABLE model_usage_ledger (
     completion_tokens BIGINT CHECK (completion_tokens >= 0),
     total_tokens BIGINT CHECK (total_tokens >= 0),
     cost_micros BIGINT CHECK (cost_micros >= 0),
+    usage_breakdown JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(usage_breakdown) = 'array'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (tenant_id, channel_type, binding_id, message_id),
     FOREIGN KEY (tenant_id, app_code) REFERENCES applications(tenant_id, app_code),
@@ -702,6 +835,41 @@ CREATE TABLE tool_executions (
 CREATE INDEX idx_tool_executions_status
     ON tool_executions (tenant_id, status, updated_at);
 
+CREATE TABLE tool_approvals (
+    approval_token TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    app_code TEXT NOT NULL,
+    config_version BIGINT NOT NULL CHECK (config_version > 0),
+    request_id TEXT NOT NULL DEFAULT '',
+    trace_id TEXT NOT NULL DEFAULT '',
+    channel_type TEXT NOT NULL,
+    binding_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    conversation_scope TEXT NOT NULL DEFAULT '',
+    external_user_id TEXT NOT NULL,
+    requester_user_id TEXT NOT NULL DEFAULT '',
+    progress_message_id TEXT NOT NULL DEFAULT '',
+    tool_name TEXT NOT NULL,
+    tool_description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'canceled')),
+    notification_id TEXT NOT NULL DEFAULT '',
+    resolved_by TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    notified_at TIMESTAMPTZ,
+    resolved_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (tenant_id, app_code) REFERENCES applications(tenant_id, app_code) ON DELETE CASCADE,
+    CHECK (expires_at > created_at),
+    CHECK (
+        (status = 'pending' AND resolved_at IS NULL)
+        OR (status <> 'pending' AND resolved_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX idx_tool_approvals_tenant_status
+    ON tool_approvals (tenant_id, status, created_at DESC);
+
 ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE applications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE application_configs ENABLE ROW LEVEL SECURITY;
@@ -709,6 +877,7 @@ ALTER TABLE application_rollouts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_bindings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_model_allowlist ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_tool_allowlist ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_backend_profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE channel_identities ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_scope_tenants ON tenants
@@ -732,6 +901,9 @@ CREATE POLICY tenant_scope_tenant_members ON tenant_members
 CREATE POLICY tenant_scope_tenant_model_allowlist ON tenant_model_allowlist
     USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_scope_tenant_tool_allowlist ON tenant_tool_allowlist
+    USING (tenant_id = current_setting('app.tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 CREATE POLICY tenant_scope_tenant_backend_profiles ON tenant_backend_profiles
     USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
@@ -745,6 +917,7 @@ ALTER TABLE application_rollouts FORCE ROW LEVEL SECURITY;
 ALTER TABLE channel_bindings FORCE ROW LEVEL SECURITY;
 ALTER TABLE tenant_members FORCE ROW LEVEL SECURITY;
 ALTER TABLE tenant_model_allowlist FORCE ROW LEVEL SECURITY;
+ALTER TABLE tenant_tool_allowlist FORCE ROW LEVEL SECURITY;
 ALTER TABLE tenant_backend_profiles FORCE ROW LEVEL SECURITY;
 ALTER TABLE channel_identities FORCE ROW LEVEL SECURITY;
 
@@ -876,6 +1049,7 @@ ALTER TABLE execution_traces FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE session_execution_leases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE session_backend_migrations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE session_migration_repairs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_scope_session_execution_leases ON session_execution_leases
     USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
@@ -884,6 +1058,10 @@ CREATE POLICY tenant_scope_session_backend_migrations ON session_backend_migrati
     USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 ALTER TABLE session_backend_migrations FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope_session_migration_repairs ON session_migration_repairs
+    USING (tenant_id = current_setting('app.tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+ALTER TABLE session_migration_repairs FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE channel_conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE inbound_message_routes ENABLE ROW LEVEL SECURITY;
@@ -934,7 +1112,48 @@ ALTER TABLE model_usage_ledger FORCE ROW LEVEL SECURITY;
 ALTER TABLE model_usage_reservations FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE tool_executions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tool_approvals ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_scope_tool_executions ON tool_executions
     USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_scope_tool_approvals ON tool_approvals
+    USING (tenant_id = current_setting('app.tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 ALTER TABLE tool_executions FORCE ROW LEVEL SECURITY;
+ALTER TABLE tool_approvals FORCE ROW LEVEL SECURITY;
+
+-- Tenant-scoped transactions switch from the login role to trpc_tenant so
+-- FORCE RLS applies even when the service login owns the tables. Keep the
+-- table privileges in the schema baseline itself: relying only on PostgreSQL
+-- ALTER DEFAULT PRIVILEGES from container bootstrap makes a rebuilt schema
+-- unusable when those defaults are absent.
+GRANT USAGE ON SCHEMA public TO trpc_tenant;
+DO $$
+DECLARE
+    relation RECORD;
+BEGIN
+    FOR relation IN
+        SELECT namespace.nspname AS schema_name, class.relname AS table_name
+        FROM pg_class AS class
+        JOIN pg_namespace AS namespace ON namespace.oid = class.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND class.relkind IN ('r', 'p')
+          AND class.relrowsecurity
+          AND class.relforcerowsecurity
+    LOOP
+        EXECUTE format(
+            'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO trpc_tenant',
+            relation.schema_name,
+            relation.table_name
+        );
+    END LOOP;
+END $$;
+
+GRANT USAGE, SELECT ON SEQUENCE
+    session_states_id_seq,
+    session_events_id_seq,
+    session_track_events_id_seq,
+    session_summaries_id_seq,
+    app_states_id_seq,
+    user_states_id_seq
+TO trpc_tenant;

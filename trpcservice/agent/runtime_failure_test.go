@@ -22,7 +22,8 @@ func (errorModel) GenerateContent(ctx context.Context, _ *model.Request) (<-chan
 func (errorModel) Info() model.Info { return model.Info{Name: "error-model"} }
 
 // TestRuntimeModelFailureWritesNothingAndStaysRetryable verifies that a model
-// outage produces no durable reply/audit side effect and releases its claim.
+// outage produces no reply/audit side effect, remains visible as failed, and
+// can still be claimed by the next Kafka retry.
 func TestRuntimeModelFailureWritesNothingAndStaysRetryable(t *testing.T) {
 	repository := tenantNewRepo(t)
 	dedup := storage.NewMemoryExecutionDedupStore()
@@ -53,7 +54,11 @@ func TestRuntimeModelFailureWritesNothingAndStaysRetryable(t *testing.T) {
 	if err != nil || len(audits) != 0 {
 		t.Fatalf("audit after model failure = %d, error = %v, want 0", len(audits), err)
 	}
-	state, err := dedup.Begin(context.Background(), "tenant-a", "telegram", "telegram-bot-a", message.MessageID, "trace-model-retry", time.Minute)
+	claims, err := dedup.ListClaims(context.Background(), "tenant-a", "", 10)
+	if err != nil || len(claims) != 1 || claims[0].Status != "failed" || claims[0].MessageID != message.MessageID {
+		t.Fatalf("claims after model failure = %+v, error = %v, want one failed claim", claims, err)
+	}
+	state, err := dedup.Begin(context.Background(), "tenant-a", "support", "telegram", "telegram-bot-a", message.MessageID, "trace-model-retry", time.Minute)
 	if err != nil || state != storage.ExecutionFresh {
 		t.Fatalf("Begin() after model failure state = %q, error = %v, want fresh", state, err)
 	}

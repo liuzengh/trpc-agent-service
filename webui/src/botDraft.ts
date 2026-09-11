@@ -1,5 +1,6 @@
 import type { ApplicationPayload } from './api'
 import { channelLabel } from './components/channelMeta'
+import { isTenantConfigurableTool } from './toolPolicy'
 import { channelsOf, type AgentStatus, type GenerationConfig, type ModelCapabilities, type Snapshot, type ToolJSONSchema } from './types'
 
 export interface BindingDraft {
@@ -31,7 +32,6 @@ export interface MCPToolDraft {
 }
 
 export interface BotDraft {
-  tenant_id: string
   app_code: string
   status: AgentStatus
   instruction: string
@@ -63,7 +63,7 @@ export interface BotDraft {
 }
 
 export const EMPTY_BOT_DRAFT: BotDraft = {
-  tenant_id: '', app_code: '', status: 'draft', instruction: '',
+  app_code: '', status: 'draft', instruction: '',
   provider_id: '', model_name: '',
   session_profile_id: '', memory_profile_id: '', knowledge_profile_id: '', artifact_profile_id: '',
   max_tool_calls: 8, budget_units: 100, retention_days: 90,
@@ -85,8 +85,8 @@ export const EMPTY_BOT_DRAFT: BotDraft = {
   token_reservation: '',
 }
 
-export function botDraftFromSnapshot(app: Snapshot | null, currentTenant: string): BotDraft {
-  if (!app) return { ...EMPTY_BOT_DRAFT, tenant_id: currentTenant }
+export function botDraftFromSnapshot(app: Snapshot | null): BotDraft {
+  if (!app) return { ...EMPTY_BOT_DRAFT }
 
   const model = app.Config.model
   const generation = model?.generation
@@ -96,7 +96,6 @@ export function botDraftFromSnapshot(app: Snapshot | null, currentTenant: string
   const confirmationNames = toolPolicy?.require_confirmation ?? []
 
   return {
-    tenant_id: app.Config.tenant_id,
     app_code: app.Config.app_code,
     status: app.Config.status,
     instruction: app.Config.instruction ?? '',
@@ -109,8 +108,8 @@ export function botDraftFromSnapshot(app: Snapshot | null, currentTenant: string
     max_tool_calls: app.Config.governance.max_tool_calls,
     budget_units: app.Config.governance.budget_units,
     retention_days: app.Config.audit.retention_days,
-    tools_allowed: allowedNames.filter((name) => !customNames.has(name)),
-    tools_require_confirmation: confirmationNames.filter((name) => !customNames.has(name)),
+    tools_allowed: allowedNames.filter((name) => !customNames.has(name) && isTenantConfigurableTool(name)),
+    tools_require_confirmation: confirmationNames.filter((name) => !customNames.has(name) && isTenantConfigurableTool(name)),
     tools_http: (toolPolicy?.http ?? []).map((tool) => ({
       name: tool.name,
       description: tool.description ?? '',
@@ -179,11 +178,13 @@ export function payloadFromSnapshot(app: Snapshot, status: AgentStatus = app.Con
 
 export function applicationPayloadFromDraft({
   draft,
+  tenantID,
   mode,
   app,
   capabilities,
 }: {
   draft: BotDraft
+  tenantID: string
   mode: 'create' | 'edit'
   app: Snapshot | null
   capabilities?: ModelCapabilities
@@ -251,8 +252,8 @@ export function applicationPayloadFromDraft({
     ...draft.tools_http.filter((tool) => tool.enabled && tool.require_confirmation).map((tool) => tool.name.trim()),
     ...draft.tools_mcp.flatMap((server) => commaNames(server.confirmation_tools).map((name) => `${server.name.trim()}_${name}`)),
   ].filter(Boolean)
-  const allowedTools = [...new Set([...draft.tools_allowed, ...customAllowedTools])]
-  const confirmationTools = [...new Set([...draft.tools_require_confirmation, ...customConfirmationTools])]
+  const allowedTools = [...new Set([...draft.tools_allowed.filter(isTenantConfigurableTool), ...customAllowedTools])]
+  const confirmationTools = [...new Set([...draft.tools_require_confirmation.filter(isTenantConfigurableTool), ...customConfirmationTools])]
   const allowedToolSet = new Set(allowedTools)
   const invalidConfirmationTools = confirmationTools.filter((name) => !allowedToolSet.has(name))
   if (invalidConfirmationTools.length > 0) {
@@ -264,7 +265,7 @@ export function applicationPayloadFromDraft({
   )
 
   return {
-    tenant_id: draft.tenant_id.trim(),
+    tenant_id: tenantID.trim(),
     app_code: draft.app_code.trim(),
     status: mode === 'create' ? 'draft' : draft.status,
     instruction: draft.instruction.trim(),

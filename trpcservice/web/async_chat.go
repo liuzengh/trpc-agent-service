@@ -48,6 +48,10 @@ func (c *consoleAPI) enqueueChat(writer http.ResponseWriter, request *http.Reque
 	if !requireTenantRead(writer, request, strings.TrimSpace(body.TenantID)) {
 		return
 	}
+	if strings.TrimSpace(body.Text) == "" && len(uploads) == 0 {
+		badRequest(writer, "message text or file is required")
+		return
+	}
 	user, ok := sessionUser(request)
 	if !ok {
 		http.Error(writer, "unauthorized", http.StatusUnauthorized)
@@ -56,10 +60,6 @@ func (c *consoleAPI) enqueueChat(writer http.ResponseWriter, request *http.Reque
 	snapshot, sessionKey, inbound, err := c.buildWebInbound(request.Context(), body, user.PlatformUserID)
 	if err != nil {
 		badRequest(writer, err.Error())
-		return
-	}
-	if strings.TrimSpace(inbound.Text) == "" && len(uploads) == 0 {
-		badRequest(writer, "message text or file is required")
 		return
 	}
 	inbound.WebOwnerID = user.PlatformUserID
@@ -252,7 +252,7 @@ func (c *consoleAPI) chatStream(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 		stream.begin()
-		stream.doneWithID(reply.EventID, reply.Text)
+		stream.doneMessageWithID(reply.EventID, reply.Text, reply.Card)
 		return
 	}
 	stream.begin()
@@ -277,7 +277,7 @@ func (c *consoleAPI) chatStream(writer http.ResponseWriter, request *http.Reques
 			stream.error("reply access denied")
 			return
 		}
-		stream.doneWithID(reply.EventID, reply.Text)
+		stream.doneMessageWithID(reply.EventID, reply.Text, reply.Card)
 		return
 	}
 
@@ -290,10 +290,11 @@ func (c *consoleAPI) chatStream(writer http.ResponseWriter, request *http.Reques
 		case <-request.Context().Done():
 			return
 		case <-heartbeat.C:
-			if fallback, ready, err := c.completedWebReply(request.Context(), tenantID, requestID); err == nil && ready && fallback.visibleTo(user) {
-				stream.doneWithID(fallback.EventID, fallback.Text)
-				return
-			}
+			// Redis Stream delivery is the live completion path. PostgreSQL is
+			// deliberately read only before/after subscription (to close the
+			// subscribe race) and when the subscriber closes. Polling durable
+			// state on every SSE heartbeat turns each idle browser connection
+			// into a steady database query source without improving correctness.
 			stream.keepAlive()
 		case <-idle.C:
 			stream.error("reply stream timed out; reconnect to resume")
@@ -301,7 +302,7 @@ func (c *consoleAPI) chatStream(writer http.ResponseWriter, request *http.Reques
 		case reply, ok := <-replies:
 			if !ok {
 				if fallback, ready, err := c.completedWebReply(request.Context(), tenantID, requestID); err == nil && ready && fallback.visibleTo(user) {
-					stream.doneWithID(fallback.EventID, fallback.Text)
+					stream.doneMessageWithID(fallback.EventID, fallback.Text, fallback.Card)
 				} else {
 					stream.error("reply stream closed")
 				}
@@ -318,7 +319,7 @@ func (c *consoleAPI) chatStream(writer http.ResponseWriter, request *http.Reques
 			case "delta":
 				stream.deltaWithID(reply.ID, reply.Content)
 			case "done":
-				stream.doneWithID(reply.ID, reply.Reply)
+				stream.doneMessageWithID(reply.ID, reply.Reply, reply.Card)
 				return
 			}
 		}
@@ -327,6 +328,7 @@ func (c *consoleAPI) chatStream(writer http.ResponseWriter, request *http.Reques
 
 type completedWebReply struct {
 	Text    string
+	Card    *channels.InteractiveCard
 	EventID string
 	OwnerID string
 }
@@ -346,24 +348,25 @@ func (c *consoleAPI) completedWebReply(ctx context.Context, tenantID, requestID 
 	if err != nil {
 		return completedWebReply{}, false, err
 	}
-	reply, ownerID, err := decodeStoredReply(event)
+	reply, ownerID, card, err := decodeStoredReply(event)
 	if err != nil {
 		return completedWebReply{}, false, err
 	}
-	return completedWebReply{Text: reply, EventID: event.DeliveryReceipt, OwnerID: ownerID}, true, nil
+	return completedWebReply{Text: reply, Card: card, EventID: event.DeliveryReceipt, OwnerID: ownerID}, true, nil
 }
 
-func decodeStoredReply(event storage.OutboxEvent) (string, string, error) {
+func decodeStoredReply(event storage.OutboxEvent) (string, string, *channels.InteractiveCard, error) {
 	var payload struct {
-		Channel    channels.Channel `json:"channel"`
-		Text       string           `json:"text"`
-		WebOwnerID string           `json:"web_owner_id"`
+		Channel    channels.Channel          `json:"channel"`
+		Text       string                    `json:"text"`
+		WebOwnerID string                    `json:"web_owner_id"`
+		Card       *channels.InteractiveCard `json:"card,omitempty"`
 	}
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	if payload.Channel != channels.Web || strings.TrimSpace(payload.Text) == "" || strings.TrimSpace(payload.WebOwnerID) == "" {
-		return "", "", errors.New("not an owned web reply")
+	if payload.Channel != channels.Web || (strings.TrimSpace(payload.Text) == "" && payload.Card == nil) || strings.TrimSpace(payload.WebOwnerID) == "" {
+		return "", "", nil, errors.New("not an owned web reply")
 	}
-	return payload.Text, payload.WebOwnerID, nil
+	return payload.Text, payload.WebOwnerID, payload.Card, nil
 }

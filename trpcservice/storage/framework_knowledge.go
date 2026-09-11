@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/backendhealth"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/credential"
 	agentknowledge "trpc.group/trpc-go/trpc-agent-go/knowledge"
@@ -21,6 +22,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/reranker/infinity"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/reranker/topk"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore"
+	frameworkelasticsearch "trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/elasticsearch"
 	frameworkpgvector "trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/pgvector"
 	frameworkqdrant "trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/qdrant"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -32,10 +34,15 @@ type frameworkKnowledgeConfig struct {
 	providers   map[string]config.ModelProviderConfig
 	secrets     credential.SecretResolver
 	httpClient  *http.Client
+	health      *backendhealth.Registry
 }
 
-func (c frameworkKnowledgeConfig) newKnowledge(ctx context.Context, tenantConfig config.TenantConfig, backend config.BackendConfig, llm model.Model) (*agentknowledge.BuiltinKnowledge, error) {
-	store, err := c.newVectorStore(ctx, tenantConfig.TenantID, tenantConfig.AppCode, normalizedKnowledgeBackendConfig(backend), nil)
+func (c frameworkKnowledgeConfig) newKnowledge(ctx context.Context, tenantConfig config.TenantConfig, backend config.BackendConfig, llm model.Model, profileIDs ...string) (*agentknowledge.BuiltinKnowledge, error) {
+	profileID := ""
+	if len(profileIDs) > 0 {
+		profileID = strings.TrimSpace(profileIDs[0])
+	}
+	store, err := c.newVectorStoreWithProfile(ctx, tenantConfig.TenantID, tenantConfig.AppCode, normalizedKnowledgeBackendConfig(backend), profileID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -61,6 +68,10 @@ func (c frameworkKnowledgeConfig) newKnowledge(ctx context.Context, tenantConfig
 }
 
 func (c frameworkKnowledgeConfig) newVectorStore(ctx context.Context, tenantID, appCode string, backend config.BackendConfig, metadata map[string]any) (vectorstore.VectorStore, error) {
+	return c.newVectorStoreWithProfile(ctx, tenantID, appCode, backend, "", metadata)
+}
+
+func (c frameworkKnowledgeConfig) newVectorStoreWithProfile(ctx context.Context, tenantID, appCode string, backend config.BackendConfig, profileID string, metadata map[string]any) (vectorstore.VectorStore, error) {
 	backend = normalizedKnowledgeBackendConfig(backend)
 	var store vectorstore.VectorStore
 	switch backend.Driver {
@@ -116,13 +127,58 @@ func (c frameworkKnowledgeConfig) newVectorStore(ctx context.Context, tenantID, 
 			return nil, fmt.Errorf("construct framework Qdrant store: %w", err)
 		}
 		store = qdrantStore
+	case "elasticsearch":
+		connection, err := c.resolveElasticsearchConfig(ctx, backend.ConnectionRef)
+		if err != nil {
+			return nil, err
+		}
+		options := []frameworkelasticsearch.Option{
+			frameworkelasticsearch.WithAddresses(connection.Addresses),
+			frameworkelasticsearch.WithIndexName(knowledgeVectorNamespace(tenantID, appCode)),
+			frameworkelasticsearch.WithVectorDimension(c.knowledge.EmbeddingDimensions),
+			frameworkelasticsearch.WithMaxResults(100),
+		}
+		if connection.Username != "" {
+			options = append(options, frameworkelasticsearch.WithUsername(connection.Username))
+		}
+		if connection.Password != "" {
+			options = append(options, frameworkelasticsearch.WithPassword(connection.Password))
+		}
+		if connection.APIKey != "" {
+			options = append(options, frameworkelasticsearch.WithAPIKey(connection.APIKey))
+		}
+		if connection.CertificateFingerprint != "" {
+			options = append(options, frameworkelasticsearch.WithCertificateFingerprint(connection.CertificateFingerprint))
+		}
+		elasticsearchStore, err := frameworkelasticsearch.New(options...)
+		if err != nil {
+			return nil, fmt.Errorf("construct framework Elasticsearch store: %w", err)
+		}
+		store = elasticsearchStore
 	default:
 		return nil, fmt.Errorf("unsupported knowledge backend %q", backend.Driver)
 	}
-	scoped, err := newScopedVectorStore(store, tenantID, appCode, metadata)
+	scopedStore, err := newScopedVectorStore(store, tenantID, appCode, metadata)
 	if err != nil {
 		_ = store.Close()
 		return nil, err
+	}
+	var scoped vectorstore.VectorStore = scopedStore
+	profileID = strings.TrimSpace(profileID)
+	if c.health != nil && profileID != "" && backendhealth.ShouldProtect(backend.Driver) {
+		healthKey := backendhealth.Key{ProfileID: profileID, Domain: BackendDomainKnowledge, Driver: backend.Driver}
+		if err := c.health.RegisterProbe(healthKey, func(probeCtx context.Context) error {
+			_, probeErr := scoped.Count(probeCtx)
+			return probeErr
+		}); err != nil {
+			_ = scoped.Close()
+			return nil, err
+		}
+		if err := c.health.Check(ctx, healthKey); err != nil {
+			_ = scoped.Close()
+			return nil, fmt.Errorf("probe Knowledge backend %q: %w", profileID, err)
+		}
+		scoped = observeVectorStore(scoped, c.health, healthKey)
 	}
 	return scoped, nil
 }
@@ -132,6 +188,14 @@ type qdrantKnowledgeConnection struct {
 	Port   int    `json:"port"`
 	APIKey string `json:"api_key,omitempty"`
 	TLS    bool   `json:"tls,omitempty"`
+}
+
+type elasticsearchKnowledgeConnection struct {
+	Addresses              []string `json:"addresses"`
+	Username               string   `json:"username,omitempty"`
+	Password               string   `json:"password,omitempty"`
+	APIKey                 string   `json:"api_key,omitempty"`
+	CertificateFingerprint string   `json:"certificate_fingerprint,omitempty"`
 }
 
 func (c frameworkKnowledgeConfig) resolveQdrantConfig(ctx context.Context, reference string) (qdrantKnowledgeConnection, error) {
@@ -159,7 +223,40 @@ func (c frameworkKnowledgeConfig) resolveQdrantConfig(ctx context.Context, refer
 	return connection, nil
 }
 
+func (c frameworkKnowledgeConfig) resolveElasticsearchConfig(ctx context.Context, reference string) (elasticsearchKnowledgeConnection, error) {
+	if strings.TrimSpace(reference) == "" {
+		return elasticsearchKnowledgeConnection{}, errors.New("Elasticsearch knowledge backend requires connection_ref")
+	}
+	encoded, err := c.secrets.Resolve(ctx, reference)
+	if err != nil {
+		return elasticsearchKnowledgeConnection{}, fmt.Errorf("resolve Elasticsearch knowledge connection: %w", err)
+	}
+	var connection elasticsearchKnowledgeConnection
+	if err := json.Unmarshal([]byte(encoded), &connection); err != nil {
+		return elasticsearchKnowledgeConnection{}, fmt.Errorf("decode Elasticsearch knowledge connection: %w", err)
+	}
+	addresses := make([]string, 0, len(connection.Addresses))
+	for _, address := range connection.Addresses {
+		if address = strings.TrimSpace(address); address != "" {
+			addresses = append(addresses, address)
+		}
+	}
+	if len(addresses) == 0 {
+		return elasticsearchKnowledgeConnection{}, errors.New("Elasticsearch knowledge connection requires at least one address")
+	}
+	connection.Addresses = addresses
+	connection.Username = strings.TrimSpace(connection.Username)
+	connection.Password = strings.TrimSpace(connection.Password)
+	connection.APIKey = strings.TrimSpace(connection.APIKey)
+	connection.CertificateFingerprint = strings.TrimSpace(connection.CertificateFingerprint)
+	return connection, nil
+}
+
 func knowledgeQdrantCollection(tenantID, appCode string) string {
+	return knowledgeVectorNamespace(tenantID, appCode)
+}
+
+func knowledgeVectorNamespace(tenantID, appCode string) string {
 	digest := sha256.Sum256([]byte(tenantID + "\x00" + appCode))
 	return "trpc_knowledge_" + hex.EncodeToString(digest[:12])
 }

@@ -7,8 +7,17 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
+
+type recordingToolExecutionObserver struct {
+	observations []metrics.ToolExecutionAttributes
+}
+
+func (o *recordingToolExecutionObserver) RecordToolExecution(_ context.Context, observation metrics.ToolExecutionAttributes) {
+	o.observations = append(o.observations, observation)
+}
 
 func contextInvocation(budget int) governance.Invocation {
 	return governance.Invocation{
@@ -141,5 +150,30 @@ func TestGovernanceCallbacksAfterToolRecordsOutcome(t *testing.T) {
 	}
 	if len(audit.events) != 2 || audit.events[1].Outcome != governance.ToolOutcomeFailed {
 		t.Fatalf("audit events = %v, want allowed then failed", audit.events)
+	}
+}
+
+func TestGovernanceCallbacksObservePhysicalToolExecution(t *testing.T) {
+	observer := &recordingToolExecutionObserver{}
+	callbacks, err := NewGovernanceCallbacks(
+		governance.NewStaticToolPolicy([]string{"count"}, nil),
+		&recordingAuditSink{},
+		NewMemoryExecutionLedger(),
+		time.Second,
+		observer,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := governance.WithInvocation(context.Background(), contextInvocation(1))
+	before, err := callbacks.BeforeTool[0](ctx, &agenttool.BeforeToolArgs{ToolName: "count", ToolCallID: "call-1", Arguments: []byte(`{"n":1}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := callbacks.AfterTool[0](before.Context, &agenttool.AfterToolArgs{ToolName: "count", ToolCallID: "call-1", Arguments: []byte(`{"n":1}`), Error: errors.New("boom")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(observer.observations) != 1 || observer.observations[0].TenantID != "tenant-a" || observer.observations[0].ToolName != "count" || observer.observations[0].Outcome != "failed" {
+		t.Fatalf("tool observations = %+v", observer.observations)
 	}
 }

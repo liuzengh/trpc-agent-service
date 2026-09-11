@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/dbscope"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	frameworkpostgres "trpc.group/trpc-go/trpc-agent-go/storage/postgres"
 )
@@ -21,8 +22,10 @@ import (
 type frameworkSchemaManaged struct{ table string }
 
 type frameworkPostgresScope struct {
-	component string
-	tenantID  string
+	component          string
+	tenantID           string
+	appName            string
+	enforceTenantScope bool
 }
 
 var installFrameworkPostgresClientOnce sync.Once
@@ -52,6 +55,17 @@ func FrameworkPostgresScope(component, tenantID string) any {
 	return frameworkPostgresScope{component: strings.TrimSpace(component), tenantID: strings.TrimSpace(tenantID)}
 }
 
+// FrameworkTenantPostgresScope marks a framework client that uses the shared
+// platform PostgreSQL database. In addition to observability dimensions, every
+// operation is executed under the trpc_tenant role and one exact app_name RLS
+// scope. External tenant-owned PostgreSQL backends must use FrameworkPostgresScope.
+func FrameworkTenantPostgresScope(component, tenantID, appName string) any {
+	return frameworkPostgresScope{
+		component: strings.TrimSpace(component), tenantID: strings.TrimSpace(tenantID),
+		appName: strings.TrimSpace(appName), enforceTenantScope: true,
+	}
+}
+
 func installFrameworkPostgresClientAdapter() {
 	installFrameworkPostgresClientOnce.Do(func() {
 		fallback := frameworkpostgres.GetClientBuilder()
@@ -71,10 +85,17 @@ func installFrameworkPostgresClientAdapter() {
 			if err != nil {
 				return nil, err
 			}
+			scope, scoped := frameworkClientScope(configured.ExtraOptions)
+			if scoped && scope.enforceTenantScope {
+				if err := validateFrameworkTenantScope(scope); err != nil {
+					_ = client.Close()
+					return nil, err
+				}
+				client = &tenantScopedFrameworkPostgresClient{delegate: client, scope: scope}
+			}
 			frameworkPostgresObserver.RLock()
 			observer := frameworkPostgresObserver.observer
 			frameworkPostgresObserver.RUnlock()
-			scope, scoped := frameworkClientScope(configured.ExtraOptions)
 			if observer == nil || !scoped {
 				return client, nil
 			}
@@ -82,6 +103,60 @@ func installFrameworkPostgresClientAdapter() {
 		})
 	})
 }
+
+func validateFrameworkTenantScope(scope frameworkPostgresScope) error {
+	if scope.component == "" || scope.tenantID == "" || scope.appName == "" {
+		return errors.New("framework PostgreSQL tenant scope requires component, tenant, and application")
+	}
+	if !strings.HasPrefix(scope.appName, scope.tenantID+"/") {
+		return fmt.Errorf("framework PostgreSQL application %q is outside tenant %q", scope.appName, scope.tenantID)
+	}
+	return nil
+}
+
+type tenantScopedFrameworkPostgresClient struct {
+	delegate frameworkpostgres.Client
+	scope    frameworkPostgresScope
+}
+
+func (c *tenantScopedFrameworkPostgresClient) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	var result sql.Result
+	err := c.withTenantTransaction(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = tx.ExecContext(ctx, query, args...)
+		return err
+	})
+	return result, err
+}
+
+func (c *tenantScopedFrameworkPostgresClient) Query(ctx context.Context, handler frameworkpostgres.HandlerFunc, query string, args ...any) error {
+	return c.withTenantTransaction(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		return handler(rows)
+	})
+}
+
+func (c *tenantScopedFrameworkPostgresClient) Transaction(ctx context.Context, fn frameworkpostgres.TxFunc) error {
+	return c.withTenantTransaction(ctx, fn)
+}
+
+func (c *tenantScopedFrameworkPostgresClient) withTenantTransaction(ctx context.Context, fn frameworkpostgres.TxFunc) error {
+	return c.delegate.Transaction(ctx, func(tx *sql.Tx) error {
+		if err := dbscope.ScopeTenantTransaction(ctx, tx, c.scope.tenantID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('app.app_name', $1, true)", c.scope.appName); err != nil {
+			return fmt.Errorf("set framework PostgreSQL application context: %w", err)
+		}
+		return fn(tx)
+	})
+}
+
+func (c *tenantScopedFrameworkPostgresClient) Close() error { return c.delegate.Close() }
 
 func frameworkManagedSchema(options []any) (frameworkSchemaManaged, bool) {
 	for _, option := range options {
@@ -207,3 +282,4 @@ func isFrameworkBootstrapDDL(query, table string) bool {
 
 var _ frameworkpostgres.Client = (*migrationManagedFrameworkClient)(nil)
 var _ frameworkpostgres.Client = (*observedFrameworkPostgresClient)(nil)
+var _ frameworkpostgres.Client = (*tenantScopedFrameworkPostgresClient)(nil)

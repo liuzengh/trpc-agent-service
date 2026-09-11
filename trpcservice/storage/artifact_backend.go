@@ -2,15 +2,21 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 
 	agentartifact "trpc.group/trpc-go/trpc-agent-go/artifact"
 	artifactcos "trpc.group/trpc-go/trpc-agent-go/artifact/cos"
+	artifactinmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
 	artifacts3 "trpc.group/trpc-go/trpc-agent-go/artifact/s3"
 )
 
 const (
+	ArtifactDriverInMemory       = "inmemory"
 	ArtifactDriverPostgres       = "postgres"
 	ArtifactDriverS3             = "s3"
 	ArtifactDriverCOS            = "cos"
@@ -20,19 +26,37 @@ const (
 type artifactDriver struct {
 	name        string
 	needsSecret bool
+	owned       bool
 	open        func(context.Context, string) (agentartifact.Service, error)
+}
+
+type artifactInstance struct {
+	service agentartifact.Service
+	closer  io.Closer
 }
 
 // ArtifactBackends is the registered set of artifact.Service constructors.
 // Official framework backends are registered alongside the platform PostgreSQL
 // adapter, which exists only because the framework has no PostgreSQL artifact module.
 type ArtifactBackends struct {
-	drivers []artifactDriver
-	byName  map[string]artifactDriver
+	drivers   []artifactDriver
+	byName    map[string]artifactDriver
+	mu        sync.Mutex
+	instances map[string]artifactInstance
+	closed    bool
 }
 
+var ErrArtifactBackendsClosed = errors.New("artifact backends are closed")
+
 func newArtifactBackends(postgres *PostgresArtifactService) *ArtifactBackends {
-	backends := &ArtifactBackends{byName: make(map[string]artifactDriver)}
+	backends := &ArtifactBackends{byName: make(map[string]artifactDriver), instances: make(map[string]artifactInstance)}
+	inMemory := artifactinmemory.NewService()
+	backends.register(artifactDriver{
+		name: ArtifactDriverInMemory,
+		open: func(context.Context, string) (agentartifact.Service, error) {
+			return inMemory, nil
+		},
+	})
 	backends.register(artifactDriver{
 		name: ArtifactDriverPostgres,
 		open: func(context.Context, string) (agentartifact.Service, error) {
@@ -45,11 +69,13 @@ func newArtifactBackends(postgres *PostgresArtifactService) *ArtifactBackends {
 	backends.register(artifactDriver{
 		name:        ArtifactDriverS3,
 		needsSecret: true,
+		owned:       true,
 		open:        openOfficialS3ArtifactService,
 	})
 	backends.register(artifactDriver{
 		name:        ArtifactDriverCOS,
 		needsSecret: true,
+		owned:       true,
 		open:        openOfficialCOSArtifactService,
 	})
 	return backends
@@ -68,26 +94,95 @@ func (b *ArtifactBackends) DriverNames() []string {
 	return names
 }
 
-func (b *ArtifactBackends) Open(ctx context.Context, driver, connection string) (agentartifact.Service, error) {
+func (b *ArtifactBackends) Open(ctx context.Context, instanceKey, driver, connection string) (agentartifact.Service, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	instanceKey = strings.TrimSpace(instanceKey)
+	if instanceKey == "" {
+		return nil, errors.New("artifact backend instance key is required")
 	}
 	name := strings.TrimSpace(driver)
 	if name == "" {
 		name = ArtifactDriverPostgres
 	}
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, ErrArtifactBackendsClosed
+	}
 	registered, ok := b.byName[name]
+	b.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("unsupported artifact driver %q", name)
 	}
 	if registered.needsSecret && strings.TrimSpace(connection) == "" {
 		return nil, fmt.Errorf("artifact driver %q requires connection_ref", name)
 	}
+	fingerprint := sha256.Sum256([]byte(name + "\x00" + connection))
+	cacheKey := fmt.Sprintf("%s\x00%x", instanceKey, fingerprint)
+	b.mu.Lock()
+	if cached, ok := b.instances[cacheKey]; ok {
+		b.mu.Unlock()
+		return cached.service, nil
+	}
+	if b.closed {
+		b.mu.Unlock()
+		return nil, ErrArtifactBackendsClosed
+	}
+	b.mu.Unlock()
+
 	service, err := registered.open(ctx, connection)
 	if err != nil {
 		return nil, err
 	}
-	return validatingArtifactService{Service: service}, nil
+	wrapped := validatingArtifactService{Service: service}
+	instance := artifactInstance{service: wrapped}
+	if registered.owned {
+		instance.closer, _ = service.(io.Closer)
+	}
+
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		if instance.closer != nil {
+			_ = instance.closer.Close()
+		}
+		return nil, ErrArtifactBackendsClosed
+	}
+	if cached, ok := b.instances[cacheKey]; ok {
+		b.mu.Unlock()
+		if instance.closer != nil {
+			_ = instance.closer.Close()
+		}
+		return cached.service, nil
+	}
+	b.instances[cacheKey] = instance
+	b.mu.Unlock()
+	return wrapped, nil
+}
+
+func (b *ArtifactBackends) Close() error {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil
+	}
+	b.closed = true
+	instances := b.instances
+	b.instances = nil
+	b.mu.Unlock()
+
+	var result error
+	for _, instance := range instances {
+		if instance.closer != nil {
+			result = errors.Join(result, instance.closer.Close())
+		}
+	}
+	return result
 }
 
 type validatingArtifactService struct {

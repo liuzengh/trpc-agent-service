@@ -363,21 +363,12 @@ try {
     if (tab === 'chat') {
       assert.equal(await page.locator('.bot-rail').count(), 0, 'chat must not duplicate the global robot switcher')
     }
-    if (tab === 'account') {
-      await page.getByRole('combobox', { name: '当前机器人' }).click()
-      await page.getByRole('option', { name: 'sales', exact: true }).click()
-      await page.locator('.account-connection-target strong').getByText('sales', { exact: true }).waitFor()
-      assert.equal(await page.locator('.account-connection-target strong').getByText('support', { exact: true }).count(), 0)
-      await page.getByRole('combobox', { name: '当前机器人' }).click()
-      await page.getByRole('option', { name: 'support', exact: true }).click()
-      await page.locator('.account-connection-target strong').getByText('support', { exact: true }).first().waitFor()
-    }
     if (tab === 'executions') {
-      await page.locator('.execution-summary-card').first().waitFor()
+      await page.locator('.execution-summary-item').first().waitFor()
       assert.equal(await page.getByText('Agent Trace', { exact: true }).count(), 0)
       assert.equal(await page.getByText('可靠性状态', { exact: true }).count(), 0)
       assert.equal(await page.getByText('这次回复已完成', { exact: false }).count(), 0)
-      assert.equal(await page.locator('.execution-summary-card').count(), 4, 'execution page should use four summary cards')
+      assert.equal(await page.locator('.execution-summary-item').count(), 4, 'execution page should use four summary items')
       assert.equal(await page.getByRole('searchbox', { name: '搜索执行记录' }).count(), 1, 'execution list should expose one real search control')
       assert.equal(await page.locator('.execution-detail-card').count(), 3, 'execution detail should use the shared three-card layout')
       assert.equal(await page.getByText(claim.message_id, { exact: true }).count() > 0, true)
@@ -411,21 +402,18 @@ try {
       assert.match(executionFilterStyle.activeBackground, /rgba\(0, 0, 0, 0\)|transparent/)
       assert.ok(executionFilterStyle.activeBoxShadow === 'none' || executionFilterStyle.activeBoxShadow === '')
       const executionDetailGeometry = await page.evaluate(() => {
-        const primary = [...document.querySelectorAll('.execution-primary-facts > div')]
-        const channel = primary.find((element) => element.querySelector('dt')?.textContent === '渠道')?.getBoundingClientRect()
-        const status = primary.find((element) => element.querySelector('dt')?.textContent === '状态')?.getBoundingClientRect()
-        const facts = [...document.querySelectorAll('.execution-facts > div')]
-        const message = facts.find((element) => element.querySelector('dt')?.textContent === '消息')?.getBoundingClientRect()
-        const steps = facts.find((element) => element.querySelector('dt')?.textContent === '步骤')?.getBoundingClientRect()
+        const status = document.querySelector('.execution-overview-status')?.getBoundingClientRect()
+        const facts = document.querySelector('.execution-overview-facts')?.getBoundingClientRect()
         return {
-          statusToRight: Boolean(channel && status && status.x > channel.x),
-          messageBeforeSteps: Boolean(message && steps && message.top < steps.top),
+          statusBeforeFacts: Boolean(status && facts && status.top < facts.top),
+          factLabels: [...document.querySelectorAll('.execution-overview-facts dt')].map((entry) => entry.textContent?.trim()),
         }
       })
-      assert.equal(executionDetailGeometry.statusToRight, true, 'execution status should sit on the right of the primary facts')
-      assert.equal(executionDetailGeometry.messageBeforeSteps, true, 'message should appear before steps in execution details')
+      assert.equal(executionDetailGeometry.statusBeforeFacts, true, 'execution status and channel should precede the compact fact row')
+      assert.deepEqual(executionDetailGeometry.factLabels, ['耗时', '步骤', '发送'])
       await page.getByRole('combobox', { name: '当前机器人' }).click()
       await page.getByRole('option', { name: 'sales', exact: true }).click()
+      await page.locator('.execution-technical summary').click()
       await page.getByText(salesClaim.message_id, { exact: true }).waitFor()
       assert.equal(await page.getByText(claim.message_id, { exact: true }).count(), 0, 'execution list must follow the selected robot')
     }
@@ -437,8 +425,8 @@ try {
       assert.equal(await page.getByRole('combobox', { name: '当前机器人' }).count(), 1, 'knowledge page must not render a second robot selector')
     }
     if (tab === 'account') {
-      assert.equal(await page.getByText('账号', { exact: true }).count(), 1)
-      assert.equal(await page.getByText('登录身份', { exact: true }).count(), 1)
+      assert.equal(await page.getByRole('heading', { name: '账号', exact: true }).count(), 1)
+      assert.equal(await page.getByRole('heading', { name: '登录身份', exact: true }).count(), 1)
       assert.equal(await page.getByText('普通账号', { exact: true }).count(), 1)
       assert.equal(await page.getByText('企业 SSO', { exact: true }).count() >= 1, true)
       assert.equal(await page.getByRole('combobox', { name: '当前机器人' }).count(), 0, 'account settings must not be app-scoped')
@@ -449,14 +437,8 @@ try {
       assert.equal(accountDisplayName, '平台管理员')
     }
     if (tab === 'data') {
-      assert.equal(await page.locator('.data-view-tabs').count(), 1, 'platform data should keep only the data-view control in its local toolbar')
+      assert.equal(await page.locator('.data-view-tabs').count(), 0, 'knowledge page must not retain the old knowledge/preference local switcher')
       assert.equal(await page.locator('.data-panel-card').count(), 1, 'knowledge should use the shared data panel surface')
-      assert.equal(await page.locator('.data-panel-card').getByText('知识文档', { exact: true }).count(), 1)
-      await page.getByRole('tab', { name: '用户偏好', exact: true }).click()
-      assert.equal(await page.getByText('用户偏好', { exact: true }).count() >= 1, true)
-      assert.equal(await page.locator('.data-panel-card .memory-filter-surface').count(), 1)
-      assert.equal(await page.locator('.data-empty-state').count(), 1)
-      await page.getByRole('tab', { name: '知识文档', exact: true }).click()
       assert.equal(await page.locator('.data-panel-card').getByText('知识文档', { exact: true }).count(), 1)
     }
     if (tab === 'system') {

@@ -44,6 +44,87 @@ func (r *PostgresRepository) beginTenantTransaction(ctx context.Context, tenantI
 	return dbscope.BeginTenantTransaction(ctx, r.database, tenantID)
 }
 
+func syncChannelBindings(ctx context.Context, tx *sql.Tx, tenantConfig config.TenantConfig) error {
+	rows, err := tx.QueryContext(ctx, `
+SELECT channel_type, external_binding_id
+FROM channel_bindings
+WHERE tenant_id=$1 AND app_code=$2
+FOR UPDATE`, tenantConfig.TenantID, tenantConfig.AppCode)
+	if err != nil {
+		return fmt.Errorf("list existing channel bindings for %q: %w", tenantConfig.AppName(), err)
+	}
+	existing := make(map[string][2]string)
+	for rows.Next() {
+		var channelType, bindingID string
+		if err := rows.Scan(&channelType, &bindingID); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan existing channel binding for %q: %w", tenantConfig.AppName(), err)
+		}
+		existing[channelType+"\x00"+bindingID] = [2]string{channelType, bindingID}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close existing channel bindings for %q: %w", tenantConfig.AppName(), err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list existing channel bindings for %q: %w", tenantConfig.AppName(), err)
+	}
+
+	desired := make(map[string]struct{}, len(tenantConfig.Channels))
+	for _, binding := range tenantConfig.Channels {
+		key := binding.Type + "\x00" + binding.BindingID
+		desired[key] = struct{}{}
+		allowlistJSON, err := marshalChannelAllowlist(binding.Allowlist)
+		if err != nil {
+			return fmt.Errorf("encode channel allowlist %q: %w", binding.BindingID, err)
+		}
+		result, err := tx.ExecContext(ctx, `
+UPDATE channel_bindings
+SET trusted_enterprise_id=$5, access_policy=$6, allowlist=$7::jsonb, updated_at=NOW()
+WHERE channel_type=$1 AND external_binding_id=$2 AND tenant_id=$3 AND app_code=$4`,
+			binding.Type, binding.BindingID, tenantConfig.TenantID, tenantConfig.AppCode,
+			binding.TrustedEnterpriseID, binding.EffectiveAccessPolicy(), string(allowlistJSON))
+		if err != nil {
+			return fmt.Errorf("update channel binding %q for %q: %w", binding.BindingID, tenantConfig.AppName(), err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect channel binding update %q for %q: %w", binding.BindingID, tenantConfig.AppName(), err)
+		}
+		if affected > 0 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO channel_bindings (channel_type, external_binding_id, tenant_id, app_code, trusted_enterprise_id, access_policy, allowlist)
+VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+			binding.Type, binding.BindingID, tenantConfig.TenantID, tenantConfig.AppCode,
+			binding.TrustedEnterpriseID, binding.EffectiveAccessPolicy(), string(allowlistJSON)); err != nil {
+			var postgresError *pgconn.PgError
+			if errors.As(err, &postgresError) && postgresError.Code == "23505" {
+				return fmt.Errorf("%w: binding=%q", ErrBindingConflict, binding.Type+"/"+binding.BindingID)
+			}
+			return fmt.Errorf("insert channel binding %q for %q: %w", binding.BindingID, tenantConfig.AppName(), err)
+		}
+	}
+
+	for key, binding := range existing {
+		if _, keep := desired[key]; keep {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+DELETE FROM channel_identities
+WHERE tenant_id=$1 AND channel_type=$2 AND binding_id=$3`, tenantConfig.TenantID, binding[0], binding[1]); err != nil {
+			return fmt.Errorf("remove channel identities for stale binding %q in %q: %w", binding[1], tenantConfig.AppName(), err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+DELETE FROM channel_bindings
+WHERE channel_type=$1 AND external_binding_id=$2 AND tenant_id=$3 AND app_code=$4`,
+			binding[0], binding[1], tenantConfig.TenantID, tenantConfig.AppCode); err != nil {
+			return fmt.Errorf("remove stale channel binding %q for %q: %w", binding[1], tenantConfig.AppName(), err)
+		}
+	}
+	return nil
+}
+
 // Publish atomically activates a new immutable configuration version for one
 // tenant application. The same validation, checksum, and binding-conflict
 // rules as MemoryRepository apply, but every effect is committed to PostgreSQL
@@ -140,26 +221,8 @@ ON CONFLICT (tenant_id, app_code, version) DO NOTHING`,
 		tenantConfig.TenantID, tenantConfig.AppCode, tenantConfig.ConfigVersion, string(configJSON), snapshot.Checksum, snapshot.PublishedAt); err != nil {
 		return Snapshot{}, fmt.Errorf("insert application config %q: %w", tenantConfig.AppName(), err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-DELETE FROM channel_bindings WHERE tenant_id = $1 AND app_code = $2`,
-		tenantConfig.TenantID, tenantConfig.AppCode); err != nil {
-		return Snapshot{}, fmt.Errorf("reset channel bindings for %q: %w", tenantConfig.AppName(), err)
-	}
-	for _, binding := range tenantConfig.Channels {
-		allowlistJSON, err := marshalChannelAllowlist(binding.Allowlist)
-		if err != nil {
-			return Snapshot{}, fmt.Errorf("encode channel allowlist %q: %w", binding.BindingID, err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO channel_bindings (channel_type, external_binding_id, tenant_id, app_code, trusted_enterprise_id, access_policy, allowlist)
-VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-			binding.Type, binding.BindingID, tenantConfig.TenantID, tenantConfig.AppCode, binding.TrustedEnterpriseID, binding.EffectiveAccessPolicy(), string(allowlistJSON)); err != nil {
-			var postgresError *pgconn.PgError
-			if errors.As(err, &postgresError) && postgresError.Code == "23505" {
-				return Snapshot{}, fmt.Errorf("%w: binding=%q", ErrBindingConflict, binding.Type+"/"+binding.BindingID)
-			}
-			return Snapshot{}, fmt.Errorf("insert channel binding %q for %q: %w", binding.BindingID, tenantConfig.AppName(), err)
-		}
+	if err := syncChannelBindings(ctx, tx, tenantConfig); err != nil {
+		return Snapshot{}, err
 	}
 	keys := []string{activeCacheKey(tenantConfig.TenantID, tenantConfig.AppCode)}
 	keys = append(keys, bindingCacheKeys(tenantConfig)...)
@@ -673,19 +736,8 @@ UPDATE applications SET status=$3, active_config_version=$4, candidate_config_ve
 WHERE tenant_id=$1 AND app_code=$2`, tenantID, appCode, candidate.Config.Status, candidate.Config.ConfigVersion); err != nil {
 		return Snapshot{}, fmt.Errorf("promote candidate version: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_bindings WHERE tenant_id=$1 AND app_code=$2`, tenantID, appCode); err != nil {
-		return Snapshot{}, fmt.Errorf("reset channel bindings during promotion: %w", err)
-	}
-	for _, binding := range candidate.Config.Channels {
-		allowlistJSON, err := marshalChannelAllowlist(binding.Allowlist)
-		if err != nil {
-			return Snapshot{}, fmt.Errorf("encode channel allowlist %q: %w", binding.BindingID, err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO channel_bindings (channel_type, external_binding_id, tenant_id, app_code, trusted_enterprise_id, access_policy, allowlist)
-VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`, binding.Type, binding.BindingID, tenantID, appCode, binding.TrustedEnterpriseID, binding.EffectiveAccessPolicy(), string(allowlistJSON)); err != nil {
-			return Snapshot{}, fmt.Errorf("restore channel binding during promotion: %w", err)
-		}
+	if err := syncChannelBindings(ctx, tx, candidate.Config); err != nil {
+		return Snapshot{}, fmt.Errorf("sync channel bindings during promotion: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM application_rollouts WHERE tenant_id=$1 AND app_code=$2`, tenantID, appCode); err != nil {
 		return Snapshot{}, fmt.Errorf("clear promoted rollout: %w", err)

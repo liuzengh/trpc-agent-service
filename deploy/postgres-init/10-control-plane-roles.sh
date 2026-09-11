@@ -8,6 +8,7 @@ psql --set=ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB
   --set=database="${POSTGRES_DB}" \
   --set=platform_user="${PLATFORM_DB_USER}" \
   --set=platform_password="${PLATFORM_DB_PASSWORD}" <<'SQL'
+CREATE EXTENSION IF NOT EXISTS vector;
 CREATE ROLE :"platform_user" LOGIN BYPASSRLS PASSWORD :'platform_password';
 CREATE ROLE trpc_tenant NOLOGIN NOBYPASSRLS;
 GRANT trpc_tenant TO :"platform_user";

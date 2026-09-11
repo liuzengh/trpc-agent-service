@@ -49,12 +49,12 @@ func (h *channelControlHandler) reconcileApprovals(ctx context.Context) error {
 			ConversationID: approval.ConversationID, ConversationScope: channels.ConversationScope(approval.ConversationScope),
 			ProviderReplyToken: approval.ProviderReplyToken,
 		}
-		if progressID := strings.TrimSpace(approval.ProgressMessageID); progressID != "" {
+		if progressID := strings.TrimSpace(approval.ProgressMessageID); progressID != "" && strings.TrimSpace(approval.ProviderReplyToken) != "" {
 			if updater, ok := sender.(channels.ProgressCardSender); ok {
 				if err := updater.UpdateProgressCard(ctx, target, progressID, card); err != nil {
 					return fmt.Errorf("update approval progress message: %w", err)
 				}
-				if err := h.approvals.MarkNotified(ctx, approval.Token, progressID); err != nil {
+				if err := h.approvals.MarkNotified(ctx, approval, progressID); err != nil {
 					return fmt.Errorf("mark approval card notified: %w", err)
 				}
 				continue
@@ -64,7 +64,7 @@ func (h *channelControlHandler) reconcileApprovals(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("send approval card: %w", err)
 		}
-		if err := h.approvals.MarkNotified(ctx, approval.Token, receipt.ExternalMessageID); err != nil {
+		if err := h.approvals.MarkNotified(ctx, approval, receipt.ExternalMessageID); err != nil {
 			return fmt.Errorf("mark approval card notified: %w", err)
 		}
 	}
@@ -97,12 +97,12 @@ func (h *channelControlHandler) handle(ctx context.Context, snapshot tenant.Snap
 	command := strings.ToLower(strings.SplitN(fields[0], "@", 2)[0])
 	switch command {
 	case "/help":
-		return true, h.sendReply(ctx, snapshot, bindingID, inbound, "可用指令：/new 开启新会话。")
+		return true, h.sendReply(ctx, snapshot, bindingID, inbound, "直接发送消息即可与机器人对话。\n\n/new 开启新会话，清空当前会话上下文。\n/help 查看帮助。")
 	case "/start":
 		if inbound.Channel != channels.Telegram {
 			return false, nil
 		}
-		return true, h.sendReply(ctx, snapshot, bindingID, inbound, "机器人已就绪。")
+		return true, h.sendReply(ctx, snapshot, bindingID, inbound, "机器人已就绪，直接发送消息即可开始对话。\n\n/new 开启新会话。\n/help 查看帮助。")
 	default:
 		return false, nil
 	}

@@ -2,7 +2,6 @@ package identity
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
@@ -142,44 +141,58 @@ func TestMemoryIdentityStoreMemberPagesAndCandidates(t *testing.T) {
 	}
 }
 
-func TestMemoryIdentityStoreRejectsChannelIdentityTakeover(t *testing.T) {
+func TestMemoryIdentityStoreResolvesTrustedWeComLoginAcrossBindings(t *testing.T) {
 	store := NewMemoryIdentityStore()
 	ctx := context.Background()
-	registerTestWeComProvider(t, store, "org-trailforge", "wecom-trailforge", "corp-trailforge")
-	first, _ := store.ResolveLoginIdentity(ctx, testWeComIdentity("org-trailforge", "wecom-trailforge", "corp-trailforge", "ming"))
-	second, _ := store.ResolveLoginIdentity(ctx, testWeComIdentity("org-trailforge", "wecom-trailforge", "corp-trailforge", "other"))
-	link := ChannelIdentity{TenantID: "trailforge", Channel: channels.Telegram, BindingID: "tg-main", ExternalUserID: "42", PlatformUserID: first.PlatformUserID}
-	if err := store.LinkChannelIdentity(ctx, link); err != nil {
-		t.Fatal(err)
-	}
-	link.PlatformUserID = second.PlatformUserID
-	if err := store.LinkChannelIdentity(ctx, link); !errors.Is(err, ErrChannelIdentityConflict) {
-		t.Fatalf("takeover error = %v, want conflict", err)
-	}
-}
-
-func TestMemoryIdentityStoreSharesTrustedWeComIdentityAcrossBindings(t *testing.T) {
-	store := NewMemoryIdentityStore()
-	ctx := context.Background()
-	registerTestWeComProvider(t, store, "org-trailforge", "wecom-trailforge", "corp-trailforge")
-	user, err := store.ResolveLoginIdentity(ctx, testWeComIdentity("org-trailforge", "wecom-trailforge", "corp-trailforge", "ming"))
+	registerTestWeComProvider(t, store, "org-support", "wecom-support", "corp-support")
+	user, err := store.ResolveLoginIdentity(ctx, testWeComIdentity("org-support", "wecom-support", "corp-support", "customer-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertTenant(ctx, "trailforge", "TrailForge"); err != nil {
+	if err := store.UpsertTenant(ctx, "support", "客服业务"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.GrantMembership(ctx, "trailforge", user.PlatformUserID, RoleMember); err != nil {
+	if err := store.GrantMembership(ctx, "support", user.PlatformUserID, RoleMember); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.LinkChannelIdentity(ctx, ChannelIdentity{
-		TenantID: "trailforge", Channel: channels.WeCom, BindingID: "wecom-support", ExternalUserID: "ming",
-		PlatformUserID: user.PlatformUserID, TrustedEnterpriseID: "corp-trailforge",
-	}); err != nil {
-		t.Fatal(err)
+	first, ok, err := store.ResolveChannelIdentity(ctx, "support", channels.WeCom, "wecom-a", "customer-1", "corp-support")
+	if err != nil || !ok || first.PlatformUserID != user.PlatformUserID {
+		t.Fatalf("first trusted WeCom identity = %+v, %v, %v", first, ok, err)
 	}
-	resolved, ok, err := store.ResolveChannelIdentity(ctx, "trailforge", channels.WeCom, "wecom-sales", "ming", "corp-trailforge")
-	if err != nil || !ok || resolved.PlatformUserID != user.PlatformUserID || resolved.BindingID != "wecom-sales" {
+	resolved, ok, err := store.ResolveChannelIdentity(ctx, "support", channels.WeCom, "wecom-b", "customer-1", "corp-support")
+	if err != nil || !ok || resolved.PlatformUserID != user.PlatformUserID || resolved.BindingID != "wecom-b" {
 		t.Fatalf("cross-binding WeCom identity = %+v, %v, %v", resolved, ok, err)
+	}
+}
+
+func TestMemoryIdentityStoreResolvesTrustedFeishuLoginAcrossBindings(t *testing.T) {
+	store := NewMemoryIdentityStore()
+	ctx := context.Background()
+	const boundary = "tenant-key-support"
+	if err := store.UpsertLoginProvider(ctx, ProviderDescriptor{
+		ProviderID: "feishu-support", Type: ProviderFeishu, DisplayName: "飞书登录",
+	}, boundary); err != nil {
+		t.Fatal(err)
+	}
+	user, err := store.ResolveLoginIdentity(ctx, Identity{
+		ProviderID: "feishu-support", ProviderType: ProviderFeishu, EnterpriseID: boundary,
+		SubjectID: "ou_customer_1", DisplayName: "客服成员",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTenant(ctx, "support", "客服业务"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.GrantMembership(ctx, "support", user.PlatformUserID, RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	first, linked, err := store.ResolveChannelIdentity(ctx, "support", channels.Feishu, "feishu-a", "ou_customer_1", boundary)
+	if err != nil || !linked || first.PlatformUserID != user.PlatformUserID || first.TrustedEnterpriseID != boundary {
+		t.Fatalf("first trusted Feishu identity = %+v, linked=%v, %v", first, linked, err)
+	}
+	second, linked, err := store.ResolveChannelIdentity(ctx, "support", channels.Feishu, "feishu-b", "ou_customer_1", boundary)
+	if err != nil || !linked || second.PlatformUserID != user.PlatformUserID || second.BindingID != "feishu-b" {
+		t.Fatalf("cross-binding Feishu identity = %+v, linked=%v, %v", second, linked, err)
 	}
 }

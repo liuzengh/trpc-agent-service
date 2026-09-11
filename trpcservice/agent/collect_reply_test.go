@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	agenttrace "trpc.group/trpc-go/trpc-agent-go/agent/trace"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -136,24 +137,24 @@ func TestCollectReplyDrainsRemainingEventsAfterCompletion(t *testing.T) {
 	}
 }
 
-func TestCollectReplyPreservesCachedPromptUsage(t *testing.T) {
+func TestCollectReplyUsesFrameworkExecutionTraceUsage(t *testing.T) {
 	t.Parallel()
 	events := make(chan *event.Event, 2)
-	response := responseEvent(false, model.ObjectTypeChatCompletion, "done", "")
-	response.Response.Usage = &model.Usage{
+	events <- responseEvent(false, model.ObjectTypeChatCompletion, "done", "")
+	completion := responseEvent(true, model.ObjectTypeRunnerCompletion, "", "")
+	completion.ExecutionTrace = &agenttrace.Trace{Usage: &model.Usage{
 		PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120,
 		PromptTokensDetails: model.PromptTokensDetails{CachedTokens: 70, CacheReadTokens: 60},
-	}
-	events <- response
-	events <- responseEvent(true, model.ObjectTypeRunnerCompletion, "", "")
+	}}
+	events <- completion
 	close(events)
 
 	outcome := collectRun(context.Background(), events, nil)
 	if outcome.err != nil {
 		t.Fatal(outcome.err)
 	}
-	if outcome.usage.promptTokens != 100 || outcome.usage.cachedPromptTokens != 70 {
-		t.Fatalf("usage = %#v, want 100 prompt / 70 cached", outcome.usage)
+	if outcome.trace == nil || outcome.trace.Usage == nil || outcome.trace.Usage.PromptTokens != 100 {
+		t.Fatalf("framework trace usage = %#v", outcome.trace)
 	}
 }
 

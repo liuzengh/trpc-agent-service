@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useState } from 'react'
 import { generateUUID } from './api'
+import type { InteractiveCard } from './types'
 
 export interface ChatMessage {
   id: string
@@ -7,12 +8,41 @@ export interface ChatMessage {
   content: string
   time: string
   attachments?: ChatAttachment[]
+  card?: InteractiveCard
 }
 
 export interface ChatAttachment {
   name: string
-  size: number
-  type: string
+  size?: number
+  type?: string
+}
+
+export function visibleUserMessage(content: string, attachments?: ChatAttachment[]) {
+  if (attachments?.length) return { content, attachments }
+  const marker = '附件「'
+  const first = content.indexOf(marker)
+  if (first < 0 || (first > 0 && !content.slice(0, first).endsWith('\n\n'))) {
+    return { content, attachments }
+  }
+  const visibleContent = content.slice(0, first).trim()
+  let rest = content.slice(first)
+  const restored: ChatAttachment[] = []
+  while (rest.startsWith(marker)) {
+    const suffix = '」内容：\n'
+    const nameEndRelative = rest.slice(marker.length).indexOf(suffix)
+    if (nameEndRelative < 0) break
+    const nameEnd = marker.length + nameEndRelative
+    const name = rest.slice(marker.length, nameEnd).trim()
+    if (!name) break
+    restored.push({ name })
+    const bodyStart = nameEnd + suffix.length
+    const next = rest.slice(bodyStart).indexOf(`\n\n${marker}`)
+    if (next < 0) break
+    rest = rest.slice(bodyStart + next + 2)
+  }
+  return restored.length > 0
+    ? { content: visibleContent, attachments: restored }
+    : { content, attachments }
 }
 
 export interface ChatThread {
@@ -70,14 +100,14 @@ export function formatChatListTime(value: number): string {
   return date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
 }
 
-export function threadFromSession(session: { SessionKey: string; Preview?: string; Summary?: string; UpdatedAt: string }): ChatThread {
+export function threadFromSession(session: { SessionKey: string; preview?: string; summary?: string; UpdatedAt: string }): ChatThread {
   const updatedAt = Date.parse(session.UpdatedAt)
   const stamp = Number.isNaN(updatedAt) ? Date.now() : updatedAt
   return {
     id: session.SessionKey,
     conversationId: conversationIdFromSessionKey(session.SessionKey),
     sessionKey: session.SessionKey,
-    preview: session.Preview?.trim() || session.Summary?.trim() || '',
+    preview: session.preview?.trim() || session.summary?.trim() || '',
     createdAt: stamp,
     updatedAt: stamp,
     pending: false,
@@ -85,13 +115,20 @@ export function threadFromSession(session: { SessionKey: string; Preview?: strin
   }
 }
 
-export function messagesFromTranscript(messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; time: string }>): ChatMessage[] {
-  return messages.map((message) => ({
-    id: message.id,
-    role: message.role,
-    content: message.content,
-    time: formatChatClock(message.time),
-  }))
+export function messagesFromTranscript(messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; time: string; attachments?: ChatAttachment[]; card?: InteractiveCard }>): ChatMessage[] {
+  return messages.map((message) => {
+    const visible = message.role === 'user'
+      ? visibleUserMessage(message.content, message.attachments)
+      : { content: message.content, attachments: message.attachments }
+    return {
+      id: message.id,
+      role: message.role,
+      content: visible.content,
+      time: formatChatClock(message.time),
+      attachments: visible.attachments,
+      card: message.card,
+    }
+  })
 }
 
 export function mergeChatThreads(local: ChatThread[], remote: ChatThread[]): ChatThread[] {

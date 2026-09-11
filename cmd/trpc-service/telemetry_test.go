@@ -254,3 +254,24 @@ func TestMountPrometheusKeepsMetricsOutsideApplicationHandler(t *testing.T) {
 		t.Fatalf("application route status=%d applicationCalls=%d", appRecorder.Code, applicationCalls)
 	}
 }
+
+func TestOTLPEndpointNormalizesSupportedForms(t *testing.T) {
+	tests := []struct {
+		raw      string
+		host     string
+		insecure bool
+	}{
+		{raw: "collector.example.test:4318", host: "collector.example.test:4318", insecure: true},
+		{raw: "http://collector.example.test:4318", host: "collector.example.test:4318", insecure: true},
+		{raw: "https://collector.example.test:4318", host: "collector.example.test:4318", insecure: false},
+	}
+	for _, test := range tests {
+		host, insecure, err := otlpEndpoint(test.raw)
+		if err != nil {
+			t.Fatalf("otlpEndpoint(%q) error = %v", test.raw, err)
+		}
+		if host != test.host || insecure != test.insecure {
+			t.Fatalf("otlpEndpoint(%q) = %q, %v", test.raw, host, insecure)
+		}
+	}
+}

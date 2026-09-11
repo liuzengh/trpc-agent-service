@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	"go.opentelemetry.io/otel/propagation"
 )
@@ -172,6 +173,7 @@ type Worker struct {
 	maxAttempts  int
 	retry        *Delivery
 	retryTracker storage.RetryTracker
+	dlqObserver  metrics.DeadLetterObserver
 
 	lifecycleMu sync.Mutex
 	draining    bool
@@ -186,7 +188,7 @@ func NewWorker(consumer Consumer, processor Processor, maxAttempts int) (*Worker
 }
 
 // NewWorkerWithRetryTracker constructs a Worker with durable retry accounting.
-func NewWorkerWithRetryTracker(consumer Consumer, processor Processor, maxAttempts int, tracker storage.RetryTracker) (*Worker, error) {
+func NewWorkerWithRetryTracker(consumer Consumer, processor Processor, maxAttempts int, tracker storage.RetryTracker, observers ...metrics.DeadLetterObserver) (*Worker, error) {
 	if consumer == nil {
 		return nil, fmt.Errorf("Kafka consumer is required")
 	}
@@ -199,9 +201,17 @@ func NewWorkerWithRetryTracker(consumer Consumer, processor Processor, maxAttemp
 	if tracker == nil {
 		return nil, fmt.Errorf("retry tracker is required")
 	}
+	var observer metrics.DeadLetterObserver
+	for _, candidate := range observers {
+		if candidate != nil {
+			observer = candidate
+			break
+		}
+	}
 	return &Worker{
 		consumer: consumer, processor: processor, maxAttempts: maxAttempts, retryTracker: tracker,
-		drainDone: make(chan struct{}),
+		dlqObserver: observer,
+		drainDone:   make(chan struct{}),
 	}, nil
 }
 
@@ -298,6 +308,15 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	}
 	if err := w.processor.Process(ctx, delivery.Envelope); err != nil {
 		if IsRetryable(err) {
+			if !retryConsumesAttempt(err) {
+				slog.Info("deferred Kafka processing conflict",
+					"tenant_id", delivery.Envelope.TenantID,
+					"session_key", delivery.Envelope.SessionKey,
+					"event_id", delivery.Envelope.EventID,
+					"error", err)
+				w.retry = &delivery
+				return fmt.Errorf("%w: %v", ErrRetryScheduled, err)
+			}
 			attempt, trackErr := w.retryTracker.Increment(ctx, delivery.Envelope.TenantID, delivery.Envelope.SessionKey, delivery.Envelope.EventID)
 			if trackErr != nil {
 				return fmt.Errorf("persist retry attempt: %w", trackErr)
@@ -346,6 +365,11 @@ func (w *Worker) finishWithDLQ(ctx context.Context, delivery Delivery, class str
 	if err := w.consumer.Commit(ctx, delivery); err != nil {
 		return fmt.Errorf("commit Kafka delivery after DLQ: %w", err)
 	}
+	if w.dlqObserver != nil {
+		w.dlqObserver.RecordDeadLetter(ctx, metrics.DeadLetterAttributes{
+			TenantID: delivery.Envelope.TenantID, ErrorClass: class,
+		})
+	}
 	w.retry = nil
 	_ = w.retryTracker.Clear(ctx, delivery.Envelope.TenantID, delivery.Envelope.SessionKey, delivery.Envelope.EventID)
 	return nil
@@ -353,15 +377,30 @@ func (w *Worker) finishWithDLQ(ctx context.Context, delivery Delivery, class str
 
 type classifiedError struct {
 	error
-	retryable bool
+	retryable      bool
+	consumeAttempt bool
 }
+
+func (e classifiedError) Unwrap() error { return e.error }
 
 // Retryable classifies an error as safe for bounded retry.
 func Retryable(err error) error {
 	if err == nil {
 		return nil
 	}
-	return classifiedError{error: err, retryable: true}
+	return classifiedError{error: err, retryable: true, consumeAttempt: true}
+}
+
+// Deferred classifies a retryable coordination conflict that should keep the
+// Kafka record uncommitted and use the ordinary retry backoff without burning
+// the delivery's bounded failure budget. Typical examples are another node
+// still owning a live idempotency/execution claim; the claim TTL supplies the
+// eventual takeover bound.
+func Deferred(err error) error {
+	if err == nil {
+		return nil
+	}
+	return classifiedError{error: err, retryable: true, consumeAttempt: false}
 }
 
 // Permanent classifies an error as non-retryable.
@@ -378,6 +417,14 @@ func IsRetryable(err error) bool {
 	var classified classifiedError
 	if errors.As(err, &classified) {
 		return classified.retryable
+	}
+	return false
+}
+
+func retryConsumesAttempt(err error) bool {
+	var classified classifiedError
+	if errors.As(err, &classified) {
+		return classified.retryable && classified.consumeAttempt
 	}
 	return false
 }

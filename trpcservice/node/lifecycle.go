@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/safego"
 )
 
 var (
@@ -142,7 +143,11 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 		cancel()
 		return err
 	}
-	go l.run(runCtx)
+	go func() {
+		if panicErr := safego.Run("node lifecycle heartbeat", func() { l.run(runCtx) }); panicErr != nil {
+			l.registered.Store(false)
+		}
+	}()
 	return nil
 }
 

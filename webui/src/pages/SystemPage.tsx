@@ -6,11 +6,10 @@ import { LoadingState } from '../components/LoadingState'
 import { PanelHeader } from '../components/PanelHeader'
 import { RefreshButton } from '../components/RefreshButton'
 import { StatusIndicator } from '../components/StatusIndicator'
+import { BackendDriverIcon } from '../components/BackendDriverIcon'
 import {
   AlertIcon,
   KafkaBrandIcon,
-  PostgreSQLBrandIcon,
-  RedisBrandIcon,
   ServerIcon,
 } from '../components/Icons'
 import { LayersIcon, RouteIcon } from '../components/PageIcons'
@@ -82,8 +81,8 @@ export function SystemPage() {
                 </>
               }
             />
-            <div className="system-dependency-table-wrap">
-              <table className="dependency-table">
+            <div className="table-scroll system-dependency-table-wrap">
+              <table className="ui-table dependency-table">
                 <thead><tr><th>服务名称</th><th>状态</th></tr></thead>
                 <tbody>
                   {dependencies.map(([name, value]) => (
@@ -115,8 +114,8 @@ export function SystemPage() {
                 title="运行节点"
                 description="网关与执行节点的实时注册和排空状态"
               />
-              <div className="system-dependency-table-wrap">
-                <table className="dependency-table system-node-table">
+              <div className="table-scroll system-dependency-table-wrap">
+                <table className="ui-table dependency-table system-node-table">
                   <thead><tr><th>节点</th><th>角色</th><th>处理中</th><th>最近心跳</th><th>状态</th></tr></thead>
                   <tbody>
                     {nodes.map((node) => (
@@ -191,18 +190,21 @@ function dependencyLabel(name: string) {
     redis: 'Redis',
     postgres: 'PostgreSQL',
     postgresql: 'PostgreSQL',
+    pgvector: 'pgvector',
+    qdrant: 'Qdrant',
+    s3: 'S3 兼容对象存储',
+    cos: '腾讯云 COS',
+    mem0: 'Mem0',
   }
   return labels[name.toLowerCase()] ?? name
 }
 
 function DependencyIcon({ name }: { name: string }) {
-  switch (name.toLowerCase()) {
-    case 'kafka': return <KafkaBrandIcon size={25} />
-    case 'redis': return <RedisBrandIcon size={25} />
-    case 'postgres':
-    case 'postgresql': return <PostgreSQLBrandIcon size={25} />
-    default: return <ServerIcon size={22} />
+  if (name.toLowerCase() === 'kafka') return <KafkaBrandIcon size={25} />
+  if (['postgres', 'postgresql', 'pgvector', 'redis', 'qdrant', 's3', 'cos', 'mem0'].includes(name.toLowerCase())) {
+    return <BackendDriverIcon driver={name} size={25} />
   }
+  return <ServerIcon size={22} />
 }
 
 function nodeRoleLabel(role: string) {

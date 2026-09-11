@@ -30,6 +30,7 @@ type MemoryIdentityStore struct {
 	systemAdmins     map[string]bool
 	tenants          map[string]memoryTenant
 	tenantModels     map[string][]TenantModelGrant
+	tenantTools      map[string][]TenantToolGrant
 	memberships      map[string]TenantMembership
 	channels         map[string]ChannelIdentity
 	localCredentials map[string]LocalCredential
@@ -47,7 +48,7 @@ func NewMemoryIdentityStore() *MemoryIdentityStore {
 	return &MemoryIdentityStore{
 		users: make(map[string]PlatformUser), providers: make(map[string]memoryLoginProvider), logins: make(map[string]LoginIdentity),
 		systemAdmins: make(map[string]bool),
-		tenants:      make(map[string]memoryTenant), tenantModels: make(map[string][]TenantModelGrant), memberships: make(map[string]TenantMembership), channels: make(map[string]ChannelIdentity),
+		tenants:      make(map[string]memoryTenant), tenantModels: make(map[string][]TenantModelGrant), tenantTools: make(map[string][]TenantToolGrant), memberships: make(map[string]TenantMembership), channels: make(map[string]ChannelIdentity),
 		localCredentials: make(map[string]LocalCredential),
 	}
 }
@@ -494,6 +495,33 @@ func (s *MemoryIdentityStore) ReplaceTenantModelGrants(_ context.Context, tenant
 	return nil
 }
 
+func (s *MemoryIdentityStore) ListTenantToolGrants(_ context.Context, tenantID string) ([]TenantToolGrant, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.tenants[tenantID]; !exists {
+		return nil, ErrTenantNotFound
+	}
+	grants := append([]TenantToolGrant(nil), s.tenantTools[tenantID]...)
+	sort.Slice(grants, func(i, j int) bool { return grants[i].ToolName < grants[j].ToolName })
+	return grants, nil
+}
+
+func (s *MemoryIdentityStore) ReplaceTenantToolGrants(_ context.Context, tenantID string, grants []TenantToolGrant) error {
+	tenantID = strings.TrimSpace(tenantID)
+	normalized, err := normalizeTenantToolGrants(grants)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.tenants[tenantID]; !exists {
+		return ErrTenantNotFound
+	}
+	s.tenantTools[tenantID] = append([]TenantToolGrant(nil), normalized...)
+	return nil
+}
+
 func (s *MemoryIdentityStore) TenantStatus(_ context.Context, tenantID string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -758,12 +786,13 @@ func (s *MemoryIdentityStore) ResolveChannelIdentity(_ context.Context, tenantID
 	if _, ok := s.channels[key]; !ok {
 		s.channels[key] = base
 	}
-	if channel != channels.WeCom || strings.TrimSpace(trustedEnterpriseID) == "" {
+	providerType, trustedChannel := trustedLoginProviderType(channel)
+	if !trustedChannel || strings.TrimSpace(trustedEnterpriseID) == "" {
 		return base, false, nil
 	}
 	var linkedPlatformUserID string
 	for _, existing := range s.channels {
-		if existing.TenantID != tenantID || existing.Channel != channels.WeCom || existing.ExternalUserID != externalUserID || existing.PlatformUserID == "" || existing.TrustedEnterpriseID != strings.TrimSpace(trustedEnterpriseID) {
+		if existing.TenantID != tenantID || existing.Channel != channel || existing.ExternalUserID != externalUserID || existing.PlatformUserID == "" || existing.TrustedEnterpriseID != strings.TrimSpace(trustedEnterpriseID) {
 			continue
 		}
 		if linkedPlatformUserID != "" && linkedPlatformUserID != existing.PlatformUserID {
@@ -782,7 +811,7 @@ func (s *MemoryIdentityStore) ResolveChannelIdentity(_ context.Context, tenantID
 		}
 	}
 	for providerID, provider := range s.providers {
-		if provider.descriptor.Type != ProviderWeCom || provider.enterpriseID != trustedEnterpriseID {
+		if provider.descriptor.Type != providerType || provider.enterpriseID != trustedEnterpriseID {
 			continue
 		}
 		login, ok := s.logins[loginKey(providerID, externalUserID)]
@@ -801,68 +830,6 @@ func (s *MemoryIdentityStore) ResolveChannelIdentity(_ context.Context, tenantID
 	return base, false, nil
 }
 
-func (s *MemoryIdentityStore) LinkChannelIdentity(_ context.Context, identity ChannelIdentity) error {
-	if err := validateChannelIdentity(identity); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := channelIdentityKey(identity.TenantID, identity.Channel, identity.BindingID, identity.ExternalUserID)
-	if existing, ok := s.channels[key]; ok && existing.PlatformUserID != "" && existing.PlatformUserID != identity.PlatformUserID {
-		return ErrChannelIdentityConflict
-	}
-	if identity.LinkedAt.IsZero() {
-		identity.LinkedAt = time.Now().UTC()
-	}
-	s.channels[key] = identity
-	if identity.Channel == channels.WeCom && strings.TrimSpace(identity.TrustedEnterpriseID) != "" {
-		for existingKey, existing := range s.channels {
-			if existing.TenantID != identity.TenantID || existing.Channel != channels.WeCom || existing.ExternalUserID != identity.ExternalUserID || existing.TrustedEnterpriseID != identity.TrustedEnterpriseID {
-				continue
-			}
-			if existing.PlatformUserID != "" && existing.PlatformUserID != identity.PlatformUserID {
-				return ErrChannelIdentityConflict
-			}
-			existing.PlatformUserID = identity.PlatformUserID
-			existing.LinkedAt = identity.LinkedAt
-			s.channels[existingKey] = existing
-		}
-	}
-	return nil
-}
-
-func (s *MemoryIdentityStore) UnlinkChannelIdentity(_ context.Context, identity ChannelIdentity) error {
-	if err := validateChannelIdentity(identity); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := channelIdentityKey(identity.TenantID, identity.Channel, identity.BindingID, identity.ExternalUserID)
-	existing, ok := s.channels[key]
-	if !ok || existing.PlatformUserID != identity.PlatformUserID {
-		return ErrChannelIdentityNotLinked
-	}
-	existing.PlatformUserID = ""
-	existing.LinkedAt = time.Time{}
-	s.channels[key] = existing
-	return nil
-}
-
-func (s *MemoryIdentityStore) ListChannelIdentities(_ context.Context, tenantID, platformUserID string) ([]ChannelIdentity, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	result := make([]ChannelIdentity, 0)
-	for _, item := range s.channels {
-		if item.TenantID == tenantID && item.PlatformUserID != "" && item.PlatformUserID == platformUserID {
-			result = append(result, item)
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		return channelIdentityKey(result[i].TenantID, result[i].Channel, result[i].BindingID, result[i].ExternalUserID) < channelIdentityKey(result[j].TenantID, result[j].Channel, result[j].BindingID, result[j].ExternalUserID)
-	})
-	return result, nil
-}
-
 func (s *MemoryIdentityStore) RecordAudit(_ context.Context, action, result, detail string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -876,4 +843,7 @@ func (s *MemoryIdentityStore) Audits() []memoryAudit {
 	return append([]memoryAudit(nil), s.audits...)
 }
 
-var _ IdentityStore = (*MemoryIdentityStore)(nil)
+var _ LoginProviderRegistrar = (*MemoryIdentityStore)(nil)
+var _ AuthIdentityStore = (*MemoryIdentityStore)(nil)
+var _ LocalBootstrapStore = (*MemoryIdentityStore)(nil)
+var _ ConsoleIdentityStore = (*MemoryIdentityStore)(nil)

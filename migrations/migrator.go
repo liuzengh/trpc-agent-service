@@ -34,6 +34,9 @@ func Apply(ctx context.Context, database *sql.DB) error {
 		return fmt.Errorf("begin migration transaction: %w", err)
 	}
 	defer func() { _ = transaction.Rollback() }()
+	if _, err := transaction.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "trpc-agent-service:migrations"); err != nil {
+		return fmt.Errorf("lock migrations: %w", err)
+	}
 
 	if _, err := transaction.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS schema_migrations (

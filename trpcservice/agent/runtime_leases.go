@@ -58,14 +58,14 @@ func (r *Runtime) acquireExecutionLeases(
 		traceID: traceID, messageLease: acquisition.Lease,
 	}
 	leases.messageHeartbeat = startIdempotencyLeaseHeartbeat(ctx, r.idempotency, acquisition.Lease, r.processingTTL)
-	ctx = leases.messageHeartbeat.context
+	ctx = leases.messageHeartbeat.Context()
 	fail := func(err error) (context.Context, *runtimeExecutionLeases, error) {
 		leases.Close()
 		return ctx, nil, err
 	}
 
 	if r.executionDedup != nil {
-		state, err := r.executionDedup.Begin(ctx, snapshot.Config.TenantID, string(inbound.Channel), bindingID, inbound.MessageID, traceID, r.processingTTL)
+		state, err := r.executionDedup.Begin(ctx, snapshot.Config.TenantID, snapshot.Config.AppCode, string(inbound.Channel), bindingID, inbound.MessageID, traceID, r.processingTTL)
 		if err != nil {
 			return fail(fmt.Errorf("begin execution claim: %w", err))
 		}
@@ -77,7 +77,7 @@ func (r *Runtime) acquireExecutionLeases(
 		case storage.ExecutionFresh:
 			leases.dedupActive = true
 			leases.claimHeartbeat = startClaimHeartbeat(ctx, r.executionDedup, snapshot.Config.TenantID, string(inbound.Channel), bindingID, inbound.MessageID, traceID, r.processingTTL)
-			ctx = leases.claimHeartbeat.context
+			ctx = leases.claimHeartbeat.Context()
 		default:
 			return fail(fmt.Errorf("unsupported execution claim state %q", state))
 		}
@@ -88,7 +88,7 @@ func (r *Runtime) acquireExecutionLeases(
 		return fail(fmt.Errorf("acquire session execution lease: %w", err))
 	}
 	leases.sessionHeartbeat = startSessionLeaseHeartbeat(ctx, r.stateStore, sessionLease, r.processingTTL)
-	return leases.sessionHeartbeat.context, leases, nil
+	return leases.sessionHeartbeat.Context(), leases, nil
 }
 
 func (l *runtimeExecutionLeases) Check() error {
@@ -111,7 +111,7 @@ func (l *runtimeExecutionLeases) FencingToken() uint64 {
 	if l == nil || l.sessionHeartbeat == nil {
 		return 0
 	}
-	return l.sessionHeartbeat.Lease().FencingToken
+	return l.sessionHeartbeat.Value().FencingToken
 }
 
 func (l *runtimeExecutionLeases) Complete() error {
@@ -154,7 +154,7 @@ func (l *runtimeExecutionLeases) Close() {
 	if l.sessionHeartbeat != nil {
 		l.sessionHeartbeat.Stop()
 		finalizeCtx, cancel := context.WithTimeout(context.Background(), finalizationTimeout)
-		_ = l.runtime.stateStore.ReleaseSessionExecutionLease(finalizeCtx, l.sessionHeartbeat.Lease())
+		_ = l.runtime.stateStore.ReleaseSessionExecutionLease(finalizeCtx, l.sessionHeartbeat.Value())
 		cancel()
 	}
 	if l.claimHeartbeat != nil {
@@ -167,6 +167,6 @@ func (l *runtimeExecutionLeases) Close() {
 	defer cancel()
 	_ = l.runtime.idempotency.Release(finalizeCtx, l.messageLease)
 	if l.dedupActive && l.runtime.executionDedup != nil {
-		_ = l.runtime.executionDedup.Abort(finalizeCtx, l.snapshot.Config.TenantID, string(l.inbound.Channel), l.bindingID, l.inbound.MessageID, l.traceID)
+		_ = l.runtime.executionDedup.Fail(finalizeCtx, l.snapshot.Config.TenantID, string(l.inbound.Channel), l.bindingID, l.inbound.MessageID, l.traceID)
 	}
 }

@@ -44,8 +44,13 @@ describe('resolveActiveAppKey', () => {
       .toBe('tenant-b/two')
   })
 
-  it('does not select a draft or disabled application for app-scoped pages', () => {
-    expect(resolveActiveAppKey([app('tenant-a', 'draft', 'draft'), app('tenant-a', 'off', 'disabled')], 'tenant-a', 'tenant-a/off'))
-      .toBe('')
+  it('matches by app_code when requestedKey has no tenant prefix', () => {
+    expect(resolveActiveAppKey([app('tenant-a', 'one'), app('tenant-a', 'two')], 'tenant-a', 'two'))
+      .toBe('tenant-a/two')
+  })
+
+  it('falls back to the first active bot when requestedKey is empty', () => {
+    expect(resolveActiveAppKey([app('tenant-a', 'one'), app('tenant-a', 'two')], 'tenant-a', ''))
+      .toBe('tenant-a/one')
   })
 })

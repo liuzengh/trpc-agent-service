@@ -70,7 +70,7 @@ type LocalBootstrap struct {
 // BootstrapLocalSystemAdmin creates the first administrator only while the
 // instance has no usable System Admin. Once one exists, deployment bootstrap
 // credentials are ignored and cannot grant or reset permissions later.
-func BootstrapLocalSystemAdmin(ctx context.Context, store IdentityStore, config LocalBootstrap) error {
+func BootstrapLocalSystemAdmin(ctx context.Context, store LocalBootstrapStore, config LocalBootstrap) error {
 	if store == nil {
 		return errors.New("identity store is required")
 	}

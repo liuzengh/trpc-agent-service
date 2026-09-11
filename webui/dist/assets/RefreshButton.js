@@ -1,0 +1,1 @@
+import{j as r}from"./app.js";import{b as i}from"./PageIcons.js";function u({onClick:o,disabled:n=!1,loading:t=!1,label:e="刷新",className:s=""}){return r.jsx("button",{type:"button",className:`icon-btn refresh-button${t?" is-loading":""}${s?` ${s}`:""}`,"aria-label":e,title:e,disabled:n||t,onClick:o,children:r.jsx(i,{size:15})})}export{u as R};

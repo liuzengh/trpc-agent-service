@@ -24,11 +24,9 @@
 .data-empty-halo { position: absolute; inset: 30px 0 0; border-radius: 50%; background: var(--accent-soft); opacity: .7; filter: blur(2px); }
 .data-empty-icon { position: relative; z-index: 1; display: grid; width: 88px; height: 88px; place-items: center; border: 1px solid var(--accent-border); border-radius: 24px; background: var(--surface); color: var(--accent-link); box-shadow: var(--sh-control-strong); }
 
-.data-table-scroll { max-width: 100%; overflow-x: auto; }
-.knowledge-docs-table { width: 100%; min-width: 760px; border-collapse: collapse; }
-.knowledge-docs-table th { padding: 11px 14px; border-bottom: 1px solid var(--hairline); color: var(--text-3); font-size: 11px; font-weight: 600; text-align: left; }
-.knowledge-docs-table td { padding: 15px 14px; border-bottom: 1px solid var(--hairline); color: var(--text-body); font-size: 12px; vertical-align: middle; }
-.knowledge-docs-table .knowledge-actions-col { text-align: right; }
+.data-table-scroll { max-width: 100%; }
+.knowledge-docs-table { min-width: 720px; }
+.knowledge-docs-table .knowledge-actions-col { width: 1%; white-space: nowrap; text-align: left; }
 .knowledge-source { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; }
 .knowledge-source.is-linked { color: var(--accent); }
 .knowledge-source.is-muted { color: var(--text-3); }

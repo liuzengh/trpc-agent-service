@@ -11,6 +11,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/credential"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/netpolicy"
+	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/duckduckgo"
 )
@@ -64,14 +65,17 @@ type ToolDescriptor struct {
 }
 
 // NewToolRegistry constructs the single platform registry. DuckDuckGo is a
-// framework-native built-in; callers may add additional platform-owned tools.
+// framework-native built-in; platform.present_card is a governed presentation
+// tool; callers may add additional platform-owned tools.
 func NewToolRegistry(registry map[string]agenttool.CallableTool, opts ...ToolRegistryOption) (*ToolRegistry, error) {
 	tools := &ToolRegistry{
-		registry: make(map[string]agenttool.CallableTool, len(registry)+1),
+		registry: make(map[string]agenttool.CallableTool, len(registry)+2),
 		timeout:  defaultRemoteToolTimeout,
 	}
 	search := duckduckgo.NewTool()
 	tools.registry[search.Declaration().Name] = search
+	presentCard := platformtool.NewPresentCardTool()
+	tools.registry[presentCard.Declaration().Name] = presentCard
 	for name, registered := range registry {
 		if registered == nil || registered.Declaration() == nil || registered.Declaration().Name == "" {
 			return nil, fmt.Errorf("registered tool %q has no valid declaration", name)
@@ -99,11 +103,29 @@ func (r *ToolRegistry) Names() []string {
 	return names
 }
 
+// SelectableNames returns the platform tools that tenants may explicitly grant
+// to applications. Platform presentation capabilities such as present_card are
+// intentionally omitted because every application receives them automatically.
+func (r *ToolRegistry) SelectableNames() []string {
+	if r == nil {
+		return []string{}
+	}
+	names := make([]string, 0, len(r.registry))
+	for name := range r.registry {
+		if name == platformtool.PresentCardToolName {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (r *ToolRegistry) Catalog() []ToolDescriptor {
 	if r == nil {
 		return []ToolDescriptor{}
 	}
-	names := r.Names()
+	names := r.SelectableNames()
 	catalog := make([]ToolDescriptor, 0, len(names))
 	for _, name := range names {
 		declaration := r.registry[name].Declaration()
@@ -124,8 +146,14 @@ func (r *ToolRegistry) Surface(ctx context.Context, tenantConfig config.TenantCo
 	for _, name := range tenantConfig.Tools.Allowed {
 		allowed[name] = struct{}{}
 	}
-	surface := ToolSurface{}
+	surface := ToolSurface{Tools: []agenttool.Tool{r.registry[platformtool.PresentCardToolName]}}
 	for _, name := range r.Names() {
+		if name == platformtool.PresentCardToolName {
+			if _, explicitlyAllowed := allowed[name]; explicitlyAllowed {
+				consumed[name] = struct{}{}
+			}
+			continue
+		}
 		if _, ok := allowed[name]; ok {
 			surface.Tools = append(surface.Tools, r.registry[name])
 			consumed[name] = struct{}{}

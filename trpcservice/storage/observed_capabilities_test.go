@@ -80,6 +80,36 @@ func TestObservedStateStoreForwardsDurableOptionalCapabilities(t *testing.T) {
 		t.Fatalf("ListPendingOutbox() = %#v, %v", pending, err)
 	}
 
+	secondEvent, err := store.RecordExecution(ctx, ExecutionRecord{
+		TenantID: "tenant-a", AppCode: "support", SessionKey: "tenant-a/support/session/1",
+		MessageID: "message-2", Channel: "web", BindingID: "web-console", TraceID: "trace-2",
+		Action: "agent.reply", Result: "queued", OutboxType: "channel_reply.web",
+		OutboxPayload: []byte("{}"), OutboxRequestID: "request-2", SubjectID: "subject-1",
+	})
+	if err != nil {
+		t.Fatalf("RecordExecution(second) error = %v", err)
+	}
+	if backlog, err := store.OutboxBacklog(ctx, "tenant-a", "channel_reply.web"); err != nil || backlog.Pending != 1 {
+		t.Fatalf("OutboxBacklog() = %#v, %v", backlog, err)
+	}
+	claimed, err = store.ClaimPendingOutbox(ctx, "tenant-a", "dispatcher-2", time.Minute, 10)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != secondEvent.ID {
+		t.Fatalf("ClaimPendingOutbox() = %#v, %v", claimed, err)
+	}
+	if batch, err := store.FindOutboxByRequestIDs(ctx, "tenant-a", []string{"request-1", "request-2"}); err != nil || len(batch) != 2 {
+		t.Fatalf("FindOutboxByRequestIDs() = %#v, %v", batch, err)
+	}
+	if err := store.FailOutboxDelivery(ctx, "tenant-a", secondEvent.ID, "dispatcher-2", errors.New("retry later")); err != nil {
+		t.Fatalf("FailOutboxDelivery() error = %v", err)
+	}
+	// The legacy mark-delivered capability is still used by non-leased callers.
+	if err := store.MarkOutboxDelivered(ctx, "tenant-a", secondEvent.ID); err != nil {
+		t.Fatalf("MarkOutboxDelivered() error = %v", err)
+	}
+	if _, err := store.PurgeDeliveredOutboxBefore(ctx, "tenant-a", time.Now().Add(time.Hour), 10); err != nil {
+		t.Fatalf("PurgeDeliveredOutboxBefore() error = %v", err)
+	}
+
 	route := SessionRoute{
 		TenantID: "tenant-a", AppCode: "support", Channel: "telegram", BindingID: "tg",
 		ConversationID: "chat-1", ExternalUserID: "external-2", SubjectID: "subject-2", Scope: "direct",
@@ -138,8 +168,9 @@ func TestObservedStateStoreForwardsDurableOptionalCapabilities(t *testing.T) {
 	}
 	for _, operation := range []string{
 		"record_execution", "record_execution_trace", "get_execution_trace", "list_execution_traces",
-		"claim_pending_outbox", "renew_outbox_delivery", "complete_outbox_delivery",
-		"find_outbox_by_request", "record_audit", "purge_audit", "switch_session",
+		"read_outbox_backlog", "claim_pending_outbox", "renew_outbox_delivery", "complete_outbox_delivery", "fail_outbox_delivery",
+		"find_outbox_by_request", "find_outbox_by_requests", "mark_outbox_delivered", "purge_delivered_outbox",
+		"record_audit", "purge_audit", "switch_session",
 		"resolve_session", "archive_session", "archive_idle_sessions",
 		"acquire_session_execution_lease", "renew_session_execution_lease", "release_session_execution_lease",
 	} {

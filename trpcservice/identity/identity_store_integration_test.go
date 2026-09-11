@@ -39,7 +39,7 @@ func testIdentityStore(t *testing.T) *PostgresIdentityStore {
 	return store
 }
 
-func registerPostgresTestProvider(t *testing.T, store IdentityStore, providerID, subjectID string) Identity {
+func registerPostgresTestProvider(t *testing.T, store LoginProviderRegistrar, providerID, subjectID string) Identity {
 	t.Helper()
 	boundary := "test:" + providerID
 	if err := store.UpsertLoginProvider(context.Background(), ProviderDescriptor{
@@ -164,6 +164,50 @@ func TestPostgresIdentityStoreAdministrativeAndChannelLifecycle(t *testing.T) {
 	if err := store.SetLocalPassword(ctx, local.PlatformUserID, "hash-v2", false); err != nil {
 		t.Fatalf("SetLocalPassword() error = %v", err)
 	}
+	secondaryIdentity := registerPostgresTestProvider(t, store, "support-secondary-"+suffix, "support-secondary")
+	secondaryIdentity.DisplayName = "客服备用登录"
+	if err := store.LinkLoginIdentity(ctx, local.PlatformUserID, secondaryIdentity); err != nil {
+		t.Fatalf("LinkLoginIdentity() error = %v", err)
+	}
+	localMethods, err := store.ListLoginMethods(ctx, local.PlatformUserID)
+	if err != nil || len(localMethods) != 2 {
+		t.Fatalf("ListLoginMethods(local) = %+v, %v; want two methods", localMethods, err)
+	}
+	if err := store.RemoveLoginIdentity(ctx, local.PlatformUserID, secondaryIdentity.ProviderID, secondaryIdentity.SubjectID); err != nil {
+		t.Fatalf("RemoveLoginIdentity(secondary) error = %v", err)
+	}
+	if err := store.RemoveLoginIdentity(ctx, local.PlatformUserID, "local", localUsername); !errors.Is(err, ErrLastLoginIdentity) {
+		t.Fatalf("RemoveLoginIdentity(last) error = %v, want ErrLastLoginIdentity", err)
+	}
+
+	// The infrastructure database is reused across integration tests. System
+	// administrator continuity is a global invariant, so isolate this lifecycle
+	// from administrators left by earlier cases and restore them afterward.
+	rows, err := store.database.QueryContext(ctx, `SELECT platform_user_id FROM system_admins`)
+	if err != nil {
+		t.Fatalf("list pre-existing system administrators: %v", err)
+	}
+	var previousSystemAdmins []string
+	for rows.Next() {
+		var platformUserID string
+		if err := rows.Scan(&platformUserID); err != nil {
+			rows.Close()
+			t.Fatalf("scan pre-existing system administrator: %v", err)
+		}
+		previousSystemAdmins = append(previousSystemAdmins, platformUserID)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close system administrator rows: %v", err)
+	}
+	if _, err := store.database.ExecContext(ctx, `DELETE FROM system_admins`); err != nil {
+		t.Fatalf("clear system administrators for isolated lifecycle: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = store.database.ExecContext(context.Background(), `DELETE FROM system_admins WHERE platform_user_id IN ($1,$2)`, admin.PlatformUserID, member.PlatformUserID)
+		for _, platformUserID := range previousSystemAdmins {
+			_, _ = store.database.ExecContext(context.Background(), `INSERT INTO system_admins (platform_user_id) VALUES ($1) ON CONFLICT DO NOTHING`, platformUserID)
+		}
+	})
 
 	if usable, err := store.HasUsableSystemAdmin(ctx); err != nil {
 		t.Fatalf("HasUsableSystemAdmin() error = %v", err)
@@ -185,6 +229,18 @@ func TestPostgresIdentityStoreAdministrativeAndChannelLifecycle(t *testing.T) {
 	if err := store.SetSystemAdmin(ctx, admin.PlatformUserID, false); err != nil {
 		t.Fatalf("SetSystemAdmin(admin,false) error = %v", err)
 	}
+	if err := store.UpdatePlatformUserAccess(ctx, admin.PlatformUserID, "suspended", false); err != nil {
+		t.Fatalf("UpdatePlatformUserAccess(admin,suspended) error = %v", err)
+	}
+	if _, err := store.ResolveSessionUser(ctx, admin.PlatformUserID); !errors.Is(err, ErrPlatformUserSuspended) {
+		t.Fatalf("ResolveSessionUser(suspended) error = %v, want ErrPlatformUserSuspended", err)
+	}
+	if err := store.UpdatePlatformUserAccess(ctx, admin.PlatformUserID, "active", false); err != nil {
+		t.Fatalf("UpdatePlatformUserAccess(admin,active) error = %v", err)
+	}
+	if err := store.UpdatePlatformUserAccess(ctx, member.PlatformUserID, "suspended", false); !errors.Is(err, ErrLastSystemAdmin) {
+		t.Fatalf("UpdatePlatformUserAccess(last system admin) error = %v, want ErrLastSystemAdmin", err)
+	}
 
 	if err := store.UpdatePlatformUserProfile(ctx, admin.PlatformUserID, "客服负责人"); err != nil {
 		t.Fatalf("UpdatePlatformUserProfile() error = %v", err)
@@ -205,6 +261,9 @@ func TestPostgresIdentityStoreAdministrativeAndChannelLifecycle(t *testing.T) {
 	if status, err := store.TenantStatus(ctx, tenantID); err != nil || status != TenantActive {
 		t.Fatalf("TenantStatus() = %q, %v", status, err)
 	}
+	if err := store.SetTenantMembership(ctx, tenantID, admin.PlatformUserID, RoleMember, "active"); !errors.Is(err, ErrLastTenantAdmin) {
+		t.Fatalf("downgrade last tenant admin error = %v, want ErrLastTenantAdmin", err)
+	}
 	if err := store.SetTenantStatus(ctx, tenantID, TenantSuspended); err != nil {
 		t.Fatalf("SetTenantStatus(suspended) error = %v", err)
 	}
@@ -219,9 +278,38 @@ func TestPostgresIdentityStoreAdministrativeAndChannelLifecycle(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(grants, wantGrants) {
 		t.Fatalf("ListTenantModelGrants() = %+v, %v", grants, err)
 	}
+	wantToolGrants := []TenantToolGrant{{ToolName: "query_order"}, {ToolName: "refund_order"}}
+	if err := store.ReplaceTenantToolGrants(ctx, tenantID, wantToolGrants); err != nil {
+		t.Fatalf("ReplaceTenantToolGrants() error = %v", err)
+	}
+	toolGrants, err := store.ListTenantToolGrants(ctx, tenantID)
+	if err != nil || !reflect.DeepEqual(toolGrants, wantToolGrants) {
+		t.Fatalf("ListTenantToolGrants() = %+v, %v", toolGrants, err)
+	}
+	if granted, err := store.TenantToolGranted(ctx, tenantID, "query_order"); err != nil || !granted {
+		t.Fatalf("TenantToolGranted(query_order) = %v, %v", granted, err)
+	}
+	if granted, err := store.TenantToolGranted(ctx, tenantID, "missing_tool"); err != nil || granted {
+		t.Fatalf("TenantToolGranted(missing_tool) = %v, %v", granted, err)
+	}
 
 	if err := store.SetTenantMembership(ctx, tenantID, member.PlatformUserID, RoleMember, "active"); err != nil {
 		t.Fatalf("SetTenantMembership(member) error = %v", err)
+	}
+	if err := store.SetTenantMembership(ctx, tenantID, member.PlatformUserID, RoleAdmin, "active"); err != nil {
+		t.Fatalf("promote tenant member to admin: %v", err)
+	}
+	if err := store.SetConversationContentAudit(ctx, tenantID, member.PlatformUserID, true); err != nil {
+		t.Fatalf("enable conversation audit for promoted admin: %v", err)
+	}
+	if err := store.SetTenantMembership(ctx, tenantID, member.PlatformUserID, RoleMember, "active"); err != nil {
+		t.Fatalf("demote tenant admin to member: %v", err)
+	}
+	if err := store.SetTenantMembership(ctx, tenantID, member.PlatformUserID, RoleMember, "suspended"); err != nil {
+		t.Fatalf("suspend tenant member: %v", err)
+	}
+	if err := store.SetTenantMembership(ctx, tenantID, member.PlatformUserID, RoleMember, "active"); err != nil {
+		t.Fatalf("reactivate tenant member: %v", err)
 	}
 	if err := store.SetConversationContentAudit(ctx, tenantID, admin.PlatformUserID, true); err != nil {
 		t.Fatalf("SetConversationContentAudit(admin) error = %v", err)
@@ -259,27 +347,161 @@ func TestPostgresIdentityStoreAdministrativeAndChannelLifecycle(t *testing.T) {
 	if err != nil || linked || resolved.PlatformUserID != "" {
 		t.Fatalf("ResolveChannelIdentity(unlinked) = %+v, linked=%v, %v", resolved, linked, err)
 	}
-	link := ChannelIdentity{TenantID: tenantID, Channel: channels.Telegram, BindingID: bindingID, ExternalUserID: "customer-42", PlatformUserID: admin.PlatformUserID}
-	if err := store.LinkChannelIdentity(ctx, link); err != nil {
-		t.Fatalf("LinkChannelIdentity() error = %v", err)
+
+	loginProviderID := "wecom-login-" + suffix
+	loginBoundary := "login-directory-" + suffix
+	if err := store.UpsertLoginProvider(ctx, ProviderDescriptor{
+		ProviderID: loginProviderID, Type: ProviderWeCom, DisplayName: "客服统一登录",
+	}, loginBoundary); err != nil {
+		t.Fatalf("UpsertLoginProvider(wecom) error = %v", err)
 	}
-	conflict := link
-	conflict.PlatformUserID = member.PlatformUserID
-	if err := store.LinkChannelIdentity(ctx, conflict); !errors.Is(err, ErrChannelIdentityConflict) {
-		t.Fatalf("LinkChannelIdentity(conflict) error = %v", err)
+	if err := store.LinkLoginIdentity(ctx, member.PlatformUserID, Identity{
+		ProviderID: loginProviderID, ProviderType: ProviderWeCom, EnterpriseID: loginBoundary,
+		SubjectID: "directory-member", DisplayName: "客服成员",
+	}); err != nil {
+		t.Fatalf("LinkLoginIdentity(wecom) error = %v", err)
 	}
-	resolved, linked, err = store.ResolveChannelIdentity(ctx, tenantID, channels.Telegram, bindingID, "customer-42", "")
-	if err != nil || !linked || resolved.PlatformUserID != admin.PlatformUserID {
-		t.Fatalf("ResolveChannelIdentity(linked) = %+v, linked=%v, %v", resolved, linked, err)
+	loginBindings := []string{"wecom-login-a-" + suffix, "wecom-login-b-" + suffix}
+	for _, loginBinding := range loginBindings {
+		if _, err := store.database.ExecContext(ctx, `
+INSERT INTO channel_bindings (
+    channel_type, external_binding_id, tenant_id, app_code, trusted_enterprise_id, access_policy, allowlist
+) VALUES ('wecom',$1,$2,$3,$4,'public','[]')`, loginBinding, tenantID, appCode, loginBoundary); err != nil {
+			t.Fatalf("seed login-backed channel binding %q: %v", loginBinding, err)
+		}
 	}
-	linkedIdentities, err := store.ListChannelIdentities(ctx, tenantID, admin.PlatformUserID)
-	if err != nil || len(linkedIdentities) != 1 {
-		t.Fatalf("ListChannelIdentities() = %+v, %v", linkedIdentities, err)
+	loginResolved, linked, err := store.ResolveChannelIdentity(ctx, tenantID, channels.WeCom, loginBindings[0], "directory-member", loginBoundary)
+	if err != nil || !linked || loginResolved.PlatformUserID != member.PlatformUserID {
+		t.Fatalf("ResolveChannelIdentity(login-backed) = %+v, linked=%v, %v", loginResolved, linked, err)
 	}
-	if err := store.UnlinkChannelIdentity(ctx, link); err != nil {
-		t.Fatalf("UnlinkChannelIdentity() error = %v", err)
+	secondBindingResolved, linked, err := store.ResolveChannelIdentity(ctx, tenantID, channels.WeCom, loginBindings[1], "directory-member", loginBoundary)
+	if err != nil || !linked || secondBindingResolved.PlatformUserID != member.PlatformUserID {
+		t.Fatalf("ResolveChannelIdentity(second login-backed binding) = %+v, linked=%v, %v", secondBindingResolved, linked, err)
 	}
-	if err := store.UnlinkChannelIdentity(ctx, link); !errors.Is(err, ErrChannelIdentityNotLinked) {
-		t.Fatalf("UnlinkChannelIdentity(second) error = %v", err)
+	if err := store.UpdatePlatformUserAccess(ctx, member.PlatformUserID, "suspended", false); !errors.Is(err, ErrLastSystemAdmin) {
+		t.Fatalf("suspend last system admin error = %v, want ErrLastSystemAdmin", err)
+	}
+	if err := store.SetSystemAdmin(ctx, admin.PlatformUserID, true); err != nil {
+		t.Fatalf("restore second system admin before suspension: %v", err)
+	}
+	if err := store.UpdatePlatformUserAccess(ctx, member.PlatformUserID, "suspended", false); err != nil {
+		t.Fatalf("suspend login-backed member: %v", err)
+	}
+	if err := store.SetTenantMembership(ctx, tenantID, member.PlatformUserID, RoleMember, "active"); err == nil || !strings.Contains(err.Error(), "suspended platform user") {
+		t.Fatalf("activate membership for suspended platform user error = %v", err)
+	}
+	otherExternal := "directory-member-suspended"
+	if err := store.LinkLoginIdentity(ctx, member.PlatformUserID, Identity{
+		ProviderID: loginProviderID, ProviderType: ProviderWeCom, EnterpriseID: loginBoundary,
+		SubjectID: otherExternal, DisplayName: "停用客服成员",
+	}); !errors.Is(err, ErrPlatformUserNotFound) {
+		t.Fatalf("LinkLoginIdentity(suspended user) error = %v, want ErrPlatformUserNotFound", err)
+	}
+	unlinked, linked, err := store.ResolveChannelIdentity(ctx, tenantID, channels.WeCom, loginBindings[0], otherExternal, loginBoundary)
+	if err != nil || linked || unlinked.PlatformUserID != "" {
+		t.Fatalf("ResolveChannelIdentity(suspended login) = %+v, linked=%v, %v", unlinked, linked, err)
+	}
+	if err := store.UpdatePlatformUserAccess(ctx, member.PlatformUserID, "active", false); err != nil {
+		t.Fatalf("reactivate member: %v", err)
+	}
+}
+
+func TestPostgresIdentityStoreLoginIdentityBoundaryErrors(t *testing.T) {
+	store := testIdentityStore(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()
+	providerID := "boundary-login-" + suffix
+	boundary := "boundary-" + suffix
+	if err := store.UpsertLoginProvider(ctx, ProviderDescriptor{
+		ProviderID: providerID, Type: ProviderOIDC, DisplayName: "客服登录",
+	}, boundary); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.ResolveLoginIdentity(ctx, Identity{
+		ProviderID: providerID, ProviderType: ProviderOIDC, EnterpriseID: boundary,
+		SubjectID: "owner", DisplayName: "客服用户甲",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherProvider := "boundary-other-" + suffix
+	otherBoundary := "boundary-other-" + suffix
+	if err := store.UpsertLoginProvider(ctx, ProviderDescriptor{
+		ProviderID: otherProvider, Type: ProviderOIDC, DisplayName: "备用登录",
+	}, otherBoundary); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.LinkLoginIdentity(ctx, owner.PlatformUserID, Identity{
+		ProviderID: otherProvider, ProviderType: ProviderOIDC, EnterpriseID: "wrong-boundary",
+		SubjectID: "secondary",
+	}); err == nil || !strings.Contains(err.Error(), "registered provider boundary") {
+		t.Fatalf("LinkLoginIdentity(boundary mismatch) error = %v", err)
+	}
+	if err := store.LinkLoginIdentity(ctx, owner.PlatformUserID, Identity{
+		ProviderID: "missing-provider", ProviderType: ProviderOIDC, EnterpriseID: "missing-boundary",
+		SubjectID: "secondary",
+	}); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("LinkLoginIdentity(missing provider) error = %v", err)
+	}
+	if err := store.LinkLoginIdentity(ctx, "missing-user", Identity{
+		ProviderID: otherProvider, ProviderType: ProviderOIDC, EnterpriseID: otherBoundary,
+		SubjectID: "secondary",
+	}); !errors.Is(err, ErrPlatformUserNotFound) {
+		t.Fatalf("LinkLoginIdentity(missing user) error = %v", err)
+	}
+	if err := store.LinkLoginIdentity(ctx, owner.PlatformUserID, Identity{
+		ProviderID: "local", ProviderType: ProviderLocal, EnterpriseID: "local", SubjectID: "local-user",
+	}); err == nil || !strings.Contains(err.Error(), "provisioned by administrators") {
+		t.Fatalf("LinkLoginIdentity(local) error = %v", err)
+	}
+	if _, _, err := store.ResolveChannelIdentity(ctx, "missing-tenant", channels.Telegram, "missing-binding", "external-user", ""); err == nil {
+		t.Fatal("ResolveChannelIdentity() unexpectedly persisted identity for a missing tenant/binding")
+	}
+}
+
+func TestPostgresIdentityStoreResolvesTrustedFeishuLoginAcrossBindings(t *testing.T) {
+	store := testIdentityStore(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()
+	tenantID := "feishu-tenant-" + suffix
+	providerID := "feishu-login-" + suffix
+	boundary := "tenant-key-" + suffix
+	externalUserID := "ou_" + strings.ReplaceAll(suffix, "-", "")
+	if err := store.UpsertLoginProvider(ctx, ProviderDescriptor{
+		ProviderID: providerID, Type: ProviderFeishu, DisplayName: "飞书登录",
+	}, boundary); err != nil {
+		t.Fatal(err)
+	}
+	user, err := store.ResolveLoginIdentity(ctx, Identity{
+		ProviderID: providerID, ProviderType: ProviderFeishu, EnterpriseID: boundary,
+		SubjectID: externalUserID, DisplayName: "飞书成员",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateTenant(ctx, tenantID, "飞书租户", user.PlatformUserID); err != nil {
+		t.Fatal(err)
+	}
+	appCode := "support"
+	if _, err := store.database.ExecContext(ctx, `INSERT INTO applications (tenant_id,app_code,status) VALUES ($1,$2,'active')`, tenantID, appCode); err != nil {
+		t.Fatal(err)
+	}
+	bindings := []string{"feishu-a-" + suffix, "feishu-b-" + suffix}
+	for _, bindingID := range bindings {
+		if _, err := store.database.ExecContext(ctx, `
+INSERT INTO channel_bindings (
+    channel_type, external_binding_id, tenant_id, app_code, trusted_enterprise_id, access_policy, allowlist
+) VALUES ('feishu',$1,$2,$3,$4,'public','[]')`, bindingID, tenantID, appCode, boundary); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, linked, err := store.ResolveChannelIdentity(ctx, tenantID, channels.Feishu, bindings[0], externalUserID, boundary)
+	if err != nil || !linked || first.PlatformUserID != user.PlatformUserID || first.TrustedEnterpriseID != boundary {
+		t.Fatalf("first trusted Feishu identity = %+v, linked=%v, %v", first, linked, err)
+	}
+	second, linked, err := store.ResolveChannelIdentity(ctx, tenantID, channels.Feishu, bindings[1], externalUserID, boundary)
+	if err != nil || !linked || second.PlatformUserID != user.PlatformUserID {
+		t.Fatalf("second trusted Feishu identity = %+v, linked=%v, %v", second, linked, err)
 	}
 }

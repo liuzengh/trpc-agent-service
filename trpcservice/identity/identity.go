@@ -125,7 +125,8 @@ var ErrSessionNotFound = errors.New("identity session not found")
 // ErrSessionExpired means the session existed but outlived its TTL.
 var ErrSessionExpired = errors.New("identity session expired")
 
-// AuditRecorder keeps login-domain audit writes separate from IdentityStore.
+// AuditRecorder keeps login-domain audit writes separate from authentication
+// and control-plane identity contracts.
 type AuditRecorder interface {
 	// RecordAudit writes one identity audit event (action/result/detail).
 	RecordAudit(ctx context.Context, action, result, detail string) error

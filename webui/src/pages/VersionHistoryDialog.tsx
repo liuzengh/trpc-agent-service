@@ -361,8 +361,9 @@ export function VersionHistoryDialog({
             <div className="release-history-head">
               <div><strong>版本历史</strong><p>历史版本不可直接参与灰度；恢复会基于其内容创建新的稳定版本。</p></div>
             </div>
-            <table>
-              <thead><tr><th>版本</th><th>创建时间</th><th>状态</th><th className="version-action-col">操作</th></tr></thead>
+            <div className="table-scroll release-history-table-scroll">
+              <table className="ui-table">
+                <thead><tr><th>版本</th><th>创建时间</th><th>状态</th><th className="version-action-col">操作</th></tr></thead>
               <tbody>
                 {versions.map((version) => {
                   const number = version.Config.config_version
@@ -377,7 +378,7 @@ export function VersionHistoryDialog({
                         {isCandidate ? (
                           <button
                             type="button"
-                            className="secondary small-btn"
+                            className="table-action"
                             disabled={busy !== ''}
                             aria-expanded={rolloutSettingsOpen}
                             onClick={toggleRolloutSettings}
@@ -387,7 +388,7 @@ export function VersionHistoryDialog({
                         ) : !isStable && (
                           <button
                             type="button"
-                            className="secondary small-btn"
+                            className="table-action"
                             disabled={busy !== '' || Boolean(candidate)}
                             title={candidate ? '请先处理当前候选版本' : undefined}
                             onClick={() => setPendingAction({ type: 'restore', version: number })}
@@ -400,7 +401,8 @@ export function VersionHistoryDialog({
                   )
                 })}
               </tbody>
-            </table>
+              </table>
+            </div>
           </section>
         </Dialog.Content>
       </Dialog.Portal>

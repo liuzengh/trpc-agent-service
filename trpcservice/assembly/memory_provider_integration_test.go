@@ -148,6 +148,10 @@ func TestPostgresMemoryProviderExtractsWithTenantModel(t *testing.T) {
 			Timestamp: time.Now(),
 			Response:  &model.Response{Choices: []model.Choice{{Message: model.NewAssistantMessage("明白")}}},
 		},
+		{
+			Timestamp: time.Now().Add(time.Second),
+			Response:  &model.Response{Choices: []model.Choice{{Message: model.NewUserMessage("这个偏好之后也继续保留")}}},
+		},
 	}
 	if err := service.EnqueueAutoMemoryJob(context.Background(), sess); err != nil {
 		t.Fatalf("EnqueueAutoMemoryJob() error = %v", err)
@@ -156,9 +160,13 @@ func TestPostgresMemoryProviderExtractsWithTenantModel(t *testing.T) {
 	if entries[0].Memory.Memory != "用户偏好简洁回答" || entries[0].Memory.Kind != agentmemory.KindFact {
 		t.Fatalf("extracted postgres memory = %+v", entries[0].Memory)
 	}
+	if len(extracted.ToolNames()) == 0 {
+		t.Fatal("memory extractor model was not invoked")
+	}
 
 	otherBackend, err := provider.MemoryBackend(context.Background(), config.TenantConfig{
 		TenantID: "other", AppCode: "memory-extract", Status: config.AgentActive, ConfigVersion: 1,
+		Storage: config.StoragePolicy{Memory: config.BackendProfileRef{ProfileID: "memory-postgres"}},
 	}, testutil.NewExtractingModel("other-extractor", "收到", "另一个租户的记忆"))
 	if err != nil {
 		t.Fatalf("Memory() other tenant error = %v", err)

@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/safego"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -17,8 +19,16 @@ func ServeHTTPServer(ctx context.Context, server *http.Server, listener net.List
 	if ctx == nil || server == nil || listener == nil {
 		return fmt.Errorf("server context, HTTP server, and listener are required")
 	}
+	server.Handler = safego.RecoverHTTP(server.Handler)
+	if server.ErrorLog == nil {
+		server.ErrorLog = safego.HTTPErrorLog()
+	}
 	serveErrors := make(chan error, 1)
-	go func() { serveErrors <- server.Serve(listener) }()
+	go func() {
+		if panicErr := safego.Run("HTTP server", func() { serveErrors <- server.Serve(listener) }); panicErr != nil {
+			serveErrors <- panicErr
+		}
+	}()
 	select {
 	case err := <-serveErrors:
 		if errors.Is(err, http.ErrServerClosed) {

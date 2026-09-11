@@ -6,16 +6,68 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/liuzengh/trpc-agent-service/migrations"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/dbscope"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	agentartifact "trpc.group/trpc-go/trpc-agent-go/artifact"
 )
+
+func TestPostgresMigrationsConcurrentApplyIsSerialized(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("TEST_POSTGRES_DSN is not set")
+	}
+	database, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	var databaseName string
+	if err := database.QueryRowContext(context.Background(), "SELECT current_database()").Scan(&databaseName); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(databaseName), "test") {
+		t.Skipf("TEST_POSTGRES_DSN database %q must contain 'test' before schema reset", databaseName)
+	}
+	if _, err := database.ExecContext(context.Background(), "DROP SCHEMA public CASCADE; CREATE SCHEMA public"); err != nil {
+		t.Fatalf("reset public schema: %v", err)
+	}
+
+	const replicas = 8
+	start := make(chan struct{})
+	errorsByReplica := make(chan error, replicas)
+	var group sync.WaitGroup
+	for replica := 0; replica < replicas; replica++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			errorsByReplica <- migrations.Apply(context.Background(), database)
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(errorsByReplica)
+	for err := range errorsByReplica {
+		if err != nil {
+			t.Fatalf("concurrent migrations.Apply() error = %v", err)
+		}
+	}
+	var count int
+	if err := database.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM schema_migrations WHERE version=1").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("baseline rows = %d, want 1", count)
+	}
+}
 
 func TestPostgresMigrationsAndStateTransaction(t *testing.T) {
 	dsn := os.Getenv("TEST_POSTGRES_DSN")
@@ -48,7 +100,8 @@ func TestPostgresMigrationsAndStateTransaction(t *testing.T) {
 	if err := migrations.Apply(context.Background(), database); err != nil {
 		t.Fatalf("second migrations.Apply() error = %v", err)
 	}
-	grantTenantRoleAccess(t, database)
+	assertTenantRoleAccess(t, database)
+	assertFrameworkSessionRLS(t, database)
 
 	var migrationCount int
 	if err := database.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
@@ -92,11 +145,11 @@ func TestPostgresMigrationsAndStateTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresExecutionDedupStore() error = %v", err)
 	}
-	beginState, err := dedup.Begin(context.Background(), "tenant-a", "telegram", "telegram-bot-a", "update-42", "trace-42", time.Minute)
+	beginState, err := dedup.Begin(context.Background(), "tenant-a", "support", "telegram", "telegram-bot-a", "update-42", "trace-42", time.Minute)
 	if err != nil || beginState != storage.ExecutionFresh {
 		t.Fatalf("Begin() state = %v, error = %v, want fresh", beginState, err)
 	}
-	_, err = store.RecordExecution(context.Background(), storage.ExecutionRecord{
+	recordedOutbox, err := store.RecordExecution(context.Background(), storage.ExecutionRecord{
 		TenantID:      "tenant-a",
 		AppCode:       "support",
 		SessionKey:    "tenant-a/support/telegram/chat-1",
@@ -109,7 +162,14 @@ func TestPostgresMigrationsAndStateTransaction(t *testing.T) {
 		AuditDetail:   "token=top-secret",
 		OutboxType:    "agent.reply.completed",
 		OutboxPayload: []byte(`{"message_id":"update-42"}`),
-		ModelUsage:    &storage.ModelUsage{ProviderID: "openai-primary", ModelName: "gpt-4o-mini", PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15, CostMicros: 9},
+		ModelUsage: &storage.ModelUsage{
+			ProviderID: "mixed", ModelName: "mixed", Known: true,
+			PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15, CostMicros: 9,
+			Breakdown: []storage.ModelUsageSegment{
+				{ProviderID: "openai-primary", ModelName: "gpt-4o-mini", ReportedModel: "gpt-4o-mini-2026", PromptTokens: 6, CompletionTokens: 3, TotalTokens: 9, CostMicros: 5},
+				{ProviderID: "fallback", ModelName: "fallback-model", PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6, CostMicros: 4},
+			},
+		},
 		ExecutionTrace: &storage.AgentExecutionTrace{
 			Status: "completed", RootAgentName: "assistant", RootInvocationID: "inv-42",
 			Steps: []storage.ExecutionTraceStep{{StepID: "step-42", NodeID: "assistant#model", NodeType: "llm"}},
@@ -125,6 +185,18 @@ func TestPostgresMigrationsAndStateTransaction(t *testing.T) {
 	if messageStatus != "completed" {
 		t.Fatalf("message status after completion = %q, want completed", messageStatus)
 	}
+	var usageProvider, usageModel, usageBreakdown string
+	if err := database.QueryRowContext(context.Background(), `
+SELECT provider_id, model_name, usage_breakdown::text
+FROM model_usage_ledger
+WHERE tenant_id=$1 AND channel_type=$2 AND binding_id=$3 AND message_id=$4`,
+		"tenant-a", "telegram", "telegram-bot-a", "update-42",
+	).Scan(&usageProvider, &usageModel, &usageBreakdown); err != nil {
+		t.Fatalf("query model usage breakdown: %v", err)
+	}
+	if usageProvider != "mixed" || usageModel != "mixed" || !strings.Contains(usageBreakdown, "openai-primary") || !strings.Contains(usageBreakdown, "fallback-model") {
+		t.Fatalf("model usage identity = %q/%q breakdown=%s", usageProvider, usageModel, usageBreakdown)
+	}
 	storedTrace, err := store.GetExecutionTrace(context.Background(), "tenant-a", "telegram", "telegram-bot-a", "update-42")
 	if err != nil || storedTrace.Trace.RootInvocationID != "inv-42" || len(storedTrace.Trace.Steps) != 1 {
 		t.Fatalf("GetExecutionTrace() = %#v, %v", storedTrace, err)
@@ -136,17 +208,36 @@ func TestPostgresMigrationsAndStateTransaction(t *testing.T) {
 	if !strings.HasPrefix(auditDetail, "hmac-sha256:") || strings.Contains(auditDetail, "top-secret") {
 		t.Fatalf("audit detail = %q, want opaque HMAC digest", auditDetail)
 	}
+	if err := store.MarkOutboxDelivered(context.Background(), "tenant-a", recordedOutbox.ID); err != nil {
+		t.Fatalf("MarkOutboxDelivered() error = %v", err)
+	}
+	if _, err := database.ExecContext(context.Background(), `
+UPDATE outbox_events SET delivered_at=NOW()-INTERVAL '8 days'
+WHERE tenant_id='tenant-a' AND id=$1`, recordedOutbox.ID); err != nil {
+		t.Fatalf("age delivered outbox error = %v", err)
+	}
+	deletedOutbox, err := store.PurgeDeliveredOutboxBefore(context.Background(), "tenant-a", time.Now().Add(-7*24*time.Hour), 1000)
+	if err != nil || deletedOutbox != 1 {
+		t.Fatalf("PurgeDeliveredOutboxBefore() = %d, %v; want 1, nil", deletedOutbox, err)
+	}
+	var retainedOutbox int
+	if err := database.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM outbox_events WHERE tenant_id='tenant-a' AND id=$1", recordedOutbox.ID).Scan(&retainedOutbox); err != nil {
+		t.Fatalf("read retained outbox count: %v", err)
+	}
+	if retainedOutbox != 0 {
+		t.Fatalf("delivered outbox retained after purge: %d", retainedOutbox)
+	}
 
 	// Cross-node takeover: a stale processing claim must be claimable by a
 	// second node, and the takeover write must carry the new owner's trace ID.
-	beginState, err = dedup.Begin(context.Background(), "tenant-a", "telegram", "telegram-bot-a", "update-takeover", "trace-old", time.Minute)
+	beginState, err = dedup.Begin(context.Background(), "tenant-a", "support", "telegram", "telegram-bot-a", "update-takeover", "trace-old", time.Minute)
 	if err != nil || beginState != storage.ExecutionFresh {
 		t.Fatalf("Begin() takeover claim state = %v, error = %v, want fresh", beginState, err)
 	}
 	if _, err := database.ExecContext(context.Background(), "UPDATE messages SET updated_at = NOW() - make_interval(secs => 120) WHERE tenant_id = 'tenant-a' AND channel_type = 'telegram' AND binding_id = 'telegram-bot-a' AND message_id = 'update-takeover'"); err != nil {
 		t.Fatalf("age takeover claim error = %v", err)
 	}
-	beginState, err = dedup.Begin(context.Background(), "tenant-a", "telegram", "telegram-bot-a", "update-takeover", "trace-new", time.Minute)
+	beginState, err = dedup.Begin(context.Background(), "tenant-a", "support", "telegram", "telegram-bot-a", "update-takeover", "trace-new", time.Minute)
 	if err != nil || beginState != storage.ExecutionFresh {
 		t.Fatalf("Begin() takeover state = %v, error = %v, want fresh", beginState, err)
 	}
@@ -158,7 +249,7 @@ func TestPostgresMigrationsAndStateTransaction(t *testing.T) {
 		t.Fatalf("takeover trace = %q, want trace-new", takeoverTrace)
 	}
 
-	beginState, err = dedup.Begin(context.Background(), "tenant-a", "telegram", "telegram-bot-a", "update-rollback", "trace-rollback", time.Minute)
+	beginState, err = dedup.Begin(context.Background(), "tenant-a", "support", "telegram", "telegram-bot-a", "update-rollback", "trace-rollback", time.Minute)
 	if err != nil || beginState != storage.ExecutionFresh {
 		t.Fatalf("Begin() rollback state = %v, error = %v, want fresh", beginState, err)
 	}
@@ -229,6 +320,155 @@ WHERE table_schema='public' AND table_name='knowledge_documents' AND column_name
 	}
 	if legacyProjectionColumns != 0 {
 		t.Fatalf("knowledge_documents still exposes %d legacy RAG content/embedding columns", legacyProjectionColumns)
+	}
+	var frameworkSessionTimestampColumns int
+	if err := database.QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM information_schema.columns
+WHERE table_schema='public'
+  AND table_name IN ('session_states','session_events','session_track_events','session_summaries','app_states','user_states')
+  AND column_name IN ('created_at','updated_at','expires_at','deleted_at')
+  AND data_type='timestamp with time zone'`).Scan(&frameworkSessionTimestampColumns); err != nil {
+		t.Fatalf("inspect framework Session timestamp columns: %v", err)
+	}
+	if frameworkSessionTimestampColumns != 23 {
+		t.Fatalf("framework Session timestamptz columns = %d, want 23", frameworkSessionTimestampColumns)
+	}
+	var frameworkMemoryColumns, frameworkMemoryIndexes int
+	if err := database.QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM information_schema.columns
+WHERE table_schema='public' AND table_name='memories'
+  AND column_name IN ('memory_id','app_name','user_id','memory_data','created_at','updated_at','deleted_at')`).Scan(&frameworkMemoryColumns); err != nil {
+		t.Fatalf("inspect framework Memory columns: %v", err)
+	}
+	if frameworkMemoryColumns != 7 {
+		t.Fatalf("framework Memory columns = %d, want 7", frameworkMemoryColumns)
+	}
+	if err := database.QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM pg_indexes
+WHERE schemaname='public' AND tablename='memories'
+  AND indexname IN ('idx_memories_app_user','idx_memories_updated_at','idx_memories_deleted_at')`).Scan(&frameworkMemoryIndexes); err != nil {
+		t.Fatalf("inspect framework Memory indexes: %v", err)
+	}
+	if frameworkMemoryIndexes != 3 {
+		t.Fatalf("framework Memory indexes = %d, want 3", frameworkMemoryIndexes)
+	}
+	var frameworkMemoryTimestampColumns int
+	if err := database.QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM information_schema.columns
+WHERE table_schema='public' AND table_name='memories'
+  AND column_name IN ('created_at','updated_at','deleted_at')
+  AND data_type='timestamp without time zone'`).Scan(&frameworkMemoryTimestampColumns); err != nil {
+		t.Fatalf("inspect framework Memory timestamp types: %v", err)
+	}
+	if frameworkMemoryTimestampColumns != 3 {
+		t.Fatalf("framework Memory timestamp-without-time-zone columns = %d, want 3", frameworkMemoryTimestampColumns)
+	}
+	var frameworkRLSCount int
+	if err := database.QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM pg_class
+WHERE relnamespace='public'::regnamespace
+  AND relname IN ('memories','session_states','session_events','session_track_events','session_summaries','app_states','user_states')
+  AND relrowsecurity AND relforcerowsecurity`).Scan(&frameworkRLSCount); err != nil {
+		t.Fatalf("inspect framework RLS: %v", err)
+	}
+	if frameworkRLSCount != 7 {
+		t.Fatalf("framework RLS tables = %d, want 7", frameworkRLSCount)
+	}
+	var frameworkRLSPolicies int
+	if err := database.QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM pg_policies
+WHERE schemaname='public'
+  AND tablename IN ('memories','session_states','session_events','session_track_events','session_summaries','app_states','user_states')
+  AND policyname LIKE 'tenant_scope_%'`).Scan(&frameworkRLSPolicies); err != nil {
+		t.Fatalf("inspect framework RLS policies: %v", err)
+	}
+	if frameworkRLSPolicies != 7 {
+		t.Fatalf("framework RLS policies = %d, want 7", frameworkRLSPolicies)
+	}
+	var frameworkVectorEpochColumns int
+	if err := database.QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM information_schema.columns
+WHERE table_schema='public' AND table_name='knowledge_vectors'
+  AND column_name IN ('created_at','updated_at') AND data_type='bigint'`).Scan(&frameworkVectorEpochColumns); err != nil {
+		t.Fatalf("inspect framework vector timestamp types: %v", err)
+	}
+	if frameworkVectorEpochColumns != 2 {
+		t.Fatalf("framework vector epoch columns = %d, want 2", frameworkVectorEpochColumns)
+	}
+	var platformLifecycleColumns int
+	if err := database.QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM information_schema.columns
+WHERE table_schema='public' AND (
+    (table_name='tenants' AND column_name='updated_at') OR
+    (table_name='platform_users' AND column_name='updated_at') OR
+    (table_name='local_credentials' AND column_name='created_at') OR
+    (table_name='tenant_members' AND column_name='updated_at') OR
+    (table_name='channel_bindings' AND column_name='updated_at') OR
+    (table_name='sessions' AND column_name='created_at') OR
+    (table_name='execution_traces' AND column_name='created_at') OR
+    (table_name='knowledge_documents' AND column_name='created_at') OR
+    (table_name='knowledge_document_sources' AND column_name='created_at')
+)`).Scan(&platformLifecycleColumns); err != nil {
+		t.Fatalf("inspect platform lifecycle columns: %v", err)
+	}
+	if platformLifecycleColumns != 9 {
+		t.Fatalf("platform lifecycle columns = %d, want 9", platformLifecycleColumns)
+	}
+	var platformCriticalIndexes int
+	if err := database.QueryRowContext(context.Background(), `
+SELECT COUNT(*) FROM pg_indexes
+WHERE schemaname='public' AND indexname IN (
+    'idx_tenant_members_user',
+    'idx_messages_tenant_updated',
+    'idx_audit_events_purge',
+    'idx_channel_identities_lookup',
+    'idx_tenant_backend_profiles_profile',
+    'idx_outbox_events_delivered_retention'
+)`).Scan(&platformCriticalIndexes); err != nil {
+		t.Fatalf("inspect platform critical indexes: %v", err)
+	}
+	if platformCriticalIndexes != 6 {
+		t.Fatalf("platform critical indexes = %d, want 6", platformCriticalIndexes)
+	}
+	var redundantArtifactIndex sql.NullString
+	if err := database.QueryRowContext(context.Background(), "SELECT to_regclass('public.idx_artifacts_session')::text").Scan(&redundantArtifactIndex); err != nil {
+		t.Fatalf("inspect redundant Artifact index: %v", err)
+	}
+	if redundantArtifactIndex.Valid {
+		t.Fatalf("redundant Artifact index still exists: %q", redundantArtifactIndex.String)
+	}
+	var sessionMigrationDriverCheck, ingestDriverCheck string
+	if err := database.QueryRowContext(context.Background(), `
+SELECT pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid='session_backend_migrations'::regclass
+  AND conname='session_backend_migrations_source_driver_check'`).Scan(&sessionMigrationDriverCheck); err != nil {
+		t.Fatalf("inspect Session migration driver constraint: %v", err)
+	}
+	for _, driver := range []string{"postgres", "redis", "inmemory", "mysql", "sqlite", "mongodb", "clickhouse"} {
+		if !strings.Contains(sessionMigrationDriverCheck, "'"+driver+"'") {
+			t.Fatalf("Session migration driver constraint missing %q: %s", driver, sessionMigrationDriverCheck)
+		}
+	}
+	if err := database.QueryRowContext(context.Background(), `
+SELECT pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid='knowledge_ingest_jobs'::regclass
+  AND conname='knowledge_ingest_jobs_backend_driver_check'`).Scan(&ingestDriverCheck); err != nil {
+		t.Fatalf("inspect knowledge ingest driver constraint: %v", err)
+	}
+	for _, driver := range []string{"pgvector", "qdrant", "elasticsearch"} {
+		if !strings.Contains(ingestDriverCheck, "'"+driver+"'") {
+			t.Fatalf("knowledge ingest driver constraint missing %q: %s", driver, ingestDriverCheck)
+		}
 	}
 	sessionKey, err := store.ResolveSession(context.Background(), storage.SessionRoute{
 		TenantID: "tenant-a", AppCode: "support", Channel: "web", BindingID: "web-console",
@@ -390,16 +630,98 @@ WHERE tenant_id=$1 AND idempotency_key=$2`, "tenant-a", unknownTool.IdempotencyK
 	if err := migrations.Apply(context.Background(), database); err != nil {
 		t.Fatalf("re-apply current baseline after schema reset: %v", err)
 	}
-	grantTenantRoleAccess(t, database)
+	assertTenantRoleAccess(t, database)
 }
 
-func grantTenantRoleAccess(t *testing.T, database *sql.DB) {
+func assertTenantRoleAccess(t *testing.T, database *sql.DB) {
 	t.Helper()
-	if _, err := database.ExecContext(context.Background(), `
-GRANT USAGE ON SCHEMA public TO trpc_tenant;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO trpc_tenant;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO trpc_tenant`); err != nil {
-		t.Fatalf("grant tenant role access to current baseline: %v", err)
+	rows, err := database.QueryContext(context.Background(), `
+SELECT class.relname,
+       has_table_privilege('trpc_tenant', class.oid, 'SELECT'),
+       has_table_privilege('trpc_tenant', class.oid, 'INSERT'),
+       has_table_privilege('trpc_tenant', class.oid, 'UPDATE'),
+       has_table_privilege('trpc_tenant', class.oid, 'DELETE')
+FROM pg_class AS class
+JOIN pg_namespace AS namespace ON namespace.oid=class.relnamespace
+WHERE namespace.nspname='public'
+  AND class.relkind IN ('r','p')
+  AND class.relrowsecurity
+  AND class.relforcerowsecurity
+ORDER BY class.relname`)
+	if err != nil {
+		t.Fatalf("query tenant role privileges: %v", err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var table string
+		var selectOK, insertOK, updateOK, deleteOK bool
+		if err := rows.Scan(&table, &selectOK, &insertOK, &updateOK, &deleteOK); err != nil {
+			t.Fatalf("scan tenant role privileges: %v", err)
+		}
+		count++
+		if !selectOK || !insertOK || !updateOK || !deleteOK {
+			t.Fatalf("trpc_tenant privileges on %s = select:%v insert:%v update:%v delete:%v", table, selectOK, insertOK, updateOK, deleteOK)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate tenant role privileges: %v", err)
+	}
+	if count == 0 {
+		t.Fatal("current baseline contains no FORCE RLS tenant tables")
+	}
+}
+
+func assertFrameworkSessionRLS(t *testing.T, database *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	const (
+		tenantID = "framework-rls-a"
+		appName  = tenantID + "/support"
+		otherApp = "framework-rls-b/support"
+	)
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO session_states (app_name,user_id,session_id,state)
+VALUES ($1,'user-b','foreign-session','{}'::jsonb)`, otherApp); err != nil {
+		t.Fatalf("seed foreign framework Session: %v", err)
+	}
+
+	tx, err := dbscope.BeginTenantTransaction(ctx, database, tenantID)
+	if err != nil {
+		t.Fatalf("begin framework RLS transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('app.app_name', $1, true)", appName); err != nil {
+		t.Fatalf("set framework app scope: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO session_states (app_name,user_id,session_id,state)
+VALUES ($1,'user-a','own-session','{}'::jsonb)`, appName); err != nil {
+		t.Fatalf("insert own framework Session through RLS: %v", err)
+	}
+	var visible int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM session_states").Scan(&visible); err != nil {
+		t.Fatalf("query scoped framework Sessions: %v", err)
+	}
+	if visible != 1 {
+		t.Fatalf("scoped framework Sessions = %d, want 1", visible)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit framework RLS transaction: %v", err)
+	}
+
+	forbidden, err := dbscope.BeginTenantTransaction(ctx, database, tenantID)
+	if err != nil {
+		t.Fatalf("begin cross-app framework RLS transaction: %v", err)
+	}
+	defer func() { _ = forbidden.Rollback() }()
+	if _, err := forbidden.ExecContext(ctx, "SELECT set_config('app.app_name', $1, true)", appName); err != nil {
+		t.Fatalf("set cross-app framework scope: %v", err)
+	}
+	if _, err := forbidden.ExecContext(ctx, `
+INSERT INTO session_states (app_name,user_id,session_id,state)
+VALUES ($1,'user-b','forbidden-session','{}'::jsonb)`, otherApp); err == nil {
+		t.Fatal("framework Session RLS accepted cross-application insert")
 	}
 }
 

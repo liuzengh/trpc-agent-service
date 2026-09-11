@@ -262,6 +262,11 @@ func TestFeishuProgressUpdatesOneCard(t *testing.T) {
 		t.Fatalf("ordinary progress card should not force wide-screen layout: %#v", initial)
 	}
 	elements, _ := initial["elements"].([]any)
+	if len(elements) == 0 {
+		if body, ok := initial["body"].(map[string]any); ok {
+			elements, _ = body["elements"].([]any)
+		}
+	}
 	if len(elements) != 1 || elements[0].(map[string]any)["tag"] != "note" {
 		t.Fatalf("ordinary progress card should use a light note state: %#v", initial)
 	}
@@ -391,6 +396,77 @@ func TestFeishuResolvedApprovalRemainsCardV2(t *testing.T) {
 	elements, _ := body["elements"].([]any)
 	if len(elements) != 1 || elements[0].(map[string]any)["tag"] != "markdown" {
 		t.Fatalf("resolved approval elements = %#v", elements)
+	}
+}
+
+func TestBuildFeishuCardCoversFallbackLinkAndActionFiltering(t *testing.T) {
+	t.Parallel()
+	content, err := buildFeishuCard(nil, "普通回复", channels.ConversationDirect)
+	if err != nil || !strings.Contains(content, "普通回复") {
+		t.Fatalf("buildFeishuCard(fallback) = %q, %v", content, err)
+	}
+	if _, err := buildFeishuCard(nil, "   ", channels.ConversationDirect); err == nil {
+		t.Fatal("buildFeishuCard(empty) error = nil")
+	}
+	content, err = buildFeishuCard(&channels.InteractiveCard{
+		Title: "订单信息", Body: "已找到订单",
+		Actions: []channels.CardAction{
+			{Label: " 查看详情 ", URL: "https://support.example.test/orders/42", Style: "primary"},
+			{Label: "默认按钮", URL: "https://support.example.test/help", Style: "unexpected"},
+			{Label: "   ", URL: "https://support.example.test/ignored"},
+			{Label: "无动作"},
+		},
+	}, "", channels.ConversationGroup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["schema"] != "2.0" {
+		t.Fatalf("link-only card schema = %#v, want 2.0", payload["schema"])
+	}
+	body, _ := payload["body"].(map[string]any)
+	elements, _ := body["elements"].([]any)
+	if len(elements) != 3 {
+		t.Fatalf("card elements = %#v", elements)
+	}
+	columnSet, _ := elements[2].(map[string]any)
+	columns, _ := columnSet["columns"].([]any)
+	if len(columns) != 2 {
+		t.Fatalf("filtered columns = %#v", columns)
+	}
+	primary, _ := columns[0].(map[string]any)
+	primaryElements, _ := primary["elements"].([]any)
+	primaryButton, _ := primaryElements[0].(map[string]any)
+	if primaryButton["type"] != "primary_filled" {
+		t.Fatalf("primary button type = %#v", primaryButton["type"])
+	}
+	behaviors, _ := primaryButton["behaviors"].([]any)
+	behavior, _ := behaviors[0].(map[string]any)
+	if behavior["type"] != "open_url" || behavior["default_url"] != "https://support.example.test/orders/42" {
+		t.Fatalf("primary button behavior = %#v", behavior)
+	}
+	defaultColumn, _ := columns[1].(map[string]any)
+	defaultElements, _ := defaultColumn["elements"].([]any)
+	defaultButton, _ := defaultElements[0].(map[string]any)
+	if defaultButton["type"] != "default" {
+		t.Fatalf("default button type = %#v", defaultButton["type"])
+	}
+}
+
+func TestFeishuDeleteMessageFailsClosedWithoutUsableTargetOrClient(t *testing.T) {
+	t.Parallel()
+	sender := newSender(nil, nil)
+	if err := sender.DeleteMessage(context.Background(), channels.ReplyTarget{Channel: channels.Telegram, ConversationID: "chat"}, "message-1"); err == nil {
+		t.Fatal("DeleteMessage() accepted wrong channel")
+	}
+	if err := sender.DeleteMessage(context.Background(), channels.ReplyTarget{Channel: channels.Feishu}, "message-1"); err == nil {
+		t.Fatal("DeleteMessage() accepted empty conversation")
+	}
+	if err := sender.DeleteMessage(context.Background(), channels.ReplyTarget{Channel: channels.Feishu, ConversationID: "oc_1"}, "message-1"); err == nil || !strings.Contains(err.Error(), "raw client is unavailable") {
+		t.Fatalf("DeleteMessage(nil client) error = %v", err)
 	}
 }
 

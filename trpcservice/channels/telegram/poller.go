@@ -32,6 +32,13 @@ var (
 // receiver contract.
 type MessageHandler = channels.InboundHandler
 
+// OffsetStore persists the next Telegram update ID that may be consumed.
+// Implementations must keep the stored value monotonic.
+type OffsetStore interface {
+	Load(context.Context) (int64, error)
+	Save(context.Context, int64) error
+}
+
 // Poller continuously fetches updates from the Telegram Bot API via getUpdates long polling.
 type Poller struct {
 	botToken       string
@@ -41,6 +48,7 @@ type Poller struct {
 	onReady        func()
 	onError        func(error)
 	maxFileBytes   int64
+	offsetStore    OffsetStore
 
 	mu          sync.RWMutex
 	offset      int64
@@ -55,6 +63,7 @@ type PollerConfig struct {
 	OnReady      func()
 	OnError      func(error)
 	MaxFileBytes int64
+	OffsetStore  OffsetStore
 }
 
 // NewPoller constructs a Telegram long poller.
@@ -79,6 +88,7 @@ func NewPoller(config PollerConfig) (*Poller, error) {
 		onReady:        config.OnReady,
 		onError:        config.OnError,
 		maxFileBytes:   config.MaxFileBytes,
+		offsetStore:    config.OffsetStore,
 	}, nil
 }
 
@@ -173,15 +183,21 @@ func (p *Poller) PollOnce(ctx context.Context, handler MessageHandler) (int, err
 				return processed, err
 			}
 			processed++
-			p.commitOffset(upd.ID + 1)
+			if err := p.advanceOffset(ctx, upd.ID+1); err != nil {
+				return processed, err
+			}
 			continue
 		}
 		if upd.Message == nil {
-			p.commitOffset(upd.ID + 1)
+			if err := p.advanceOffset(ctx, upd.ID+1); err != nil {
+				return processed, err
+			}
 			continue
 		}
 		if upd.ID <= 0 || upd.Message.ID <= 0 || upd.Message.Chat.ID == 0 || upd.Message.From.ID <= 0 {
-			p.commitOffset(upd.ID + 1)
+			if err := p.advanceOffset(ctx, upd.ID+1); err != nil {
+				return processed, err
+			}
 			continue
 		}
 		text := strings.TrimSpace(upd.Message.Text)
@@ -197,7 +213,9 @@ func (p *Poller) PollOnce(ctx context.Context, handler MessageHandler) (int, err
 			var triggered bool
 			text, triggered = normalizeTelegramGroupText(text, botUsername)
 			if !triggered {
-				p.commitOffset(upd.ID + 1)
+				if err := p.advanceOffset(ctx, upd.ID+1); err != nil {
+					return processed, err
+				}
 				continue
 			}
 		}
@@ -207,7 +225,9 @@ func (p *Poller) PollOnce(ctx context.Context, handler MessageHandler) (int, err
 			return processed, fmt.Errorf("telegram update %d attachment download: %w", upd.ID, err)
 		}
 		if text == "" && len(receivedFiles) == 0 {
-			p.commitOffset(upd.ID + 1)
+			if err := p.advanceOffset(ctx, upd.ID+1); err != nil {
+				return processed, err
+			}
 			continue
 		}
 
@@ -239,7 +259,9 @@ func (p *Poller) PollOnce(ctx context.Context, handler MessageHandler) (int, err
 			}
 		}
 		processed++
-		p.commitOffset(upd.ID + 1)
+		if err := p.advanceOffset(ctx, upd.ID+1); err != nil {
+			return processed, err
+		}
 	}
 
 	return processed, nil
@@ -292,6 +314,34 @@ func (p *Poller) commitOffset(offset int64) {
 		p.offset = offset
 	}
 	p.mu.Unlock()
+}
+
+func (p *Poller) advanceOffset(ctx context.Context, offset int64) error {
+	if offset <= 0 {
+		return nil
+	}
+	if p.offsetStore != nil {
+		if err := p.offsetStore.Save(ctx, offset); err != nil {
+			return fmt.Errorf("persist telegram update offset %d: %w", offset, err)
+		}
+	}
+	p.commitOffset(offset)
+	return nil
+}
+
+func (p *Poller) loadPersistedOffset(ctx context.Context) error {
+	if p.offsetStore == nil {
+		return nil
+	}
+	offset, err := p.offsetStore.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("load telegram update offset: %w", err)
+	}
+	if offset < 0 {
+		return fmt.Errorf("load telegram update offset: invalid negative offset %d", offset)
+	}
+	p.commitOffset(offset)
+	return nil
 }
 
 func (p *Poller) downloadMessageFiles(ctx context.Context, message *message) ([]channels.ReceivedFile, error) {
@@ -408,8 +458,15 @@ func (p *Poller) Run(ctx context.Context, handler MessageHandler) error {
 		p.reportError(err)
 		return err
 	}
+	if err := p.loadPersistedOffset(ctx); err != nil {
+		p.reportError(err)
+		return err
+	}
 	if sender, err := NewSender(p.botToken, p.baseURL, p.client); err == nil {
 		if err := sender.SetCommands(ctx, DefaultCommands()); err != nil {
+			p.reportError(err)
+		}
+		if err := sender.SetMenuButtonCommands(ctx); err != nil {
 			p.reportError(err)
 		}
 	}
@@ -507,9 +564,13 @@ func normalizeTelegramGroupText(text, botUsername string) (string, bool) {
 		}
 		if strings.HasSuffix(trimmed, target) {
 			triggered = true
-			cut := len(field) - len(target)
-			if cut > 0 {
-				field = strings.TrimSpace(field[:cut])
+			// lower preserves the byte offsets of the original UTF-8 field for
+			// ASCII bot usernames. Locate the mention itself instead of trimming
+			// len(target) bytes from the raw field: trailing full-width punctuation
+			// such as '！' occupies multiple bytes and would otherwise cut through
+			// the username.
+			if mention := strings.LastIndex(lower, target); mention >= 0 {
+				field = strings.TrimSpace(field[:mention])
 			}
 		}
 		if field != "" {

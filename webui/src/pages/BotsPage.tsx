@@ -7,12 +7,8 @@ import { channelLabel } from '../components/channelMeta'
 import { FeedbackBanner } from '../components/FeedbackBanner'
 import { LoadingState } from '../components/LoadingState'
 import { SearchField } from '../components/SearchField'
-import {
-  BotIcon,
-  ChatIcon,
-  SettingsIcon,
-} from '../components/Icons'
-import { LayersIcon, PlayIcon, PlusIcon, PowerIcon, RouteIcon } from '../components/PageIcons'
+import { BotIcon } from '../components/Icons'
+import { PlayIcon, PlusIcon, RouteIcon } from '../components/PageIcons'
 import { StatusIndicator } from '../components/StatusIndicator'
 import { useAppContext } from '../context'
 import { channelsOf, type Snapshot } from '../types'
@@ -23,7 +19,7 @@ const loadVersionHistory = () => import('./VersionHistoryDialog')
 const VersionHistoryDialog = lazy(async () => ({ default: (await loadVersionHistory()).VersionHistoryDialog }))
 
 export function BotsPage({ onOpenChat }: { onOpenChat: (app: Snapshot) => void }) {
-  const { apps, appsLoading, appsError, tenants, tenantsLoading, tenant, refresh } = useAppContext()
+  const { apps, appsLoading, appsError, tenantsLoading, tenant, refresh } = useAppContext()
   const [editing, setEditing] = useState<{ mode: 'create' } | { mode: 'edit'; app: Snapshot } | null>(null)
   const [busy, setBusy] = useState('')
   const [versioning, setVersioning] = useState<Snapshot | null>(null)
@@ -125,7 +121,8 @@ export function BotsPage({ onOpenChat }: { onOpenChat: (app: Snapshot) => void }
       </div>
 
       <section className="application-table" aria-label="机器人列表">
-        <table>
+        <div className="table-scroll application-table-scroll">
+          <table className="ui-table">
           <thead>
             <tr>
               <th>机器人</th>
@@ -184,41 +181,42 @@ export function BotsPage({ onOpenChat }: { onOpenChat: (app: Snapshot) => void }
                 </td>
                 <td>
                   <div className="row-actions">
-                    <button type="button" className="secondary small-btn" disabled={app.Config.status !== 'active'} onClick={() => onOpenChat(app)}>
-                      <ChatIcon size={14} /> 对话
+                    <button type="button" className="table-action" disabled={app.Config.status !== 'active'} onClick={() => onOpenChat(app)}>
+                      对话
                     </button>
                     <button
                       type="button"
-                      className="secondary small-btn"
+                      className="table-action"
                       onPointerEnter={preloadEditor}
                       onFocus={preloadEditor}
                       onClick={() => setEditing({ mode: 'edit', app })}
                     >
-                      <SettingsIcon size={13} /> 配置
+                      配置
                     </button>
                     <button
                       type="button"
-                      className="secondary small-btn"
+                      className="table-action"
                       onPointerEnter={() => { void loadVersionHistory() }}
                       onFocus={() => { void loadVersionHistory() }}
                       onClick={() => setVersioning(app)}
                     >
-                      <LayersIcon size={13} /> 版本发布
+                      版本发布
                     </button>
                     <button
                       type="button"
-                      className={`secondary small-btn status-action ${app.Config.status === 'active' ? 'is-stop' : 'is-start'}`}
+                      className={`table-action status-action ${app.Config.status === 'active' ? 'is-stop' : 'is-start'}`}
                       disabled={busy === `${app.Config.tenant_id}/${app.Config.app_code}`}
                       onClick={() => void toggleStatus(app)}
                     >
-                      <PowerIcon size={13} /> {app.Config.status === 'active' ? '停用' : app.Config.status === 'draft' ? '启用' : '重新启用'}
+                      {app.Config.status === 'active' ? '停用' : app.Config.status === 'draft' ? '启用' : '重新启用'}
                     </button>
                   </div>
                 </td>
               </tr>
             ))}
           </tbody>
-        </table>
+          </table>
+        </div>
       </section>
 
       {versioning && (
@@ -239,7 +237,6 @@ export function BotsPage({ onOpenChat }: { onOpenChat: (app: Snapshot) => void }
           <BotModal
             mode={editing.mode}
             app={editing.mode === 'edit' ? editing.app : null}
-            tenants={tenants}
             currentTenant={tenant}
             onClose={() => setEditing(null)}
             onSaved={async (result) => {

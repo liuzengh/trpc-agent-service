@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/dbscope"
 )
 
 func (s *PostgresStateStore) ListAudit(ctx context.Context, tenantID, traceID string) ([]AuditEvent, error) {
@@ -85,9 +87,65 @@ func (s *PostgresStateStore) PurgeAuditBefore(ctx context.Context, tenantID stri
 	if before.IsZero() {
 		return 0, fmt.Errorf("audit cutoff is required")
 	}
-	result, err := s.database.ExecContext(ctx, "DELETE FROM audit_events WHERE tenant_id=$1 AND created_at < $2", tenantID, before)
+	tx, err := dbscope.BeginTenantTransaction(ctx, s.database, tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("purge audit events: begin retention transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Approval rows are durable lifecycle evidence. If an old pending row was
+	// stranded after its Redis coordination state disappeared, turn the elapsed
+	// deadline into an explicit terminal state before retention evaluates it.
+	if _, err := tx.ExecContext(ctx, `
+UPDATE tool_approvals
+SET status='expired', resolved_at=expires_at, updated_at=NOW()
+WHERE tenant_id=$1 AND status='pending' AND expires_at < NOW()`, tenantID); err != nil {
+		return 0, fmt.Errorf("expire stale approval records: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM tool_approvals
+WHERE tenant_id=$1 AND status <> 'pending'
+  AND COALESCE(resolved_at, updated_at) < $2`, tenantID, before); err != nil {
+		return 0, fmt.Errorf("purge approval evidence: %w", err)
+	}
+
+	// Execution traces are observability projections only. They do not carry
+	// the exactly-once contract, so the tenant audit retention window applies.
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM execution_traces
+WHERE tenant_id=$1 AND updated_at < $2`, tenantID, before); err != nil {
+		return 0, fmt.Errorf("purge execution traces: %w", err)
+	}
+
+	// Completed tool results may contain encrypted business payloads. Delete
+	// them only after the parent message is durably completed and both records
+	// are beyond the retention window. Keep failed/running/outcome_unknown rows:
+	// those records still participate in retry or duplicate-side-effect safety.
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM tool_executions AS tool
+WHERE tool.tenant_id=$1 AND tool.status='completed' AND tool.completed_at < $2
+  AND EXISTS (
+      SELECT 1
+      FROM messages AS message
+      WHERE message.tenant_id=tool.tenant_id
+        AND message.message_id=tool.request_id
+        AND message.trace_id=tool.trace_id
+        AND message.status='completed'
+        AND message.updated_at < $2
+  )`, tenantID, before); err != nil {
+		return 0, fmt.Errorf("purge completed tool evidence: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, "DELETE FROM audit_events WHERE tenant_id=$1 AND created_at < $2", tenantID, before)
 	if err != nil {
 		return 0, fmt.Errorf("purge audit events: %w", err)
 	}
-	return result.RowsAffected()
+	removedAudit, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read purged audit row count: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit audit retention: %w", err)
+	}
+	return removedAudit, nil
 }

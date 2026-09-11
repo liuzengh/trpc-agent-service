@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/backendhealth"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/credential"
 	agentartifact "trpc.group/trpc-go/trpc-agent-go/artifact"
 	agentknowledge "trpc.group/trpc-go/trpc-agent-go/knowledge"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge/embedder"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/source"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -19,12 +21,22 @@ import (
 type PlatformStoreFactory struct {
 	postgres  *PostgresPlatformStore
 	artifacts *ArtifactBackends
-	profiles  BackendProfileStore
+	profiles  BackendProfileResolver
 	secrets   credential.SecretResolver
 	framework frameworkKnowledgeConfig
+	health    *backendhealth.Registry
 }
 
-func NewPlatformStoreFactory(database *sql.DB, databaseURL string, knowledge config.KnowledgeConfig, providers []config.ModelProviderConfig, profiles BackendProfileStore, secrets credential.SecretResolver, httpClient *http.Client) (*PlatformStoreFactory, error) {
+type PlatformStoreFactoryOption func(*PlatformStoreFactory)
+
+func WithBackendHealth(registry *backendhealth.Registry) PlatformStoreFactoryOption {
+	return func(factory *PlatformStoreFactory) {
+		factory.health = registry
+		factory.framework.health = registry
+	}
+}
+
+func NewPlatformStoreFactory(database *sql.DB, databaseURL string, knowledge config.KnowledgeConfig, providers []config.ModelProviderConfig, profiles BackendProfileResolver, secrets credential.SecretResolver, httpClient *http.Client, options ...PlatformStoreFactoryOption) (*PlatformStoreFactory, error) {
 	postgres, err := NewPostgresPlatformStore(database)
 	if err != nil {
 		return nil, err
@@ -43,12 +55,18 @@ func NewPlatformStoreFactory(database *sql.DB, databaseURL string, knowledge con
 	for _, provider := range providers {
 		providerCatalog[provider.ID] = provider
 	}
-	return &PlatformStoreFactory{
+	factory := &PlatformStoreFactory{
 		postgres: postgres, artifacts: newArtifactBackends(postgresArtifacts), profiles: profiles, secrets: secrets,
 		framework: frameworkKnowledgeConfig{
 			databaseURL: databaseURL, knowledge: knowledge, providers: providerCatalog, secrets: secrets, httpClient: httpClient,
 		},
-	}, nil
+	}
+	for _, option := range options {
+		if option != nil {
+			option(factory)
+		}
+	}
+	return factory, nil
 }
 
 func (f *PlatformStoreFactory) ArtifactDrivers() []string {
@@ -56,6 +74,16 @@ func (f *PlatformStoreFactory) ArtifactDrivers() []string {
 		return nil
 	}
 	return f.artifacts.DriverNames()
+}
+
+// MemoryEmbedder returns the same platform-owned embedder configuration used
+// by Knowledge so vector-backed Memory implementations do not grow a second
+// model/credential configuration path.
+func (f *PlatformStoreFactory) MemoryEmbedder(ctx context.Context) (embedder.Embedder, error) {
+	if f == nil {
+		return nil, fmt.Errorf("platform store factory is required")
+	}
+	return f.framework.newEmbedder(ctx)
 }
 
 // ArtifactService resolves the framework artifact service for one immutable
@@ -73,11 +101,32 @@ func (f *PlatformStoreFactory) ArtifactService(ctx context.Context, tenantConfig
 		}
 		connection = value
 	}
-	service, err := f.artifacts.Open(ctx, backend.Driver, connection)
+	service, err := f.artifacts.Open(ctx, tenantConfig.Storage.Artifact.ProfileID, backend.Driver, connection)
 	if err != nil {
 		return nil, fmt.Errorf("tenant %q: %w", tenantConfig.AppName(), err)
 	}
+	if f.health != nil && backendhealth.ShouldProtect(backend.Driver) {
+		healthKey := backendhealth.Key{ProfileID: tenantConfig.Storage.Artifact.ProfileID, Domain: BackendDomainArtifact, Driver: backend.Driver}
+		probeInfo := agentartifact.SessionInfo{AppName: tenantConfig.AppName(), UserID: "__backend_probe__", SessionID: "__backend_probe__"}
+		if err := f.health.RegisterProbe(healthKey, func(probeCtx context.Context) error {
+			_, probeErr := service.ListArtifactKeys(probeCtx, probeInfo)
+			return probeErr
+		}); err != nil {
+			return nil, err
+		}
+		if err := f.health.Check(ctx, healthKey); err != nil {
+			return nil, fmt.Errorf("probe tenant %q artifact backend: %w", tenantConfig.AppName(), err)
+		}
+		service = observeArtifactService(service, f.health, healthKey)
+	}
 	return service, nil
+}
+
+func (f *PlatformStoreFactory) Close() error {
+	if f == nil || f.artifacts == nil {
+		return nil
+	}
+	return f.artifacts.Close()
 }
 
 // Knowledge returns the framework-native knowledge surface for one tenant
@@ -88,12 +137,13 @@ func (f *PlatformStoreFactory) Knowledge(ctx context.Context, tenantConfig confi
 	if err != nil {
 		return nil, fmt.Errorf("resolve tenant %q Knowledge backend profile: %w", tenantConfig.AppName(), err)
 	}
-	return f.framework.newKnowledge(ctx, tenantConfig, backend, configuredModel)
+	return f.framework.newKnowledge(ctx, tenantConfig, backend, configuredModel, tenantConfig.Storage.Knowledge.ProfileID)
 }
 
 type KnowledgeLoadRequest struct {
 	TenantID, AppCode, DocumentID string
 	JobID, Owner                  string
+	ProfileID                     string
 	Backend                       config.BackendConfig
 }
 
@@ -106,7 +156,7 @@ func (f *PlatformStoreFactory) LoadKnowledgeSource(ctx context.Context, request 
 		knowledgeJobMetadataKey:    request.JobID,
 		knowledgeOwnerMetadataKey:  request.Owner,
 	}
-	store, err := f.framework.newVectorStore(ctx, request.TenantID, request.AppCode, request.Backend, metadata)
+	store, err := f.framework.newVectorStoreWithProfile(ctx, request.TenantID, request.AppCode, request.Backend, request.ProfileID, metadata)
 	if err != nil {
 		return 0, err
 	}
@@ -157,7 +207,7 @@ func (f *PlatformStoreFactory) DeleteKnowledgeDocument(ctx context.Context, tena
 	if err != nil {
 		return fmt.Errorf("resolve tenant %q Knowledge backend profile: %w", tenantConfig.AppName(), err)
 	}
-	store, err := f.framework.newVectorStore(ctx, tenantConfig.TenantID, tenantConfig.AppCode, normalizedKnowledgeBackendConfig(backend), nil)
+	store, err := f.framework.newVectorStoreWithProfile(ctx, tenantConfig.TenantID, tenantConfig.AppCode, normalizedKnowledgeBackendConfig(backend), tenantConfig.Storage.Knowledge.ProfileID, nil)
 	if err != nil {
 		return err
 	}

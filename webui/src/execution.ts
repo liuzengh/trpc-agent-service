@@ -124,6 +124,18 @@ export function stepSubject(step: AgentExecutionTraceStep): string {
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'incomplete'
 
+export type ExecutionTimelineItem = {
+  id: string
+  kind: 'framework' | 'model' | 'approval' | 'tool' | 'delivery'
+  title: string
+  subject?: string
+  detail?: string
+  status: 'running' | 'completed' | 'failed'
+  started_at?: string
+  ended_at?: string
+  usage?: AgentExecutionTraceUsage
+}
+
 export function orderExecutionSteps(steps: AgentExecutionTraceStep[]): AgentExecutionTraceStep[] {
   const byID = new Map(steps.map((step) => [step.step_id, step]))
   const ordered: AgentExecutionTraceStep[] = []
@@ -147,12 +159,147 @@ export function visibleExecutionTraceSteps(detail: ExecutionTrace): AgentExecuti
   if (!trace) return []
   const tools = detail.tool_executions ?? []
   const steps = orderExecutionSteps(trace.steps ?? []).filter((step) => tools.length === 0 || step.node_type !== 'tool')
-  if (tools.length > 0 && steps.length === 1 && steps[0].node_type === 'agent') return []
+  const hasApprovalEvidence = (detail.audit_events ?? []).some((event) => event.Action.startsWith('approval.'))
+  const hasModelEvidence = (detail.audit_events ?? []).some((event) => event.Action.startsWith('model.'))
+  if ((tools.length > 0 || hasApprovalEvidence || hasModelEvidence) && steps.length === 1 && steps[0].node_type === 'agent') return []
   return steps
 }
 
 export function executionProcessCount(detail: ExecutionTrace): number {
-  return visibleExecutionTraceSteps(detail).length + (detail.tool_executions?.length ?? 0)
+  return executionTimelineItems(detail).length
+}
+
+export function executionTimelineItems(detail: ExecutionTrace): ExecutionTimelineItem[] {
+  const steps = visibleExecutionTraceSteps(detail)
+  const items: ExecutionTimelineItem[] = steps.map((step) => ({
+    id: `framework:${step.step_id}`,
+    kind: 'framework',
+    title: step.node_type === 'agent' ? '机器人运行' : nodeTypeLabel(step.node_type),
+    subject: stepSubject(step),
+    status: step.failed ? 'failed' : 'completed',
+    started_at: step.started_at,
+    ended_at: step.ended_at,
+    usage: step.usage,
+  }))
+
+  items.push(...modelTimelineItems(detail))
+  items.push(...approvalTimelineItems(detail))
+  for (const tool of detail.tool_executions ?? []) {
+    items.push({
+      id: `tool:${tool.tool_call_id}:${tool.started_at}`,
+      kind: 'tool',
+      title: '工具调用',
+      subject: tool.tool_name,
+      detail: [toolExecutionStatusLabel(tool.status), tool.error_type].filter(Boolean).join(' · '),
+      status: tool.status === 'running' ? 'running' : tool.status === 'completed' ? 'completed' : 'failed',
+      started_at: tool.started_at,
+      ended_at: tool.completed_at,
+    })
+  }
+  for (const outbox of detail.outbox ?? []) {
+    items.push({
+      id: `delivery:${outbox.ID}`,
+      kind: 'delivery',
+      title: '消息发送',
+      subject: outbox.DeliveredAt ? '已送达' : '待发送',
+      status: outbox.DeliveredAt ? 'completed' : 'running',
+      started_at: outbox.CreatedAt,
+      ended_at: outbox.DeliveredAt ?? undefined,
+    })
+  }
+  return items.sort((left, right) => timelineTimestamp(left) - timelineTimestamp(right))
+}
+
+function modelTimelineItems(detail: ExecutionTrace): ExecutionTimelineItem[] {
+  const events = [...(detail.audit_events ?? [])]
+    .filter((event) => event.Action.startsWith('model.'))
+    .sort((left, right) => Date.parse(left.CreatedAt) - Date.parse(right.CreatedAt))
+  const pending = new Map<string, ExecutionTimelineItem[]>()
+  const result: ExecutionTimelineItem[] = []
+  for (const event of events) {
+    const key = event.RequestID ?? detail.event_id
+    if (event.Action === 'model.requested') {
+      const item: ExecutionTimelineItem = {
+        id: `model:${event.ID}`,
+        kind: 'model',
+        title: '模型调用',
+        subject: event.AgentName || undefined,
+        status: 'running',
+        started_at: event.CreatedAt,
+      }
+      result.push(item)
+      const queue = pending.get(key) ?? []
+      queue.push(item)
+      pending.set(key, queue)
+      continue
+    }
+    const queue = pending.get(key)
+    const item = queue?.shift()
+    if (!item) continue
+    item.ended_at = event.CreatedAt
+    if (event.Action === 'model.completed') {
+      item.status = 'completed'
+      continue
+    }
+    item.title = '模型调用失败'
+    item.status = 'failed'
+    item.detail = event.ErrorType || undefined
+  }
+  return result
+}
+
+function approvalTimelineItems(detail: ExecutionTrace): ExecutionTimelineItem[] {
+  const events = [...(detail.audit_events ?? [])]
+    .filter((event) => event.Action.startsWith('approval.'))
+    .sort((left, right) => Date.parse(left.CreatedAt) - Date.parse(right.CreatedAt))
+  const pending = new Map<string, ExecutionTimelineItem[]>()
+  const result: ExecutionTimelineItem[] = []
+  for (const event of events) {
+    const key = `${event.RequestID ?? detail.event_id}\u0000${event.ToolName ?? ''}`
+    if (event.Action === 'approval.requested') {
+      const item: ExecutionTimelineItem = {
+        id: `approval:${event.ID}`,
+        kind: 'approval',
+        title: '等待审批',
+        subject: event.ToolName,
+        status: 'running',
+        started_at: event.CreatedAt,
+      }
+      result.push(item)
+      const queue = pending.get(key) ?? []
+      queue.push(item)
+      pending.set(key, queue)
+      continue
+    }
+    const queue = pending.get(key)
+    const item = queue?.shift()
+    if (!item) continue
+    item.ended_at = event.CreatedAt
+    switch (event.Action) {
+      case 'approval.approved':
+        item.title = '审批通过'
+        item.status = 'completed'
+        break
+      case 'approval.rejected':
+        item.title = '审批拒绝'
+        item.status = 'failed'
+        break
+      case 'approval.expired':
+        item.title = '审批过期'
+        item.status = 'failed'
+        break
+      default:
+        item.title = '审批失败'
+        item.status = 'failed'
+        break
+    }
+  }
+  return result
+}
+
+function timelineTimestamp(item: ExecutionTimelineItem): number {
+  const parsed = Date.parse(item.started_at ?? item.ended_at ?? '')
+  return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER
 }
 
 export function invocationDepth(step: AgentExecutionTraceStep, steps: AgentExecutionTraceStep[]): number {
@@ -203,12 +350,14 @@ export function runStatus(detail: ExecutionTrace): RunStatus {
   const status = detail.status || detail.agent_trace?.status
   if (status === 'failed') return 'failed'
   if (status === 'incomplete') return 'incomplete'
+  if (detail.claim?.status === 'failed') return 'failed'
   if (detail.claim?.status === 'processing') return 'running'
   if (status === 'completed' || detail.claim?.status === 'completed') return 'completed'
   return 'running'
 }
 
 export function listRunStatus(claim: Claim): RunStatus {
+  if (claim.status === 'failed') return 'failed'
   if (claim.status !== 'completed') return 'running'
   if (claim.failed) return 'failed'
   return 'completed'
@@ -221,6 +370,12 @@ export function runStatusLabel(status: RunStatus): string {
 export function runSettled(detail: ExecutionTrace): boolean {
   const status = runStatus(detail)
   return status === 'completed' || status === 'failed' || (status === 'incomplete' && Boolean(detail.agent_trace))
+}
+
+export function executionViewSettled(detail: ExecutionTrace): boolean {
+  if (!runSettled(detail)) return false
+  const outbox = detail.outbox ?? []
+  return outbox.length === 0 || outbox.every((entry) => Boolean(entry.DeliveredAt))
 }
 
 export function replyFromExecution(detail: ExecutionTrace): string {
@@ -271,18 +426,14 @@ export function formatExecutionText(detail: ExecutionTrace): string {
     lines[0] += `  ${durationLabel(trace.started_at, trace.ended_at)}`
     const usage = formatTokenCompact(trace.usage)
     if (usage) lines.push(`  ${usage}`)
-    for (const step of visibleExecutionTraceSteps(detail)) {
-      const mark = step.failed ? '×' : '·'
-      const extra = formatTokenCompact(step.usage)
-      const subject = stepSubject(step)
-      lines.push(`  ${mark} ${nodeTypeLabel(step.node_type)}${subject ? `  ${subject}` : ''}  ${durationLabel(step.started_at, step.ended_at)}${extra ? `  ${extra}` : ''}`)
-    }
   }
-  for (const tool of detail.tool_executions ?? []) {
-    const mark = tool.status === 'completed' ? '·' : tool.status === 'running' ? '…' : '×'
-    lines.push(`  ${mark} 工具调用  ${tool.tool_name}  ${toolExecutionDurationLabel(tool)}  ${toolExecutionStatusLabel(tool.status)}`)
+  for (const item of executionTimelineItems(detail)) {
+    const mark = item.status === 'completed' ? '·' : item.status === 'running' ? '…' : '×'
+    const duration = item.ended_at ? durationLabel(item.started_at ?? '', item.ended_at) : item.status === 'running' ? '进行中' : '—'
+    const usage = formatTokenCompact(item.usage)
+    lines.push(`  ${mark} ${item.title}${item.subject ? `  ${item.subject}` : ''}  ${duration}${item.detail ? `  ${item.detail}` : ''}${usage ? `  ${usage}` : ''}`)
   }
-  lines.push(`  发送 ${deliveryLabel(detail)}`)
+  if ((detail.outbox?.length ?? 0) === 0) lines.push(`  发送 ${deliveryLabel(detail)}`)
   if (detail.attempts > 0) lines.push(`  重试 ${detail.attempts} 次`)
   return lines.join('\n')
 }

@@ -1,10 +1,12 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 var testArtifactDrivers = []string{"postgres", "s3", "cos"}
@@ -403,5 +405,295 @@ func TestPlatformPolicyValidatorUsesManagedDynamicModels(t *testing.T) {
 	catalog.ReplaceDiscoveredModels("provider-static", []string{"discovered-1"})
 	if err := validator.Validate(staticCfg); err != nil {
 		t.Fatalf("after discovery, model should be accepted, got %v", err)
+	}
+}
+
+func newSupportPolicyValidator(t *testing.T) *PlatformPolicyValidator {
+	t.Helper()
+	catalog := mustTestModelCatalog(t, []ModelProviderConfig{{
+		ID: "support-models", Type: ModelProviderOpenAI, BaseURL: "https://models.example.test/v1", APIKeyRef: "env:MODEL_KEY",
+		Models: []ModelPricingConfig{{
+			Name: "support-primary",
+			Capabilities: &ModelCapabilities{
+				ReasoningEfforts: []string{"low", "high"}, ThinkingToggle: true, ThinkingBudget: true,
+			},
+		}, {Name: "support-backup"}},
+	}})
+	validator, err := NewPlatformPolicyValidator(
+		catalog,
+		[]string{"env:MODEL_KEY", "env:CHANNEL_KEY", "env:TOOL_KEY"},
+		[]string{"env:CHANNEL_KEY"},
+		[]string{"env:TOOL_KEY"},
+		[]string{"search_knowledge"},
+		testArtifactDrivers,
+	)
+	if err != nil {
+		t.Fatalf("NewPlatformPolicyValidator() error = %v", err)
+	}
+	return validator
+}
+
+func validSupportPolicyConfig() TenantConfig {
+	return TenantConfig{
+		TenantID: "support", AppCode: "assistant", Status: AgentActive, ConfigVersion: 1,
+		Model:    ModelConfig{ProviderID: "support-models", Name: "support-primary"},
+		Channels: []ChannelBinding{{Type: ChannelTelegram, BindingID: "support-main", CredentialRef: "env:CHANNEL_KEY"}},
+		Tools:    ToolPolicy{Allowed: []string{"search_knowledge"}},
+	}
+}
+
+func TestNewPlatformPolicyValidatorRejectsInvalidCatalogInputs(t *testing.T) {
+	t.Parallel()
+	if _, err := NewPlatformPolicyValidator(nil, nil, nil, nil, nil, nil); err == nil {
+		t.Fatal("nil model catalog error = nil")
+	}
+	emptyCatalog := mustTestModelCatalog(t, nil)
+	if _, err := NewPlatformPolicyValidator(emptyCatalog, nil, nil, nil, []string{" "}, nil); err == nil {
+		t.Fatal("empty platform tool name error = nil")
+	}
+	if _, err := NewPlatformPolicyValidator(emptyCatalog, []string{"not-env"}, nil, nil, nil, nil); err == nil {
+		t.Fatal("invalid allowed secret error = nil")
+	}
+	if _, err := NewPlatformPolicyValidator(emptyCatalog, []string{"env:KEY"}, []string{"env:MISSING"}, nil, nil, nil); err == nil {
+		t.Fatal("unmanaged channel secret error = nil")
+	}
+	if _, err := NewPlatformPolicyValidator(emptyCatalog, []string{"env:KEY"}, nil, []string{"env:MISSING"}, nil, nil); err == nil {
+		t.Fatal("unmanaged tool secret error = nil")
+	}
+}
+
+func TestPlatformPolicyValidatorRejectsInvalidApplicationPolicy(t *testing.T) {
+	t.Parallel()
+	validator := newSupportPolicyValidator(t)
+	var nilValidator *PlatformPolicyValidator
+	if err := nilValidator.Validate(validSupportPolicyConfig()); err == nil {
+		t.Fatal("nil validator error = nil")
+	}
+
+	tests := []struct {
+		name string
+		edit func(*TenantConfig)
+		want string
+	}{
+		{"active model required", func(c *TenantConfig) { c.Model = ModelConfig{} }, "model is required"},
+		{"unknown model", func(c *TenantConfig) { c.Model.Name = "missing" }, "not managed"},
+		{"unknown failover provider", func(c *TenantConfig) {
+			c.Model.FailoverCandidates = []ModelCandidate{{ProviderID: "missing", Name: "support-backup"}}
+		}, "provider_id"},
+		{"unknown failover model", func(c *TenantConfig) {
+			c.Model.FailoverCandidates = []ModelCandidate{{ProviderID: "support-models", Name: "missing"}}
+		}, "not managed"},
+		{"missing channel credential", func(c *TenantConfig) { c.Channels[0].CredentialRef = "" }, "credential_ref is required"},
+		{"unmanaged channel credential", func(c *TenantConfig) { c.Channels[0].CredentialRef = "env:OTHER" }, "not managed"},
+		{"unknown allowed tool", func(c *TenantConfig) { c.Tools.Allowed = []string{"missing_tool"} }, "not registered"},
+		{"invalid allowed tool", func(c *TenantConfig) { c.Tools.Allowed = []string{"bad tool"} }, "invalid tool name"},
+		{"duplicate allowed tool", func(c *TenantConfig) { c.Tools.Allowed = []string{"search_knowledge", "search_knowledge"} }, "duplicate tool"},
+		{"invalid confirmation tool", func(c *TenantConfig) {
+			c.Tools.RequireConfirmation = []string{"bad tool"}
+		}, "invalid tool name"},
+		{"confirmation outside allowed", func(c *TenantConfig) {
+			c.Tools.RequireConfirmation = []string{"missing_tool"}
+		}, "unallowed tool"},
+		{"roles outside allowed", func(c *TenantConfig) {
+			c.Tools.AllowedRoles = map[string][]string{"missing_tool": {"member"}}
+		}, "allowed_roles references unallowed"},
+		{"empty roles", func(c *TenantConfig) {
+			c.Tools.AllowedRoles = map[string][]string{"search_knowledge": {}}
+		}, "must not be empty"},
+		{"invalid role", func(c *TenantConfig) {
+			c.Tools.AllowedRoles = map[string][]string{"search_knowledge": {"owner"}}
+		}, "unsupported role"},
+		{"negative governance", func(c *TenantConfig) { c.Governance.MaxToolCalls = -1 }, "must not be negative"},
+		{"token reservation required", func(c *TenantConfig) { c.Governance.TokenBudgetPerHour = 1000 }, "token_reservation must be positive"},
+		{"token reservation exceeds budget", func(c *TenantConfig) {
+			c.Governance.TokenBudgetPerHour = 1000
+			c.Governance.TokenReservation = 1001
+		}, "must not exceed"},
+		{"negative retention", func(c *TenantConfig) { c.Audit.RetentionDays = -1 }, "retention_days"},
+		{"invalid profile id", func(c *TenantConfig) { c.Storage.Session.ProfileID = "bad/profile" }, "profile_id"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			configuration := validSupportPolicyConfig()
+			configuration.Channels = append([]ChannelBinding(nil), configuration.Channels...)
+			tt.edit(&configuration)
+			if err := validator.Validate(configuration); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestPlatformPolicyValidatorGenerationBoundaries(t *testing.T) {
+	t.Parallel()
+	validator := newSupportPolicyValidator(t)
+	temperatureLow := -0.1
+	temperatureHigh := 2.1
+	topPLow := -0.1
+	topPHigh := 1.1
+	zero := 0
+	badEffort := "medium"
+
+	tests := []struct {
+		name       string
+		generation *model.GenerationConfig
+		want       string
+	}{
+		{"temperature low", &model.GenerationConfig{Temperature: &temperatureLow}, "temperature"},
+		{"temperature high", &model.GenerationConfig{Temperature: &temperatureHigh}, "temperature"},
+		{"top p low", &model.GenerationConfig{TopP: &topPLow}, "top_p"},
+		{"top p high", &model.GenerationConfig{TopP: &topPHigh}, "top_p"},
+		{"max tokens", &model.GenerationConfig{MaxTokens: &zero}, "max_tokens"},
+		{"thinking tokens", &model.GenerationConfig{ThinkingTokens: &zero}, "thinking_tokens"},
+		{"reasoning effort", &model.GenerationConfig{ReasoningEffort: &badEffort}, "reasoning_effort"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			configuration := validSupportPolicyConfig()
+			configuration.Model.Generation = tt.generation
+			if err := validator.Validate(configuration); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestPlatformPolicyValidatorCustomToolValidationMatrix(t *testing.T) {
+	t.Parallel()
+	validator := newSupportPolicyValidator(t)
+	base := validSupportPolicyConfig()
+	base.Status = AgentDisabled
+	base.Model = ModelConfig{}
+	base.Channels = nil
+
+	tests := []struct {
+		name string
+		tool ToolPolicy
+		want string
+	}{
+		{
+			name: "http invalid name",
+			tool: ToolPolicy{Allowed: []string{"bad tool"}, HTTP: []HTTPToolConfig{{Name: "bad tool", URL: "https://tools.example.test/query"}}},
+			want: "invalid tool name",
+		},
+		{
+			name: "http duplicate definition",
+			tool: ToolPolicy{Allowed: []string{"query_order"}, HTTP: []HTTPToolConfig{{Name: "query_order", URL: "https://tools.example.test/a"}, {Name: "query_order", URL: "https://tools.example.test/b"}}},
+			want: "duplicated",
+		},
+		{
+			name: "http insecure url",
+			tool: ToolPolicy{Allowed: []string{"query_order"}, HTTP: []HTTPToolConfig{{Name: "query_order", URL: "http://tools.example.test/query"}}},
+			want: "HTTPS URL"},
+		{
+			name: "http url credentials",
+			tool: ToolPolicy{Allowed: []string{"query_order"}, HTTP: []HTTPToolConfig{{Name: "query_order", URL: "https://user:pass@tools.example.test/query"}}},
+			want: "without credentials"},
+		{
+			name: "http url fragment",
+			tool: ToolPolicy{Allowed: []string{"query_order"}, HTTP: []HTTPToolConfig{{Name: "query_order", URL: "https://tools.example.test/query#fragment"}}},
+			want: "without credentials"},
+		{
+			name: "http credential scheme",
+			tool: ToolPolicy{Allowed: []string{"query_order"}, HTTP: []HTTPToolConfig{{Name: "query_order", URL: "https://tools.example.test/query", CredentialRef: "plain"}}},
+			want: "env: reference"},
+		{
+			name: "http unmanaged credential",
+			tool: ToolPolicy{Allowed: []string{"query_order"}, HTTP: []HTTPToolConfig{{Name: "query_order", URL: "https://tools.example.test/query", CredentialRef: "env:OTHER"}}},
+			want: "not managed"},
+		{
+			name: "http schema",
+			tool: ToolPolicy{Allowed: []string{"query_order"}, HTTP: []HTTPToolConfig{{Name: "query_order", URL: "https://tools.example.test/query", InputSchema: &agenttool.Schema{Type: "string"}}}},
+			want: "input_schema"},
+		{
+			name: "mcp invalid name",
+			tool: ToolPolicy{Allowed: []string{"bad_tool_search"}, MCP: []MCPToolConfig{{Name: "bad tool", URL: "https://mcp.example.test/mcp"}}},
+			want: "invalid"},
+		{
+			name: "mcp duplicate definition",
+			tool: ToolPolicy{Allowed: []string{"search_lookup"}, MCP: []MCPToolConfig{{Name: "search", URL: "https://mcp.example.test/a"}, {Name: "search", URL: "https://mcp.example.test/b"}}},
+			want: "duplicated"},
+		{
+			name: "mcp transport",
+			tool: ToolPolicy{Allowed: []string{"search_lookup"}, MCP: []MCPToolConfig{{Name: "search", Transport: "stdio", URL: "https://mcp.example.test/mcp"}}},
+			want: "transport"},
+		{
+			name: "mcp url",
+			tool: ToolPolicy{Allowed: []string{"search_lookup"}, MCP: []MCPToolConfig{{Name: "search", URL: "http://mcp.example.test/mcp"}}},
+			want: "HTTPS URL"},
+		{
+			name: "mcp credential",
+			tool: ToolPolicy{Allowed: []string{"search_lookup"}, MCP: []MCPToolConfig{{Name: "search", URL: "https://mcp.example.test/mcp", CredentialRef: "env:OTHER"}}},
+			want: "not managed"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			configuration := base
+			configuration.Tools = tt.tool
+			if err := validator.Validate(configuration); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+
+	validHTTP := base
+	validHTTP.Tools = ToolPolicy{Allowed: []string{"query_order"}, HTTP: []HTTPToolConfig{{Name: "query_order", URL: "https://tools.example.test/query", CredentialRef: "env:TOOL_KEY", InputSchema: &agenttool.Schema{Type: "object"}}}}
+	if err := validator.Validate(validHTTP); err != nil {
+		t.Fatalf("Validate(valid HTTP tool) error = %v", err)
+	}
+	validMCP := base
+	validMCP.Tools = ToolPolicy{Allowed: []string{"search_lookup"}, MCP: []MCPToolConfig{{Name: "search", URL: "https://mcp.example.test/mcp", CredentialRef: "env:TOOL_KEY"}}}
+	if err := validator.Validate(validMCP); err != nil {
+		t.Fatalf("Validate(valid MCP tool) error = %v", err)
+	}
+}
+
+func TestConfigModelProviderValidationMatrix(t *testing.T) {
+	t.Parallel()
+	base := validServiceConfigForTest()
+	base.Service.AllowedSecretRefs = []string{"env:MODEL_KEY", "env:SECRET_ID", "env:SECRET_KEY"}
+
+	tests := []struct {
+		name     string
+		provider ModelProviderConfig
+		want     string
+	}{
+		{"missing id", ModelProviderConfig{BaseURL: "https://models.example.test/v1", APIKeyRef: "env:MODEL_KEY"}, ".id"},
+		{"id separator", ModelProviderConfig{ID: "bad/id", BaseURL: "https://models.example.test/v1", APIKeyRef: "env:MODEL_KEY"}, "reserved separator"},
+		{"unsupported type", ModelProviderConfig{ID: "support", Type: "custom"}, "unsupported"},
+		{"openai missing url", ModelProviderConfig{ID: "support", APIKeyRef: "env:MODEL_KEY"}, "absolute URL"},
+		{"insecure remote url", ModelProviderConfig{ID: "support", BaseURL: "http://models.example.test/v1", APIKeyRef: "env:MODEL_KEY"}, "HTTPS"},
+		{"url query", ModelProviderConfig{ID: "support", BaseURL: "https://models.example.test/v1?debug=1", APIKeyRef: "env:MODEL_KEY"}, "must not include"},
+		{"unmanaged key", ModelProviderConfig{ID: "support", BaseURL: "https://models.example.test/v1", APIKeyRef: "env:OTHER"}, "api_key_ref"},
+		{"hunyuan secret id", ModelProviderConfig{ID: "support", Type: ModelProviderHunyuan, SecretIDRef: "env:OTHER", SecretKeyRef: "env:SECRET_KEY"}, "secret_id_ref"},
+		{"hunyuan secret key", ModelProviderConfig{ID: "support", Type: ModelProviderHunyuan, SecretIDRef: "env:SECRET_ID", SecretKeyRef: "env:OTHER"}, "secret_key_ref"},
+		{"empty model", ModelProviderConfig{ID: "support", BaseURL: "https://models.example.test/v1", APIKeyRef: "env:MODEL_KEY", Models: []ModelPricingConfig{{Name: " "}}}, ".name is required"},
+		{"duplicate model", ModelProviderConfig{ID: "support", BaseURL: "https://models.example.test/v1", APIKeyRef: "env:MODEL_KEY", Models: []ModelPricingConfig{{Name: "model-a"}, {Name: " model-a "}}}, "duplicated"},
+		{"negative prompt price", ModelProviderConfig{ID: "support", BaseURL: "https://models.example.test/v1", APIKeyRef: "env:MODEL_KEY", Models: []ModelPricingConfig{{Name: "model-a", PromptCostMicrosPerMillionTokens: -1}}}, "cost rates"},
+		{"invalid reasoning capability", ModelProviderConfig{ID: "support", BaseURL: "https://models.example.test/v1", APIKeyRef: "env:MODEL_KEY", Models: []ModelPricingConfig{{Name: "model-a", Capabilities: &ModelCapabilities{ReasoningEfforts: []string{"extreme"}}}}}, "unsupported value"},
+		{"duplicate reasoning capability", ModelProviderConfig{ID: "support", BaseURL: "https://models.example.test/v1", APIKeyRef: "env:MODEL_KEY", Models: []ModelPricingConfig{{Name: "model-a", Capabilities: &ModelCapabilities{ReasoningEfforts: []string{"HIGH", " high "}}}}}, "duplicate value"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			configuration := base
+			configuration.ModelProviders = []ModelProviderConfig{tt.provider}
+			if err := configuration.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+
+	loopback := base
+	loopback.ModelProviders = []ModelProviderConfig{{ID: "support", BaseURL: "http://127.0.0.1:9999/v1", APIKeyRef: "env:MODEL_KEY"}}
+	if err := loopback.Validate(); err != nil {
+		t.Fatalf("loopback HTTP provider should be valid for testing: %v", err)
 	}
 }

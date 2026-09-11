@@ -32,9 +32,46 @@ if (import.meta.hot) {
   ;(import.meta.hot.data as AppContextHotData).appContext = AppContext
 }
 
+export const STORAGE_KEY_ACTIVE_APP = 'trpc_agent_active_app'
+export const STORAGE_KEY_ACTIVE_TENANT = 'trpc_agent_active_tenant'
+
+export function getInitialTenant(user?: SessionUser | null): string {
+  if (typeof window !== 'undefined') {
+    const searchParams = new URLSearchParams(window.location.search)
+    const urlTenant = searchParams.get('tenant')
+    if (urlTenant) return urlTenant
+    const urlApp = searchParams.get('app')
+    if (urlApp && urlApp.includes('/')) {
+      return urlApp.split('/')[0]
+    }
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY_ACTIVE_TENANT)
+      if (stored) return stored
+    } catch {}
+  }
+  return user?.active_tenant_id || user?.tenants?.[0]?.tenant_id || ''
+}
+
+export function getInitialActiveAppKey(): string {
+  if (typeof window !== 'undefined') {
+    const searchParams = new URLSearchParams(window.location.search)
+    const urlApp = searchParams.get('app')
+    if (urlApp) return urlApp
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY_ACTIVE_APP)
+      if (stored) return stored
+    } catch {}
+  }
+  return ''
+}
+
 export function AppProvider({ children, user, refreshUser }: { children: React.ReactNode; user?: SessionUser | null; refreshUser?: () => Promise<void> }) {
-  const [tenant, setTenantState] = useState('')
-  const [requestedActiveAppKey, setRequestedActiveAppKey] = useState('')
+  const [tenant, setTenantState] = useState(() => {
+    const initial = getInitialTenant(user)
+    if (initial) setActiveTenantHeader(initial)
+    return initial
+  })
+  const [requestedActiveAppKey, setRequestedActiveAppKey] = useState(getInitialActiveAppKey)
 
   const {
     data: apps = [],
@@ -58,6 +95,13 @@ export function AppProvider({ children, user, refreshUser }: { children: React.R
   const setTenant = useCallback((nextTenant: string) => {
     setTenantState(nextTenant)
     setActiveTenantHeader(nextTenant)
+    try {
+      if (nextTenant) {
+        localStorage.setItem(STORAGE_KEY_ACTIVE_TENANT, nextTenant)
+      } else {
+        localStorage.removeItem(STORAGE_KEY_ACTIVE_TENANT)
+      }
+    } catch {}
   }, [])
 
   const tenants = useMemo(() => {
@@ -68,6 +112,7 @@ export function AppProvider({ children, user, refreshUser }: { children: React.R
   const appsError = queryError instanceof Error ? queryError.message : ''
 
   useEffect(() => {
+    if (tenantSummaries.length === 0) return
     const known = new Set(tenantSummaries.map((entry) => entry.tenant_id))
     const nextTenant = tenant && known.has(tenant)
       ? tenant
@@ -76,6 +121,11 @@ export function AppProvider({ children, user, refreshUser }: { children: React.R
         : tenantSummaries[0]?.tenant_id ?? ''
     if (nextTenant !== tenant) setTenantState(nextTenant)
     setActiveTenantHeader(nextTenant)
+    if (nextTenant) {
+      try {
+        localStorage.setItem(STORAGE_KEY_ACTIVE_TENANT, nextTenant)
+      } catch {}
+    }
   }, [tenant, tenantSummaries, user])
 
   const refresh = useCallback(async () => {
@@ -84,17 +134,35 @@ export function AppProvider({ children, user, refreshUser }: { children: React.R
     if (error) throw error
   }, [refetchApps, refetchTenants])
 
-  const activeAppKey = useMemo(
-    () => resolveActiveAppKey(apps, tenant, requestedActiveAppKey),
-    [apps, requestedActiveAppKey, tenant],
-  )
+  const activeAppKey = useMemo(() => {
+    if (appsLoading && requestedActiveAppKey) {
+      return requestedActiveAppKey
+    }
+    return resolveActiveAppKey(apps, tenant, requestedActiveAppKey)
+  }, [apps, appsLoading, requestedActiveAppKey, tenant])
 
   useEffect(() => {
-    if (requestedActiveAppKey !== activeAppKey) setRequestedActiveAppKey(activeAppKey)
-  }, [activeAppKey, requestedActiveAppKey])
+    if (appsLoading) return
+    if (apps.length === 0) return
+    if (activeAppKey && requestedActiveAppKey !== activeAppKey) {
+      setRequestedActiveAppKey(activeAppKey)
+    }
+    if (activeAppKey) {
+      try {
+        localStorage.setItem(STORAGE_KEY_ACTIVE_APP, activeAppKey)
+      } catch {}
+    }
+  }, [activeAppKey, apps.length, appsLoading, requestedActiveAppKey])
 
   const setActiveAppKey = useCallback((key: string) => {
     setRequestedActiveAppKey(key)
+    try {
+      if (key) {
+        localStorage.setItem(STORAGE_KEY_ACTIVE_APP, key)
+      } else {
+        localStorage.removeItem(STORAGE_KEY_ACTIVE_APP)
+      }
+    } catch {}
   }, [])
 
   const value = useMemo<AppContextValue>(
@@ -106,7 +174,15 @@ export function AppProvider({ children, user, refreshUser }: { children: React.R
 
 export function resolveActiveAppKey(apps: Snapshot[], tenant: string, requestedKey: string): string {
   const tenantApps = apps.filter((app) => app.Config.tenant_id === tenant && app.Config.status === 'active')
-  if (tenantApps.some((app) => `${app.Config.tenant_id}/${app.Config.app_code}` === requestedKey)) return requestedKey
+  if (requestedKey) {
+    const exact = tenantApps.find((app) => `${app.Config.tenant_id}/${app.Config.app_code}` === requestedKey)
+    if (exact) return `${exact.Config.tenant_id}/${exact.Config.app_code}`
+
+    if (!requestedKey.includes('/')) {
+      const codeMatch = tenantApps.find((app) => app.Config.app_code === requestedKey)
+      if (codeMatch) return `${codeMatch.Config.tenant_id}/${codeMatch.Config.app_code}`
+    }
+  }
   const first = tenantApps[0]
   return first ? `${first.Config.tenant_id}/${first.Config.app_code}` : ''
 }
