@@ -345,9 +345,9 @@ if have kubectl && have ruby && have jq; then
     printf 'PASS  %-52s %s\n' "kubectl kustomize 离线渲染" "exit 0"
     pass=$((pass + 1))
 
-    jqcheck "渲染出 7 类对象" \
+    jqcheck "渲染出 7 类对象（去重）" \
       "ConfigMap,Deployment,HorizontalPodAutoscaler,Ingress,PodDisruptionBudget,Secret,Service" \
-      "$K8S_JSON" '[.[] | .kind] | sort | join(",")'
+      "$K8S_JSON" '[.[] | .kind] | unique | join(",")'
     # The suffix is the content hash. If it is missing, the generator did not run
     # and editing the config no longer rolls the Deployment.
     jqcheck "ConfigMap 名带内容哈希（改配置自动 rollout）" "ok" "$K8S_JSON" '
@@ -377,9 +377,43 @@ if have kubectl && have ruby && have jq; then
       | if ($ref|length)==0 then "根本没有 secretRef"
         elif (($ref - $s)|length)==0 then "ok"
         else "悬空引用：\(($ref - $s)|join(","))" end'
+
+    # --- the reliable roles: the split is only real if each Deployment says so
+    jqcheck "4 个 Deployment：gateway + worker + delivery + jobs" \
+      "trpc-agent-delivery,trpc-agent-jobs,trpc-agent-service,trpc-agent-worker" "$K8S_JSON" '
+      [.[] | select(.kind=="Deployment") | .metadata.name] | sort | join(",")'
+    jqcheck "三个可靠角色各自声明了正确的 -role" "ok" "$K8S_JSON" '
+      [.[] | select(.kind=="Deployment") | {n:.metadata.name, a:(.spec.template.spec.containers[0].args|join(" "))}] as $all
+      | ([$all[] | select(.n=="trpc-agent-worker" and (.a|startswith("-role worker")))] | length) as $w
+      | ([$all[] | select(.n=="trpc-agent-delivery" and (.a|startswith("-role delivery")))] | length) as $d
+      | ([$all[] | select(.n=="trpc-agent-jobs" and (.a|startswith("-role jobs")))] | length) as $j
+      | if $w==1 and $d==1 and $j==1 then "ok" else "worker=\($w) delivery=\($d) jobs=\($j)" end'
+    jqcheck "worker 副本数 ≥2（fencing 需要第二个进程见证接管）" "ok" "$K8S_JSON" '
+      ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-worker") | .spec.replicas] | .[0]) as $r
+      | if ($r // 0) >= 2 then "ok" else "replicas=\($r)" end'
+    jqcheck "可靠角色的 WORKER_ID 取 Pod 名（每副本唯一）" "ok" "$K8S_JSON" '
+      [.[] | select(.kind=="Deployment")
+         | select(.metadata.name=="trpc-agent-worker" or .metadata.name=="trpc-agent-delivery" or .metadata.name=="trpc-agent-jobs")] as $roles
+      | ([$roles[] | .spec.template.spec.containers[0].env[]?
+          | select(.name=="WORKER_ID" and .valueFrom.fieldRef.fieldPath=="metadata.name")] | length) as $ok
+      | if $ok==($roles|length) then "ok" else "\($ok)/\($roles|length)" end'
+    jqcheck "可靠角色引用 trpc-agent-reliable Secret" "ok" "$K8S_JSON" '
+      ([.[] | select(.kind=="Deployment") | .spec.template.spec.containers[0].env[]?
+          | select(.valueFrom.secretKeyRef.name=="trpc-agent-reliable")] | length) as $refs
+      | if $refs>=3 then "ok" else "只有 \($refs) 个环境变量引用它" end'
+    # The gateway Deployment's selector is the bare label `app:
+    # trpc-agent-service`, and a Deployment's selector also decides which Pods
+    # its ReplicaSet owns. A reliable Pod carrying that label would be adopted
+    # and then deleted during the gateway's next rollout — so the label set is
+    # an invariant, not a style.
+    jqcheck "可靠角色 Pod 不带裸 app 标签（不被 gateway ReplicaSet/Service 认领）" "ok" "$K8S_JSON" '
+      ([.[] | select(.kind=="Deployment" and (.metadata.name|startswith("trpc-agent-")))
+          | select(.metadata.name!="trpc-agent-service")
+          | .spec.template.metadata.labels.app] | map(select(.!=null)) | length) as $bad
+      | if $bad==0 then "ok" else "\($bad) 个可靠 Pod 带 app 标签" end'
     jqcheck "Service selector 命中 Pod 标签，targetPort 命中容器端口名" "ok" "$K8S_JSON" '
       ([.[] | select(.kind=="Service")] | .[0]) as $svc
-      | ([.[] | select(.kind=="Deployment")] | .[0]) as $dep
+      | ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service")] | .[0]) as $dep
       | ($dep.spec.template.metadata.labels) as $pl
       | ($svc.spec.selector | to_entries | map(select($pl[.key] != .value) | .key)) as $bad
       | ($dep.spec.template.spec.containers[0].ports | map(.name)) as $pn
@@ -389,11 +423,11 @@ if have kubectl && have ruby && have jq; then
         else "selector 不匹配=\($bad|join(",")) 端口名不存在=\($miss|join(","))" end'
     jqcheck "HPA 指向这个 Deployment" "ok" "$K8S_JSON" '
       ([.[] | select(.kind=="HorizontalPodAutoscaler") | .spec.scaleTargetRef] | .[0]) as $t
-      | ([.[] | select(.kind=="Deployment") | .metadata.name] | .[0]) as $n
+      | ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .metadata.name] | .[0]) as $n
       | if $t.kind=="Deployment" and $t.name==$n then "ok" else "\($t) vs Deployment/\($n)" end'
     jqcheck "PDB selector 命中 Pod 标签" "ok" "$K8S_JSON" '
       ([.[] | select(.kind=="PodDisruptionBudget") | .spec.selector.matchLabels] | .[0]) as $sel
-      | ([.[] | select(.kind=="Deployment")] | .[0].spec.template.metadata.labels) as $pl
+      | ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service")] | .[0].spec.template.metadata.labels) as $pl
       | ($sel | to_entries | map(select($pl[.key] != .value) | .key)) as $bad
       | if ($bad|length)==0 then "ok" else "不匹配：\($bad|join(","))" end'
     jqcheck "Ingress backend 指向 Service 的真实端口" "ok" "$K8S_JSON" '
@@ -410,13 +444,13 @@ if have kubectl && have ruby && have jq; then
     # Redis-backed SETNX and leases make replicas safe; assert the deployment
     # starts above one, rolls safely, and the HPA can add capacity.
     jqcheck "Redis 协调后允许滚动扩容（Deployment + HPA）" "ok" "$K8S_JSON" '
-      ([.[] | select(.kind=="Deployment") | .spec] | .[0]) as $d
+      ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .spec] | .[0]) as $d
       | ([.[] | select(.kind=="HorizontalPodAutoscaler") | .spec] | .[0]) as $h
       | if $d.replicas>=2 and $d.strategy.type=="RollingUpdate"
            and $h.minReplicas>=2 and $h.maxReplicas>$h.minReplicas then "ok"
         else "replicas=\($d.replicas) strategy=\($d.strategy.type) hpa=\($h.minReplicas)-\($h.maxReplicas)" end'
     jqcheck "terminationGracePeriodSeconds = 10（Shutdown 5s，不等在飞消息）" "10" \
-      "$K8S_JSON" '[.[] | select(.kind=="Deployment") | .spec.terminationGracePeriodSeconds] | .[0]'
+      "$K8S_JSON" '[.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .spec.terminationGracePeriodSeconds] | .[0]'
     # Both composites below guard against null BEFORE joining. In jq `null.foo`
     # is null rather than an error, and `join(" ")` renders null as the empty
     # string — so a manifest with the whole probe block missing would produce
@@ -424,7 +458,7 @@ if have kubectl && have ruby && have jq; then
     # That is the same shape as the self-test that once tallied its way to PASS.
     jqcheck "探针：liveness /healthz，readiness+startup /readyz，5s×2 摘流量" \
       "/healthz /readyz /readyz 4 5 2" "$K8S_JSON" '
-      ([.[] | select(.kind=="Deployment") | .spec.template.spec.containers[0]] | .[0]) as $c
+      ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .spec.template.spec.containers[0]] | .[0]) as $c
       | if ($c.livenessProbe==null) or ($c.readinessProbe==null) or ($c.startupProbe==null)
         then "缺探针：只有 \([$c | keys[] | select(endswith("Probe"))] | join(","))"
         else [$c.livenessProbe.httpGet.path, $c.readinessProbe.httpGet.path,
@@ -447,11 +481,11 @@ if have kubectl && have ruby && have jq; then
       trpcservice/web/web.go)
     num_gt "web.go 里读得出 readyTimeout（秒；读不出来=常量改名或换了写法）" "$rdy" 0
     rto=$(jqv "$K8S_JSON" '
-      [.[] | select(.kind=="Deployment")
+      [.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service")
        | .spec.template.spec.containers[0].readinessProbe.timeoutSeconds] | .[0]')
     num_gt "readinessProbe.timeoutSeconds > web.readyTimeout 的 ${rdy}s" "$rto" "$rdy"
     sto=$(jqv "$K8S_JSON" '
-      [.[] | select(.kind=="Deployment")
+      [.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service")
        | .spec.template.spec.containers[0].startupProbe.timeoutSeconds] | .[0]')
     num_gt "startupProbe.timeoutSeconds > web.readyTimeout 的 ${rdy}s" "$sto" "$rdy"
     # …and below its own period. The worker is a serial loop (doProbe, then wait
@@ -462,13 +496,13 @@ if have kubectl && have ruby && have jq; then
     # because stretching its interval only lengthens a boot budget nobody waits
     # on, while a 2s period keeps a ready Pod noticed promptly.
     jqcheck "readiness 的 timeout < period（摘流量 ≈ 2×5s 的前提）" "ok" "$K8S_JSON" '
-      ([.[] | select(.kind=="Deployment") | .spec.template.spec.containers[0].readinessProbe]
+      ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .spec.template.spec.containers[0].readinessProbe]
        | .[0]) as $r
       | if $r.timeoutSeconds < $r.periodSeconds then "ok"
         else "timeout=\($r.timeoutSeconds) period=\($r.periodSeconds)" end'
 
     jqcheck "非 root + 只读根文件系统 + drop ALL" "true 65534 65534 true false ALL" "$K8S_JSON" '
-      ([.[] | select(.kind=="Deployment") | .spec.template.spec] | .[0]) as $ps
+      ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .spec.template.spec] | .[0]) as $ps
       | ($ps.securityContext) as $pod
       | ($ps.containers[0].securityContext) as $cs
       | if ($pod.runAsNonRoot==null) or ($pod.runAsUser==null) or ($pod.fsGroup==null)
@@ -483,7 +517,7 @@ if have kubectl && have ruby && have jq; then
     # ConfigMap volume is read-only, and config.Save needs to write <path>.tmp
     # next to the file it replaces (fact #19).
     jqcheck "initContainer 只读 ConfigMap → 可写 emptyDir → app 挂同一卷" "ok" "$K8S_JSON" '
-      ([.[] | select(.kind=="Deployment") | .spec.template.spec] | .[0]) as $ps
+      ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .spec.template.spec] | .[0]) as $ps
       | ($ps.initContainers[0]) as $ic
       | ($ps.volumes | map({(.name): (if .configMap then "configMap"
                                       elif .emptyDir then "emptyDir"
@@ -499,9 +533,9 @@ if have kubectl && have ruby && have jq; then
     # ConfigMap, what the initContainer copies, and what -config points at.
     jqcheck "ConfigMap 键 = initContainer 拷贝 = -config 指向" "ok" "$K8S_JSON" '
       ([.[] | select(.kind=="ConfigMap") | .data | keys] | .[0] | join(",")) as $keys
-      | ([.[] | select(.kind=="Deployment") | .spec.template.spec.containers[0].args]
+      | ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .spec.template.spec.containers[0].args]
          | .[0] | join(" ")) as $args
-      | ([.[] | select(.kind=="Deployment") | .spec.template.spec.initContainers[0].command]
+      | ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .spec.template.spec.initContainers[0].command]
          | .[0] | join(" ")) as $cmd
       | if $keys=="config.yaml" and ($args|endswith("-config /config/config.yaml"))
            and ($cmd|contains("/config-src/config.yaml"))
@@ -512,12 +546,12 @@ if have kubectl && have ruby && have jq; then
     # process spends its life being CFS-throttled — which reads exactly like a
     # model latency regression in the metrics.
     jqcheck "GOMAXPROCS 与 limits.cpu 同步" "ok" "$K8S_JSON" '
-      ([.[] | select(.kind=="Deployment") | .spec.template.spec.containers[0]] | .[0]) as $c
+      ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .spec.template.spec.containers[0]] | .[0]) as $c
       | ($c.env | map({(.name): .value}) | add) as $e
       | if $e.GOMAXPROCS == $c.resources.limits.cpu then "ok"
         else "GOMAXPROCS=\($e.GOMAXPROCS) limits.cpu=\($c.resources.limits.cpu)" end'
     jqcheck "GOMEMLIMIT 低于 limits.memory（留栈与运行时开销）" "ok" "$K8S_JSON" '
-      ([.[] | select(.kind=="Deployment") | .spec.template.spec.containers[0]] | .[0]) as $c
+      ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .spec.template.spec.containers[0]] | .[0]) as $c
       | ($c.env | map({(.name): .value}) | add) as $e
       | (($e.GOMEMLIMIT // "") | capture("^(?<n>[0-9]+)MiB$") | .n | tonumber) as $gl
       | (($c.resources.limits.memory // "") | capture("^(?<n>[0-9]+)Mi$") | .n | tonumber) as $ml
@@ -526,7 +560,7 @@ if have kubectl && have ruby && have jq; then
     # audit.file is absent from the ConfigMap, so there must be no /data mount:
     # with readOnlyRootFilesystem a path there is a boot failure, not a warning.
     jqcheck "不设 audit.file 也就不挂 /data（只读根下会起不来）" "ok" "$K8S_JSON" '
-      ([.[] | select(.kind=="Deployment") | .spec.template.spec.containers[0].volumeMounts]
+      ([.[] | select(.kind=="Deployment" and .metadata.name=="trpc-agent-service") | .spec.template.spec.containers[0].volumeMounts]
        | .[0] | map(.mountPath)) as $m
       | ([.[] | select(.kind=="ConfigMap") | .data["config.yaml"]] | .[0]) as $cfg
       | if ($m|index("/data")) and ($cfg|contains("audit:")|not) then "挂了 /data 但配置里没有 audit"
@@ -534,7 +568,7 @@ if have kubectl && have ruby && have jq; then
         else "ok" end'
   fi
 else
-  skipn "需要 kubectl + ruby + jq（本机 python3 没有 pyyaml，yq 也没装）" 24
+  skipn "需要 kubectl + ruby + jq（本机 python3 没有 pyyaml，yq 也没装）" 30
 fi
 
 # ---------------------------------------------------------------------------

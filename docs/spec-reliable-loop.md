@@ -93,8 +93,9 @@ bash scripts/reliable_e2e.sh   →  31 PASS / 0 FAIL / 0 SKIP → RELIABLE E2E P
   durable 钩子 `WithDurableNotifications` 已有单测）；企微/webchat 的接收端持久化未做。
   E2E 里「回调已记下 notification」一步由 SQL 模拟。
 - **投递通道仅微信客服**；webchat/企微 被明确拒绝（不是静默成功）。
-- **可靠链路没有故障矩阵脚本**：kill worker 接管、MySQL 闪断、delivery unknown
-  这些场景的包级测试都有，但还没按 D1–D7 那样编排成演练；现有 D1–D7 验的是旧链路。
+- **可靠链路故障矩阵已入库**：`scripts/reliable_fault_drill.sh`（R1 kill -9 接管、
+  R2 MySQL 停机、R3 Qdrant 停机自愈，29 条断言真跑；P5 切片）。仍未编排的：
+  delivery unknown 的容器级演练（包级测试覆盖了 unknown 挂起与人工处置）。
 - **YAML 仍是启动必需**：角色本身不读 tenants，但 `config.Load` 的校验要求它存在
   —— 可靠模式下这份 tenancy 是残留，待控制面 bootstrap 流程收敛。
 - KF token 缓存仍是进程内（丢一次缓存只是多一次 gettoken，不影响正确性）。

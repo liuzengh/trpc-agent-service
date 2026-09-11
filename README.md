@@ -261,7 +261,24 @@ RELIABLE_KEEP=1 bash scripts/reliable_e2e.sh # 跑完不拆栈，供人工取证
 HTTP 挂载点还没接，见下）；webchat / 企微 的可靠投递尚未接线，Delivery 对它们
 返回明确拒绝而不是静默成功。
 
-### 6. 门禁
+### 6. 可靠模式故障演练（29 条断言）
+
+`scripts/reliable_fault_drill.sh` 把可靠链路的三条恢复承诺变成真跑出来的断言：
+
+```bash
+bash scripts/reliable_fault_drill.sh   # 29 PASS / 0 FAIL → RELIABLE FAULT DRILL PASS
+```
+
+- **R1 kill -9 接管**：`docker kill -s KILL` 打死正在执行的 worker-a → worker-b 在
+  30s 租约到期后以更高 fence 接管，同一消息只提交一次（`attempts=2` 见证接管，
+  一个 execution、无残留租约、回复照常投递）。
+- **R2 MySQL 停机**：停机期间角色存活且不误标任何消息；恢复后消息照常完成，
+  `attempts=1`（停机不是失败，不会被当成重跑理由）。
+- **R3 Qdrant 停机**：冻结 jobs → ingest → 停向量库 → 放行 jobs；索引任务失败重试，
+  **文档绝不进入 ready**，失败原因落在队列行上；向量库恢复后任务靠退避重试自愈，
+  chunk 与索引计数最终一致。
+
+### 7. 门禁
 
 ```bash
 bash scripts/check_deps.sh      # go.mod 冻结：直接依赖与基线一致（--tidy 验幂等）
@@ -284,8 +301,9 @@ otel-collector 真收到 span（镜像拉不到，只能用 stdout exporter）�
 
 可靠模式（第二批）同样只标到验过的为止：角色进程、双 worker 竞争、KF 拉取→入库→
 提交→投递（假 KF 上游）、重启不吃游标、受控工具全链路与 unknown 阻断→人工处置→
-重跑、三类文档 pipeline（上传→索引→ready→embedding），都在 `scripts/reliable_e2e.sh` 里真跑了受控工具与知识管道（P3/P4）；
+重跑、三类文档 pipeline（上传→索引→ready→embedding），都在 `scripts/reliable_e2e.sh` 里真跑了受控工具与知识管道（P3/P4）；可靠故障矩阵（kill worker 接管、MySQL 停机、Qdrant 停机自愈）在 `scripts/reliable_fault_drill.sh` 里真跑了 29 条断言；
 **可靠 gateway 角色（企微/webchat 的接收端持久化与 HTTP 挂载）尚未接线**，投递侧
-也仅 微信客服 一个通道；针对可靠链路的故障矩阵（kill worker、MySQL 闪断、
-delivery unknown 等）还没写成脚本 —— 仓库现有的 D1–D7 矩阵验的是旧链路。
+也仅 微信客服 一个通道；delivery unknown 的容器级演练仍未编排（包级测试覆盖了
+unknown 挂起与人工处置，E2E 演练的是工具侧的同类路径）；K8s 分角色清单（gateway +
+worker/delivery/jobs 四个 Deployment）只做了离线渲染与字段门禁，集群行为未验。
 

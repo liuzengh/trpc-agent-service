@@ -1,4 +1,4 @@
-// Deterministic embeddings for the fake model.
+// Deterministic embeddings for the fake model, with injectable faults.
 //
 // The algorithm is a bag-of-token hashing vectorizer: each token maps to one
 // dimension (FNV-1a), counts accumulate, the vector is L2-normalised. That
@@ -10,6 +10,8 @@
 // CJK text has no spaces, so runs of CJK runes are emitted one rune at a
 // time; overlap between a Chinese query and a Chinese document therefore
 // shows up at the character level.
+//
+//	POST /__embed/mode {"mode":"error500"|"hang"|"ok"}  inject a fault; GET reads it back
 package main
 
 import (
@@ -19,10 +21,62 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"sync"
 	"unicode"
 )
 
-const defaultEmbeddingDim = 64
+const (
+	defaultEmbeddingDim = 64
+	embedModePath       = "/__embed/mode"
+)
+
+// embedState is the embedding endpoint's fault switch. The knowledge drill
+// needs a store that *fails* the way a real one does (500s, hangs) to prove
+// the index job refuses to mark a document ready when the vector write did
+// not happen.
+type embedState struct {
+	mu   sync.Mutex
+	mode string // "" or "ok" | "error500" | "hang"
+}
+
+func (e *embedState) get() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.mode == "" {
+		return "ok"
+	}
+	return e.mode
+}
+
+func (e *embedState) set(mode string) {
+	e.mu.Lock()
+	e.mode = mode
+	e.mu.Unlock()
+}
+
+// handleEmbedMode is the drill's control surface for the embedding fault.
+func (s *server) handleEmbedMode(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, map[string]string{"mode": s.embed.get()})
+		return
+	}
+	var p struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, "decode body: "+err.Error())
+		return
+	}
+	switch p.Mode {
+	case "ok", "error500", "hang":
+	default:
+		writeErr(w, http.StatusBadRequest, `embed mode must be "ok", "error500" or "hang"`)
+		return
+	}
+	s.embed.set(p.Mode)
+	s.log.Printf("embed mode=%s", p.Mode)
+	writeJSON(w, http.StatusOK, map[string]string{"mode": s.embed.get()})
+}
 
 type embeddingsRequest struct {
 	Model      string   `json:"model"`
@@ -39,6 +93,21 @@ func (s *server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+
+	// Fault injection happens before any parsing: a drill that injected
+	// "hang" wants the caller to time out, not to get a 400 for a body the
+	// fault was supposed to precede.
+	switch s.embed.get() {
+	case "error500":
+		s.log.Printf("embeddings: injected 500")
+		writeErr(w, http.StatusInternalServerError, "injected embedding failure")
+		return
+	case "hang":
+		s.log.Printf("embeddings: injected hang, waiting for caller")
+		<-r.Context().Done()
+		return
+	}
+
 	var req embeddingsRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "decode embeddings request: "+err.Error())

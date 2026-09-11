@@ -112,6 +112,7 @@ type server struct {
 	requests atomic.Int64
 	lastMsgs atomic.Int64 // messages in the most recent completion request
 	embeds   atomic.Int64 // embeddings calls served (see embedding.go)
+	embed    embedState   // the embedding fault switch (see embedding.go)
 	kf       *kfState     // the 微信客服 stub (see kf.go)
 	tool     *toolState   // the tool-target stub (see tool.go)
 	log      *log.Logger
@@ -141,6 +142,7 @@ func (s *server) Handler() http.Handler {
 	mux.HandleFunc(kfScriptPath, s.handleKF)
 	mux.HandleFunc(kfSentPath, s.handleKF)
 	mux.HandleFunc("/__tool/", s.handleTool)
+	mux.HandleFunc(embedModePath, s.handleEmbedMode)
 	mux.HandleFunc("/v1/embeddings", s.handleEmbeddings)
 	mux.HandleFunc(modePath, s.handleMode)
 	mux.HandleFunc(healthPath, s.handleHealth)
@@ -174,6 +176,8 @@ type stateResponse struct {
 	// Embeddings counts /v1/embeddings calls, so a drill can assert that the
 	// index job actually embedded through the configured endpoint.
 	Embeddings int64 `json:"embeddings"`
+	// EmbedMode reports the embedding fault switch ("ok" unless injected).
+	EmbedMode string `json:"embed_mode"`
 }
 
 func (s *server) handleMode(w http.ResponseWriter, r *http.Request) {
@@ -190,7 +194,7 @@ func (s *server) handleMode(w http.ResponseWriter, r *http.Request) {
 func (s *server) state() stateResponse {
 	set := s.cfg.Load()
 	return stateResponse{Mode: set.Mode, Delay: set.Delay, Requests: s.requests.Load(),
-		LastMessages: s.lastMsgs.Load(), Embeddings: s.embeds.Load()}
+		LastMessages: s.lastMsgs.Load(), Embeddings: s.embeds.Load(), EmbedMode: s.embed.get()}
 }
 
 func (s *server) switchMode(w http.ResponseWriter, r *http.Request) {

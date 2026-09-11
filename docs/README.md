@@ -24,7 +24,7 @@
 | [`spec-im-channels.md`](spec-im-channels.md) | 8/21 导师答复落地 | IM 通道接入与本地验证：企微 / 微信客服两类差异、统一适配抽象、网页版 IM 做本地验证 |
 | [`spec-governance-observability.md`](spec-governance-observability.md) | 9/7–9/9 | 治理与观测：输入/输出 Guardrail、带 `trace_id` 的审计行、租户维度指标（**第 4 批**，冻结前最后一批） |
 | [`spec-deployment-fault-drill.md`](spec-deployment-fault-drill.md) | 9/9–9/10 | 部署与韧性：go.mod 冻结、Dockerfile/Compose/K8s 清单、端到端联调（44 条）、故障演练 D1–D7（143 条） |
-| [`spec-reliable-loop.md`](spec-reliable-loop.md) | 第二批 | 可靠消息闭环：MySQL 事实源、Inbox/租约/fencing/原子提交、分角色进程（worker/delivery/jobs）、KF durable 拉取，`scripts/reliable_e2e.sh` 31 条断言 |
+| [`spec-reliable-loop.md`](spec-reliable-loop.md) | 第二批 | 可靠消息闭环：MySQL 事实源、Inbox/租约/fencing/原子提交、分角色进程（worker/delivery/jobs）、KF durable 拉取，`scripts/reliable_e2e.sh` 74 条断言；故障矩阵 `scripts/reliable_fault_drill.sh` 29 条（R1 kill 接管 / R2 MySQL 停机 / R3 Qdrant 停机自愈） |
 | [`spec-tool-governance.md`](spec-tool-governance.md) | 第二批 | 受控工具与执行账本（P3）：`tool_calls` 台账、governor 检查链、SSRF/secret/schema 拒绝、unknown 阻断与人工处置（CLI + admin/v2），E2E 扩到 63 条断言 |
 | [`deps-baseline.txt`](deps-baseline.txt) | 9/9 起冻结，第二批持续更新 | go.mod 冻结基线（第二批后 17 项直接依赖），由 `scripts/check_deps.sh` 当门禁读 |
 

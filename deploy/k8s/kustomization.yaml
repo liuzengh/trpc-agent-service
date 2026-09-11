@@ -33,6 +33,11 @@
 resources:
   - 10-secret.example.yaml
   - 20-deployment.yaml
+  # The reliable-mode roles (worker/delivery/jobs) over the same image. They
+  # are part of the default kustomize build because a deployment that runs
+  # them is the point of the reliable path; a single-process deployment can
+  # delete this line and the three Deployments go with it.
+  - 21-deployment-reliable.yaml
   - 30-service.yaml
   - 40-hpa.yaml
   - 50-pdb.yaml
