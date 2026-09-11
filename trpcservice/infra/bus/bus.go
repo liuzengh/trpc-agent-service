@@ -119,6 +119,16 @@ type Segment struct {
 	Type string `json:"type"` // "text" | "markdown" | "image"
 	Text string `json:"text,omitempty"`
 	URL  string `json:"url,omitempty"`
+	// Actions carries interactive buttons (cards). Each button's Value is the
+	// callback payload the IM platform returns when it is pressed: that is how
+	// an approval decision travels back without the user typing anything.
+	Actions []SegmentAction `json:"actions,omitempty"`
+}
+
+// SegmentAction is one button of an interactive card.
+type SegmentAction struct {
+	Text  string            `json:"text"`
+	Value map[string]string `json:"value,omitempty"`
 }
 
 // encode serializes a Message into Redis Stream field/value pairs.

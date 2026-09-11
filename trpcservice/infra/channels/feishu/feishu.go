@@ -124,6 +124,75 @@ func chatTypeOf(t string) string {
 	return channels.ChatTypeSingle
 }
 
+// cardActionEnvelope is how an interactive-card button click enters the
+// adapter's event stream: the Conn re-encodes the SDK callback into this shape
+// (see conn.go), and the adapter decoder turns it into a normal inbound
+// message. Going through the same stream means the decision inherits the
+// adapter's dedup, the bus idempotency key, the worker's approval resolution
+// and the audit trail for free.
+type cardActionEnvelope struct {
+	CardAction *cardActionPayload `json:"card_action,omitempty"`
+}
+
+// cardActionPayload carries what the adapter needs from a button click.
+type cardActionPayload struct {
+	EventID   string            `json:"event_id"`
+	OpenID    string            `json:"open_id"`
+	UserID    string            `json:"user_id,omitempty"`
+	MessageID string            `json:"message_id,omitempty"`
+	Value     map[string]string `json:"value"`
+}
+
+// CardActionToInbound maps a button click onto the inbound message the approval
+// flow already understands: the click becomes the user's 批准/拒绝 reply to the
+// session the card was sent to. Returns nil when the payload lacks the session
+// (nothing to decide) or the decision is unknown.
+func CardActionToInbound(tenantID string, env *cardActionEnvelope) *channels.InboundMessage {
+	if env == nil || env.CardAction == nil {
+		return nil
+	}
+	act := env.CardAction
+	sessionID := act.Value["session_id"]
+	text := approvalReplyText(act.Value["decision"])
+	if sessionID == "" || text == "" {
+		return nil
+	}
+	userID := act.UserID
+	if userID == "" {
+		userID = act.OpenID
+	}
+	// The dedup key must be unique per click and stable across redeliveries:
+	// the platform event id is exactly that (the message id alone would collide
+	// when both buttons of one card are pressed).
+	id := act.EventID
+	if id == "" {
+		id = act.MessageID + ":" + act.Value["decision"]
+	}
+	return &channels.InboundMessage{
+		PlatformMsgID: id,
+		TenantID:      tenantID,
+		SessionID:     sessionID,
+		UserID:        userID,
+		ChatType:      channels.ChatTypeSingle,
+		ChatID:        act.Value["chat_id"],
+		Content:       text,
+		MsgType:       "text",
+	}
+}
+
+// approvalReplyText maps a card button decision onto the reply wording the
+// worker's approval classifier already recognizes.
+func approvalReplyText(decision string) string {
+	switch decision {
+	case "approve":
+		return "批准"
+	case "deny":
+		return "拒绝"
+	default:
+		return ""
+	}
+}
+
 // mentioned reports whether the bot (identified by open_id) was @-mentioned.
 // The mention's Id.OpenID (not Key, which is a positional placeholder) carries
 // the real identity. botOpenID empty means no gating is possible, so we accept
@@ -184,6 +253,13 @@ func New(tenantID, botOpenID string, conn channels.Conn) *Adapter {
 // Start consumes raw events from the Conn until ctx is done.
 func (a *Adapter) Start(ctx context.Context) error {
 	return a.BaseAdapter.Run(ctx, func(raw []byte) (*channels.InboundMessage, bool) {
+		// A card button click first: it arrives on the same stream as message
+		// events but in a different envelope.
+		var env cardActionEnvelope
+		if err := json.Unmarshal(raw, &env); err == nil && env.CardAction != nil {
+			in := CardActionToInbound(a.tenantID, &env)
+			return in, in != nil
+		}
 		var ev Event
 		if err := json.Unmarshal(raw, &ev); err != nil || ev.Header.EventID == "" {
 			return nil, false // skip malformed or undeduplicatable events

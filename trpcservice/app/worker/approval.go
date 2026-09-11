@@ -23,6 +23,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/bus"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/channels"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
@@ -219,6 +220,11 @@ func classifyApprovalReply(text string) string {
 }
 
 // approvalNotice renders the outbound message that asks the user to decide.
+//
+// On a channel that can deliver interactive buttons (Feishu) the notice is a
+// card with 批准/拒绝 buttons whose callback value carries the session and the
+// decision, so the user approves with one click; the body still spells out the
+// typed reply as a fallback. Other channels (WeCom) get the plain text prompt.
 func approvalNotice(m *bus.Message, toolName, args string) *bus.Message {
 	var b strings.Builder
 	fmt.Fprintf(&b, "⚠️ 需要您审批（任务已暂停）\n\nAgent 请求执行工具：%s", toolName)
@@ -227,7 +233,32 @@ func approvalNotice(m *bus.Message, toolName, args string) *bus.Message {
 	}
 	b.WriteString("\n\n回复「批准」允许执行，或「拒绝」阻止本次调用。")
 	fmt.Fprintf(&b, "\n%d 分钟内有效，超时自动拒绝。", int(approvalTimeout.Minutes()))
-	return replyMessage(m, b.String())
+
+	notice := replyMessage(m, b.String())
+	if !channels.CardActionCapable(m.Channel) {
+		return notice
+	}
+	notice.Kind = channels.KindCard
+	notice.Segments = []bus.Segment{
+		{Type: "title", Text: "需要人工审批"},
+		{Type: "markdown", Text: b.String()},
+		{Type: "actions", Actions: []bus.SegmentAction{
+			{Text: "批准", Value: approvalValue(m, "approve")},
+			{Text: "拒绝", Value: approvalValue(m, "deny")},
+		}},
+	}
+	return notice
+}
+
+// approvalValue is the callback payload a card button sends back. It carries the
+// session and decision only: the reply routing (chat) is already known to the
+// gateway from the original inbound message.
+func approvalValue(m *bus.Message, decision string) map[string]string {
+	return map[string]string{
+		"session_id": m.SessionID,
+		"decision":   decision,
+		"tool":       m.AgentID,
+	}
 }
 
 // approvalConfirm renders the acknowledgement sent after a decision.

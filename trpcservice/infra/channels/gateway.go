@@ -382,6 +382,9 @@ func convertSegments(busSegs []bus.Segment) []Segment {
 	segs := make([]Segment, len(busSegs))
 	for i, s := range busSegs {
 		segs[i] = Segment{Type: s.Type, Text: s.Text, URL: s.URL}
+		for _, a := range s.Actions {
+			segs[i].Actions = append(segs[i].Actions, CardAction{Text: a.Text, Value: a.Value})
+		}
 	}
 	return segs
 }

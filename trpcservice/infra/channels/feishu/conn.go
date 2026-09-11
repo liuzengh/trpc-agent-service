@@ -22,6 +22,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
@@ -82,6 +83,29 @@ func NewConn(appID, appSecret string) *Conn {
 				slog.Warn("feishu: inbound buffer full, dropping event")
 			}
 			return nil
+		}).
+		// Interactive-card buttons (the approval card). The click arrives on the
+		// same long connection; it is re-encoded into the adapter's event stream
+		// so the decision travels the exact same path as a typed reply (dedup,
+		// bus idempotency, worker approval resolution, audit).
+		OnP2CardActionTrigger(func(_ context.Context, ev *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			if ev == nil || ev.Event == nil {
+				return nil, nil
+			}
+			raw, err := json.Marshal(toCardActionEnvelope(ev))
+			if err != nil {
+				return nil, err
+			}
+			select {
+			case c.events <- raw:
+			default:
+				slog.Warn("feishu: inbound buffer full, dropping card action")
+			}
+			// Ack with a toast: without a response the client shows a generic
+			// failure even though the decision was accepted.
+			return &callback.CardActionTriggerResponse{
+				Toast: &callback.Toast{Type: "info", Content: "已提交，Agent 收到你的决定"},
+			}, nil
 		})
 	c.handler = handler
 	c.client = larkws.NewClient(appID, appSecret, larkws.WithEventHandler(handler))
@@ -96,6 +120,36 @@ func NewConn(appID, appSecret string) *Conn {
 
 // reconnectMaxBackoff caps the reconnect delay.
 const reconnectMaxBackoff = 30 * time.Second
+
+// toCardActionEnvelope converts an SDK card-action callback into the envelope
+// the adapter decodes (see feishu.go). Button values are copied to
+// string→string so the payload is stable across the JSON round trip.
+func toCardActionEnvelope(ev *callback.CardActionTriggerEvent) cardActionEnvelope {
+	act := cardActionPayload{}
+	if ev.Event != nil {
+		act.MessageID = ev.Event.Context.OpenMessageID
+		if ev.Event.Operator != nil {
+			act.OpenID = ev.Event.Operator.OpenID
+			if ev.Event.Operator.UserID != nil {
+				act.UserID = *ev.Event.Operator.UserID
+			}
+		}
+		act.Value = map[string]string{}
+		if ev.Event.Action != nil {
+			for k, v := range ev.Event.Action.Value {
+				if s, ok := v.(string); ok {
+					act.Value[k] = s
+				}
+			}
+		}
+		// The callback token doubles as a per-click unique id when the event
+		// header is absent.
+		if act.EventID == "" {
+			act.EventID = ev.Event.Token
+		}
+	}
+	return cardActionEnvelope{CardAction: &act}
+}
 
 // supervise keeps the long connection alive. The SDK's Start returns when the
 // connection ends for good (network drop, credential rotation, server drain),
@@ -190,10 +244,57 @@ func (c *Conn) SendStream(ctx context.Context, target, chatType string, stream <
 	return c.Send(ctx, target, chatType, fullText)
 }
 
-// SendCard sends an interactive card message via Feishu.
+// SendCard sends an interactive card: markdown body plus one button per action.
+// A button's callback value is echoed back by Feishu to the card-action handler
+// (see the dispatcher registration in NewConn), which is how an approval
+// decision comes back without the user typing anything.
 func (c *Conn) SendCard(ctx context.Context, target, chatType string, card channels.Card) error {
-	content := fmt.Sprintf(`{"elements":[{"tag":"markdown","content":"%s"}]}`, escapeJSON(card.Content))
+	content := renderCard(card)
 	return c.send(ctx, target, "interactive", content)
+}
+
+// renderCard builds the Feishu interactive-card JSON.
+func renderCard(card channels.Card) string {
+	elements := make([]map[string]any, 0, 2)
+	if card.Content != "" {
+		elements = append(elements, map[string]any{"tag": "markdown", "content": card.Content})
+	}
+	if len(card.Actions) > 0 {
+		buttons := make([]map[string]any, 0, len(card.Actions))
+		for i, act := range card.Actions {
+			value := map[string]string{}
+			for k, v := range act.Value {
+				value[k] = v
+			}
+			btnType := "default"
+			if i == 0 {
+				btnType = "primary"
+			}
+			buttons = append(buttons, map[string]any{
+				"tag":  "button",
+				"text": map[string]any{"tag": "plain_text", "content": act.Text},
+				"type": btnType,
+				// behaviors.callback keeps the click inside the long connection:
+				// Feishu POSTs the value to our card-action handler.
+				"behaviors": []map[string]any{{"type": "callback", "value": value}},
+				"value":     value,
+			})
+		}
+		elements = append(elements, map[string]any{"tag": "action", "actions": buttons})
+	}
+	payload := map[string]any{"elements": elements}
+	if card.Title != "" {
+		payload["header"] = map[string]any{
+			"title": map[string]any{"tag": "plain_text", "content": card.Title},
+		}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		// A card that cannot be encoded is a programming error; fall back to the
+		// body text so the user still gets the message.
+		return fmt.Sprintf(`{"elements":[{"tag":"markdown","content":"%s"}]}`, escapeJSON(card.Content))
+	}
+	return string(raw)
 }
 
 func (c *Conn) send(ctx context.Context, target string, msgType, content string) error {

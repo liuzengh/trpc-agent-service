@@ -8,6 +8,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/bus"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/channels"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	fwtool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -132,5 +133,54 @@ func TestApprovalNoticeMentionsToolAndInstruction(t *testing.T) {
 	}
 	if notice.ReplyTo != m.ID {
 		t.Errorf("notice.ReplyTo = %q, want %q", notice.ReplyTo, m.ID)
+	}
+}
+
+// TestApprovalNoticeIsACardOnButtonCapableChannels covers the per-channel
+// capability split: Feishu gets an interactive card with 批准/拒绝 buttons whose
+// callback value routes the decision back to the right session, while WeCom
+// (no button callback in the adapter) keeps the plain text prompt. The card body
+// still spells out the typed reply, so a client that cannot render buttons is
+// not left without a way to answer.
+func TestApprovalNoticeIsACardOnButtonCapableChannels(t *testing.T) {
+	content := model.NewUserMessage("deploy please")
+	base := &bus.Message{ID: "m-1", TenantID: "t1", SessionID: "s1", UserID: "u1", Content: &content}
+
+	feishuMsg := *base
+	feishuMsg.Channel = channels.ChannelFeishu
+	card := approvalNotice(&feishuMsg, "execute_code", "")
+	if card.Kind != channels.KindCard {
+		t.Fatalf("feishu notice kind = %q, want card", card.Kind)
+	}
+	var actions []bus.SegmentAction
+	for _, seg := range card.Segments {
+		actions = append(actions, seg.Actions...)
+	}
+	if len(actions) != 2 {
+		t.Fatalf("card actions = %d, want 批准 + 拒绝", len(actions))
+	}
+	byDecision := map[string]bus.SegmentAction{}
+	for _, a := range actions {
+		byDecision[a.Value["decision"]] = a
+	}
+	for _, want := range []string{"approve", "deny"} {
+		act, ok := byDecision[want]
+		if !ok {
+			t.Fatalf("card missing the %q button: %+v", want, actions)
+		}
+		// The session is what lets the click resolve the right approval.
+		if act.Value["session_id"] != "s1" {
+			t.Errorf("%s button session_id = %q, want s1", want, act.Value["session_id"])
+		}
+	}
+	if !strings.Contains(card.Content.Content, "批准") {
+		t.Errorf("card body must still explain the typed reply: %q", card.Content.Content)
+	}
+
+	wecomMsg := *base
+	wecomMsg.Channel = channels.ChannelWeCom
+	plain := approvalNotice(&wecomMsg, "execute_code", "")
+	if plain.Kind == channels.KindCard || len(plain.Segments) != 0 {
+		t.Errorf("wecom notice should stay text, got kind=%q segments=%d", plain.Kind, len(plain.Segments))
 	}
 }

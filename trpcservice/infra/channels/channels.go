@@ -91,12 +91,31 @@ type Segment struct {
 	Type string // text | image | file
 	Text string
 	URL  string
+	// Actions carries interactive buttons (see CardAction).
+	Actions []CardAction
+}
+
+// CardAction is one button on an interactive card. Value is the payload the
+// platform hands back when the button is pressed, so a decision (approve/deny)
+// can arrive as a callback instead of a typed reply.
+type CardAction struct {
+	Text  string
+	Value map[string]string
 }
 
 // Card represents a rich card message payload.
 type Card struct {
 	Title   string // card title
 	Content string // markdown or JSON content
+	Actions []CardAction
+}
+
+// CardActionCapable reports whether a channel can deliver interactive buttons
+// and return their callbacks. WeCom's AI-bot long connection has no button
+// callback in our adapter, so there the approval notice stays a text prompt and
+// the user replies 批准/拒绝.
+func CardActionCapable(channel string) bool {
+	return channel == ChannelFeishu
 }
 
 // Text returns the concatenated plain text of the message's segments.

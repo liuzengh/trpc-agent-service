@@ -55,9 +55,16 @@ func (a *BaseAdapter) Send(ctx context.Context, msg *OutboundMessage) error {
 	case KindCard:
 		card := Card{}
 		for _, seg := range msg.Segments {
-			if seg.Type == "markdown" || seg.Type == "text" {
+			switch seg.Type {
+			case "markdown", "text":
 				card.Content += seg.Text
+			case "title":
+				card.Title = seg.Text
 			}
+			// Buttons travel with their callback payload; a channel that cannot
+			// render them drops them, which is why the card body also carries
+			// the "reply 批准/拒绝" instruction.
+			card.Actions = append(card.Actions, seg.Actions...)
 		}
 		if card.Content == "" {
 			card.Content = msg.Text()
