@@ -303,8 +303,8 @@ func TestFeishuProgressUpdatesOneCard(t *testing.T) {
 			elements, _ = body["elements"].([]any)
 		}
 	}
-	if len(elements) != 1 || elements[0].(map[string]any)["tag"] != "note" {
-		t.Fatalf("ordinary progress card should use a light note state: %#v", initial)
+	if len(elements) != 1 || elements[0].(map[string]any)["tag"] != "markdown" {
+		t.Fatalf("ordinary progress card should use a schema-v2 markdown element: %#v", initial)
 	}
 	if !strings.Contains(fake.lastCreate, "正在回复") {
 		t.Fatalf("initial progress card = %q", fake.lastCreate)

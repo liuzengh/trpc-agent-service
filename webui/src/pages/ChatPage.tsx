@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { artifactDownloadURL, deleteSession, generateUUID, getSessionMessages, listSessions, postChat, resolveChatApproval } from '../api'
 import { useAppContext } from '../context'
@@ -310,7 +310,7 @@ export function ChatPage() {
     }
   }
 
-  const addFiles = (selectedFiles: FileList | null) => {
+  const addFiles = (selectedFiles: FileList | File[] | null) => {
     if (!selectedFiles) return
     const next = [...files, ...Array.from(selectedFiles)]
     if (next.length > MAX_CHAT_FILES) {
@@ -323,6 +323,16 @@ export function ChatPage() {
     }
     setFiles(next)
     setFileError('')
+  }
+
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const imageFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null)
+    if (imageFiles.length === 0) return
+    event.preventDefault()
+    addFiles(imageFiles)
   }
 
   const hasDraggedFiles = (event: DragEvent<HTMLElement>) => Array.from(event.dataTransfer.types).includes('Files')
@@ -533,6 +543,7 @@ export function ChatPage() {
               value={text}
               disabled={streaming || !selected}
               onChange={(event) => setText(event.target.value)}
+              onPaste={handlePaste}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault()

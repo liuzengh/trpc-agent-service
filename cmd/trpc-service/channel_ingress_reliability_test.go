@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,32 @@ type retryingIngressProducer struct {
 	failures int
 	calls    int
 	events   []messaging.Envelope
+}
+
+type ingressProgressSender struct {
+	connectorTestSender
+	started atomic.Bool
+}
+
+func (s *ingressProgressSender) StartProgress(context.Context, channels.ReplyTarget) (channels.SendReceipt, error) {
+	s.started.Store(true)
+	return channels.SendReceipt{ExternalMessageID: "progress-1"}, nil
+}
+
+func (*ingressProgressSender) UpdateProgress(context.Context, channels.ReplyTarget, string, string) error {
+	return nil
+}
+
+type progressAwareArtifactService struct {
+	agentartifact.Service
+	progressStarted *atomic.Bool
+}
+
+func (s *progressAwareArtifactService) SaveArtifact(ctx context.Context, info agentartifact.SessionInfo, filename string, artifact *agentartifact.Artifact) (int, error) {
+	if s.progressStarted == nil || !s.progressStarted.Load() {
+		return 0, errors.New("progress was not started before attachment staging")
+	}
+	return s.Service.SaveArtifact(ctx, info, filename, artifact)
 }
 
 func (p *retryingIngressProducer) Publish(_ context.Context, envelope messaging.Envelope) error {
@@ -161,6 +188,45 @@ func TestChannelIngressCombinesBareAttachmentWithFollowingTextForEnterpriseIM(t 
 			}, payload.Inbound.Files[0].ArtifactName, &version)
 			if err != nil || stored == nil || string(stored.Data) != "evidence" {
 				t.Fatalf("combined artifact = %#v, %v", stored, err)
+			}
+		})
+	}
+}
+
+func TestChannelIngressStartsEnterpriseIMProgressBeforeAttachmentStaging(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		channel   channels.Channel
+		bindingID string
+	}{
+		{name: "feishu", channel: channels.Feishu, bindingID: "feishu-main"},
+		{name: "wecom", channel: channels.WeCom, bindingID: "wecom-main"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			producer := &retryingIngressProducer{}
+			ingress, _, artifacts := reliableIngressFixtureForChannel(t, producer, test.channel, test.bindingID)
+			sender := &ingressProgressSender{}
+			ingress.resolveSender = func(context.Context, string, string, uint64, channels.BindingKey) (channels.Sender, error) {
+				return sender, nil
+			}
+			ingress.artifacts = connectorTestArtifactProvider{service: &progressAwareArtifactService{
+				Service: artifacts, progressStarted: &sender.started,
+			}}
+
+			err := ingress.publish(context.Background(), test.bindingID, channels.InboundMessage{
+				MessageID: "image-with-question", Channel: test.channel,
+				ConversationID: "customer-1", SenderID: "customer-1", ConversationScope: channels.ConversationDirect,
+				Text: "这张图片是什么？", ReceivedAt: time.Now().UTC(),
+				ReceivedFiles: []channels.ReceivedFile{{Name: "image.png", MimeType: "image/png", Data: []byte("image-bytes")}},
+			})
+			if err != nil {
+				t.Fatalf("publish() error = %v", err)
+			}
+			if !sender.started.Load() {
+				t.Fatal("progress was not started")
+			}
+			if len(producer.events) != 1 {
+				t.Fatalf("published events = %d, want 1", len(producer.events))
 			}
 		})
 	}

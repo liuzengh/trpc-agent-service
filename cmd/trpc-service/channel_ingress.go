@@ -103,6 +103,21 @@ func (i *channelIngress) publish(ctx context.Context, bindingID string, inbound 
 		return fmt.Errorf("resolve connector release: %w", err)
 	}
 	snapshot = selection.Snapshot
+	var progress *inboundProgressHandle
+	if strings.TrimSpace(inbound.Text) != "" {
+		// A user turn that already has instructions should acknowledge immediately,
+		// before provider media download / Artifact staging / pending-file recovery.
+		// This is especially important for WeCom because its reply token is
+		// short-lived. Bare attachment messages are intentionally excluded: they
+		// are staged as pending input and receive the dedicated attachment notice.
+		progress = i.startProgress(ctx, snapshot, bindingID, &inbound)
+	}
+	published := false
+	defer func() {
+		if !published {
+			i.cancelProgress(progress)
+		}
+	}()
 	var (
 		artifactService agentartifact.Service
 		artifactInfo    agentartifact.SessionInfo
@@ -161,13 +176,6 @@ func (i *channelIngress) publish(ctx context.Context, bindingID string, inbound 
 			return fmt.Errorf("%w: %v", errChannelIngressRejected, errors.Join(err, restoreErr))
 		}
 	}
-	progress := i.startProgress(ctx, snapshot, bindingID, &inbound)
-	published := false
-	defer func() {
-		if !published {
-			i.cancelProgress(progress)
-		}
-	}()
 	envelope, err := messaging.NewInboundEnvelopeWithContext(ctx, selection, bindingID, sessionKey, inbound, i.manifests)
 	if err != nil {
 		restoreErr := i.pendingFiles.Restore(ctx, pendingKey, drainedFiles)

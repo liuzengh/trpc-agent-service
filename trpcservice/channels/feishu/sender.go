@@ -87,7 +87,7 @@ func (s *Sender) StartProgress(ctx context.Context, target channels.ReplyTarget)
 	if err := validateFeishuTarget(target); err != nil {
 		return channels.SendReceipt{}, err
 	}
-	content, err := buildFeishuProgressCard()
+	content, err := buildFeishuProgressCard(target.ConversationScope)
 	if err != nil {
 		return channels.SendReceipt{}, err
 	}
@@ -258,23 +258,13 @@ func buildFeishuCardV2(card *channels.InteractiveCard, body string, scope channe
 	return string(encoded), nil
 }
 
-func buildFeishuProgressCard() (string, error) {
-	payload := map[string]any{
-		"schema": "2.0",
-		"body": map[string]any{"elements": []any{
-			map[string]any{
-				"tag": "note",
-				"elements": []any{
-					map[string]any{"tag": "plain_text", "content": "正在回复…"},
-				},
-			},
-		}},
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("marshal feishu progress card: %w", err)
-	}
-	return string(encoded), nil
+func buildFeishuProgressCard(scope channels.ConversationScope) (string, error) {
+	// Keep progress on the same card-v2 markdown path as later updates. Feishu
+	// rejects the legacy `note` element inside schema 2.0 cards.
+	return buildFeishuCard(&channels.InteractiveCard{
+		Body:  "正在回复…",
+		State: "running",
+	}, "", scope)
 }
 
 func (s *Sender) sendFile(ctx context.Context, conversationID string, file channels.OutboundFile) (string, error) {
