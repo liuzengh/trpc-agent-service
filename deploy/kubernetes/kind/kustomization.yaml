@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../configmap.yaml
+  - ../service.yaml
+  - ../gateway-deployment.yaml
+  - ../channel-deployment.yaml
+  - ../worker-deployment.yaml
+  - ../hpa.yaml
+  - ../pdb.yaml
+  - ../networkpolicy.yaml
+  - ../docling.yaml
+patches:
+  - path: configmap-patch.yaml
+  - path: gateway-deployment-patch.yaml
+  - path: worker-deployment-patch.yaml
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: trpc-agent-service
+    patch: |-
+      - op: add
+        path: /spec/egress/0/ports/-
+        value: {protocol: TCP, port: 9000}
+      - op: add
+        path: /spec/egress/0/ports/-
+        value: {protocol: TCP, port: 9999}
+images:
+  - name: ghcr.io/example/trpc-agent-service
+    newName: trpc-agent-service
+    newTag: kind

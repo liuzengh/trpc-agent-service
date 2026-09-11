@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-worker
+  namespace: trpc-agent
+spec:
+  replicas: 2
+  progressDeadlineSeconds: 300
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: worker
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: worker
+          image: ghcr.io/example/trpc-agent-service:replace-me
+          imagePullPolicy: IfNotPresent
+          args: ["serve"]
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - {name: SERVICE_ROLE, value: worker}
+            - name: NODE_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - {name: CONFIG_PATH, value: /etc/trpc-agent/platform.json}
+            - {name: AUTO_MIGRATE, value: "false"}
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: trpc-agent-service-secrets, key: database-url}}
+            - name: REDIS_ADDR
+              valueFrom: {secretKeyRef: {name: trpc-agent-service-secrets, key: redis-addr}}
+            - name: REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: trpc-agent-service-secrets, key: redis-password, optional: true}}
+            - name: KAFKA_BROKERS
+              valueFrom: {secretKeyRef: {name: trpc-agent-service-secrets, key: kafka-brokers}}
+            - {name: KAFKA_TOPIC, value: agent.inbound.v1}
+            - {name: KAFKA_GROUP_ID, value: trpc-agent-worker}
+            - {name: WORKER_CONCURRENCY, value: "4"}
+            - name: MODEL_API_KEY
+              valueFrom: {secretKeyRef: {name: trpc-agent-service-secrets, key: model-api-key}}
+            - name: AUDIT_HMAC_KEY
+              valueFrom: {secretKeyRef: {name: trpc-agent-service-secrets, key: audit-hmac-key}}
+            - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: http://otel-collector.observability.svc.cluster.local:4318}
+            - name: LANGFUSE_PUBLIC_KEY
+              valueFrom: {secretKeyRef: {name: trpc-agent-service-secrets, key: langfuse-public-key, optional: true}}
+            - name: LANGFUSE_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: trpc-agent-service-secrets, key: langfuse-secret-key, optional: true}}
+            - name: LANGFUSE_HOST
+              valueFrom: {secretKeyRef: {name: trpc-agent-service-secrets, key: langfuse-host, optional: true}}
+          volumeMounts:
+            - {name: configuration, mountPath: /etc/trpc-agent, readOnly: true}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: configuration
+          configMap: {name: trpc-agent-service-config}

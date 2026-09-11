@@ -1,0 +1,1 @@
+import{j as e,ad as d,ae as i,af as t}from"./app.js";function b({ariaLabel:l,value:r,items:s,onValueChange:n,className:o=""}){return e.jsx(d,{value:r,onValueChange:a=>n(a),children:e.jsx(i,{className:`segmented-control ${o}`.trim(),"aria-label":l,children:s.map(a=>e.jsx(t,{value:a.value,"aria-label":a.ariaLabel,disabled:a.disabled,children:a.label},a.value))})})}export{b as S};

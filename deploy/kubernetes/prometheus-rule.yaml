@@ -1,0 +1,202 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: trpc-agent-service-alerts
+  namespace: trpc-agent
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+spec:
+  groups:
+    - name: trpc-agent-service
+      rules:
+        - alert: TrpcAgentHTTP5xxRateHigh
+          expr: |
+            sum(rate(http_server_requests_total{http_response_status_code=~"5.."}[10m]))
+            /
+            clamp_min(sum(rate(http_server_requests_total[10m])), 1) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service HTTP 5xx rate is above 5%
+            runbook: Inspect http.server requests by route and correlate the trace ID with downstream Store or Sender spans.
+        - alert: TrpcAgentChannelDeliveryFailures
+          expr: sum(rate(channel_delivery_failures_total[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service channel delivery is failing
+            runbook: Inspect channel.sender.send spans and durable Outbox delivery attempts; retries are at-least-once.
+        - alert: TrpcAgentStoreFailures
+          expr: sum(rate(platform_store_failures_total[10m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: trpc-agent-service durable store operation is failing
+            runbook: Inspect platform.store.operation spans by backend and operation, then verify PostgreSQL or Redis readiness.
+        - alert: TrpcAgentExecutionFailures
+          expr: sum(rate(agent_execution_failures_total[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service agent execution is failing
+            runbook: Correlate agent.runtime.handle with governed tool and Store spans; no request content is emitted to telemetry.
+        - alert: TrpcAgentExecutionLatencyP95High
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(agent_execution_duration_ms_bucket[10m]))
+            ) > 30000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service agent execution p95 latency is above 30 seconds
+            runbook: Correlate model latency, tool latency, Kafka lag and database saturation before scaling workers.
+        - alert: TrpcAgentHTTPLatencyP99High
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (rate(http_server_duration_ms_bucket[10m]))
+            ) > 5000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service HTTP p99 latency is above 5 seconds
+            runbook: Inspect HTTP route latency and downstream Store/Redis spans; exclude expected long-lived SSE streams when diagnosing request latency.
+        - alert: TrpcAgentDeadLettersDetected
+          expr: sum(rate(messaging_dlq_messages_total[10m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: trpc-agent-service is dead-lettering inbound messages
+            runbook: Group by error_class and tenant_id, inspect the original trace, and do not replay side-effecting messages until the failure class is understood.
+        - alert: TrpcAgentToolFailuresHigh
+          expr: |
+            sum(rate(tool_execution_failures_total[10m]))
+            /
+            clamp_min(sum(rate(tool_execution_total[10m])), 1) > 0.10
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: governed tool execution failure rate is above 10%
+            runbook: Inspect failures by tenant_id and tool_name, then correlate with the tool execution ledger before retrying any side-effecting operation.
+        - alert: TrpcAgentGovernanceRejectionsHigh
+          expr: sum by (tenant_id, app_code, governance_reason) (rate(governance_rejections_total[10m])) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: tenant governance is rejecting requests continuously
+            runbook: Inspect governance_reason before changing limits; sustained token_budget or concurrent_run_limit rejections indicate policy/capacity pressure rather than provider failure.
+        - alert: TrpcAgentBackendCircuitOpening
+          expr: sum(rate(backend_circuit_opens_total[10m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: a managed backend circuit breaker is opening
+            runbook: Inspect backend domain/profile/driver labels and probe failures; do not disable the breaker before confirming the downstream dependency is healthy.
+        - alert: TrpcAgentWorkerExecutionSaturated
+          expr: |
+            sum(agent_execution_active)
+            /
+            clamp_min(sum(worker_execution_slots), 1) > 0.85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service worker execution slots are above 85% utilization
+            runbook: Check Kafka lag, model latency and database pool saturation. Increase Worker replicas only when Kafka partitions can supply the extra slots.
+        - alert: TrpcAgentKafkaLagGrowing
+          expr: |
+            max(messaging_kafka_consumer_lag) > 0
+            and
+            delta(max(messaging_kafka_consumer_lag)[10m:]) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service Kafka consumer lag is growing
+            runbook: Compare worker execution utilization with model latency. If workers are saturated, scale Worker replicas; if not, inspect blocked executions and downstream dependencies.
+        - alert: TrpcAgentKafkaPartitionsBelowWorkerSlots
+          expr: max(messaging_kafka_topic_partitions) < sum(worker_execution_slots)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Kafka partition count is below configured Worker execution slots
+            runbook: Extra Worker slots cannot receive independent partitions. Increase topic partitions through Kafka administration before adding more Worker capacity.
+        - alert: TrpcAgentKafkaCapacitySamplingFailures
+          expr: sum(rate(messaging_kafka_capacity_sample_failures_total[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service cannot refresh Kafka lag or partition capacity metrics
+            runbook: Treat the last Kafka lag gauge as stale until sampling recovers. Check broker connectivity, group metadata permissions and Kafka availability.
+        - alert: TrpcAgentDatabasePoolSaturated
+          expr: |
+            sum(database_pool_connections_in_use)
+            /
+            clamp_min(sum(database_pool_connections_max), 1) > 0.85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service PostgreSQL connection pools are above 85% utilization
+            runbook: Check database_pool_waits_total and database latency before raising pool limits; verify PostgreSQL max_connections and other clients first.
+        - alert: TrpcAgentDatabasePoolWaiting
+          expr: sum(rate(database_pool_waits_total[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service requests are waiting for PostgreSQL connections
+            runbook: Treat pool wait as saturation evidence. Correlate with active executions, database latency and PostgreSQL server load.
+        - alert: TrpcAgentRedisPoolTimeouts
+          expr: sum(rate(redis_pool_timeouts_total[5m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: trpc-agent-service Redis connection pool is timing out
+            runbook: Inspect redis_pool_waits_total, Redis latency and connection limits. Do not increase the application pool blindly if Redis itself is saturated.
+        - alert: TrpcAgentOutboxDelayed
+          expr: max(outbox_oldest_age_seconds) > 60
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service has an Outbox item waiting for more than 60 seconds
+            runbook: Inspect outbox_pending by tenant/channel and channel.delivery failures. Confirm the active Channel owner before replaying anything.
+        - alert: TrpcAgentInboundPublishFailures
+          expr: sum(rate(channel_inbound_failures_total[5m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: trpc-agent-service is failing to publish accepted inbound messages
+            runbook: Inspect Kafka availability and channel.inbound publish latency. External channel connectors retain/retry messages according to their delivery contract.
+        - alert: TrpcAgentTenantModelTokenRateHigh
+          expr: sum by (tenant_id, app_code) (rate(model_tokens_total[10m])) > 10000
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service tenant model token rate is high
+            runbook: Inspect model token usage by tenant and app. Review tenant requests_per_minute and model pricing before changing a limit.
+        - alert: TrpcAgentTenantModelCostRateHigh
+          expr: sum by (tenant_id, app_code) (rate(model_cost_microunits_total[1h])) > 1000000
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: trpc-agent-service tenant model cost rate is high
+            runbook: Inspect model cost by tenant, app, provider, and model. Verify platform-owned pricing before changing a limit.

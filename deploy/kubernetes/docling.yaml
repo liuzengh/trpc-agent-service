@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: docling-serve
+  namespace: trpc-agent
+spec:
+  selector:
+    app.kubernetes.io/name: docling-serve
+  ports:
+    - name: http
+      port: 5001
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docling-serve
+  namespace: trpc-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: docling-serve
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: docling-serve
+    spec:
+      containers:
+        - name: docling
+          image: ghcr.io/docling-project/docling-serve-cpu:v1.30.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: DOCLING_SERVE_ENABLE_UI, value: "0"}
+            - {name: DOCLING_SERVE_MAX_FILE_SIZE, value: "16777216"}
+          ports:
+            - {name: http, containerPort: 5001}
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests: {cpu: 250m, memory: 1Gi}
+            limits: {cpu: "2", memory: 4Gi}

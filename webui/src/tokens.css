@@ -1,0 +1,85 @@
+:root {
+  --bg: #f5f5f7;
+  --surface: #ffffff;
+  --hover: #fbfbfd;
+  --text: #1d1d1f;
+  --text-body: #424245;
+  --text-2: #6e6e73;
+  --text-3: #86868b;
+  --text-4: #aeaeb2;
+  --faint: #d2d2d7;
+  --hairline: rgba(0, 0, 0, 0.07);
+  --hairline-strong: rgba(0, 0, 0, 0.14);
+  --hairline-contrast: rgba(0, 0, 0, 0.35);
+  --neutral-soft: rgba(0, 0, 0, 0.045);
+  --neutral-fill: rgba(0, 0, 0, 0.05);
+  --accent: #0071e3;
+  --accent-link: #0066cc;
+  --accent-soft: rgba(0, 113, 227, 0.09);
+  --accent-soft-hover: rgba(0, 113, 227, 0.07);
+  --accent-selection: rgba(0, 113, 227, 0.18);
+  --accent-ring: rgba(0, 113, 227, 0.14);
+  --accent-border: rgba(0, 113, 227, 0.3);
+  --indigo: #5e5ce6;
+  --heat: #ff6b00;
+  --heat-bg: rgba(255, 107, 0, 0.1);
+  --live: #30d158;
+  --track: #e8e8ed;
+  --glass: rgba(255, 255, 255, 0.78);
+  --glass-strong: rgba(255, 255, 255, 0.9);
+  --chrome-glass: rgba(245, 245, 247, 0.72);
+  --field-surface: rgba(255, 255, 255, 0.82);
+  --secondary-surface: rgba(255, 255, 255, 0.86);
+  --field-border: rgba(0, 0, 0, 0.1);
+  --field-border-hover: rgba(0, 0, 0, 0.18);
+  --secondary-border: rgba(0, 0, 0, 0.09);
+  --overlay-scrim: rgba(0, 0, 0, 0.28);
+  --modal-surface: rgba(255, 255, 255, 0.96);
+
+  --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
+    'Helvetica Neue', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --mono: ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --r-pill: 999px;
+  --r-chip: 6px;
+  --r-thumb: 12px;
+  --r-sheet: 16px;
+  --r-card: 18px;
+  --r-panel: 22px;
+  --r-hero: 26px;
+
+  --sh-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.05);
+  --sh-panel: 0 1px 3px rgba(0, 0, 0, 0.05), 0 14px 40px rgba(0, 0, 0, 0.05);
+  --sh-lift: 0 12px 32px rgba(0, 0, 0, 0.1);
+  --sh-overlay: 0 2px 8px rgba(0, 0, 0, 0.1), 0 30px 80px rgba(0, 0, 0, 0.24);
+  --sh-field: 0 1px 2px rgba(0, 0, 0, 0.03);
+  --sh-control: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --sh-control-strong: 0 1px 3px rgba(0, 0, 0, 0.12);
+  --sh-switch: 0 1px 3px rgba(0, 0, 0, 0.2);
+  --sh-logo: 0 1px 2px rgba(0, 0, 0, 0.12), 0 6px 16px rgba(0, 0, 0, 0.08);
+  --sh-accent: 0 1px 2px rgba(0, 0, 0, 0.08), 0 8px 20px rgba(0, 113, 227, 0.16);
+  --sh-accent-hover: 0 1px 2px rgba(0, 0, 0, 0.08), 0 10px 24px rgba(0, 113, 227, 0.2);
+
+  --max-read: 720px;
+  --max-grid: 1080px;
+  --pad-x: 22px;
+  --section-gap: clamp(34px, 6vw, 56px);
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+
+  /* Semantic state colors. */
+  --ok: #248a3d;
+  --ok-soft: rgba(48, 209, 88, 0.11);
+  --warn: #b25000;
+  --warn-soft: var(--heat-bg);
+  --err: #d70015;
+  --err-soft: rgba(215, 0, 21, 0.08);
+
+  /* External service brand accents used only with their native marks. */
+  --brand-kafka: #231f20;
+  --brand-postgres: #4169e1;
+  --brand-redis: #ff4438;
+  --telegram: #229ed9;
+  --wecom: #07c160;
+  --feishu: #3370ff;
+}

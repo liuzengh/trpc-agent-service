@@ -1,0 +1,239 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: trpc-agent
+data:
+  10-tenant-role.sql: |
+    CREATE ROLE trpc_tenant NOLOGIN NOBYPASSRLS;
+    GRANT trpc_tenant TO trpc_local;
+    GRANT USAGE ON SCHEMA public TO trpc_tenant;
+    ALTER DEFAULT PRIVILEGES FOR ROLE trpc_local IN SCHEMA public
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO trpc_tenant;
+    ALTER DEFAULT PRIVILEGES FOR ROLE trpc_local IN SCHEMA public
+        GRANT USAGE, SELECT ON SEQUENCES TO trpc_tenant;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: trpc-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: postgres}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: postgres}
+    spec:
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16
+          env:
+            - {name: POSTGRES_DB, value: trpc_agent}
+            - {name: POSTGRES_USER, value: trpc_local}
+            - {name: POSTGRES_PASSWORD, value: kind-local-password}
+          ports:
+            - {name: postgres, containerPort: 5432}
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "trpc_local", "-d", "trpc_agent"]}
+            periodSeconds: 3
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: init, mountPath: /docker-entrypoint-initdb.d/10-tenant-role.sql, subPath: 10-tenant-role.sql, readOnly: true}
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: init
+          configMap: {name: postgres-init}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: trpc-agent
+spec:
+  selector: {app.kubernetes.io/name: postgres}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: trpc-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: redis}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: redis}
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          args: ["redis-server", "--appendonly", "no"]
+          ports:
+            - {name: redis, containerPort: 6379}
+          readinessProbe:
+            exec: {command: ["redis-cli", "ping"]}
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: trpc-agent
+spec:
+  selector: {app.kubernetes.io/name: redis}
+  ports:
+    - {name: redis, port: 6379, targetPort: redis}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redpanda
+  namespace: trpc-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: redpanda}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: redpanda}
+    spec:
+      containers:
+        - name: redpanda
+          image: redpandadata/redpanda:v24.1.7
+          args:
+            - redpanda
+            - start
+            - --overprovisioned
+            - --smp=1
+            - --memory=768M
+            - --reserve-memory=0M
+            - --node-id=0
+            - --check=false
+            - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+            - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+          ports:
+            - {name: kafka, containerPort: 9092}
+            - {name: admin, containerPort: 9644}
+          readinessProbe:
+            httpGet: {path: /v1/status/ready, port: admin}
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits: {memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda
+  namespace: trpc-agent
+spec:
+  selector: {app.kubernetes.io/name: redpanda}
+  ports:
+    - {name: kafka, port: 9092, targetPort: kafka}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: trpc-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: minio}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: minio}
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - {name: MINIO_ROOT_USER, value: trpc_minio}
+            - {name: MINIO_ROOT_PASSWORD, value: kind-minio-password}
+          ports:
+            - {name: api, containerPort: 9000}
+            - {name: console, containerPort: 9001}
+          readinessProbe:
+            httpGet: {path: /minio/health/ready, port: api}
+            periodSeconds: 3
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: trpc-agent
+spec:
+  selector: {app.kubernetes.io/name: minio}
+  ports:
+    - {name: api, port: 9000, targetPort: api}
+    - {name: console, port: 9001, targetPort: console}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-bucket-init
+  namespace: trpc-agent
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: minio-bucket-init}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              until mc alias set local http://minio:9000 trpc_minio kind-minio-password; do sleep 2; done
+              mc mb --ignore-existing local/trpc-artifacts
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-openai
+  namespace: trpc-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: mock-openai}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: mock-openai}
+    spec:
+      containers:
+        - name: mock-openai
+          image: trpc-mock-openai:kind
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 9999}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-openai
+  namespace: trpc-agent
+spec:
+  selector: {app.kubernetes.io/name: mock-openai}
+  ports:
+    - {name: http, port: 9999, targetPort: http}

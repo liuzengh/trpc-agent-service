@@ -1,0 +1,38 @@
+{
+  "service": {
+    "listen_address": ":8080",
+    "request_timeout": "15s",
+    "http_read_header_timeout": "15s",
+    "http_read_timeout": "5m",
+    "http_idle_timeout": "2m",
+    "max_inbound_bytes": 1048576,
+    "outbox_retention_age": "168h",
+    "docling_endpoint": "http://127.0.0.1:5001",
+    "document_extract_timeout": "5m",
+    "knowledge": {
+      "embedding_provider_id": "openai-primary",
+      "embedding_model": "text-embedding-3-small",
+      "embedding_dimensions": 1536,
+      "reranker": {"type": "topk", "top_n": 5},
+      "allowed_source_hosts": ["github.com", "raw.githubusercontent.com"]
+    },
+    "allowed_secret_refs": ["env:MODEL_API_KEY", "env:TELEGRAM_EXAMPLE_CONFIG_JSON", "env:TOOL_API_TOKEN"],
+    "channel_credential_refs": ["env:TELEGRAM_EXAMPLE_CONFIG_JSON"],
+    "tool_credential_refs": ["env:TOOL_API_TOKEN"]
+  },
+  "model_providers": [
+    {
+      "id": "openai-primary",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_ref": "env:MODEL_API_KEY",
+      "models": [
+        {
+          "name": "gpt-4o-mini",
+          "prompt_cost_micros_per_million_tokens": 150000,
+          "cached_prompt_cost_micros_per_million_tokens": 15000,
+          "completion_cost_micros_per_million_tokens": 600000
+        }
+      ]
+    }
+  ]
+}

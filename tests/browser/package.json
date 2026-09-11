@@ -1,0 +1,18 @@
+{
+  "name": "console-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "登录全链路浏览器验收（Playwright）",
+  "scripts": {
+    "e2e": "bash run.sh",
+    "e2e:ui-shell": "node e2e-ui-shell.mjs",
+    "e2e:ui-destinations": "node e2e-ui-destinations.mjs",
+    "e2e:mock": "node e2e-login.mjs mock",
+    "e2e:wecom": "node e2e-login.mjs wecom",
+    "e2e:expiry": "node e2e-login.mjs expiry"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}

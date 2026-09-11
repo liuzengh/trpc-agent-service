@@ -1,0 +1,38 @@
+{
+  "name": "trpc-agent-service-console",
+  "private": true,
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=20 <23"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-select": "2.3.7",
+    "@radix-ui/react-tabs": "1.1.21",
+    "@tanstack/react-query": "5.102.8",
+    "@types/marked": "5.0.2",
+    "dompurify": "3.4.15",
+    "marked": "18.0.12",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-hook-form": "7.87.0",
+    "reicon-react": "1.2.5"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/coverage-v8": "2.1.9",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "2.1.9"
+  }
+}

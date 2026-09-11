@@ -1,0 +1,1 @@
+import{j as a}from"./app.js";function i({label:s="正在加载…",compact:e=!1}){return a.jsxs("div",{className:`loading-state ${e?"is-compact":""}`,role:"status","aria-live":"polite",children:[a.jsx("span",{className:"loading-state-spinner","aria-hidden":"true"}),a.jsx("span",{children:s})]})}export{i as L};

@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-ROOT="$(cd "$(dirname "$0")" && pwd)"
-cd "$ROOT"
-
-gofmt -w .
-echo "formatted"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$ROOT/scripts/format.sh" "$@"

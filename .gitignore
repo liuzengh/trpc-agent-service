@@ -1,17 +1,49 @@
+# OS & IDE
 .idea
 .vscode
 .DS_Store
 *.log
 *.swp
+__pycache__/
+*.pyc
 
+# Build outputs & binaries
 bin/
 dist/
-coverage.out
-coverage.html
 *.test
 *.exe
+coverage.out
+coverage.html
 
+# Temporary & local development data
+/.scratch/
 vendor/
-
 data/*
 !data/README.md
+
+# Local secrets
+deploy/.env
+
+# WebUI artifacts
+webui/node_modules/
+webui/.vite/
+webui/coverage/
+
+# Keep webui/dist version controlled for go:embed
+!webui/dist/
+!webui/dist/**
+
+# Test artifacts & generated reports
+tests/browser/node_modules/
+tests/browser/artifacts/
+tests/coverage/
+deploy/kubernetes/kind/evidence/*.txt
+tests/infrastructure/artifacts/*.txt
+tests/infrastructure/artifacts/*.log
+
+# Coding agent local workspace
+/.agents/
+/agent/
+/.codex/
+/AGENTS.md
+/skills-lock.json
