@@ -222,7 +222,7 @@ Worker 需要 Docker CLI，指定 daemon 中需已有镜像，镜像提供 `/bin
 ```bash
 test -f .env || cp .env.example .env
 chmod 600 .env
-./build.sh
+./scripts/build.sh
 ```
 
 在私有配置中填写已准备的数据库与 Redis 地址，并启用持久化后端：

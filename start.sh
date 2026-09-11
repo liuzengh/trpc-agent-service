@@ -10,7 +10,7 @@ if local_agent_already_running; then exit 0; fi
 
 mkdir -p "$ROOT/bin" "$ROOT/data"
 if [[ ! -x "$ROOT/bin/trpc-service" ]]; then
-  "$ROOT/build.sh"
+  "$ROOT/scripts/build.sh"
 fi
 
 ENV_FILE="${TRPC_AGENT_ENV_FILE:-$ROOT/.env}"

@@ -77,7 +77,7 @@ func (h *Handler) serveUI(w http.ResponseWriter, r *http.Request) bool {
 	raw, err := uiFiles.ReadFile(name)
 	if err != nil {
 		if path == "" {
-			http.Error(w, "Console assets are not built. Run ./build.sh before starting the service.", http.StatusServiceUnavailable)
+			http.Error(w, "Console assets are not built. Run ./scripts/build.sh before starting the service.", http.StatusServiceUnavailable)
 		} else {
 			http.NotFound(w, r)
 		}

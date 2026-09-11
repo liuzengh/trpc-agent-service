@@ -22,11 +22,11 @@ jobs:
           cache: npm
           cache-dependency-path: trpcservice/web/console/package-lock.json
       - name: Build application
-        run: ./build.sh
+        run: ./scripts/build.sh
       - name: Run tests
         run: go test -race ./...
       - name: Static checks
-        run: ./lint.sh
+        run: ./scripts/lint.sh
       - name: Check whitespace
         run: git diff --check
       - name: Build container image

@@ -12,6 +12,21 @@ import (
 	"time"
 )
 
+func TestStartUsesRelocatedBuildScript(t *testing.T) {
+	root := scriptFixture(t, "start.sh")
+	writeScriptFixture(t, root, "scripts/local-process.sh", "local_agent_init() { :; }\nlocal_agent_already_running() { return 1; }\n")
+	writeScriptFixture(t, root, "scripts/build.sh", "#!/bin/sh\nprintf 'relocated build invoked\\n'\nexit 42\n")
+	if err := os.Chmod(filepath.Join(root, "scripts/build.sh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", filepath.Join(root, "start.sh"))
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 42 || !strings.Contains(string(output), "relocated build invoked") {
+		t.Fatalf("start did not invoke relocated build: %v: %s", err, output)
+	}
+}
+
 func TestManualScriptsInIsolatedWorkspace(t *testing.T) {
 	if _, err := exec.LookPath("flock"); err != nil {
 		t.Skip("Linux flock required")

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CLEAN_ROOT="$(cd "$(dirname "$0")" && pwd)"
+CLEAN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$CLEAN_ROOT"
 umask 077
 CLEAN_MODE="${1:---dry-run}"
 [[ $# -le 1 && ( "$CLEAN_MODE" == --dry-run || "$CLEAN_MODE" == --apply ) ]] || {
-  echo "usage: ./clean.sh [--dry-run|--apply]" >&2; exit 2;
+  echo "usage: ./scripts/clean.sh [--dry-run|--apply]" >&2; exit 2;
 }
 for clean_dir in bin data data/archive; do
   [[ ! -L "$clean_dir" && ( ! -e "$clean_dir" || -d "$clean_dir" ) ]] || {
@@ -47,5 +47,5 @@ for clean_file in "${CLEAN_TARGETS[@]}"; do
   mv -- "$CLEAN_ROOT/$clean_file" "$CLEAN_ARCHIVE/$clean_file"
 done
 echo "archived build outputs: $CLEAN_ARCHIVE"
-echo "recover files to their original relative paths, or regenerate with ./build.sh"
+echo "recover files to their original relative paths, or regenerate with ./scripts/build.sh"
 echo "configuration, runtime data, Docker resources and Go caches unchanged"

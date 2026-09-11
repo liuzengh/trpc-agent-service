@@ -1,5 +1,5 @@
 # 控制台资源
 
-前端源码位于 `trpcservice/web/console`。根目录 `./build.sh` 会先构建前端，将生成资源写入本目录的 `dist/`，再由 Go 内嵌到服务二进制中。
+前端源码位于 `trpcservice/web/console`。在仓库根目录执行 `./scripts/build.sh`，先构建前端，将生成资源写入本目录的 `dist/`，再由 Go 内嵌到服务二进制中。
 
 运行二进制不需要 Node；从源码安装时需先执行构建命令。未生成页面资源时，管理页面返回 503。

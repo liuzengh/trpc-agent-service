@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $# == 0 ]] || { echo "usage: ./build.sh" >&2; exit 2; }
+[[ $# == 0 ]] || { echo "usage: ./scripts/build.sh" >&2; exit 2; }
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 command -v npm >/dev/null || { echo "Node.js/npm are required to build the console; use Node 22.12+ or 24 LTS." >&2; exit 1; }

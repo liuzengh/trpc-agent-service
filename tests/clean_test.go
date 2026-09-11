@@ -17,6 +17,9 @@ func scriptFixture(t *testing.T, name string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, name), raw, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -65,22 +68,22 @@ func TestCleanPreviewAndRecoverableApply(t *testing.T) {
 	if _, err := exec.LookPath("flock"); err != nil {
 		t.Skip("flock required")
 	}
-	root := scriptFixture(t, "clean.sh")
+	root := scriptFixture(t, "scripts/clean.sh")
 	writeScriptFixture(t, root, ".gitignore", "bin/\ncoverage.out\ndata/\n.env\n")
 	writeScriptFixture(t, root, "bin/trpc-service", "generated binary fixture")
 	writeScriptFixture(t, root, "bin/unknown", "KEEP")
 	writeScriptFixture(t, root, "coverage.out", "coverage fixture")
 	writeScriptFixture(t, root, ".env", "PRIVATE_CANARY")
-	scriptCommand(t, root, "bash", "clean.sh")
+	scriptCommand(t, root, "bash", "scripts/clean.sh")
 	if _, err := os.Stat(filepath.Join(root, "bin/trpc-service")); err != nil {
 		t.Fatal("preview modified file")
 	}
 	writeScriptFixture(t, root, "data/trpc-service.pid", "12345")
-	scriptMustFail(t, root, "clean.sh --apply")
+	scriptMustFail(t, root, "scripts/clean.sh --apply")
 	if err := os.Remove(filepath.Join(root, "data/trpc-service.pid")); err != nil {
 		t.Fatal(err)
 	}
-	scriptCommand(t, root, "bash", "clean.sh", "--apply")
+	scriptCommand(t, root, "bash", "scripts/clean.sh", "--apply")
 	archives, _ := filepath.Glob(filepath.Join(root, "data/archive/build-outputs.*"))
 	if len(archives) != 1 {
 		t.Fatal("missing recovery archive")
@@ -103,7 +106,7 @@ func TestCleanPreviewAndRecoverableApply(t *testing.T) {
 func TestCleanRejectsSymlinkAndTrackedOutput(t *testing.T) {
 	for _, mode := range []string{"symlink", "tracked"} {
 		t.Run(mode, func(t *testing.T) {
-			root := scriptFixture(t, "clean.sh")
+			root := scriptFixture(t, "scripts/clean.sh")
 			if mode == "symlink" {
 				if err := os.Symlink(t.TempDir(), filepath.Join(root, "bin")); err != nil {
 					t.Fatal(err)
@@ -112,7 +115,7 @@ func TestCleanRejectsSymlinkAndTrackedOutput(t *testing.T) {
 				writeScriptFixture(t, root, "coverage.out", "user-owned tracked output")
 				scriptCommand(t, root, "git", "add", "coverage.out")
 			}
-			scriptMustFail(t, root, "clean.sh --apply")
+			scriptMustFail(t, root, "scripts/clean.sh --apply")
 		})
 	}
 }
