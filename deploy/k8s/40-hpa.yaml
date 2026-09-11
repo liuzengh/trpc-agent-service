@@ -1,0 +1,45 @@
+# HorizontalPodAutoscaler for Redis-coordinated gateway workers.
+#
+# Not verified in a cluster (fact #3).
+#
+# Redis SETNX claims duplicate deliveries and Redis leases serialize each
+# session across Pods. The per-tenant concurrency quota remains local to each
+# worker, so it protects one worker but is not a cluster-wide tenant quota.
+#
+# WHY CPU, AND WHY THAT IS ALSO NOT THE RIGHT SIGNAL
+# The proposal doc asked for scaling on concurrent sessions. That needs a custom
+# or external metrics adapter (prometheus-adapter and friends), which is a
+# cluster dependency these manifests cannot assume. CPU is the honest
+# lowest-common-denominator fallback, so it is what is written here — but it is
+# a poor signal for this workload: the gateway is I/O bound, spending nearly all
+# of its wall-clock time waiting on model APIs, so CPU stays low while the thing
+# that is actually saturating (in-flight messages per tenant) is already being
+# refused. The metric that matches the failure mode is already emitted —
+# trpcservice.messages{result="throttled"} — and scaling on its rate is the
+# second-phase target once an adapter is available. Recorded as a deviation in
+# spec §5.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: trpc-agent-service
+  labels:
+    app: trpc-agent-service
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: gateway
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: trpc-agent-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # Utilization is relative to requests.cpu (250m), not to limits.cpu,
+          # so this fires at 175m of actual usage. That is the intended reading
+          # and the usual source of surprise.
+          averageUtilization: 70

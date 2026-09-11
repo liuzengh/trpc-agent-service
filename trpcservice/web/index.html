@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>trpc-agent-service chat</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;background:#f5f6fa;display:flex;flex-direction:column;height:100vh}
+  header{padding:10px 16px;background:#fff;border-bottom:1px solid #e3e6ee;display:flex;gap:10px;align-items:center}
+  #log{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:8px}
+  .msg{max-width:70%;padding:8px 12px;border-radius:10px;white-space:pre-wrap;line-height:1.5}
+  .user{align-self:flex-end;background:#4f7cff;color:#fff}
+  .bot{align-self:flex-start;background:#fff;border:1px solid #e3e6ee}
+  footer{padding:10px 16px;background:#fff;border-top:1px solid #e3e6ee;display:flex;gap:8px}
+  input,select,button{font-size:14px;padding:8px;border:1px solid #d5d9e2;border-radius:8px}
+  #text{flex:1}
+</style>
+</head>
+<body>
+<header>
+  <strong>trpc-agent-service</strong>
+  <select id="tenant"></select>
+  <span id="who"></span>
+</header>
+<div id="log"></div>
+<footer>
+  <input id="text" placeholder="输入消息，回车发送">
+  <button id="send">发送</button>
+</footer>
+<script>
+const user = "user-" + Math.random().toString(36).slice(2, 6);
+document.getElementById("who").textContent = user;
+let es = null;
+
+async function init() {
+  const tenants = await (await fetch("/api/tenants")).json();
+  const sel = document.getElementById("tenant");
+  sel.innerHTML = tenants.map(t => `<option>${t}</option>`).join("");
+  sel.onchange = openStream;
+  openStream();
+}
+
+function openStream() {
+  if (es) es.close();
+  const t = document.getElementById("tenant").value;
+  es = new EventSource(`/webchat/stream?tenant=${t}&user=${user}`);
+  let bubble = null;
+  es.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (!bubble) bubble = addMsg("bot", "");
+    if (ev.text) bubble.textContent += ev.text;
+    if (ev.done) bubble = null;
+    scroll();
+  };
+}
+
+function addMsg(cls, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls;
+  d.textContent = text;
+  document.getElementById("log").appendChild(d);
+  scroll();
+  return d;
+}
+
+function scroll() {
+  const l = document.getElementById("log");
+  l.scrollTop = l.scrollHeight;
+}
+
+async function send() {
+  const input = document.getElementById("text");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  addMsg("user", text);
+  const t = document.getElementById("tenant").value;
+  await fetch(`/callback/webchat/${t}`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({user, text, msg_id: crypto.randomUUID()}),
+  });
+}
+
+document.getElementById("send").onclick = send;
+document.getElementById("text").onkeydown = (e) => { if (e.key === "Enter") send(); };
+init();
+</script>
+</body>
+</html>
