@@ -20,7 +20,11 @@ npm --prefix trpcservice/web/console run build
 go test -race ./...
 ./lint.sh
 go build ./...
-git diff --check
+# Source archives deliberately omit .git. Check whitespace only when this
+# exact directory is the Git worktree root, not an unrelated parent checkout.
+if [[ "$(git rev-parse --show-toplevel 2>/dev/null)" == "$REGRESSION_ROOT" ]]; then
+  git diff --check
+fi
 
 if [[ "$REGRESSION_ISOLATED" == 1 ]]; then
   TEST_PERMISSIONS_DOCKER=1 go test -race -count=1 ./deploy/permissions -run TestRedisACLIntegration
