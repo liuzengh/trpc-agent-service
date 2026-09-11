@@ -15,6 +15,10 @@
 | [risks.md](risks.md) | 20 项生产风险及缓解措施 |
 | [acceptance.md](acceptance.md) | 题目映射、可重复验证入口和明确的交付限制 |
 
-第一次体验：从[运行手册 0.0](operations-runbook.md#00-推荐只用-docker-打开平台)启动完整 Compose，在网页创建工作空间、配置模型并调试 Agent，无需宿主机安装 Go/Node。需要宿主机开发时再读 0.1。了解实现：读架构与时序。检查交付：读验收说明。图采用 Mermaid，表结构示例与实际 migrations 的区别在数据模型文档中说明。
+从哪里开始：
+
+- 部署到服务器：[公网部署步骤](operations-runbook.md#05-公网服务器部署)。
+- 本机体验：[Docker 启动步骤](operations-runbook.md#00-推荐只用-docker-打开平台)。
+- 了解实现：先读架构与时序；核对交付：读验收说明。
 
 默认交付只包含源码、配置模板、部署文件和自动测试。模型/IM 密钥、会话和后端数据、原始 trace、日志、二进制及本机备份不包含在源码包中。

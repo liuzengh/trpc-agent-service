@@ -100,6 +100,8 @@ schema 30 增加 `channel_connection`、`channel_credential`、`channel_connecti
 
 维护前的未知结果检查同时查询 Outbound 分段和 Tool Journal，不能只看请求或出站总状态：总状态已进入 dead，仍可能存在 unknown/attempting 分段。必须先按证据对账，再更换或移除连接。
 
+公网诊断与连接设置共用地址来源，数据库读取失败时不回退到过时的环境变量。检查结果按目标地址缓存，修改地址后失效。显式健康检查复用公网模型传输层的 DNS/IP 防护，但不采用模型地址白名单例外：不使用代理、不开内网访问、不转发认证信息、不跟随重定向，只保留 HTTP 状态，不返回响应正文。公网服务器的 Nginx 模板仅暴露回调和健康检查，管理访问通过 SSH 端口转发，详见[运行手册](operations-runbook.md#05-公网服务器部署)。
+
 ## 3. 工具、审批与业务幂等
 
 ToolFilter 控制模型可见性，PermissionPolicy 控制执行；工具自身和 MCP 包装器还校验可信 Scope。白名单、用户限制、调用次数和总执行时间随 Revision 固定。

@@ -1,0 +1,10 @@
+# Overlay on the repository-root compose.demo.yaml; do not use on its own.
+# Ports and persistent volumes come from that base file and stay on loopback.
+# Only the server deployment opts into restart-on-failure/host-reboot behavior.
+services:
+  platform:
+    restart: unless-stopped
+  postgres:
+    restart: unless-stopped
+  redis:
+    restart: unless-stopped

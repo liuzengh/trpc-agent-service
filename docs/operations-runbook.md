@@ -6,7 +6,7 @@
 
 ## 0. 第一次拿到源码：从空环境到可用平台
 
-本节提供两条路径，不依赖作者电脑上的数据库、域名、workbuddy2api 或私有脚本。首次体验推荐 **0.0 的完整 Compose**，只需 Docker；开发者需要在宿主机编译时再从 0.1 开始。已有环境按升级章节处理，不要通过删数据卷获得“空环境”。
+本节不依赖作者电脑上的数据库、域名、workbuddy2api 或私有脚本。**部署到公网服务器，直接按 [0.5](#05-公网服务器部署) 操作**；仅在本机体验可使用 0.0，宿主机源码开发从 0.1 开始。已有环境按升级章节处理，不要通过删数据卷获得“空环境”。
 
 ### 0.0 推荐：只用 Docker 打开平台
 
@@ -134,6 +134,137 @@ docker compose run --rm minio-init
 
 0.0 的完整 Compose 默认只有平台、PostgreSQL 和 Redis，不挂载 Docker socket、Skill 或作者的其他服务。需要体验本节所有高级能力时，可选择完整的宿主机路径；若继续采用容器部署，应给容器提供可达的存储地址、用途授权和受控的独立沙箱执行环境，不能照抄宿主机的 `127.0.0.1` 地址。两种路径任选其一，不需要长期运行两套平台。
 
+### 0.5 公网服务器部署
+
+以下按 **Ubuntu 24.04 服务器 + Docker Compose + Nginx** 首次部署。准备好：
+
+- 一台公网服务器，已安装 [Docker 和 Compose](https://docs.docker.com/engine/install/ubuntu/)，并下载本版本代码。
+- 一个域名，A 记录指向服务器公网 IP。下文的 `agent.example.com` 都换成自己的域名；未配置 IPv6 时不要添加 AAAA 记录。
+- 安全组和防火墙放行 **80、443**，SSH 仅允许管理来源。不要公开平台的 18080/8080 或数据库端口。服务器须能访问模型和 IM 接口。
+
+已有平台实例不要重复初始化；从第 2 步配置 Nginx，并将模板上游端口改成现有端口。除注明“在自己电脑上执行”的命令外，其余均在**服务器仓库根目录**执行。
+
+#### 1. 启动平台
+
+复制部署配置并启动，首次构建需要等待几分钟：
+
+```bash
+mkdir -p data/server
+test -f data/server/public.env || cp deploy/compose/server.env.example data/server/public.env
+chmod 600 data/server/public.env
+
+docker compose -p trpc-agent-server \
+  --env-file data/server/public.env \
+  -f compose.demo.yaml -f deploy/compose/server.yaml \
+  up -d --build --wait
+
+curl -fsS http://127.0.0.1:18080/readyz
+```
+
+返回 `{"status":"ready"}` 即启动成功。管理员 Token 和数据库密码自动生成；模型 API Key 稍后在网页填写，不用复制作者的 `.env`。
+
+#### 2. 配置域名和 HTTPS
+
+先安装 Nginx 和证书工具。执行 `sudoedit` 时，把文件中的 `agent.example.com` 换成自己的域名。**已有同名配置或同域名站点时，先备份并合并，不要直接覆盖。**
+
+```bash
+sudo apt update
+sudo apt install -y nginx certbot
+sudo install -d -m 755 /var/www/letsencrypt/.well-known/acme-challenge
+sudo install -m 644 deploy/nginx/http-bootstrap.conf /etc/nginx/conf.d/trpc-agent.conf
+sudoedit /etc/nginx/conf.d/trpc-agent.conf
+sudo nginx -t
+sudo systemctl enable --now nginx
+sudo systemctl reload nginx
+```
+
+申请证书，替换命令中的域名，按提示填写邮箱：
+
+```bash
+sudo certbot certonly --webroot \
+  -w /var/www/letsencrypt \
+  --cert-name agent.example.com -d agent.example.com \
+  --deploy-hook "nginx -t && systemctl reload nginx"
+```
+
+证书申请成功后，换用 HTTPS 配置。这次编辑要替换**所有** `agent.example.com`，包括证书路径：
+
+```bash
+sudo cp --backup=numbered /etc/nginx/conf.d/trpc-agent.conf /etc/nginx/trpc-agent.http-backup
+sudo install -m 644 deploy/nginx/https.conf /etc/nginx/conf.d/trpc-agent.conf
+sudoedit /etc/nginx/conf.d/trpc-agent.conf
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+启用并检查证书自动续期：
+
+```bash
+sudo systemctl enable --now certbot.timer
+sudo certbot renew --dry-run --run-deploy-hooks
+```
+
+#### 3. 登录管理页面
+
+管理页面不对公网开放。**在自己电脑上执行**，将 `deploy` 和 IP 换成服务器的 SSH 用户名和 IP：
+
+```bash
+ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 deploy@203.0.113.10
+```
+
+保持终端打开，在浏览器访问 **http://127.0.0.1:18080/admin/ui/**。
+
+另开终端连接服务器，在仓库根目录获取登录用的管理员 Token（不要公开）：
+
+```bash
+docker compose -p trpc-agent-server \
+  --env-file data/server/public.env \
+  -f compose.demo.yaml -f deploy/compose/server.yaml \
+  exec platform trpc-init -show-token
+```
+
+登录后依次完成：**创建工作空间 → 配置模型 → 创建 Agent → 调试 → 发布**。
+
+#### 4. 连接机器人
+
+**在自己电脑上执行**，检查公网地址：
+
+```bash
+curl -fsS https://agent.example.com/healthz
+```
+
+返回 `{"status":"ok"}` 后，在控制台 **机器人 → 服务地址** 填写 `https://agent.example.com`，不加其他路径。然后添加 Telegram Bot，平台会注册回调；给机器人发消息，收到回复即完成。
+
+企业微信消息 MCP 不需要公网回调，按[IM 接入说明](im-channels.md)连接即可。
+
+<details>
+<summary>遇到问题或需要启停服务时再看</summary>
+
+- 域名不通 / 证书申请失败：检查 DNS 和 80、443 端口。
+- 返回 502：检查 `http://127.0.0.1:18080/readyz`，确认平台在运行、Nginx 上游端口正确。
+- `/healthz` 返回欢迎页或 404：检查 Nginx 是否加载了本项目配置，域名是否已替换。
+- 公网 `/admin/ui/` 返回 404：正常，管理页面通过第 3 步的 SSH 转发访问。
+- 电脑的 18080 已占用：SSH 命令只改第一个端口为 18081，浏览器也改用 18081。
+- 机器人不回复：在控制台查看消息记录，确认是未收到、执行失败还是发送失败。
+- 网页公网检查失败、外部访问却正常：检查服务器是否能访问自身公网地址、内部 DNS 是否指向私网。
+
+在服务器仓库根目录停止 / 再次启动：
+
+```bash
+docker compose -p trpc-agent-server \
+  --env-file data/server/public.env \
+  -f compose.demo.yaml -f deploy/compose/server.yaml stop
+
+docker compose -p trpc-agent-server \
+  --env-file data/server/public.env \
+  -f compose.demo.yaml -f deploy/compose/server.yaml up -d --wait
+```
+
+**不要执行 `down -v`，它会删除数据卷。** 升级和备份见第 5 节。服务器重启后由 Docker 恢复服务，须确保 Docker 随系统启动；关闭 SSH 转发不会停止机器人。
+
+改域名只影响新连接。已有 Telegram 连接需先暂停、核对未完成请求，再移除并重新添加；历史记录保留，新连接使用新会话。迁移服务器须保留数据库和加密主密钥。
+
+</details>
+
 ## 1. 环境与配置
 
 Go 版本以 [go.mod](../go.mod) 为准。从源码构建控制台还需要 Node.js 22.12+（推荐 24 LTS）与 npm；运行构建好的 Go 二进制不需要 Node。`build.sh` 按锁文件安装前端依赖、检查类型并构建页面，再编译 Go。手动启停需要 Linux、flock 和支持 pidfd 的内核；其他系统可直接以前台二进制或容器运行。持久化/多进程部署还需要 Docker Compose 或自行准备 PostgreSQL、Redis，以及按需使用的 MinIO/Qdrant。
@@ -206,7 +337,7 @@ curl -fsS http://127.0.0.1:8080/readyz
 ./stop.sh
 ```
 
-脚本共享生命周期锁，核对工作区 exe/cwd、PID 启动时间与 boot ID，通过 pidfd 对同一进程发送 SIGTERM，最多等待 20 秒；身份不符或超时不强杀、不删除证据。仅停止 Agent，模型、Tunnel 和数据库由部署者单独管理。
+脚本共享生命周期锁，核对工作区 exe/cwd、PID 启动时间与 boot ID，通过 pidfd 对同一进程发送 SIGTERM，最多等待 20 秒；身份不符或超时不强杀、不删除证据。仅停止 Agent，模型、反向代理和数据库由部署者单独管理。
 
 ## 3. HTTP、Admin 和 IM
 
@@ -326,7 +457,7 @@ Docker 多阶段构建在 Node 阶段完成页面编译，运行镜像只包含 
 - 发布弹窗展示配置检查、具体差异和同配置的隔离调试记录。版本 ID/序号由后端生成；不可变版本列表支持继续翻页，发布历史另从审计事实展示操作人、操作时间、版本变化、回滚和灰度调整。旧记录缺少的字段不补造；审计保留期之外的操作不会显示。旧业务会话保持原版本。
 - 在“运行记录”按应用、来源、时间和状态查看请求、耗时、Token/成本、工具与投递。成本使用部署者配置的计费单位，未配置价格时为 0，不表示供应商免费。通道详情只查询已有的接收/投递记录；企业微信 MCP 另展示消费进度和拒绝原因，不主动读取新消息。
 - 请求详情关联带源 request_id 的后台任务，应用的“后台任务”页可分页查看摘要、记忆、知识同步与迁移状态。只展示任务元数据，不返回文档正文或原始供应商错误；旧任务没有关联编号时不推测归属，不自动重试。
-- 在“系统状态”查看 Worker 心跳、默认 Session/队列/配额和 Docker 固定镜像的实际检查结果。Worker 每 15 秒做有界只读检查，每 5 秒上报；专用 Session 每轮最多轮询 32 个已初始化实例，不因检查创建后端表。Admin 只读取共享观测，超过 30 秒、尚未初始化或本轮未观测时显示未知。发布预检按应用后端和配置指纹匹配，保守汇总活跃 Worker；模型仍需显式调试，不自动生成。公网探测只访问部署者配置的 `TRPC_AGENT_PUBLIC_BASE_URL/healthz`，必须点击触发，不会自动启动 Tunnel。
+- 在“系统状态”查看 Worker 心跳、默认 Session/队列/配额和 Docker 固定镜像的实际检查结果。Worker 每 15 秒做有界只读检查，每 5 秒上报；专用 Session 每轮最多轮询 32 个已初始化实例，不因检查创建后端表。Admin 只读取共享观测，超过 30 秒、尚未初始化或本轮未观测时显示未知。发布预检按应用后端和配置指纹匹配，保守汇总活跃 Worker；模型仍需显式调试，不自动生成。公网探测优先读取“机器人 → 服务地址”，未设置时使用 `TRPC_AGENT_PUBLIC_BASE_URL`，只访问该地址的 `/healthz`；必须点击触发，不会自动配置反向代理。更换地址后旧探测结果失效，内网地址和重定向不放行。
 
 网页调试每个会话最多 50 轮，有工具时要求明确的 1～32 次工具调用上限；执行最长 2 分钟，显示输出最多 64 KiB。数据保留 7 天，Worker 清理对应独立用户的原生 Session/Memory 后再清理控制台记录；后端不可用时保留清理目标重试。InMemory 仅适合单进程开发，多节点需 PostgreSQL 和共享 Session 后端。节点中断产生未知结果时不会盲目重跑。
 
@@ -342,7 +473,7 @@ TRPC_AGENT_SANDBOX_SOCKET=/var/run/docker.sock
 
 Worker 所在主机需已安装 Docker CLI，并且所指定 daemon 已有该镜像；服务不会自动 pull 或修改 daemon。镜像必须提供 /bin/sh 和 /bin/busybox，启动时解析并固定 image ID。默认容器部署模板不授予 Docker socket 权限；容器化 Worker 启用沙箱前须单独准备可信 Docker CLI、只读 Skill 挂载和专用 daemon 访问，不应把生产主机 root socket 直接共享给所有应用。
 
-在页面选择租户 → Agent 应用 → 工作台 → 勾选已授权 Skill。页面写入完整 name/version/checksum，并加入 skill_load、skill_run 工具白名单；原有权限和配置保留。保存草稿后可以直接在网页调试，不需要 Tunnel 或新建 Telegram Topic。验证配置后再显式发布到业务使用；已 pin 的 IM 会话不会自动换版本。
+在页面选择租户 → Agent 应用 → 工作台 → 勾选已授权 Skill。页面写入完整 name/version/checksum，并加入 skill_load、skill_run 工具白名单；原有权限和配置保留。保存草稿后可以直接在网页调试，不需要公网回调或新建 Telegram Topic。验证配置后再显式发布到业务使用；已 pin 的 IM 会话不会自动换版本。
 
 保存前点击“检查配置”。可执行 Skill 的 `tool_policy.max_tool_calls` 至少为 2，初次测试可明确设为 4；1 只够加载说明，不能完成接下来的执行。平台会阻止这种配置，不自动提高限额。0 表示不限次数而不是禁用工具。检查结果会区分错误、警告与运行依赖未知；静态配置检查不会消耗模型额度，也不证明真实调用已经通过。详细接口见[治理说明](governance-operations.md)。
 

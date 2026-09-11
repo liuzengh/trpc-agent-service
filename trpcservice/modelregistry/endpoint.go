@@ -155,6 +155,13 @@ func publicIP(ip netip.Addr) bool {
 }
 
 func newPublicTransport() *http.Transport {
+	return NewPublicHTTPTransport()
+}
+
+// NewPublicHTTPTransport is also used by explicit public-ingress health probes.
+// It has no trusted-origin exceptions or proxies, validates every DNS answer,
+// and retains normal TLS verification. Callers enforce HTTPS and no redirects.
+func NewPublicHTTPTransport() *http.Transport {
 	// Unlisted destinations must not delegate DNS resolution to a generic proxy:
 	// that would bypass the IP checks below. Trusted origins retain the deployment
 	// transport/proxy/loopback-alias behavior in transport.go.

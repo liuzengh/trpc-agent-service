@@ -156,17 +156,24 @@ func (s *Store) app(ctx context.Context, t, a string) error {
 	return nil
 }
 func (s *Store) PublicURL(ctx context.Context) string {
+	value, _ := s.ReadPublicURL(ctx)
+	return value
+}
+
+// ReadPublicURL is the shared source for connection setup and diagnostics.
+// Do not fall back to an old environment value when reading the database fails.
+func (s *Store) ReadPublicURL(ctx context.Context) (string, error) {
 	if s == nil {
-		return ""
+		return "", ErrUnavailable
 	}
 	var value string
 	e := s.sql(ctx).QueryRowContext(ctx, `SELECT value FROM channel_connection_setting WHERE name='public_url'`).Scan(&value)
 	if errors.Is(e, sql.ErrNoRows) {
 		value = s.publicURL
 	} else if e != nil {
-		return ""
+		return "", safe(e)
 	}
-	return strings.TrimRight(value, "/")
+	return strings.TrimRight(value, "/"), nil
 }
 
 func (s *Store) CallbackURL(ctx context.Context, tenant, binding string) string {

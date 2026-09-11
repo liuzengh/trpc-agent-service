@@ -392,7 +392,7 @@ spec:
   policyTypes: [Ingress]
   ingress:
     - from:
-        # Label only the namespace hosting the trusted Ingress/tunnel connector.
+        # Label only the namespace hosting the trusted Ingress controller.
         - namespaceSelector:
             matchLabels: {trpc-agent-access: gateway}
       ports: [{protocol: TCP, port: 8080}]

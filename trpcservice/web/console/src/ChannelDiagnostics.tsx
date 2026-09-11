@@ -83,7 +83,7 @@ export function ChannelDiagnostics({
                           </span>
                         </>
                       ) : (
-                        "部署者尚未配置有效的 TRPC_AGENT_PUBLIC_BASE_URL。请用自己的公网 HTTPS 域名拼接上述路径。"
+                        "尚未配置有效公网地址。请在“机器人 → 服务地址”填写自己的 HTTPS 域名。"
                       ),
                     },
                   ]

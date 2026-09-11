@@ -16,6 +16,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/console"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/modelregistry"
 )
 
 type SystemCheck struct {
@@ -32,12 +33,25 @@ type systemInfo struct {
 	checks          map[string]func(context.Context) error
 	mu              sync.Mutex
 	lastProbe       SystemCheck
+	lastProbeURL    string
 	limiter         loginLimiter
 }
 
 func (s *Service) WithSystemInfo(role, publicURL string, checks map[string]func(context.Context) error) *Service {
 	s.system = &systemInfo{role: role, publicURL: publicURL, checks: checks}
 	return s
+}
+
+func (s *Service) publicAddress(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if s.connections != nil {
+		return s.connections.ReadPublicURL(ctx)
+	}
+	if s.system != nil {
+		return strings.TrimRight(s.system.publicURL, "/"), nil
+	}
+	return "", nil
 }
 
 func (h *Handler) handleSystem(w http.ResponseWriter, r *http.Request) {
@@ -55,6 +69,7 @@ func (h *Handler) handleSystem(w http.ResponseWriter, r *http.Request) {
 	if info == nil {
 		info = &systemInfo{}
 	}
+	publicURL, publicURLError := h.service.publicAddress(r.Context())
 	if r.URL.Path == "/admin/system/probe" {
 		if !h.require(w, r, in.TenantID, PermissionOperate) {
 			return
@@ -64,9 +79,13 @@ func (h *Handler) handleSystem(w http.ResponseWriter, r *http.Request) {
 			adminJSON(w, 429, map[string]string{"error": "探测过于频繁，请稍后重试"})
 			return
 		}
-		u, err := url.Parse(info.publicURL)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-			h.writeResult(w, 0, nil, invalidf("部署者尚未配置有效的 HTTPS 公网入口"))
+		if publicURLError != nil {
+			h.writeResult(w, 0, nil, publicURLError)
+			return
+		}
+		u, err := url.Parse(publicURL)
+		if err != nil || len(publicURL) > 2048 || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || strings.ContainsAny(publicURL, "\r\n\\") {
+			h.writeResult(w, 0, nil, invalidf("请先在“机器人 → 服务地址”填写有效的公网 HTTPS 地址"))
 			return
 		}
 		u.Path = strings.TrimRight(u.Path, "/") + "/healthz"
@@ -78,8 +97,10 @@ func (h *Handler) handleSystem(w http.ResponseWriter, r *http.Request) {
 			h.writeResult(w, 0, nil, invalidf("公网入口配置无效"))
 			return
 		}
-		client := http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-		check := SystemCheck{Name: "public_entry", Label: "公网入口 / Tunnel", State: "unavailable", Source: "explicit_https_probe", ObservedAt: time.Now().UTC(), Description: "未能完成公网健康检查。请检查 Tunnel、网络与源服务。", ProbeAvailable: true}
+		transport := modelregistry.NewPublicHTTPTransport()
+		defer transport.CloseIdleConnections()
+		client := http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		check := SystemCheck{Name: "public_entry", Label: "公网 HTTPS 入口", State: "unavailable", Source: "explicit_https_probe", ObservedAt: time.Now().UTC(), Description: "公网健康检查未通过，请检查域名解析、HTTPS 证书、反向代理和平台服务。仅允许访问公网地址。", ProbeAvailable: true}
 		response, err := client.Do(req)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
@@ -91,8 +112,18 @@ func (h *Handler) handleSystem(w http.ResponseWriter, r *http.Request) {
 				check.State = "unknown"
 			}
 		}
+		current, readErr := h.service.publicAddress(r.Context())
+		if readErr != nil {
+			h.writeResult(w, 0, nil, readErr)
+			return
+		}
+		if current != publicURL {
+			adminJSON(w, http.StatusConflict, map[string]string{"error": "公网地址已变化，请按新地址重新检查"})
+			return
+		}
 		info.mu.Lock()
 		info.lastProbe = check
+		info.lastProbeURL = publicURL
 		info.mu.Unlock()
 		adminJSON(w, 200, check)
 		return
@@ -159,11 +190,14 @@ func (h *Handler) handleSystem(w http.ResponseWriter, r *http.Request) {
 	checks = append(checks, SystemCheck{Name: "sandbox", Label: "Docker 沙箱", State: "unknown", Description: fmt.Sprintf("%d 个活跃调试 Worker 配置了沙箱。未主动执行脚本；这不等于 Docker 此刻可用。", configuredSandbox), Source: "worker_configuration", ObservedAt: last})
 	checks = append(checks, SystemCheck{Name: "model", Label: "模型服务", State: "unknown", Description: "配置名称：" + h.service.startupModelName + "。此页面不会调用模型；请在 Agent 工作台发起调试验证。", Source: "startup_configuration"})
 	principal, _ := r.Context().Value(principalContextKey{}).(Principal)
-	public := SystemCheck{Name: "public_entry", Label: "公网入口 / Tunnel", State: "unknown", Source: "not_observed", Description: "仅访问本地页面无法判断公网入口状态。配置 TRPC_AGENT_PUBLIC_BASE_URL 后可显式探测。", ProbeAvailable: info.publicURL != "" && principal.Allows(PermissionOperate, in.TenantID)}
+	public := SystemCheck{Name: "public_entry", Label: "公网 HTTPS 入口", State: "unknown", Source: "not_observed", Description: "先在“机器人 → 服务地址”填写域名，再点击检查。仅查看本地页面无法判断公网是否可达。", ProbeAvailable: publicURLError == nil && publicURL != "" && principal.Allows(PermissionOperate, in.TenantID)}
+	if publicURLError != nil {
+		public.Description = "无法读取公网地址，请检查连接存储。"
+	}
 	info.mu.Lock()
-	if !info.lastProbe.ObservedAt.IsZero() {
+	if publicURLError == nil && publicURL != "" && info.lastProbeURL == publicURL && !info.lastProbe.ObservedAt.IsZero() {
 		public = info.lastProbe
-		public.ProbeAvailable = info.publicURL != "" && principal.Allows(PermissionOperate, in.TenantID)
+		public.ProbeAvailable = principal.Allows(PermissionOperate, in.TenantID)
 		if time.Since(public.ObservedAt) > 30*time.Second {
 			public.State = "unknown"
 			public.Description = "上次公网探测已过期，请按需重新检查。"

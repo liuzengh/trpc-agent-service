@@ -312,9 +312,9 @@ func status(ctx context.Context, root, base string, manager localrun.Manager, ou
 		tasks = append(tasks, struct {
 			name string
 			fn   func() check
-		}{"Public entry / Tunnel", func() check { return httpProbe(ctx, strings.TrimRight(public, "/")+"/healthz", nil) }})
+		}{"Public HTTPS entry", func() check { return httpProbe(ctx, strings.TrimRight(public, "/")+"/healthz", nil) }})
 	} else {
-		results = append(results, check{"Public entry / Tunnel", "unknown", "set TRPC_AGENT_PUBLIC_BASE_URL to check the configured ingress"})
+		results = append(results, check{"Public HTTPS entry", "unknown", "set TRPC_AGENT_PUBLIC_BASE_URL to check the configured ingress"})
 	}
 	start := len(results)
 	results = append(results, make([]check, len(tasks))...)

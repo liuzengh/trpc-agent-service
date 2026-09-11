@@ -505,15 +505,33 @@ export function Connections({
         <p>
           Telegram 会把消息发送到这个地址。只需设置一次；已有机器人保持原地址。
         </p>
+        <p className="muted">
+          先配置服务器域名、HTTPS 证书和 Nginx 反向代理，再填写地址。
+          保存地址不会自动创建公网入口；这里也不是模型 API 地址。
+        </p>
         <Input
           value={address}
           onChange={(e) => setAddress(e.target.value)}
           placeholder="https://bot.example.com"
         />
         <p className="muted">
-          使用反向代理或 Tunnel 时，放行 /callbacks/telegram/
-          下的回调路径。不要公开管理页面。
+          Nginx 只转发回调路径和 /healthz，不公开管理页面。
+          保存后可在“系统状态”检查公网入口。
         </p>
+        <details>
+          <summary>查看服务器部署步骤</summary>
+          <ol>
+            <li>将域名解析到公网服务器，放行 80、443 端口。</li>
+            <li>在服务器启动平台。完整 Compose 默认监听本机 18080 端口。</li>
+            <li>配置 Nginx 和有效证书，只公开 IM 回调与健康检查。</li>
+            <li>通过 SSH 端口转发打开控制台，填写这里的 HTTPS 域名。</li>
+            <li>连接机器人并发一条消息，确认收发正常。</li>
+          </ol>
+          <p className="muted">
+            完整命令见源码 docs/operations-runbook.md 第 0.5 节； Nginx 模板在
+            deploy/nginx。企业微信消息 MCP 不需要公网回调。
+          </p>
+        </details>
       </Modal>
     </>
   );

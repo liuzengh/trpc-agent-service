@@ -57,8 +57,8 @@ func (h *Handler) handleChannelDiagnostics(w http.ResponseWriter, r *http.Reques
 	switch binding.ChannelType {
 	case "telegram", "wecom":
 		result["callback_path"] = "/callbacks/" + binding.ChannelType + "/" + binding.CallbackKey
-		if h.service.system != nil {
-			u, err := url.Parse(h.service.system.publicURL)
+		if public, readErr := h.service.publicAddress(ctx); readErr == nil {
+			u, err := url.Parse(public)
 			if err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" && u.Opaque == "" {
 				u.Path = strings.TrimRight(u.Path, "/") + result["callback_path"].(string)
 				u.RawPath = ""

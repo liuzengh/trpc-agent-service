@@ -1151,7 +1151,7 @@ export function SystemPage({ tenant }: { tenant: string }) {
       <Alert
         type="info"
         showIcon
-        title="此页面不会自动启动模型、Tunnel 或 IM 服务"
+        title="此页面不会自动启动模型、配置反向代理或注册 IM 回调"
         description="刷新只执行平台依赖检查，不发送模型生成请求。需要验证模型时，请在 Agent 工作台发起一次调试。"
       />
       {result ? (
