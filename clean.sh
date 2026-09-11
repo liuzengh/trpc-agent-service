@@ -15,9 +15,9 @@ for clean_dir in bin data data/archive; do
 done
 CLEAN_TARGETS=()
 for clean_file in coverage.out coverage.html \
-  bin/trpc-service bin/trpc-local bin/trpc-migrate bin/trpc-loadgen \
-  bin/trpc-modelcheck bin/trpc-embeddingcheck bin/trpc-tracecheck \
-  bin/trpc-wecomcheck bin/trpc-wecomsample bin/trpc-wecomsetup bin/trpc-permissions; do
+  bin/trpc-service bin/trpc-local bin/trpc-migrate bin/trpc-init \
+  bin/trpc-modelcheck bin/trpc-embeddingcheck \
+  bin/trpc-wecomcheck bin/trpc-permissions; do
   [[ ! -L "$clean_file" ]] || { echo "refusing symlink: $clean_file" >&2; exit 1; }
   [[ ! -e "$clean_file" || -f "$clean_file" ]] || { echo "refusing non-file: $clean_file" >&2; exit 1; }
   if [[ -f "$clean_file" ]]; then
@@ -48,4 +48,4 @@ for clean_file in "${CLEAN_TARGETS[@]}"; do
 done
 echo "archived build outputs: $CLEAN_ARCHIVE"
 echo "recover files to their original relative paths, or regenerate with ./build.sh"
-echo "configuration, runtime data, delivery packages, Docker resources and Go caches unchanged"
+echo "configuration, runtime data, Docker resources and Go caches unchanged"

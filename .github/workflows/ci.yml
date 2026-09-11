@@ -16,8 +16,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test -race ./...
-      - run: go vet ./...
-      - run: ./lint.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: trpcservice/web/console/package-lock.json
+      - name: Build console and run checks
+        run: ./scripts/regression.sh
       - run: ./build.sh
       - run: docker build -t trpc-agent-service:ci .

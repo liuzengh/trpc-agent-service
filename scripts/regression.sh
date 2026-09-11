@@ -20,8 +20,7 @@ npm --prefix trpcservice/web/console run build
 go test -race ./...
 ./lint.sh
 go build ./...
-# Source archives deliberately omit .git. Check whitespace only when this
-# exact directory is the Git worktree root, not an unrelated parent checkout.
+# Check this worktree, not an unrelated parent checkout.
 if [[ "$(git rev-parse --show-toplevel 2>/dev/null)" == "$REGRESSION_ROOT" ]]; then
   git diff --check
 fi

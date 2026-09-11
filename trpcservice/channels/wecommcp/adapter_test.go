@@ -17,13 +17,17 @@ import (
 
 const fixtureEndpoint = "https://qyapi.weixin.qq.com/mcp/v2/bot/msg?apikey=credential-canary"
 
+type adapterRoundTripper func(*http.Request) (*http.Response, error)
+
+func (fn adapterRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
+
 func fixtureBinding() controlplane.ChannelBinding {
 	return controlplane.ChannelBinding{ID: "binding", TenantID: "tenant", AppID: "app", AccountID: "bot", ChannelType: ChannelType, Status: controlplane.StatusActive, SecretRef: "env://TEST_MCP_KEY", Version: 1, Config: json.RawMessage(`{"allowed_chat_ids":["group-1"],"allowed_user_ids":["human-1","human-2"],"mention_prefix":"@testbot","timezone":"UTC","start_at":"2026-09-06T00:00:00Z","dedupe_mode":"fingerprint-v1"}`)}
 }
 
 func fixtureClient(t *testing.T, business func(string, map[string]any) (any, error)) *http.Client {
 	t.Helper()
-	return &http.Client{Transport: sampleRoundTripper(func(req *http.Request) (*http.Response, error) {
+	return &http.Client{Transport: adapterRoundTripper(func(req *http.Request) (*http.Response, error) {
 		var rpc struct {
 			ID     any    `json:"id"`
 			Method string `json:"method"`

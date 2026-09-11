@@ -51,7 +51,7 @@ type Discovery struct {
 
 // Discover allows only initialize, notifications/initialized, and tools/list.
 // It uses the same tRPC MCP SDK used by tRPC-Agent-Go's tool/mcp ToolSet, while
-// preserving raw schemas needed to design a Channel Adapter (not model tools).
+// preserving schemas for Channel Adapter capability checks (not model tools).
 func Discover(ctx context.Context, endpoint string) (Discovery, error) {
 	if err := ValidateEndpoint(endpoint); err != nil {
 		return Discovery{}, err
@@ -189,7 +189,7 @@ func (g *discoveryHTTP) Handle(ctx context.Context, _ *http.Client, req *http.Re
 		}
 		g.mu.Unlock()
 		if !allowed {
-			return nil, errors.New("unapproved MCP sampling tool or arguments blocked")
+			return nil, errors.New("unapproved MCP tool or arguments blocked")
 		}
 	default:
 		return nil, errors.New("business MCP method blocked during discovery")

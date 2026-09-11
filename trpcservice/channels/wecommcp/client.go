@@ -11,7 +11,7 @@ import (
 	mcp "trpc.group/trpc-go/trpc-mcp-go"
 )
 
-// Runtime calls do not create sampling files or expose raw SDK/provider errors.
+// Runtime calls expose validated channel payloads, never raw SDK/provider errors.
 // A client can invoke exactly one preselected tool with exact arguments; no
 // discovery, files, subscription, generic message_send or automatic retry.
 func callRuntime(ctx context.Context, endpoint string, httpClient *http.Client, name string, args map[string]any) (json.RawMessage, bool, error) {
@@ -29,7 +29,7 @@ func callLimited(ctx context.Context, endpoint string, httpClient *http.Client, 
 	defer cancel()
 	var transport *http.Transport
 	if httpClient == nil {
-		transport = probeTransport()
+		transport = &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 20 * time.Second}
 		defer transport.CloseIdleConnections()
 		httpClient = &http.Client{Transport: transport, Timeout: 20 * time.Second}
 	}
@@ -52,7 +52,7 @@ func callLimited(ctx context.Context, endpoint string, httpClient *http.Client, 
 	if err != nil || result == nil {
 		return nil, false, errors.New("WeCom MCP tool result unavailable")
 	}
-	payload, err := samplePayload(result)
+	payload, err := toolPayload(result)
 	if err != nil {
 		return nil, false, errors.New("invalid WeCom MCP result")
 	}

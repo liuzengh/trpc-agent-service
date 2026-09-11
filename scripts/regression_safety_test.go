@@ -29,16 +29,16 @@ func TestRegressionDoesNotInheritLiveIntegrationsOrRestartServices(t *testing.T)
 	}
 }
 
-func TestRegressionSupportsArchivesAndKeepsWorktreeChecks(t *testing.T) {
+func TestRegressionChecksOnlyItsOwnWorktree(t *testing.T) {
 	raw, err := os.ReadFile("regression.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"archive", "nested-archive", "worktree"} {
+	for _, mode := range []string{"plain-directory", "nested-directory", "worktree"} {
 		t.Run(mode, func(t *testing.T) {
 			outer := t.TempDir()
 			root := outer
-			if mode == "nested-archive" {
+			if mode == "nested-directory" {
 				root = filepath.Join(outer, "source")
 			}
 			if err := os.MkdirAll(filepath.Join(root, "scripts"), 0700); err != nil {
@@ -56,12 +56,12 @@ func TestRegressionSupportsArchivesAndKeepsWorktreeChecks(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if mode != "archive" {
-				deliveryCommand(t, outer, "git", "init", "-q")
-				writeDeliveryFixture(t, outer, "tracked.txt", "original\n")
-				deliveryCommand(t, outer, "git", "add", "tracked.txt")
-				deliveryCommand(t, outer, "git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
-				writeDeliveryFixture(t, outer, "tracked.txt", "invalid trailing whitespace \n")
+			if mode != "plain-directory" {
+				scriptCommand(t, outer, "git", "init", "-q")
+				writeScriptFixture(t, outer, "tracked.txt", "original\n")
+				scriptCommand(t, outer, "git", "add", "tracked.txt")
+				scriptCommand(t, outer, "git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
+				writeScriptFixture(t, outer, "tracked.txt", "invalid trailing whitespace \n")
 			}
 			cmd := exec.Command("bash", "scripts/regression.sh")
 			cmd.Dir = root
@@ -72,7 +72,7 @@ func TestRegressionSupportsArchivesAndKeepsWorktreeChecks(t *testing.T) {
 					t.Fatal("worktree whitespace check was skipped")
 				}
 			} else if err != nil || !strings.Contains(string(out), "regression passed") {
-				t.Fatalf("archive regression failed: %v: %s", err, out)
+				t.Fatalf("directory regression failed: %v: %s", err, out)
 			}
 		})
 	}
