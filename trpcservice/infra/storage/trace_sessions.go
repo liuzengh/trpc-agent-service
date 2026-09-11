@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"log/slog"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -19,31 +20,85 @@ import (
 // hands to the runner, so it wraps them here instead of patching the framework.
 var storageTracer = otel.Tracer("trpc-agent-service/storage")
 
+// startStoreSpan opens a span for one storage operation of a domain, tagged
+// with the backend that served it (so latency can be attributed per backend in
+// Jaeger).
+func startStoreSpan(ctx context.Context, domain, op string, backend Backend, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	full := make([]attribute.KeyValue, 0, len(attrs)+2)
+	full = append(full, attrs...)
+	full = append(full,
+		attribute.String("storage.domain", domain),
+		attribute.String("storage.backend", string(backend)),
+	)
+	return storageTracer.Start(ctx, domain+"."+op, trace.WithAttributes(full...))
+}
+
 // tracingSessions decorates a session service with one span per storage
 // operation. It implements session.Service by delegation: the wrapped service
 // still does the work (and still owns tenant isolation via Key.AppName).
+//
+// It deliberately implements *only* session.Service. The optional capabilities
+// the framework asserts on live in the embedded sessionCaps of
+// tracingSessionsFull, because Go decides capability by method set: a wrapper
+// that always answered the WindowService assertion would turn the framework's
+// "no window support, use the full transcript" fallback into a runtime error.
 type tracingSessions struct {
 	inner   session.Service
 	backend Backend
 }
 
-// withTracing wraps a session service so its operations appear in the trace.
+// trackEventReader mirrors the framework's unexported anchor-window reader
+// interface. Go interface satisfaction is structural, so forwarding this method
+// keeps the framework's own type assertion working through the decorator.
+type trackEventReader interface {
+	GetTrackEvents(ctx context.Context, key session.Key, track session.Track, opts ...session.Option) (*session.TrackEvents, error)
+}
+
+// sessionCaps forwards the optional session capabilities (anchor event windows,
+// track events) and traces them like every other storage operation.
+type sessionCaps struct {
+	backend Backend
+	window  session.WindowService
+	track   session.TrackService
+	reader  trackEventReader
+}
+
+// tracingSessionsFull is the decorator for a backend that can serve event
+// windows and track events — every backend in backendTable can today, and the
+// capability tests pin that.
+type tracingSessionsFull struct {
+	*tracingSessions
+	sessionCaps
+}
+
+// withTracing wraps a session service so its operations appear in the trace
+// without hiding any capability the underlying backend offers.
 func withTracingSessions(inner session.Service, backend Backend) session.Service {
 	if inner == nil {
 		return nil
 	}
-	return &tracingSessions{inner: inner, backend: backend}
+	base := &tracingSessions{inner: inner, backend: backend}
+	window, okWindow := inner.(session.WindowService)
+	track, okTrack := inner.(session.TrackService)
+	reader, okReader := inner.(trackEventReader)
+	if !okWindow || !okTrack || !okReader {
+		// The backend cannot serve these, so the decorator must not advertise
+		// them either (see the type comment). Warn loudly: a backend that
+		// silently loses event windows would otherwise look like a framework
+		// mystery rather than a missing capability.
+		slog.Warn("storage: session backend lacks optional capabilities, leaving them unadvertised",
+			"backend", backend, "event_window", okWindow, "track_events", okTrack, "track_reader", okReader)
+		return base
+	}
+	return &tracingSessionsFull{
+		tracingSessions: base,
+		sessionCaps:     sessionCaps{backend: backend, window: window, track: track, reader: reader},
+	}
 }
 
-// startSessionSpan opens a span for one storage operation, tagged with the
-// tenant (app_name) and the session/user it touches plus the backend that
-// served it, so latency can be attributed per backend in Jaeger.
+// startSessionSpan opens a span for one session operation.
 func (s *tracingSessions) start(ctx context.Context, op string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	attrs = append(attrs,
-		attribute.String("storage.domain", "session"),
-		attribute.String("storage.backend", string(s.backend)),
-	)
-	return storageTracer.Start(ctx, "session."+op, trace.WithAttributes(attrs...))
+	return startStoreSpan(ctx, "session", op, s.backend, attrs...)
 }
 
 // finish closes a span, recording the error (if any) so a failing backend shows
@@ -211,6 +266,48 @@ func (s *tracingSessions) GetSessionSummaryText(ctx context.Context, sess *sessi
 }
 
 func (s *tracingSessions) Close() error { return s.inner.Close() }
+
+// GetEventWindow loads the events around one anchor, for the framework's
+// long-session recovery path.
+func (c sessionCaps) GetEventWindow(ctx context.Context, req session.EventWindowRequest) (*session.EventWindow, error) {
+	ctx, span := startStoreSpan(ctx, "session", "event_window", c.backend, keyAttrs(req.Key)...)
+	span.SetAttributes(
+		attribute.String("session.anchor_event_id", req.AnchorEventID),
+		attribute.Int("session.window_before", req.Before),
+		attribute.Int("session.window_after", req.After),
+	)
+	out, err := c.window.GetEventWindow(ctx, req)
+	if err == nil && out != nil {
+		span.SetAttributes(attribute.Int("session.window_events", len(out.Entries)))
+	}
+	finish(span, err)
+	return out, err
+}
+
+// AppendTrackEvent records one track event (a durable side-channel about the
+// session, e.g. a delivery receipt), so it is visible and attributable.
+func (c sessionCaps) AppendTrackEvent(ctx context.Context, sess *session.Session, trackEvent *session.TrackEvent, opts ...session.Option) error {
+	attrs := []attribute.KeyValue{attribute.String("session.id", sessionIDOf(sess))}
+	if trackEvent != nil {
+		attrs = append(attrs, attribute.String("session.track", string(trackEvent.Track)))
+	}
+	ctx, span := startStoreSpan(ctx, "session", "append_track_event", c.backend, attrs...)
+	err := c.track.AppendTrackEvent(ctx, sess, trackEvent, opts...)
+	finish(span, err)
+	return err
+}
+
+// GetTrackEvents reads the track events of a session.
+func (c sessionCaps) GetTrackEvents(ctx context.Context, key session.Key, track session.Track, opts ...session.Option) (*session.TrackEvents, error) {
+	ctx, span := startStoreSpan(ctx, "session", "track_events", c.backend,
+		append(keyAttrs(key), attribute.String("session.track", string(track)))...)
+	out, err := c.reader.GetTrackEvents(ctx, key, track, opts...)
+	if err == nil && out != nil {
+		span.SetAttributes(attribute.Int("session.track_events", len(out.Events)))
+	}
+	finish(span, err)
+	return out, err
+}
 
 // sessionIDOf returns the session id, tolerating a nil session.
 func sessionIDOf(sess *session.Session) string {

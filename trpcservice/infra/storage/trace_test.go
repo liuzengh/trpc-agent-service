@@ -9,9 +9,15 @@ import (
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	artifactinmem "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	"trpc.group/trpc-go/trpc-agent-go/session/externalization"
+	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	sessionmysql "trpc.group/trpc-go/trpc-agent-go/session/mysql"
+	sessionredis "trpc.group/trpc-go/trpc-agent-go/session/redis"
 )
 
 // testTP / testRec are process-wide: the OTel global provider resolves its
@@ -272,7 +278,9 @@ func (f failingSessions) UpdateUserState(context.Context, session.UserKey, sessi
 func (f failingSessions) ListUserStates(context.Context, session.UserKey) (session.StateMap, error) {
 	return nil, f.err
 }
-func (f failingSessions) DeleteUserState(context.Context, session.UserKey, string) error { return f.err }
+func (f failingSessions) DeleteUserState(context.Context, session.UserKey, string) error {
+	return f.err
+}
 func (f failingSessions) UpdateSessionState(context.Context, session.Key, session.StateMap) error {
 	return f.err
 }
@@ -304,10 +312,128 @@ func sessionInMemoryForTest(t *testing.T) session.Service {
 
 // unwrapSessions peels the tracing decorator (tests wrap it themselves).
 func unwrapSessions(s *Sessions) session.Service {
-	if ts, ok := s.svc.(*tracingSessions); ok {
-		return ts.inner
+	switch v := s.svc.(type) {
+	case *tracingSessions:
+		return v.inner
+	case *tracingSessionsFull:
+		return v.inner
+	default:
+		return s.svc
 	}
-	return s.svc
+}
+
+// TestTracingSessionsPreservesOptionalCapabilities is the regression guard for a
+// silent capability loss: the framework type-asserts the session service for
+// WindowService (long-session recovery) and SearchableService/TrackService. A
+// decorator that implements only session.Service makes those assertions fail, so
+// a wrapped backend quietly loses features it has. The wrapper must therefore
+// forward every optional interface the backend implements — and must NOT claim
+// one the backend lacks.
+func TestTracingSessionsPreservesOptionalCapabilities(t *testing.T) {
+	inner := sessionInMemoryForTest(t)
+	if _, ok := inner.(session.WindowService); !ok {
+		t.Fatal("the in-memory backend is expected to serve event windows")
+	}
+
+	wrapped := withTracingSessions(inner, BackendInMemory)
+	if _, ok := wrapped.(session.WindowService); !ok {
+		t.Error("wrapping must not hide WindowService (framework long-session recovery depends on it)")
+	}
+	if _, ok := wrapped.(session.TrackService); !ok {
+		t.Error("wrapping must not hide TrackService")
+	}
+	if _, ok := wrapped.(trackEventReader); !ok {
+		t.Error("wrapping must not hide the track-event reader")
+	}
+	// Nothing in the framework implements semantic session search; claiming it
+	// would turn the framework's absence check into a failing call.
+	if _, ok := wrapped.(session.SearchableService); ok {
+		t.Error("the wrapper must not claim a capability the backend does not have")
+	}
+
+	// A backend with no optional capabilities keeps them hidden.
+	plain := withTracingSessions(failingSessions{err: errors.New("x")}, BackendRedis)
+	if _, ok := plain.(session.WindowService); ok {
+		t.Error("a backend without event windows must not be advertised as having them")
+	}
+
+	// The production chain is Wrap(externalization) over Wrap(tracing): the
+	// framework's externalization wrapper rebuilds its optional-interface
+	// combination from what it wraps, so a decorator that hides a capability
+	// strips it from the whole chain — not just from the inner layer.
+	chained := externalization.Wrap(wrapped, artifactinmem.NewService(), externalization.Config{Enabled: true})
+	if _, ok := chained.(session.WindowService); !ok {
+		t.Error("the externalization layer must still see WindowService through the tracing decorator")
+	}
+	if _, ok := chained.(session.TrackService); !ok {
+		t.Error("the externalization layer must still see TrackService through the tracing decorator")
+	}
+}
+
+// TestSessionWindowIsTracedAndDelegated proves the forwarded capability is not
+// just a type assertion: the call reaches the backend and produces a span.
+func TestSessionWindowIsTracedAndDelegated(t *testing.T) {
+	rec := withSpanRecorder(t)
+	svc := withTracingSessions(sessionInMemoryForTest(t), BackendMySQL)
+	ctx := context.Background()
+	key := session.Key{AppName: "t1", UserID: "u1", SessionID: "s1"}
+	sess, err := svc.CreateSession(ctx, key, session.StateMap{})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var anchor string
+	for i := 0; i < 3; i++ {
+		// Real content matters: the backend only persists events that carry a
+		// valid message, and an unpersisted anchor cannot be located.
+		ev := event.NewResponseEvent("inv", "assistant", &model.Response{
+			Choices: []model.Choice{{Message: model.NewAssistantMessage("turn")}},
+		})
+		if err := svc.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		anchor = ev.ID
+	}
+	window, err := svc.(session.WindowService).GetEventWindow(ctx, session.EventWindowRequest{
+		Key: key, AnchorEventID: anchor, Before: 1, After: 1,
+	})
+	if err != nil {
+		t.Fatalf("GetEventWindow: %v", err)
+	}
+	if window == nil || len(window.Entries) == 0 {
+		t.Fatalf("window = %+v, want the events around the anchor", window)
+	}
+
+	var sawWindow bool
+	for _, s := range rec.Ended() {
+		if s.Name() != "session.event_window" {
+			continue
+		}
+		sawWindow = true
+		if got := attrOf(s, "session.app_name"); got != "t1" {
+			t.Errorf("session.app_name = %q, want t1", got)
+		}
+		if got := attrOf(s, "session.anchor_event_id"); got != anchor {
+			t.Errorf("session.anchor_event_id = %q, want %q", got, anchor)
+		}
+	}
+	if !sawWindow {
+		t.Errorf("spans = %v, want a session.event_window span", spanNames(rec))
+	}
+}
+
+// TestRealSessionBackendsKeepTheirCapabilities pins the compile-time contract
+// the decorator relies on: if a dependency bump drops event windows from one of
+// the backends the Router can build, `withTracingSessions` would stop forwarding
+// the capability and the framework would silently fall back.
+func TestRealSessionBackendsKeepTheirCapabilities(t *testing.T) {
+	var (
+		_ session.WindowService = (*sessioninmemory.SessionService)(nil)
+		_ session.TrackService  = (*sessioninmemory.SessionService)(nil)
+		_ session.WindowService = (*sessionmysql.Service)(nil)
+		_ session.TrackService  = (*sessionmysql.Service)(nil)
+		_ session.WindowService = (*sessionredis.Service)(nil)
+		_ session.TrackService  = (*sessionredis.Service)(nil)
+	)
 }
 
 // memoryInMemoryForTest returns a plain in-memory memory service.

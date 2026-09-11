@@ -39,16 +39,16 @@ func TestArtifactTenantIsolation(t *testing.T) {
 
 func TestParseArtifactRevision(t *testing.T) {
 	cases := []struct {
-		key  string
-		rev  int
-		ok   bool
+		key string
+		rev int
+		ok  bool
 	}{
 		{"acme/u1/s1/f.txt/0", 0, true},
 		{"acme/u1/s1/f.txt/12", 12, true},
 		{"acme/u1/user/user:avatar/3", 3, true},
-		{"acme/u1/s1/f.txt", 0, false},     // no revision leaf
-		{"acme/u1/s1/f.txt/", 0, false},    // empty leaf
-		{"acme/u1/s1/f.txt/v1", 0, false},  // non-numeric revision
+		{"acme/u1/s1/f.txt", 0, false},    // no revision leaf
+		{"acme/u1/s1/f.txt/", 0, false},   // empty leaf
+		{"acme/u1/s1/f.txt/v1", 0, false}, // non-numeric revision
 	}
 	for _, c := range cases {
 		rev, ok := parseArtifactRevision(c.key)

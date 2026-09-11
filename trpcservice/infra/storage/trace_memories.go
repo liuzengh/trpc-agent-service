@@ -18,7 +18,10 @@ type tracingMemories struct {
 	backend Backend
 }
 
-// withTracingMemories wraps a memory service so its operations appear in the trace.
+// withTracingMemories wraps a memory service so its operations appear in the
+// trace. memory.Service has no optional capability interfaces (the framework
+// only defines Reader, a subset of Service), so — unlike the session decorator
+// — delegation cannot hide anything.
 func withTracingMemories(inner memory.Service, backend Backend) memory.Service {
 	if inner == nil {
 		return nil
@@ -27,11 +30,7 @@ func withTracingMemories(inner memory.Service, backend Backend) memory.Service {
 }
 
 func (m *tracingMemories) start(ctx context.Context, op string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	attrs = append(attrs,
-		attribute.String("storage.domain", "memory"),
-		attribute.String("storage.backend", string(m.backend)),
-	)
-	return storageTracer.Start(ctx, "memory."+op, trace.WithAttributes(attrs...))
+	return startStoreSpan(ctx, "memory", op, m.backend, attrs...)
 }
 
 func (m *tracingMemories) ReadMemories(ctx context.Context, userKey memory.UserKey, limit int) ([]*memory.Entry, error) {
