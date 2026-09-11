@@ -15,7 +15,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,56 +62,10 @@ type botInfoResp struct {
 // background. Recv surfaces incoming events; Send calls the OpenAPI. The bot's
 // own open_id is fetched from bot/v3/info for group @-mention gating.
 func NewConn(appID, appSecret string) *Conn {
-	c := &Conn{
-		appID:     appID,
-		appSecret: appSecret,
-		events:    make(chan []byte, 64),
-		api:       lark.NewClient(appID, appSecret),
-		done:      make(chan struct{}),
-	}
+	c := newConn(appID, appSecret)
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
-
-	handler := dispatcher.NewEventDispatcher("", "").
-		OnP2MessageReceiveV1(func(_ context.Context, ev *larkim.P2MessageReceiveV1) error {
-			raw, err := json.Marshal(ev)
-			if err != nil {
-				return err
-			}
-			select {
-			case c.events <- raw:
-			default:
-				// Drop when the adapter is not draining rather than block the
-				// SDK dispatcher; a dropped inbound is a lost message.
-				slog.Warn("feishu: inbound buffer full, dropping event")
-			}
-			return nil
-		}).
-		// Interactive-card buttons (the approval card). The click arrives on the
-		// same long connection; it is re-encoded into the adapter's event stream
-		// so the decision travels the exact same path as a typed reply (dedup,
-		// bus idempotency, worker approval resolution, audit).
-		OnP2CardActionTrigger(func(_ context.Context, ev *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
-			if ev == nil || ev.Event == nil {
-				return nil, nil
-			}
-			raw, err := json.Marshal(toCardActionEnvelope(ev))
-			if err != nil {
-				return nil, err
-			}
-			select {
-			case c.events <- raw:
-			default:
-				slog.Warn("feishu: inbound buffer full, dropping card action")
-			}
-			// Ack with a toast: without a response the client shows a generic
-			// failure even though the decision was accepted.
-			return &callback.CardActionTriggerResponse{
-				Toast: &callback.Toast{Type: "info", Content: "已提交，Agent 收到你的决定"},
-			}, nil
-		})
-	c.handler = handler
-	c.client = larkws.NewClient(appID, appSecret, larkws.WithEventHandler(handler))
+	c.client = larkws.NewClient(appID, appSecret, larkws.WithEventHandler(c.handler))
 	go c.supervise(ctx)
 	// Resolve the bot's own open_id before returning so the adapter can gate
 	// group @-mentions from the first event. Bounded (see fetchBotOpenID);
@@ -118,8 +75,175 @@ func NewConn(appID, appSecret string) *Conn {
 	return c
 }
 
+// NewWebhookConn builds a Conn whose inbound events are pushed over HTTP
+// (Feishu's event-subscription "请求网址" mode) instead of a long connection.
+//
+// Only the inbound transport changes: sending, cards and attachment download
+// already go through the OpenAPI with the app credentials, so a webhook-mode
+// binding behaves exactly like a long-connection one from the pipeline's point
+// of view. Events reach the adapter through Feed.
+func NewWebhookConn(appID, appSecret string) *Conn {
+	c := newConn(appID, appSecret)
+	// No long connection to supervise, but Recv still honours cancellation, so
+	// the context exists for Close to cancel.
+	_, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
+	c.fetchBotOpenID()
+	return c
+}
+
+// newConn builds the platform-independent parts of a Conn: the OpenAPI client,
+// the event buffer and the dispatcher that normalizes SDK callbacks into the
+// adapter's event stream. Both transports share it so a new event type has to be
+// registered once.
+func newConn(appID, appSecret string) *Conn {
+	c := &Conn{
+		appID:     appID,
+		appSecret: appSecret,
+		events:    make(chan []byte, 64),
+		api:       lark.NewClient(appID, appSecret),
+		done:      make(chan struct{}),
+	}
+	c.handler = dispatcher.NewEventDispatcher("", "").
+		OnP2MessageReceiveV1(func(_ context.Context, ev *larkim.P2MessageReceiveV1) error {
+			raw, err := json.Marshal(ev)
+			if err != nil {
+				return err
+			}
+			c.push(raw, "message")
+			return nil
+		}).
+		// Interactive-card buttons (the approval card). The click arrives on the
+		// same stream as messages; it is re-encoded into the adapter's event
+		// stream so the decision travels the exact same path as a typed reply
+		// (dedup, bus idempotency, worker approval resolution, audit).
+		OnP2CardActionTrigger(func(_ context.Context, ev *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			if ev == nil || ev.Event == nil {
+				return nil, nil
+			}
+			raw, err := json.Marshal(toCardActionEnvelope(ev))
+			if err != nil {
+				return nil, err
+			}
+			c.push(raw, "card action")
+			// Ack with a toast: without a response the client shows a generic
+			// failure even though the decision was accepted.
+			return &callback.CardActionTriggerResponse{
+				Toast: &callback.Toast{Type: "info", Content: "已提交，Agent 收到你的决定"},
+			}, nil
+		})
+	return c
+}
+
+// Feed hands one authenticated HTTP callback body to the event stream, so the
+// adapter's existing decode/dedup pipeline handles it unchanged. It reports
+// false when the buffer is full: the HTTP layer then answers 503 and the platform
+// retries, which is strictly better than dropping a user's message.
+func (c *Conn) Feed(payload []byte) bool {
+	return c.push(payload, "webhook event")
+}
+
+// push enqueues one raw event without blocking the caller (an SDK dispatcher, or
+// an HTTP handler that must answer promptly).
+func (c *Conn) push(raw []byte, what string) bool {
+	select {
+	case <-c.done:
+		return false
+	default:
+	}
+	select {
+	case c.events <- raw:
+		return true
+	default:
+		slog.Warn("feishu: inbound buffer full, dropping event", "kind", what)
+		return false
+	}
+}
+
 // reconnectMaxBackoff caps the reconnect delay.
 const reconnectMaxBackoff = 30 * time.Second
+
+// DownloadMedia fetches a Feishu attachment through the message-resource API
+// (image/file/audio share it; only the type parameter differs).
+func (c *Conn) DownloadMedia(ctx context.Context, att channels.MediaAttachment) ([]byte, string, error) {
+	if att.MessageID == "" || att.FileKey == "" {
+		return nil, "", errors.New("feishu: attachment needs message id and file key")
+	}
+	resourceType := "file"
+	switch att.Kind {
+	case channels.MediaImage:
+		resourceType = "image"
+	case channels.MediaVoice:
+		resourceType = "audio"
+	}
+	req := larkim.NewGetMessageResourceReqBuilder().
+		MessageId(att.MessageID).
+		FileKey(att.FileKey).
+		Type(resourceType).
+		Build()
+	resp, err := c.api.Im.MessageResource.Get(ctx, req)
+	if err != nil {
+		return nil, "", fmt.Errorf("feishu: get message resource: %w", err)
+	}
+	if !resp.Success() {
+		return nil, "", fmt.Errorf("feishu: get message resource: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	// The SDK streams the resource; bound the read so an oversized attachment
+	// cannot exhaust memory before the adapter's own limit check.
+	data, err := io.ReadAll(io.LimitReader(resp.File, maxMediaBytes+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("feishu: read message resource: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, "", errors.New("feishu: message resource is empty")
+	}
+	if len(data) > maxMediaBytes {
+		return nil, "", fmt.Errorf("feishu: attachment exceeds %d bytes", maxMediaBytes)
+	}
+	mime := ""
+	if resp.FileName != "" {
+		mime = mimeForName(resp.FileName)
+	}
+	if mime == "" {
+		mime = mimeForKind(att.Kind)
+	}
+	return data, mime, nil
+}
+
+// maxMediaBytes bounds one attachment, matching the adapter's own limit.
+const maxMediaBytes = 8 << 20
+
+// mimeForKind is the fallback mime type when Feishu sends no filename.
+func mimeForKind(kind string) string {
+	switch kind {
+	case channels.MediaImage:
+		return "image/png"
+	case channels.MediaVoice:
+		return "audio/opus"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// mimeForName derives a mime type from the resource filename.
+func mimeForName(name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".pdf":
+		return "application/pdf"
+	case ".txt", ".md", ".csv", ".json", ".log":
+		return "text/plain; charset=utf-8"
+	default:
+		return ""
+	}
+}
 
 // toCardActionEnvelope converts an SDK card-action callback into the envelope
 // the adapter decodes (see feishu.go). Button values are copied to

@@ -114,6 +114,49 @@ func ToInbound(tenantID string, ev *Event, botOpenID string) *channels.InboundMe
 		ChatID:        chatID,
 		Content:       extractText(msg.MessageType, msg.Content),
 		MsgType:       normalizeMsgType(msg.MessageType),
+		Media:         extractMedia(msg),
+	}
+}
+
+// extractMedia reads the attachment descriptor out of an image/file message.
+// Feishu sends a key, not a URL: the bytes are fetched later through the
+// message-resource API, which needs the message id too.
+func extractMedia(msg Message) []channels.MediaAttachment {
+	switch msg.MessageType {
+	case channels.MsgTypeImage:
+		var payload struct {
+			ImageKey string `json:"image_key"`
+		}
+		if err := json.Unmarshal([]byte(msg.Content), &payload); err != nil || payload.ImageKey == "" {
+			return nil
+		}
+		return []channels.MediaAttachment{{
+			Kind: channels.MediaImage, FileKey: payload.ImageKey, MessageID: msg.MessageID,
+		}}
+	case channels.MsgTypeFile:
+		var payload struct {
+			FileKey  string `json:"file_key"`
+			FileName string `json:"file_name"`
+		}
+		if err := json.Unmarshal([]byte(msg.Content), &payload); err != nil || payload.FileKey == "" {
+			return nil
+		}
+		return []channels.MediaAttachment{{
+			Kind: channels.MediaFile, FileKey: payload.FileKey, MessageID: msg.MessageID, Name: payload.FileName,
+		}}
+	case "audio":
+		var payload struct {
+			FileKey  string `json:"file_key"`
+			Duration int    `json:"duration"`
+		}
+		if err := json.Unmarshal([]byte(msg.Content), &payload); err != nil || payload.FileKey == "" {
+			return nil
+		}
+		return []channels.MediaAttachment{{
+			Kind: channels.MediaVoice, FileKey: payload.FileKey, MessageID: msg.MessageID,
+		}}
+	default:
+		return nil
 	}
 }
 
@@ -242,12 +285,28 @@ func normalizeMsgType(t string) string {
 type Adapter struct {
 	tenantID  string
 	botOpenID string
+	conn      channels.Conn
 	*channels.BaseAdapter
 }
 
 // New returns a Feishu adapter bound to the given tenant and bot open_id.
 func New(tenantID, botOpenID string, conn channels.Conn) *Adapter {
-	return &Adapter{tenantID: tenantID, botOpenID: botOpenID, BaseAdapter: channels.NewBaseAdapter(Name, conn)}
+	return &Adapter{tenantID: tenantID, botOpenID: botOpenID, conn: conn, BaseAdapter: channels.NewBaseAdapter(Name, conn)}
+}
+
+// Feed pushes one authenticated HTTP callback payload into the adapter's event
+// stream, making the adapter satisfy channels.WebhookAdapter when it was built
+// on a webhook Conn.
+//
+// A long-connection Conn receives events from the platform, so feeding it would
+// bypass the SDK's own dispatch: that is reported as "not accepted" rather than
+// silently injecting an event.
+func (a *Adapter) Feed(payload []byte) bool {
+	f, ok := a.conn.(interface{ Feed([]byte) bool })
+	if !ok {
+		return false
+	}
+	return f.Feed(payload)
 }
 
 // Start consumes raw events from the Conn until ctx is done.

@@ -30,3 +30,12 @@ minio:
 telemetry:
   otlp_endpoint: "otel-collector:4317"
   service_name: "trpc-agent-service"
+
+# IM HTTP callback ingress. Disabled by default: the endpoint is public and
+# authenticated only by the platform's signature. Enable it to run Feishu in
+# "事件订阅 → 请求网址" mode (POST /webhooks/im/{binding_id}) instead of the
+# long connection. The callback URL must be reachable from the platform.
+# im:
+#   webhook:
+#     enable: true
+#     channels: ["feishu"]

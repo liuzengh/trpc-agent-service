@@ -50,7 +50,12 @@ type Manager struct {
 	build    AdapterBuilder
 	gw       *Gateway
 
-	mu    sync.Mutex
+	// webhook is the installed HTTP callback ingress (nil when disabled); whMu
+	// serializes its adapter construction, which performs network calls.
+	webhook *WebhookConfig
+	whMu    sync.Mutex
+
+	mu    sync.RWMutex
 	conns map[string]connHandle
 }
 
@@ -106,6 +111,12 @@ func (m *Manager) Reload(ctx context.Context) error {
 		}
 	}
 	for id, b := range want {
+		if m.webhook != nil && m.webhook.Channels[b.Channel] {
+			// This channel is served over HTTP callbacks (see webhook.go): its
+			// adapter is built on the first callback, so opening a long
+			// connection here would deliver every event twice.
+			continue
+		}
 		if _, ok := m.conns[id]; ok {
 			continue
 		}

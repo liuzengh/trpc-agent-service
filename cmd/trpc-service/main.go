@@ -319,10 +319,16 @@ func main() {
 		mux.HandleFunc("/auth/me", authMW.Me)
 	}
 
+	// Routes that must bypass the platform auth middleware: the health probe and
+	// login are public by nature, and the IM callback ingress is authenticated
+	// by the platform's own signature. startDataPlane mounts the ingress (it owns
+	// the IM manager) and reports the paths it needs in the skip list.
+	skipAuth := []string{"/healthz", "/auth/login"}
+
 	// Data plane: the worker loop, the outbox dispatcher and the IM gateway, each
 	// gated by the role plan. All three need Redis; the worker and the ledger
 	// also need MySQL.
-	startDataPlane(runCtx, dataPlaneDeps{
+	skipAuth = append(skipAuth, startDataPlane(runCtx, dataPlaneDeps{
 		plan:        plan,
 		cfg:         cfg,
 		db:          db,
@@ -339,15 +345,14 @@ func main() {
 		mux:         mux,
 		channelAPI:  channelAPI,
 		logger:      logger,
-	})
+	})...)
 
 	logger.Info("starting server", "addr", cfg.Server.HTTPAddr, "role", cfg.Role)
 	// Middleware order matters: CORS is outermost so that every response —
 	// including auth rejections (401/403) — carries the CORS headers the
 	// browser needs to read the status instead of reporting a network error.
 	// The auth middleware then lets preflights through and enforces the Bearer
-	// token: /healthz and /auth/login are public, everything else needs a token.
-	skipAuth := []string{"/healthz", "/auth/login"}
+	// token: everything not listed in skipAuth needs a token.
 	readHeaderTimeout := cfg.Server.ReadHeaderTimeout
 	if readHeaderTimeout <= 0 {
 		readHeaderTimeout = config.DefaultReadHeaderTimeout
@@ -458,14 +463,17 @@ type dataPlaneDeps struct {
 // A gateway-only node therefore holds no REST surface and consumes no inbound
 // messages, while a worker-only node exposes no management API. Extracted from
 // main so the composition root stays a thin assembly.
-func startDataPlane(runCtx context.Context, d dataPlaneDeps) {
+//
+// It returns the routes that must bypass the platform auth middleware (currently
+// only the IM callback ingress, which the platform authenticates by signature).
+func startDataPlane(runCtx context.Context, d dataPlaneDeps) []string {
 	needsRedis := d.plan.WorkerLoop || d.plan.IMGatway
 	if !needsRedis || d.cfg.Redis.URL == "" {
 		if needsRedis {
 			d.logger.Error("redis url not configured, data plane disabled",
 				"worker", d.plan.WorkerLoop, "gateway", d.plan.IMGatway)
 		}
-		return
+		return nil
 	}
 	// Wait for Redis before the bus is used: the worker would otherwise start,
 	// fail every command, and leave the IM/chat path unresponsive until an
@@ -474,15 +482,17 @@ func startDataPlane(runCtx context.Context, d dataPlaneDeps) {
 	rb, err := bus.NewRedisFromURL(d.cfg.Redis.URL)
 	if err != nil {
 		d.logger.Error("redis bus unavailable, data plane disabled", "err", err)
-		return
+		return nil
 	}
 
 	if d.plan.WorkerLoop {
 		startWorkerLoop(runCtx, d, rb)
 	}
+	var public []string
 	if d.plan.IMGatway {
-		startIMGatway(runCtx, d, rb)
+		public = startIMGatway(runCtx, d, rb)
 	}
+	return public
 }
 
 // startWorkerLoop starts message consumption, the outbox dispatcher and the
@@ -587,7 +597,8 @@ func startWorkerLoop(runCtx context.Context, d dataPlaneDeps, rb *bus.RedisBus) 
 
 // startIMGatway starts the binding-driven IM connection manager: it holds the IM
 // long connections and fans outbound replies back to the originating channel.
-func startIMGatway(runCtx context.Context, d dataPlaneDeps, rb *bus.RedisBus) {
+// It returns the routes the callback ingress added (empty when it is disabled).
+func startIMGatway(runCtx context.Context, d dataPlaneDeps, rb *bus.RedisBus) []string {
 	imMgr := channels.NewManager(rb, d.bindStore, d.secretStore, buildAdapter)
 	if d.cfg.RateLimit.Enable {
 		// Inbound rate limiting shares the bus's Redis so the limit holds
@@ -600,6 +611,36 @@ func startIMGatway(runCtx context.Context, d dataPlaneDeps, rb *bus.RedisBus) {
 		}
 	}
 	d.channelAPI.SetManager(imMgr)
+	verifiers, builders := webhookChannels()
+	var public []string
+	if d.cfg.IM.Webhook.Enable {
+		served, err := webhookSelection(d.cfg.IM.Webhook.Channels, verifiers, builders)
+		if err != nil {
+			// A channel the platform cannot call back is a configuration error:
+			// refuse to start rather than advertise an endpoint that never
+			// receives anything.
+			d.logger.Error("IM webhook ingress misconfigured", "err", err)
+			os.Exit(2)
+		}
+		if len(served) == 0 {
+			d.logger.Warn("IM webhook ingress enabled with no channels, nothing served")
+		}
+		if err := imMgr.EnableWebhook(channels.WebhookConfig{
+			Channels:  served,
+			Verifiers: verifiers,
+			Builders:  builders,
+		}); err != nil {
+			d.logger.Error("IM webhook ingress disabled", "err", err)
+		} else {
+			// The callback route is unauthenticated by design (the platform
+			// signs the request, it cannot present a session), so it is mounted
+			// only here and its path joins the auth middleware's skip list.
+			webhookAPI := web.NewWebhookAPI(imMgr)
+			webhookAPI.Register(d.mux)
+			public = webhookAPI.Paths()
+			d.logger.Info("IM webhook ingress mounted", "path", web.WebhookPathPrefix, "channels", served)
+		}
+	}
 	if err := imMgr.Reload(context.Background()); err != nil {
 		d.logger.Error("IM gateway reload failed", "err", err)
 	}
@@ -617,6 +658,23 @@ func startIMGatway(runCtx context.Context, d dataPlaneDeps, rb *bus.RedisBus) {
 		}
 	}()
 	d.logger.Info("IM gateway started")
+	return public
+}
+
+// webhookSelection validates the configured callback channels against the ones
+// the platform can actually serve and returns the resulting set.
+func webhookSelection(channels []string, verifiers map[string]channels.WebhookVerifier, builders map[string]channels.WebhookBuilder) (map[string]bool, error) {
+	served := make(map[string]bool, len(channels))
+	for _, ch := range channels {
+		if ch == "" {
+			continue
+		}
+		if verifiers[ch] == nil || builders[ch] == nil {
+			return nil, fmt.Errorf("channel %q has no HTTP callback mode (supported: feishu)", ch)
+		}
+		served[ch] = true
+	}
+	return served, nil
 }
 
 // setupTelemetry wires OpenTelemetry trace + metrics when an OTLP endpoint is

@@ -112,6 +112,24 @@ type Message struct {
 	ReplyTo   string         `json:"reply_to,omitempty"` // outbound routing hint
 	Kind      string         `json:"kind,omitempty"`     // text | stream | card
 	Segments  []Segment      `json:"segments,omitempty"` // card segments
+	// Media describes the non-text attachments of an inbound message. The
+	// bytes travel inside Content.ContentParts (that is what the model
+	// consumes); this manifest is what lets the worker archive the attachment
+	// and tell the user when one could not be read.
+	Media []MediaRef `json:"media,omitempty"`
+}
+
+// MediaRef is one non-text attachment of an inbound message as the worker sees
+// it: enough to archive the payload, audit it, and explain a failure. It
+// deliberately carries no bytes — those are already in the message content.
+type MediaRef struct {
+	Kind     string `json:"kind"` // image | file | voice
+	Name     string `json:"name,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	// Size is the fetched payload size in bytes (0 when the fetch failed).
+	Size int `json:"size,omitempty"`
+	// FetchError explains why Size is 0 (empty when the attachment was fetched).
+	FetchError string `json:"fetch_error,omitempty"`
 }
 
 // Segment represents a rich content segment for card messages.
@@ -155,6 +173,26 @@ func encode(m *Message) (map[string]interface{}, error) {
 		}
 		fields["content"] = string(raw)
 	}
+	// Kind + Segments must survive the stream: a card downgraded to an empty
+	// kind would reach the gateway as plain text and its buttons would never be
+	// rendered (the approval card is exactly that case).
+	if m.Kind != "" {
+		fields["kind"] = m.Kind
+	}
+	if len(m.Segments) > 0 {
+		raw, err := json.Marshal(m.Segments)
+		if err != nil {
+			return nil, fmt.Errorf("bus: encode segments: %w", err)
+		}
+		fields["segments"] = string(raw)
+	}
+	if len(m.Media) > 0 {
+		raw, err := json.Marshal(m.Media)
+		if err != nil {
+			return nil, fmt.Errorf("bus: encode media: %w", err)
+		}
+		fields["media"] = string(raw)
+	}
 	return fields, nil
 }
 
@@ -169,6 +207,7 @@ func decode(vals map[string]interface{}) (*Message, error) {
 		Channel:   stringAt(vals, "channel"),
 		UserID:    stringAt(vals, "user_id"),
 		ReplyTo:   stringAt(vals, "reply_to"),
+		Kind:      stringAt(vals, "kind"),
 	}
 	if raw := stringAt(vals, "content"); raw != "" {
 		var content model.Message
@@ -176,6 +215,21 @@ func decode(vals map[string]interface{}) (*Message, error) {
 			return nil, fmt.Errorf("bus: decode content: %w", err)
 		}
 		m.Content = &content
+	}
+	// A malformed optional payload degrades the message instead of dropping it:
+	// the text is still deliverable, and the alternative (failing the decode)
+	// would ack-drop a user's message over a cosmetic field.
+	if raw := stringAt(vals, "segments"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &m.Segments); err != nil {
+			slog.Warn("bus: dropping unreadable segments", "id", m.ID, "err", err)
+			m.Segments = nil
+		}
+	}
+	if raw := stringAt(vals, "media"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &m.Media); err != nil {
+			slog.Warn("bus: dropping unreadable media manifest", "id", m.ID, "err", err)
+			m.Media = nil
+		}
 	}
 	return m, nil
 }

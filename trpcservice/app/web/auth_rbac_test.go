@@ -110,6 +110,35 @@ func TestAuthMiddlewareLetsPreflightThrough(t *testing.T) {
 	}
 }
 
+// A skip path ending in "/" is a prefix. The IM callback ingress needs this:
+// its route carries the binding id as the last segment, so the exact path set is
+// not knowable up front — and an unmatched callback would be answered with 401,
+// which the platform reads as "this endpoint is not ours".
+func TestAuthMiddlewareSkipsPathPrefix(t *testing.T) {
+	authMW := NewAuthMiddleware(member.NewManager(), "test-secret")
+	reached := ""
+	handler := authMW.Wrap([]string{"/healthz", "/webhooks/im/"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, path := range []string{"/webhooks/im/b-1", "/webhooks/im/tenant-2/bot-3"} {
+		reached = ""
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		if reached != path {
+			t.Errorf("%s did not reach the handler (status %d)", path, rec.Code)
+		}
+	}
+
+	// The prefix must not leak: a sibling route still needs a token.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/webhooks/other", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("/webhooks/other status = %d, want 401", rec.Code)
+	}
+}
+
 // CORS must wrap the auth middleware so rejection responses (401) still carry
 // the CORS headers the browser needs to read the status instead of reporting an
 // opaque network error.

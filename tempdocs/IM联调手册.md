@@ -84,17 +84,29 @@ curl localhost:8080/healthz                     # 就绪
 - [ ] 重复投递：平台侧补发同 `platformMsgID` → 服务端不重复执行（幂等）
 - [ ] 会话连续性：同租户同人第二次提问可读到上轮会话/记忆
 - [ ] 超长回复被截断（>2000 企微 / >4000 飞书字符实验）
-- [ ] Jaeger：`im.callback / agent.run / im.reply / tool / session` 同 trace
+- [ ] Jaeger：`im.callback / agent.run / im.reply / tool / session.* / memory.*` 同 trace
 - [ ] 审计：GET /audit 看到 channel/user/session/agent/tokens/latency/trace_id
 - [ ] 失败路径：停掉 MySQL/Redis 一端，观察降级日志与重投行为
+- [ ] **附件**：给机器人发一张图片 → 回复里能描述图片内容（说明 ContentParts 生效）；
+      再看 `GET /audit` 是否有该轮 executed 行、MinIO `artifacts` bucket 是否多出
+      `sessionpart_*` 对象（说明 externalization 归档生效）
+- [ ] **附件失败回执**：发一个 >8 MiB 文件（或临时配错凭据让下载失败）→ 应收到
+      "⚠️ 有附件未能读取…" 回执，且审计出现 `error_type=attachment_unreadable`
+- [ ] **飞书审批卡片**：触发需审批的工具（如 code-exec）→ 通知是卡片且有 批准/拒绝 按钮；
+      点「批准」→ 收到"已批准执行「…」"，Agent 继续；审计出现 approve
+- [ ] **飞书 HTTP 回调模式**（可选）：`im.webhook.enable: true` + `channels: ["feishu"]`
+      + 绑定里「验证令牌」填 **Encrypt Key**，飞书后台把请求网址指向
+      `https://<域名>/webhooks/im/{binding_id}` → 平台先通过 url_verification 握手，
+      再正常收发；错误签名应得 401（`curl -X POST` 空签名验证）
 
 ## 4. 待真实账号联调后方可确认的项（代码就绪）
 
 | 项 | 现状 | 判定 |
 | --- | --- | --- |
 | 逐字流式回复（KindStream） | 企微占位+原位替换已实现；飞书回复仍整段文本 | 需真实长连接观察 |
-| 卡片消息（KindCard） | 定义存在未接线 | 需求未强制，可选 |
-| 媒体文件收发 | 识别已实现，收发未处理 | 见《IM平台限制与降级策略》§3 |
+| 卡片消息（KindCard） | **已接线**：审批通知在飞书为交互卡片 + 按钮回调（阶段 45）；其余场景仍走文本 | 需真实账号点一次按钮 |
+| 媒体文件收发 | **入站已实现**：下载 → ContentParts → MinIO 归档 → 失败回执 + 审计（阶段 45）；出站发图仍未接线 | 需真实账号发一张图 |
+| HTTP 回调入口（`/webhooks/im/{id}`） | 已实现且默认关闭；飞书回调模式可用，企业微信无该模式 | 需公网可达地址验证 |
 | 长连接断线重连 | SDK 自带重连；平台层 Stop/Reload 已实现 | 真实网络下验证 |
 
 ## 5. 排障提示

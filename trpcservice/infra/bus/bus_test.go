@@ -123,3 +123,78 @@ func TestMessageRoundTrip(t *testing.T) {
 		t.Errorf("Content not preserved: %+v", out.Content)
 	}
 }
+
+// TestMessageRoundTripPreservesCardAndMedia pins the two optional payloads that
+// a reply/notice depends on. Kind+Segments used to be dropped by the encoder,
+// which silently downgraded the interactive approval card to plain text once it
+// had been through the outbox; Media carries the attachment manifest the worker
+// archives.
+func TestMessageRoundTripPreservesCardAndMedia(t *testing.T) {
+	in := &Message{
+		ID:        "msg-2",
+		TenantID:  "t1",
+		SessionID: "sess-1",
+		Channel:   "feishu",
+		Content:   &model.Message{Role: model.RoleAssistant, Content: "approve?"},
+		Kind:      "card",
+		Segments: []Segment{
+			{Type: "title", Text: "需要人工审批"},
+			{Type: "actions", Actions: []SegmentAction{
+				{Text: "批准", Value: map[string]string{"decision": "approve", "session_id": "sess-1"}},
+			}},
+		},
+		Media: []MediaRef{
+			{Kind: "image", Name: "photo.png", MimeType: "image/png", Size: 1234},
+			{Kind: "file", Name: "report.pdf", FetchError: "download failed"},
+		},
+	}
+	fields, err := encode(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	out, err := decode(fields)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Kind != "card" {
+		t.Errorf("Kind lost: %q", out.Kind)
+	}
+	if len(out.Segments) != 2 || out.Segments[0].Type != "title" {
+		t.Fatalf("Segments lost: %+v", out.Segments)
+	}
+	action := out.Segments[1].Actions
+	if len(action) != 1 || action[0].Text != "批准" || action[0].Value["decision"] != "approve" {
+		t.Errorf("button callback payload lost: %+v", action)
+	}
+	if len(out.Media) != 2 {
+		t.Fatalf("Media lost: %+v", out.Media)
+	}
+	if out.Media[0].Kind != "image" || out.Media[0].Size != 1234 {
+		t.Errorf("media descriptor lost: %+v", out.Media[0])
+	}
+	if out.Media[1].FetchError != "download failed" {
+		t.Errorf("media fetch error lost: %+v", out.Media[1])
+	}
+}
+
+// TestDecodeDropsUnreadableOptionalPayloads: a corrupt segments/media field must
+// not cost the user their message — the text still decodes.
+func TestDecodeDropsUnreadableOptionalPayloads(t *testing.T) {
+	fields := map[string]interface{}{
+		"id":         "msg-3",
+		"session_id": "sess-1",
+		"kind":       "card",
+		"segments":   "{not json",
+		"media":      "[not json",
+	}
+	out, err := decode(fields)
+	if err != nil {
+		t.Fatalf("decode must tolerate a corrupt optional field: %v", err)
+	}
+	if out.Segments != nil || out.Media != nil {
+		t.Errorf("corrupt payloads must be dropped: %+v", out)
+	}
+	if out.Kind != "card" {
+		t.Errorf("Kind lost: %q", out.Kind)
+	}
+}

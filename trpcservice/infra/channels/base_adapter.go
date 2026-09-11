@@ -8,7 +8,9 @@ package channels
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
+	"time"
 )
 
 // DecodeFn maps one raw platform event to a normalized InboundMessage. ok
@@ -77,6 +79,56 @@ func (a *BaseAdapter) Send(ctx context.Context, msg *OutboundMessage) error {
 	}
 }
 
+// Media fetch bounds. A platform attachment is fetched inline (before the turn
+// reaches the model) and inlined as a content part, so both the time and the
+// size must be bounded: an unbounded fetch would stall the gateway or blow up
+// the model prompt.
+const (
+	mediaFetchTimeout = 15 * time.Second
+	maxMediaBytes     = 8 << 20 // 8 MiB per attachment
+)
+
+// fetchMedia fills Data for every attachment that carries a fetched payload,
+// using the Conn's downloader. Failures are recorded on the attachment (never
+// fatal): the message still reaches the worker, which then tells the user the
+// attachment could not be read and audits it.
+func (a *BaseAdapter) fetchMedia(ctx context.Context, msg *InboundMessage) {
+	if msg == nil || len(msg.Media) == 0 {
+		return
+	}
+	dl, ok := a.conn.(MediaDownloader)
+	for i := range msg.Media {
+		att := &msg.Media[i]
+		if len(att.Data) > 0 {
+			continue
+		}
+		if !ok {
+			att.FetchError = "channel does not support attachment download"
+			continue
+		}
+		fetchCtx, cancel := context.WithTimeout(ctx, mediaFetchTimeout)
+		data, mime, err := dl.DownloadMedia(fetchCtx, *att)
+		cancel()
+		switch {
+		case err != nil:
+			att.FetchError = err.Error()
+			slog.Warn("channels: attachment fetch failed",
+				"channel", a.name, "kind", att.Kind, "err", err)
+		case len(data) == 0:
+			att.FetchError = "attachment is empty"
+		case len(data) > maxMediaBytes:
+			att.FetchError = fmt.Sprintf("attachment exceeds the %d MiB limit", maxMediaBytes>>20)
+			slog.Warn("channels: attachment too large, dropped",
+				"channel", a.name, "kind", att.Kind, "bytes", len(data))
+		default:
+			att.Data = data
+			if mime != "" {
+				att.MimeType = mime
+			}
+		}
+	}
+}
+
 // Stop closes the underlying connection.
 func (a *BaseAdapter) Stop(_ context.Context) error {
 	return a.conn.Close()
@@ -114,6 +166,10 @@ func (a *BaseAdapter) Run(ctx context.Context, decode DecodeFn) error {
 		if a.Seen(in.PlatformMsgID) {
 			continue
 		}
+		// Attachments are fetched before the message enters the bus: the worker
+		// must be able to hand the model real bytes (or an explicit "could not
+		// read it" note), not a dangling platform reference.
+		a.fetchMedia(ctx, in)
 		select {
 		case a.inbound <- in:
 		case <-ctx.Done():

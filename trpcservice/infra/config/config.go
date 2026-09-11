@@ -26,6 +26,7 @@ type Config struct {
 	Secret    SecretConfig    `yaml:"secret"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
 	Memory    MemoryConfig    `yaml:"memory"`
+	IM        IMConfig        `yaml:"im"`
 	Telemetry TelemetryConfig `yaml:"telemetry"`
 }
 
@@ -99,6 +100,26 @@ type LogConfig struct {
 type RateLimitConfig struct {
 	Enable    bool  `yaml:"enable"`
 	PerMinute int64 `yaml:"per_minute"`
+}
+
+// IMConfig configures the IM ingress above the binding store. Bindings decide
+// which accounts exist and who they belong to; this is the deployment-level
+// choice of how events reach the platform.
+type IMConfig struct {
+	Webhook WebhookConfig `yaml:"webhook"`
+}
+
+// WebhookConfig enables the HTTP callback ingress for IM channels. It is off by
+// default: the endpoint is unauthenticated except for the platform's own
+// signature, so opening it must be a deliberate act.
+//
+// Channels lists the channels served over HTTP callbacks instead of a long
+// connection. A channel the platform cannot call back (WeCom's AI bot only
+// speaks its own WSS protocol) is rejected at startup rather than left with an
+// endpoint that could never work.
+type WebhookConfig struct {
+	Enable   bool     `yaml:"enable"`
+	Channels []string `yaml:"channels"`
 }
 
 // MemoryConfig configures the platform's long-term memory feature. Memory is

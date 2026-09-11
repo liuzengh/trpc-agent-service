@@ -34,6 +34,8 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
+	"trpc.group/trpc-go/trpc-agent-go/session"
+	"trpc.group/trpc-go/trpc-agent-go/session/externalization"
 	fwtool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -102,12 +104,20 @@ type StateBus interface {
 // ToolSource resolves a registered tool id to its runtime implementation.
 type ToolSource func(id string) (fwtool.Tool, bool)
 
+// OutboxAppender durably queues one outbound message under an idempotency key
+// (bus.Outbox satisfies it). The worker only ever appends — dispatching belongs
+// to the node that owns the outbound loop — so it depends on this narrow slice
+// and can be exercised without a database.
+type OutboxAppender interface {
+	Append(ctx context.Context, m *bus.Message, msgKey string) error
+}
+
 // Worker turns inbound messages into agent replies.
 type Worker struct {
 	bus       StateBus
 	agents    *agent.Manager
 	toolRes   *toolResolver // optional: static tools + KB search tools
-	outbox    *bus.Outbox
+	outbox    OutboxAppender
 	sessions  *storage.Router  // optional: per-tenant session backend
 	skills    *skill.Manager   // optional: mounted skills -> instruction splice
 	auditor   audit.Recorder   // optional: audit log
@@ -121,7 +131,7 @@ type Worker struct {
 // New assembles a worker. toolRes, sessions, skills, auditor, artifacts and
 // ledger may be nil (no tools / no multi-turn persistence / no skills / no
 // audit / no artifact persistence / no chat ledger).
-func New(b StateBus, agents *agent.Manager, toolRes *toolResolver, outbox *bus.Outbox, sessions *storage.Router, skills *skill.Manager, auditor audit.Recorder, artifacts artifact.Service, ledger chat.Ledger) *Worker {
+func New(b StateBus, agents *agent.Manager, toolRes *toolResolver, outbox OutboxAppender, sessions *storage.Router, skills *skill.Manager, auditor audit.Recorder, artifacts artifact.Service, ledger chat.Ledger) *Worker {
 	return &Worker{bus: b, agents: agents, toolRes: toolRes, outbox: outbox, sessions: sessions, skills: skills, auditor: auditor, artifacts: artifacts, ledger: ledger}
 }
 
@@ -324,6 +334,10 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 		done()
 		return nil
 	}
+
+	// Unreadable attachments are reported to the user and audited before the
+	// turn starts, so the gap is visible even if the agent run later fails.
+	w.reportUnreadableMedia(ctx, m)
 
 	// Serialize handling of one session across nodes.
 	token := uuid.NewString()
@@ -701,10 +715,30 @@ func (w *Worker) buildRunnerOptions(ctx context.Context, m *bus.Message, policy 
 			slog.Warn("worker: session backend unavailable, running stateless",
 				"tenant", m.TenantID, "err", err)
 		} else {
-			opts = append(opts, runner.WithSessionService(s.Service()))
+			opts = append(opts, runner.WithSessionService(w.externalizeSessionContent(s.Service(), artMeter)))
 		}
 	}
 	return opts, timer, artMeter
+}
+
+// externalizeSessionContent moves inline attachment payloads out of the session
+// events and into artifact storage before they are persisted, hydrating them
+// again on read.
+//
+// Why it matters: an inbound image arrives as inline bytes in the model message,
+// and the framework would otherwise persist those bytes (base64 in JSON) into
+// session_events — one user image per turn, in the hot MySQL table. Externalizing
+// keeps the event small and leaves the bytes in object storage, addressed by a
+// pinned, sha256-verified artifact reference. This is the framework's own
+// mechanism (session/externalization), not a platform re-implementation.
+//
+// The meter doubles as the artifact service so externalized payloads are counted
+// in the artifact usage dimension alongside tool-produced artifacts.
+func (w *Worker) externalizeSessionContent(svc session.Service, meter *artifactUsage) session.Service {
+	if svc == nil || meter == nil {
+		return svc
+	}
+	return externalization.Wrap(svc, meter, externalization.Config{Enabled: true})
 }
 
 // recordTurnUsage records the finished turn's consumption: the

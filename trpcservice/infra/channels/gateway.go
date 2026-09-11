@@ -27,7 +27,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // tracer names the IM bridge's spans (im.callback / im.reply).
@@ -304,7 +303,7 @@ func (g *Gateway) pumpInbound(ctx context.Context, a Adapter, opt Attach) {
 				slog.Warn("channels: no agent for inbound", "channel", a.Name(), "session", in.SessionID)
 				continue
 			}
-			content := model.NewUserMessage(in.Content)
+			content, mediaRefs := buildUserContent(in)
 
 			// The IM callback is the trace root: emit an im.callback span and
 			// carry its trace id on the bus message so the worker's agent.run
@@ -314,6 +313,7 @@ func (g *Gateway) pumpInbound(ctx context.Context, a Adapter, opt Attach) {
 					attribute.String("channel", a.Name()),
 					attribute.String("session_id", in.SessionID),
 					attribute.String("platform_msg_id", in.PlatformMsgID),
+					attribute.Int("media.count", len(mediaRefs)),
 				),
 			)
 			traceID := cbSpan.SpanContext().TraceID().String()
@@ -329,6 +329,7 @@ func (g *Gateway) pumpInbound(ctx context.Context, a Adapter, opt Attach) {
 				UserID:    in.UserID,
 				TraceID:   traceID,
 				Content:   &content,
+				Media:     mediaRefs,
 			}
 			if err := g.bus.PublishInbound(ctx, msg); err != nil {
 				slog.Error("channels: publish inbound", "channel", a.Name(), "err", err)

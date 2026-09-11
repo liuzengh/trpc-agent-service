@@ -26,13 +26,13 @@ var ErrBindingDuplicate = errors.New("channels: channel account already bound")
 // references (never plaintext tokens). Deleting is soft (is_deleted) to keep
 // the unique key.
 type ChannelBinding struct {
-	BindingID            string    `json:"binding_id"`
-	TenantID             string    `json:"tenant_id"`
-	AgentID              string    `json:"agent_id"`
-	Channel              string    `json:"channel"` // wecom | feishu
-	AccountID            string    `json:"account_id"`
-	CredentialRef        string    `json:"credential_ref,omitempty"`
-	VerificationTokenRef string    `json:"verification_token_ref,omitempty"` // feishu event-subscription verify token
+	BindingID            string `json:"binding_id"`
+	TenantID             string `json:"tenant_id"`
+	AgentID              string `json:"agent_id"`
+	Channel              string `json:"channel"` // wecom | feishu
+	AccountID            string `json:"account_id"`
+	CredentialRef        string `json:"credential_ref,omitempty"`
+	VerificationTokenRef string `json:"verification_token_ref,omitempty"` // feishu event-subscription verify token
 	// CreatedBy is the member that bound the account; Visibility decides whether
 	// the rest of the tenant may see the binding (see domain/asset).
 	CreatedBy  string    `json:"created_by,omitempty"`

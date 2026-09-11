@@ -47,18 +47,28 @@ func NewAuthMiddleware(mgr *member.Manager, secret string) *AuthMiddleware {
 
 // Wrap returns an http.Handler that enforces JWT auth on all routes except skipPaths.
 //
+// A skip path ending in "/" is a prefix: it matches that path and everything
+// below it. The IM callback ingress needs this — its route carries the binding
+// id as the last segment, so the exact set of paths is not knowable up front
+// (/webhooks/im/{binding_id}).
+//
 // CORS preflight requests (OPTIONS) are always passed through: the browser never
 // attaches the Authorization header to a preflight, so rejecting it makes the
 // real request unreachable (the browser reports a CORS failure, not a 401). The
 // handler behind this middleware is responsible for answering the preflight.
 func (a *AuthMiddleware) Wrap(skipPaths []string, next http.Handler) http.Handler {
 	skip := make(map[string]bool, len(skipPaths))
+	var prefixes []string
 	for _, p := range skipPaths {
+		if strings.HasSuffix(p, "/") {
+			prefixes = append(prefixes, p)
+			continue
+		}
 		skip[p] = true
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if r.Method == http.MethodOptions || skip[path] {
+		if r.Method == http.MethodOptions || skip[path] || hasAnyPrefix(path, prefixes) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -76,6 +86,16 @@ func (a *AuthMiddleware) Wrap(skipPaths []string, next http.Handler) http.Handle
 		ctx := context.WithValue(r.Context(), AuthUserKey, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// hasAnyPrefix reports whether path falls under one of the prefix skip entries.
+func hasAnyPrefix(path string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Login handles POST /auth/login.

@@ -31,3 +31,22 @@ func buildAdapter(_ context.Context, b channels.ChannelBinding, secret string) (
 		return nil, fmt.Errorf("unsupported channel %q", b.Channel)
 	}
 }
+
+// webhookChannels are the channels this platform can serve over HTTP callbacks,
+// with the verifier and adapter builder each one needs.
+//
+// WeCom is deliberately absent: its AI-bot product speaks only its own WSS
+// protocol (the callback-URL mode belongs to a different WeCom product whose
+// reply path is not implemented), so listing it in the config is a startup error
+// rather than an endpoint that could never receive anything.
+func webhookChannels() (map[string]channels.WebhookVerifier, map[string]channels.WebhookBuilder) {
+	verifiers := map[string]channels.WebhookVerifier{
+		channels.ChannelFeishu: feishu.WebhookVerifier(),
+	}
+	builders := map[string]channels.WebhookBuilder{
+		channels.ChannelFeishu: func(_ context.Context, b channels.ChannelBinding, secret string) (channels.WebhookAdapter, error) {
+			return feishu.NewWebhookAdapter(b.TenantID, b.AccountID, secret), nil
+		},
+	}
+	return verifiers, builders
+}

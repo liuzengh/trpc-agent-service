@@ -41,3 +41,19 @@ log:
 #   otlp_endpoint: "127.0.0.1:4317"
 #   service_name: "trpc-agent-service"
 
+# IM ingress. By default every bound account is reached over a connection we
+# open and hold (WeCom AI-bot WSS, Feishu ws.Client). Enabling the HTTP callback
+# mode instead makes the platform POST each event to
+# POST /webhooks/im/{binding_id}; the channel then opens no long connection, so
+# the two modes never deliver the same event twice.
+#
+# Off by default: the endpoint is reachable from the internet and its only
+# credential is the platform's signature, and the callback's verification secret
+# is the account's "Encrypt Key" (stored as the binding's verification token).
+# Only feishu supports this mode today; naming any other channel is a startup
+# error.
+# im:
+#   webhook:
+#     enable: true
+#     channels: ["feishu"]
+

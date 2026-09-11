@@ -75,6 +75,46 @@ type InboundMessage struct {
 	ChatID        string
 	Content       string
 	MsgType       string // text | image | file | event
+	// Media carries the non-text attachments of the message (see
+	// MediaAttachment); empty for a plain text message.
+	Media []MediaAttachment
+}
+
+// Media kinds. An unknown kind is reported as MediaFile so the user still gets a
+// receipt instead of silence.
+const (
+	MediaImage = "image"
+	MediaFile  = "file"
+	MediaVoice = "voice"
+)
+
+// MediaAttachment is one non-text attachment of an inbound message. The adapter
+// fills the descriptor (URL / FileKey); the bytes are fetched through
+// MediaDownloader into Data so the agent can actually see the content instead of
+// the platform silently dropping the message.
+type MediaAttachment struct {
+	Kind     string // image | file | voice
+	Name     string
+	MimeType string
+	// URL is a direct download link (WeCom hands one out with every media message).
+	URL string
+	// AesKey decrypts a WeCom media download (WeCom encrypts media at rest).
+	AesKey string
+	// FileKey + MessageID identify a Feishu resource (that API needs both).
+	FileKey   string
+	MessageID string
+	// Data is the fetched payload; nil means the fetch did not happen or failed.
+	Data []byte
+	// FetchError explains a missing payload (empty when fetched).
+	FetchError string
+}
+
+// MediaDownloader is the optional capability of a Conn to fetch an inbound
+// attachment's bytes (per-platform API, sometimes with decryption). A Conn that
+// does not implement it leaves the attachment unfetched, and the platform then
+// tells the user the attachment could not be read instead of ignoring it.
+type MediaDownloader interface {
+	DownloadMedia(ctx context.Context, att MediaAttachment) ([]byte, string, error)
 }
 
 // OutboundMessage is a normalized reply (text / stream / card).

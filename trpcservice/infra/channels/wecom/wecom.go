@@ -90,6 +90,33 @@ func pkcs7Unpad(b []byte) ([]byte, error) {
 	return b[:len(b)-padLen], nil
 }
 
+// DecryptMedia decrypts a WeCom media download. Media uses the same AES-256-CBC
+// + PKCS7 scheme as callback messages but without the random/msg-len/receiveid
+// framing, so the whole plaintext is the file content. aesKey is the 43-char
+// base64 key delivered with the message ("aeskey" field).
+func DecryptMedia(encodingAESKey string, ciphertext []byte) ([]byte, error) {
+	if encodingAESKey == "" {
+		return ciphertext, nil
+	}
+	rawKey, err := base64.StdEncoding.DecodeString(encodingAESKey + "=")
+	if err != nil {
+		return nil, fmt.Errorf("wecom: decode media aes key: %w", err)
+	}
+	if len(rawKey) != 32 {
+		return nil, fmt.Errorf("wecom: invalid media aes key length %d", len(rawKey))
+	}
+	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("wecom: invalid media ciphertext length %d", len(ciphertext))
+	}
+	block, err := aes.NewCipher(rawKey)
+	if err != nil {
+		return nil, fmt.Errorf("wecom: new media cipher: %w", err)
+	}
+	plain := make([]byte, len(ciphertext))
+	cipher.NewCBCDecrypter(block, rawKey[:aes.BlockSize]).CryptBlocks(plain, ciphertext)
+	return pkcs7Unpad(plain)
+}
+
 // Message is the decrypted inbound WeCom message (XML unmarshaled).
 type Message struct {
 	ToUserName   string `xml:"ToUserName"`
@@ -100,6 +127,17 @@ type Message struct {
 	MsgId        string `xml:"MsgId"`
 	AgentID      string `xml:"AgentID"`
 	ChatId       string `xml:"ChatId"` // present only in group chat
+	// Media carries one attachment descriptor per non-text message. WeCom hands
+	// out a download URL plus the AES key that protects it.
+	Media []MediaPart `xml:"Media"`
+}
+
+// MediaPart is the XML shape of one WeCom attachment descriptor.
+type MediaPart struct {
+	Kind   string `xml:"Kind,attr"`   // image | file | voice
+	URL    string `xml:"URL,attr"`    // download url
+	AesKey string `xml:"AesKey,attr"` // media decryption key
+	Name   string `xml:"Name,attr"`
 }
 
 // ToInbound converts a decrypted WeCom message into a normalized InboundMessage.
@@ -122,7 +160,29 @@ func ToInbound(tenantID string, msg *Message) *channels.InboundMessage {
 		ChatID:        chatID,
 		Content:       msg.Content,
 		MsgType:       normalizeMsgType(msg.MsgType),
+		Media:         toMedia(msg.Media),
 	}
+}
+
+// toMedia maps the XML descriptors onto the unified attachment type.
+func toMedia(parts []MediaPart) []channels.MediaAttachment {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]channels.MediaAttachment, 0, len(parts))
+	for _, p := range parts {
+		kind := p.Kind
+		if kind == "" {
+			kind = channels.MediaFile
+		}
+		out = append(out, channels.MediaAttachment{
+			Kind:   kind,
+			Name:   p.Name,
+			URL:    p.URL,
+			AesKey: p.AesKey,
+		})
+	}
+	return out
 }
 
 // normalizeMsgType maps WeCom message types onto the unified contract. Types
