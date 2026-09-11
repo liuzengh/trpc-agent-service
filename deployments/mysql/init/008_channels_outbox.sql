@@ -53,9 +53,10 @@ CREATE TABLE IF NOT EXISTS outbox_events (
   COMMENT='reliable-delivery outbox: MySQL is authoritative, dispatcher drains to Redis Streams';
 
 CREATE TABLE IF NOT EXISTS idempotency_keys (
-    msg_key    VARCHAR(128) NOT NULL                COMMENT 'hash(channel + platform message id)',
+    msg_key    VARCHAR(128) NOT NULL                COMMENT 'channel + colon + platform message id, e.g. wecom:msg-123',
     tenant_id  VARCHAR(36)  NOT NULL,
     created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (msg_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='IM message dedup: at-least-once delivery idempotency';
+

@@ -121,11 +121,13 @@ im:
 
 ## 6. 异步回复与失败重试（已有，防误读）
 
-- 回复**异步**：worker 消费组 ↔ outbound 流 ↔ gateway.Run 分发，与会话无锁耦合
+- 回复**异步**：worker 消费组 ↔ outbox ↔ outbound 流 ↔ gateway.Run 分发，与会话无锁耦合
   （`im.reply` 有独立 span）。
-- 幂等与重试：入站按 `channel:platformMsgID` 去重（gateway.go + adapter 内存去重 +
-  worker Redis SetNX 幂等 + MySQL outbox 唯一键）；出站失败由 XAUTOCLAIM 重投
-  （bus.go），但 IM 发送失败不自动补发（平台侧会话继续，人工可再问）。
+- 幂等与重试：入站按 `channel:platformMsgID` 去重（adapter 内存 `Seen` + worker
+  Redis 两阶段幂等租约 + MySQL `idempotency_keys` 唯一键 + 事件级幂等复用）；
+  **出站失败由 outbox 自己重试**（`pending` 按 2s→60s 指数退避，10 次后置 `dead` 并记
+  `last_error`），不依赖 `XAUTOCLAIM`——`XAUTOCLAIM` 只负责认领**入站**流里被死消费者
+  留下的 pending 消息。IM **发送**失败不会自动补发到平台（平台侧会话继续，用户可再问）。
 
 ## 7. 与容量评估的关系
 

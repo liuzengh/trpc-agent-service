@@ -119,7 +119,7 @@
 |   |-- docker-compose.yml / .env.example    # 本地完整栈
 |   |-- backend-compose.config.yaml          # compose 后端挂载的完整运行配置
 |   |-- prometheus.yml                        # compose Prometheus 抓取
-|   `-- mysql/init/001~010.sql                # 10 个建表脚本（按文件序号执行）
+|   `-- mysql/init/001~013.sql                # 13 个建表脚本（按文件序号执行，22 张核心表）
 |-- docs                   # 架构/详细设计/多后端/风险清单/可复用性评估
 |-- front                  # Vue3 + Vite + TS + Pinia + Element Plus + Vitest + Playwright
 |   |-- e2e/               # Playwright E2E 核心链路
@@ -156,7 +156,7 @@
 
 ### 方式一：Docker Compose（推荐，自动建表）
 
-MySQL 首次启动时会自动执行 `deployments/mysql/init/001~012.sql` 建表，无需手动操作。
+MySQL 首次启动时会自动执行 `deployments/mysql/init/001~013.sql` 建表（**仅在数据卷首次创建时执行**，改表结构后需 `./begin.sh reset` 或手工 ALTER），无需手动操作。
 
 **Linux / macOS：**
 
@@ -269,8 +269,9 @@ go run ./scripts/loadtest/chat_load.go \
 | [系统架构图](docs/系统架构图.png) | 全组件关系图（PNG 可直接查看） |
 | [核心时序图](docs/核心时序图.png) | 完整消息链路时序（PNG 可直接查看） |
 | [ER 图](docs/ER图.png) | 数据库表关系图（PNG 可直接查看） |
-| [数据模型设计](docs/数据模型设计.md) | 26 张表结构 + ER 图 + Redis 键 + JSON Schema |
+| [数据模型设计](docs/数据模型设计.md) | 22 张平台表结构（另含框架自建会话/记忆表）+ ER 图 + Redis 键 + JSON 字段示例 |
 | [数据同步与幂等策略](docs/数据同步与幂等策略.md) | 并发一致性、更新顺序、迁移方案、IM 幂等 |
 | [多后端适配方案](docs/多后端适配方案.md) | 五域路由、Redis/MySQL/Milvus/MinIO 适配 |
-| [风险清单](docs/风险清单.md) | 10 个生产风险及缓解措施 |
+| [风险清单](docs/风险清单.md) | 11 个生产风险及缓解措施 |
 | [验收检查清单](docs/验收检查清单.md) | 32 项验收测试用例 |
+

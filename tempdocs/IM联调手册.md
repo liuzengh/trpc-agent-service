@@ -1,6 +1,7 @@
 # IM 联调手册（真实收发 + mock 冒烟）
 
-> 状态：代码就绪，真实收发待本地账号手测（需求验收 B6）。
+> 状态：代码就绪；**文本链路的真实收发已于 2026-09 实测通过**（见文末「真实联调实测结论」），
+> 阶段 45 新增的卡片按钮回调 / 入站附件 / HTTP 回调入口仍需真实账号手测（清单见 §3.5）。
 > 代码：`trpcservice/infra/channels/{wecom,feishu}`、`cmd/trpc-service` gateway 装配、
 > binding 驱动 `channels.Manager`。
 > 本文给出：①不依赖真实账号的 **mock 冒烟**；②真实企微/飞书配置步骤；③验证清单。
@@ -124,3 +125,4 @@ curl localhost:8080/healthz                     # 就绪
   回复经 `stream:outbound` 投递成功（audit `Decision=executed` 佐证）。
 - 保留给后续的观察项：企微流式占位/原位替换、飞书逐字流式与卡片的最终展示
   效果（功能代码已就绪，视账号/群场景按需再验）。
+

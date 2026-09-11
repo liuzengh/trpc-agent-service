@@ -1,7 +1,7 @@
 // Command migrate copies tenant session/event state and user memory between
 // storage backends using the framework Service API only (no backend-private
 // schema), so any backend pair supported by the platform can be migrated:
-// session inmemory/mysql/redis, memory inmemory/redis.
+// session inmemory/mysql/redis, memory inmemory/mysql/redis.
 //
 // Scope of one run is a single tenant (AppName) and an explicit user list
 // (-users) or every user of a MySQL source (-auto). The target side is
@@ -105,10 +105,15 @@ func sessionService(sp spec) (session.Service, error) {
 }
 
 func memoryService(sp spec) (memory.Service, error) {
-	if sp.backend == storage.BackendMySQL {
-		return nil, fmt.Errorf("memory has no mysql backend (use inmemory or redis)")
-	}
-	w, err := storage.NewMemories(storage.MemoryConfig{Backend: sp.backend, RedisURL: sp.dsn})
+	// MySQL memory is a supported platform backend (storage.backendTable), so a
+	// tenant can be pinned to it at runtime — the migration tool has to be able
+	// to read from and write to it too, otherwise a tenant that was switched to
+	// MySQL memory becomes unmigratable.
+	w, err := storage.NewMemories(storage.MemoryConfig{
+		Backend:  sp.backend,
+		RedisURL: sp.dsn,
+		MySQLDSN: sp.dsn,
+	})
 	if err != nil {
 		return nil, err
 	}
