@@ -16,6 +16,18 @@ services:
   mysql:
     container_name: tas-rel-mysql
 
+  redis:
+    # The projection store of the reliable stack (session_project jobs). It
+    # has no published port, so only the container name needs remapping to
+    # coexist with the default stack's redis.
+    container_name: tas-rel-redis
+
+  gateway:
+    # Only a rename: the service itself is reliable-profile-only and its
+    # compose port already defaults to 9020 (RELIABLE_GATEWAY_PORT), which
+    # cannot collide with the default stack's app on 8080.
+    container_name: tas-rel-gateway
+
   fake-model:
     container_name: tas-rel-model
     # 9019, not 9009: the default stack owns 9009, and the two stacks are

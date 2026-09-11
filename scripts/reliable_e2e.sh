@@ -15,10 +15,10 @@
 #   2. 断言 helper 自己先过逐例签名自检；
 #   3. JSON payload 落文件再 --data-binary @file，不在 "$( )" 内联带引号的 JSON。
 #
-# 关于「回调」：可靠模式目前只有 微信客服 的接收端落了地（KfPuller），它的 HTTP
-# 挂载点还没接（属可靠 gateway 切片）。所以本脚本用一条 SQL 模拟「回调已经可靠地
-# 记下了 notification」这一步——这恰好是 KfPuller 的输入契约，而回调的验签/解密
-# 已有官方向量单测覆盖。这一步之外的所有环节都是真实角色进程在跑。
+# 关于「回调」：可靠 gateway 角色（-role gateway）已挂载三个回调面，全部先落库
+# 再 ACK。本脚本对微信客服与企微**真发加密签名的回调**（python3 组明文 +
+# openssl 做 AES-256-CBC + SHA1 签名，与官方算法一致），断言只认库里长出来的
+# 行——不再有 SQL 模拟。webchat 段另走邮箱推送（SSE 轮询 reply_outbox）。
 #
 # 变量名紧邻中文时必须写成 ${VAR}（bash 3.2 的多字节标识符陷阱，见 e2e.sh 头）。
 #
@@ -32,11 +32,19 @@ rm -rf "$SMOKE"; mkdir -p "$SMOKE"
 
 PROJECT=${RELIABLE_PROJECT:-tas-reliable}
 MODEL=${RELIABLE_MODEL:-http://localhost:${RELIABLE_MODEL_PORT:-9019}}
+GATEWAY=${RELIABLE_GATEWAY:-http://localhost:${RELIABLE_GATEWAY_PORT:-9020}}
 TENANT=${RELIABLE_TENANT:-acme}
 DB_USER=${MYSQL_USER:-tas}
 DB_PASS=${MYSQL_PASSWORD:-taspw}
 DB_NAME=${MYSQL_DATABASE:-tas}
 KEEP=${RELIABLE_KEEP:-0}
+
+# 微信回调加密的官方向量，与 B 段 fixture 的 channel_bindings.config 一致。
+WX_CORP=wwfixture00000001
+WX_TOKEN=fixture-callback-token
+WX_AES_KEY=jWmYm7qr5nMoAUwZRjGtBxmz3KA1tkAj3ykkR6q2B2C
+WX_TS=1731000000
+WX_NONCE=fixture-nonce
 
 pass=0; fail=0; selftest=0
 
@@ -84,6 +92,7 @@ cleanup() {
     dc logs worker-b > "$SMOKE/worker-b.log" 2>&1
     dc logs delivery > "$SMOKE/delivery.log" 2>&1
     dc logs jobs > "$SMOKE/jobs.log" 2>&1
+    dc logs gateway > "$SMOKE/gateway.log" 2>&1
     dc logs mysql > "$SMOKE/mysql.log" 2>&1
   } || true
   if [ "$KEEP" = "1" ]; then
@@ -109,6 +118,71 @@ wait_sql() { # wait_sql <sql> <want> <timeout_s> —— 轮询直到相等
   return 1
 }
 
+# --- 微信系回调的加密与签名（KfPuller / WeCom 共用官方算法） ---
+# 明文 = random(16) + msg_len(4, 网络序) + msg + receiveid，AES-256-CBC；
+# 填充是 PKCS#7 但**块大小为 32**（微信专有，不是 AES 的 16）：python 侧手工补齐，
+# openssl 用 -nopad 只做加解密。签名 = SHA1(sort(token, timestamp, nonce, encrypt))。
+# AES key = base64decode(EncodingAESKey + "=")，IV 取其前 16 字节。
+# （曾踩过：openssl 默认按 16 对齐填充，解密端 pkcs7Unpad(b,32) 因长度非 32 倍数直接
+# 返回 nil，报 "plaintext too short"——两条链里只有一条恰好对齐 32，伪装成“只有 KF 坏”。）
+encrypt_callback_body() { # <plain_file> <out_body_file>；设置 WX_SIG
+  local key_hex iv_hex enc
+  key_hex=$(printf '%s=' "$WX_AES_KEY" | openssl base64 -d -A | xxd -p -c 64)
+  iv_hex=${key_hex:0:32}
+  enc=$(openssl enc -aes-256-cbc -nopad -K "$key_hex" -iv "$iv_hex" -in "$1" -a | tr -d '\n')
+  WX_SIG=$(python3 -c 'import hashlib,sys; print(hashlib.sha1("".join(sorted(sys.argv[1:5])).encode()).hexdigest())' \
+    "$WX_TOKEN" "$WX_TS" "$WX_NONCE" "$enc")
+  printf '<xml><ToUserName><![CDATA[%s]]></ToUserName><Encrypt><![CDATA[%s]]></Encrypt></xml>' \
+    "$WX_CORP" "$enc" > "$2"
+}
+
+# post_kf_callback <event_token> <open_kfid> —— 真回调给 gateway，打印 HTTP 码，
+# ACK 体落 _callback_ack.txt。
+post_kf_callback() {
+  local plain=$SMOKE/_kf_plain.bin body=$SMOKE/_kf_body.xml
+  python3 - "$1" "$2" "$WX_CORP" "$plain" <<'PY'
+import struct, sys
+ev, kf, corp, out = sys.argv[1:5]
+msg = ("<xml><ToUserName><![CDATA[%s]]></ToUserName>" % corp +
+       "<CreateTime>1731000000</CreateTime>" +
+       "<MsgType><![CDATA[event]]></MsgType>" +
+       "<Event><![CDATA[kf_msg_or_event]]></Event>" +
+       ("<Token><![CDATA[%s]]></Token>" % ev) +
+       ("<OpenKfId><![CDATA[%s]]></OpenKfId></xml>" % kf)).encode()
+plain = b"0123456789abcdef" + struct.pack(">I", len(msg)) + msg + corp.encode()
+pad = 32 - len(plain) % 32
+plain += bytes([pad]) * pad
+open(out, "wb").write(plain)
+PY
+  encrypt_callback_body "$plain" "$body"
+  curl -s -o "$SMOKE/_callback_ack.txt" -w '%{http_code}' \
+    -X POST "$GATEWAY/callback/wechat_kf/$TENANT?msg_signature=$WX_SIG&timestamp=$WX_TS&nonce=$WX_NONCE" \
+    --data-binary @"$body"
+}
+
+# post_wecom_callback <from_user> <content> <msg_id> —— 真回调给 gateway。
+post_wecom_callback() {
+  local plain=$SMOKE/_wecom_plain.bin body=$SMOKE/_wecom_body.xml
+  python3 - "$1" "$2" "$3" "$WX_CORP" "$plain" <<'PY'
+import struct, sys
+frm, content, msgid, corp, out = sys.argv[1:6]
+msg = ("<xml><ToUserName><![CDATA[%s]]></ToUserName>" % corp +
+       ("<FromUserName><![CDATA[%s]]></FromUserName>" % frm) +
+       "<CreateTime>1731000000</CreateTime>" +
+       "<MsgType><![CDATA[text]]></MsgType>" +
+       ("<Content><![CDATA[%s]]></Content>" % content) +
+       ("<MsgId>%s</MsgId></xml>" % msgid)).encode()
+plain = b"0123456789abcdef" + struct.pack(">I", len(msg)) + msg + corp.encode()
+pad = 32 - len(plain) % 32
+plain += bytes([pad]) * pad
+open(out, "wb").write(plain)
+PY
+  encrypt_callback_body "$plain" "$body"
+  curl -s -o "$SMOKE/_callback_ack.txt" -w '%{http_code}' \
+    -X POST "$GATEWAY/callback/wecom/$TENANT?msg_signature=$WX_SIG&timestamp=$WX_TS&nonce=$WX_NONCE" \
+    --data-binary @"$body"
+}
+
 echo "--- A. 起栈与就绪门禁 ---"
 # 从干净状态开始：上一轮若被 Ctrl-C 或机器重启打断，容器和命名卷都会留下，
 # 而这轮的夹具假设「空库」（tenant 不存在、profile 不重复）。先清再起。
@@ -119,7 +193,7 @@ dc --profile reliable down -v --remove-orphans >/dev/null 2>&1 || true
 if ! dc build app > "$SMOKE/build.log" 2>&1; then
   echo "构建失败，见 $SMOKE/build.log"; tail -30 "$SMOKE/build.log"; exit 1
 fi
-if ! dc --profile reliable up -d mysql qdrant minio > "$SMOKE/up.log" 2>&1; then
+if ! dc --profile reliable up -d mysql qdrant minio redis > "$SMOKE/up.log" 2>&1; then
   echo "起栈失败，见 $SMOKE/up.log"; tail -30 "$SMOKE/up.log"; exit 1
 fi
 ready=0
@@ -147,6 +221,15 @@ check "MinIO 就绪" "1" "$object_ready"
 if [ "$vector_ready" != 1 ] || [ "$object_ready" != 1 ]; then
   echo "知识库依赖没起来，不再往下跑。"; exit 1
 fi
+# Redis is the session-projection store for the jobs role; it needs no host
+# port (the roles reach it over the compose network as redis:6379).
+redis_ready=0
+for i in $(seq 1 30); do
+  if [ "$(dc exec -T redis redis-cli ping 2>/dev/null | tr -d '\r')" = "PONG" ]; then redis_ready=1; break; fi
+  sleep 1
+done
+check "Redis 就绪（投影存储）" "1" "$redis_ready"
+if [ "$redis_ready" != 1 ]; then echo "Redis 没起来，不再往下跑。"; exit 1; fi
 
 # 迁移是显式的部署动作（不随角色启动执行），bootstrap 创建租户 + 首个 admin。
 dc run --rm --no-deps worker-a -migrate -config /config/config.yaml > "$SMOKE/migrate.log" 2>&1 \
@@ -159,7 +242,7 @@ dc run --rm --no-deps worker-a -bootstrap-admin \
   || check "bootstrap-admin 退出码" "0" "$?"
 check "租户由 bootstrap 创建" "$TENANT" "$(mysql_q "SELECT tenant_id FROM tenants WHERE tenant_id='$TENANT'")"
 check "首个 admin 落在 tenant_users" "admin" "$(mysql_q "SELECT role FROM tenant_users WHERE tenant_id='$TENANT'")"
-check "迁移落了四版 schema" "4" "$(mysql_q "SELECT COUNT(*) FROM schema_migrations")"
+check "迁移落了五版 schema" "5" "$(mysql_q "SELECT COUNT(*) FROM schema_migrations")"
 
 echo "--- B. 控制面夹具（等价于 Admin API 建好的 app/revision/binding） ---"
 # 模型 profile 指向栈内的假模型；api_key_ref 是 env 引用，worker 侧靠
@@ -192,10 +275,19 @@ SELECT '$TENANT', app_id, 'wechat_kf', 'main',
        '{"corp_id":"wwfixture00000001","secret":"kf-fixture-secret","token":"fixture-callback-token","encoding_aes_key":"jWmYm7qr5nMoAUwZRjGtBxmz3KA1tkAj3ykkR6q2B2C"}'
 FROM agent_apps WHERE tenant_id='$TENANT' AND public_id='assistant';
 
--- 这一行是「回调已可靠记下 notification」的模拟：KfPuller 的输入契约起点。
-INSERT INTO channel_notifications (tenant_id, binding_id, event_token, scope_key)
-SELECT '$TENANT', binding_id, 'FIXTURE-EVTOK', 'wk1'
-FROM channel_bindings WHERE tenant_id='$TENANT' AND public_id='main';
+-- 企微 binding：H 段的真回调与回复投递都靠它（token/aes_key 与上方同一官方向量，
+-- 加密 helper 因此只需一套）。
+INSERT INTO channel_bindings (tenant_id, app_id, channel_type, public_id, config)
+SELECT '$TENANT', app_id, 'wecom', 'main',
+       '{"corp_id":"wwfixture00000001","corp_secret":"wecom-fixture-secret","agent_id":218,"token":"fixture-callback-token","encoding_aes_key":"jWmYm7qr5nMoAUwZRjGtBxmz3KA1tkAj3ykkR6q2B2C"}'
+FROM agent_apps WHERE tenant_id='$TENANT' AND public_id='assistant';
+
+-- webchat binding：H 段的邮箱段（无凭据，本机通道）。
+INSERT INTO channel_bindings (tenant_id, app_id, channel_type, public_id, credential_ref)
+SELECT '$TENANT', app_id, 'webchat', 'main', 'env:X'
+FROM agent_apps WHERE tenant_id='$TENANT' AND public_id='assistant';
+
+-- notification 不再由 SQL 直插：C/D 段的真回调经 gateway 落库（先落库后 ACK）。
 SQL
 if dc exec -T mysql mysql -h127.0.0.1 -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$SMOKE/fixture.sql" 2>"$SMOKE/fixture.err"; then
   check "夹具导入" "0" "0"
@@ -204,7 +296,7 @@ else
 fi
 
 # 假 KF 的脚本必须在角色启动**之前**就装好。移到这里是被实测教的：脚本原本在 C 段
-# 装载，而 B 段已插入的 notification 会被刚起的 jobs 抢先拉走——它看到的是空队列，
+# 装载，而此刻回调会在下一瞬间发出——被刚起的 jobs 抢先拉走的话，它看到的是空队列，
 # 于是把 notification 标 done、一条消息也没拉，后面的断言全部落空。
 cat > "$SMOKE/kf_script1.json" <<'JSON'
 {"reset":true,"pages":[{"next_cursor":"C1","has_more":0,
@@ -228,9 +320,23 @@ echo "--- C. 启动角色进程与消息处理 ---"
 # 角色在 schema 就绪之后才启动：它们一上来就轮询租户/任务，先于迁移启动会在日志
 # 里刷一串 `Table 'tas.tenants' doesn't exist` —— 功能上无害（会重试），但把一个
 # 正常时序变成看起来像故障的噪音。
-if ! dc --profile reliable up -d worker-a worker-b delivery jobs > "$SMOKE/up-roles.log" 2>&1; then
+if ! dc --profile reliable up -d worker-a worker-b delivery jobs gateway > "$SMOKE/up-roles.log" 2>&1; then
   echo "启动角色失败，见 $SMOKE/up-roles.log"; tail -30 "$SMOKE/up-roles.log"; exit 1
 fi
+gateway_ready=0
+for i in $(seq 1 30); do
+  if curl -s --max-time 2 "$GATEWAY/healthz" | grep -q '"ok"'; then gateway_ready=1; break; fi
+  sleep 1
+done
+check "可靠 gateway 就绪" "1" "$gateway_ready"
+if [ "$gateway_ready" != 1 ]; then echo "gateway 没起来，不再往下跑"; exit 1; fi
+
+# 真回调：gateway 验签 → 落 channel_notifications → 才 ACK "success"。
+kf_code=$(post_kf_callback "FIXTURE-EVTOK" "wk1")
+check "KF 回调 HTTP 200" "200" "$kf_code"
+check "KF 回调 ACK=success" "success" "$(cat "$SMOKE/_callback_ack.txt")"
+check "真回调落 notification（先落库后 ACK）" "1" \
+  "$(mysql_q "SELECT COUNT(*) FROM channel_notifications WHERE tenant_id='$TENANT'")"
 
 if wait_sql "SELECT status FROM inbox_messages WHERE tenant_id='$TENANT' ORDER BY in_seq LIMIT 1" "done" 90; then
   check "消息被 inbox 受理并执行完成" "done" "done"
@@ -268,12 +374,9 @@ JSON
 curl -s -X POST "$MODEL/__kf_script" --data-binary @"$SMOKE/kf_script2.json" > "$SMOKE/kf_script2.out"
 has "KF 脚本已装载（第二页）" "$SMOKE/kf_script2.out" '"pages":1'
 
-cat > "$SMOKE/notification2.sql" <<SQL
-INSERT INTO channel_notifications (tenant_id, binding_id, event_token, scope_key)
-SELECT '$TENANT', binding_id, 'FIXTURE-EVTOK-2', 'wk1'
-FROM channel_bindings WHERE tenant_id='$TENANT' AND public_id='main';
-SQL
-dc exec -T mysql mysql -h127.0.0.1 -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$SMOKE/notification2.sql" 2>/dev/null
+# 第二条真回调：同一 open_kfid、新 event token。
+d_code=$(post_kf_callback "FIXTURE-EVTOK-2" "wk1")
+check "第二条 KF 回调 HTTP 200" "200" "$d_code"
 
 wait_sql "SELECT COUNT(*) FROM inbox_messages WHERE tenant_id='$TENANT'" "2" 60 \
   && check "第二条消息到达 inbox" "2" "2" \
@@ -292,6 +395,34 @@ check "上游模型共被调用两次" "2" \
   "$(curl -s "$MODEL/__mode" | python3 -c 'import sys,json;print(json.load(sys.stdin)["requests"])')"
 check "没有遗留的未投递回复" "0" \
   "$(mysql_q "SELECT COUNT(*) FROM reply_outbox WHERE tenant_id='$TENANT' AND status IN ('pending','unknown','dead')")"
+
+echo "--- D2. 会话投影：Redis 缓存追上 MySQL 事实源 ---"
+# 每次提交都入队 session_project；jobs 排空后投影版本应等于 session_version。
+# 用 wait 允许投影滞后（它是缓存），并用 python 比较两边的 version——
+# 只 grep "version": 2 会把 MySQL 自己的版本号当证据，那是假绿。
+cat > "$SMOKE/proj_check.py" <<'PY'
+import json,sys
+try:
+    # dc run mixes compose chatter and the binary banner into stdout before
+    # the JSON; the document starts at the first brace.
+    raw=open(sys.argv[1]).read()
+    d=json.loads(raw[raw.index("{"):])
+    p=d.get("projection") or {}
+    print(1 if p.get("present") and p.get("version")==d["mysql"]["version"] else 0)
+except Exception:
+    print(0)
+PY
+PK=$(mysql_q "SELECT session_pk FROM sessions WHERE tenant_id='$TENANT' LIMIT 1")
+proj_file="$SMOKE/session_state.json"
+proj_ok=0
+for i in $(seq 1 30); do
+  dc run --rm --no-deps worker-a -session-state "$PK" -resolve-tenant "$TENANT" \
+    -config /config/config.yaml > "$proj_file" 2>&1
+  [ "$(python3 "$SMOKE/proj_check.py" "$proj_file")" = "1" ] && proj_ok=1 && break
+  sleep 1
+done
+check "投影存在且版本追上 MySQL（允许滞后，wait 收敛）" "1" "$proj_ok"
+has "session-state 输出含 projection 段" "$proj_file" '"projection"'
 
 echo "--- E. 受控工具：revision 固定 HTTP 工具，账本留证 ---"
 # 工具段用新会话：存量会话固定 rev1（无工具），发布/回滚只影响新会话——这一步
@@ -343,12 +474,8 @@ JSON
 curl -s -X POST "$MODEL/__kf_script" --data-binary @"$SMOKE/kf_script3.json" > "$SMOKE/kf_script3.out"
 has "KF 脚本已装载（工具会话）" "$SMOKE/kf_script3.out" '"pages":1'
 
-cat > "$SMOKE/notification3.sql" <<SQL
-INSERT INTO channel_notifications (tenant_id, binding_id, event_token, scope_key)
-SELECT '$TENANT', binding_id, 'FIXTURE-EVTOK-3', 'wk1'
-FROM channel_bindings WHERE tenant_id='$TENANT' AND public_id='main';
-SQL
-dc exec -T mysql mysql -h127.0.0.1 -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$SMOKE/notification3.sql" 2>/dev/null
+e_code=$(post_kf_callback "FIXTURE-EVTOK-3" "wk1")
+check "工具会话回调 HTTP 200（第 3 条真回调）" "200" "$e_code"
 
 wait_sql "SELECT status FROM tool_calls WHERE tenant_id='$TENANT' AND tool_name='echo_upstream' ORDER BY call_id DESC LIMIT 1" "succeeded" 90 \
   && check "工具调用在账本里落 succeeded" "succeeded" "succeeded" \
@@ -420,12 +547,8 @@ cat > "$SMOKE/kf_script4.json" <<'JSON'
 JSON
 curl -s -X POST "$MODEL/__kf_script" --data-binary @"$SMOKE/kf_script4.json" > "$SMOKE/kf_script4.out"
 has "KF 脚本已装载（charge 会话）" "$SMOKE/kf_script4.out" '"pages":1'
-cat > "$SMOKE/notification4.sql" <<SQL
-INSERT INTO channel_notifications (tenant_id, binding_id, event_token, scope_key)
-SELECT '$TENANT', binding_id, 'FIXTURE-EVTOK-4', 'wk1'
-FROM channel_bindings WHERE tenant_id='$TENANT' AND public_id='main';
-SQL
-dc exec -T mysql mysql -h127.0.0.1 -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$SMOKE/notification4.sql" 2>/dev/null
+f_code=$(post_kf_callback "FIXTURE-EVTOK-4" "wk1")
+check "charge 会话回调 HTTP 200（第 4 条真回调）" "200" "$f_code"
 
 wait_sql "SELECT COUNT(*) FROM sessions WHERE tenant_id='$TENANT' AND actor_key='ext-tool-2' AND blocked_reason LIKE 'tool %'" "1" 90 \
   && check "不确定的写调用阻断了会话" "1" "1" \
@@ -558,6 +681,46 @@ check "embedding 端点被调用过" "1" \
   "$(curl -s "$MODEL/__mode" | python3 -c 'import sys,json;print(1 if json.load(sys.stdin)["embeddings"]>0 else 0)')"
 echo "知识段结束：upload→index→ready 管道验证完毕；tool call 验证在集成测试中"
 check "没有遗留的未投递回复（知识段结束）" "0" \
+  "$(mysql_q "SELECT COUNT(*) FROM reply_outbox WHERE tenant_id='$TENANT' AND status IN ('pending','unknown','dead')")"
+
+echo "--- H. 可靠 gateway：webchat 邮箱与企微投递 ---"
+# webchat：接收端持久化（落库在 202 之前）；回复走 outbox → delivery 确认（webchat
+# 的 sent 只是"可推送"）→ 邮箱把 sent 且未推送的行推给 SSE 连接并标记 pushed_at。
+cat > "$SMOKE/webchat_msg.json" <<'JSON'
+{"user":"webuser","msg_id":"web-1","text":"hello from webchat e2e"}
+JSON
+web_code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  "$GATEWAY/callback/webchat/$TENANT" --data-binary @"$SMOKE/webchat_msg.json")
+check "webchat 回调 202" "202" "$web_code"
+wait_sql "SELECT COUNT(*) FROM sessions WHERE tenant_id='$TENANT' AND actor_key='webuser'" "1" 30 \
+  && check "webchat 消息进入 inbox（会话建立）" "1" "1" \
+  || check "webchat 消息进入 inbox（会话建立）" "1" \
+     "$(mysql_q "SELECT COUNT(*) FROM sessions WHERE tenant_id='$TENANT' AND actor_key='webuser'")"
+wait_sql "SELECT status FROM reply_outbox WHERE tenant_id='$TENANT' AND channel_type='webchat' LIMIT 1" "sent" 60 >/dev/null \
+  && check "webchat 回复由 delivery 确认 sent" "sent" "sent" \
+  || check "webchat 回复由 delivery 确认 sent" "sent" \
+     "$(mysql_q "SELECT status FROM reply_outbox WHERE tenant_id='$TENANT' AND channel_type='webchat' LIMIT 1")"
+# 连 4 秒（邮箱每秒轮询一次；已 sent 未推送的行会被补推）。curl 超时退出，吞掉。
+curl -sN --max-time 4 "$GATEWAY/webchat/stream?tenant=$TENANT&user=webuser" > "$SMOKE/webchat_sse.log" 2>&1 || true
+has "webchat SSE 收到 done 帧" "$SMOKE/webchat_sse.log" '"done":true'
+check "webchat 回复已标记 pushed_at" "1" \
+  "$(mysql_q "SELECT COUNT(*) FROM reply_outbox WHERE tenant_id='$TENANT' AND channel_type='webchat' AND pushed_at IS NOT NULL")"
+
+# 企微：真回调 → inbox → worker → delivery 经企微 sender 投到假上游并记录。
+wecom_code=$(post_wecom_callback "ext-wecom-1" "hello from wecom e2e" 4561255354251345929)
+check "企微回调 HTTP 200" "200" "$wecom_code"
+check "企微回调 ACK=success" "success" "$(cat "$SMOKE/_callback_ack.txt")"
+wait_sql "SELECT COUNT(*) FROM sessions WHERE tenant_id='$TENANT' AND actor_key='ext-wecom-1'" "1" 30 \
+  && check "企微消息进入 inbox（会话建立）" "1" "1" \
+  || check "企微消息进入 inbox（会话建立）" "1" \
+     "$(mysql_q "SELECT COUNT(*) FROM sessions WHERE tenant_id='$TENANT' AND actor_key='ext-wecom-1'")"
+wait_sql "SELECT status FROM reply_outbox WHERE tenant_id='$TENANT' AND channel_type='wecom' LIMIT 1" "sent" 60 >/dev/null \
+  && check "企微回复由 delivery 投递成功" "sent" "sent" \
+  || check "企微回复由 delivery 投递成功" "sent" \
+     "$(mysql_q "SELECT status FROM reply_outbox WHERE tenant_id='$TENANT' AND channel_type='wecom' LIMIT 1")"
+curl -s "$MODEL/__wecom_sent" > "$SMOKE/wecom_sent.json"
+has "假企微收到回复（收件人=FromUserName）" "$SMOKE/wecom_sent.json" '"touser":"ext-wecom-1"'
+check "没有遗留的未投递回复（本段结束）" "0" \
   "$(mysql_q "SELECT COUNT(*) FROM reply_outbox WHERE tenant_id='$TENANT' AND status IN ('pending','unknown','dead')")"
 
 printf '\n=== %d PASS / %d FAIL ===\n' "$pass" "$fail"

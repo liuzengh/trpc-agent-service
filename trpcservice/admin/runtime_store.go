@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
@@ -9,6 +10,14 @@ import (
 )
 
 const runtimeConfigKey = "runtime-config"
+
+// ErrSnapshotUnavailable marks a Load that could not reach the snapshot
+// store at all, as opposed to a snapshot that exists but cannot be parsed.
+// The distinction matters at boot: an unreachable store is the very failure
+// the session probe reports a few lines later with a message that names the
+// dependency, so the caller may fall back to the file config; a broken
+// snapshot is data corruption and must not be silently ignored.
+var ErrSnapshotUnavailable = errors.New("runtime config: snapshot store unavailable")
 
 // RuntimeStore preserves live admin changes independently of a Pod's writable
 // filesystem. Redis is used only when the platform already selected Redis as
@@ -28,8 +37,11 @@ func NewRedisRuntimeStore(state coordination.StateStore) RuntimeStore {
 
 func (s *redisRuntimeStore) Load(ctx context.Context) (*config.Config, error) {
 	raw, err := s.state.Get(ctx, runtimeConfigKey)
-	if err != nil || raw == "" {
-		return nil, err
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrSnapshotUnavailable, err)
+	}
+	if raw == "" {
+		return nil, nil
 	}
 	cfg, err := config.LoadBytes([]byte(raw))
 	if err != nil {

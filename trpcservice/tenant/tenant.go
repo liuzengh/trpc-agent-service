@@ -5,9 +5,11 @@ package tenant
 // the gitignored config file (or MODEL_* environment overrides) and must
 // never be written to logs, traces, or error reports.
 type ModelConfig struct {
-	Name    string `yaml:"name"`               // model name, e.g. "deepseek-v4-flash"
-	APIKey  string `yaml:"api_key"`            // secret; KMS-encrypted in production deployments
-	BaseURL string `yaml:"base_url,omitempty"` // optional OpenAI-compatible endpoint
+	Name                string `yaml:"name"`               // model name, e.g. "deepseek-v4-flash"
+	APIKey              string `yaml:"api_key"`            // secret; KMS-encrypted in production
+	BaseURL             string `yaml:"base_url,omitempty"` // optional OpenAI-compatible endpoint
+	PromptCostPer1K     uint32 `yaml:"prompt_cost_per_1k,omitempty"`
+	CompletionCostPer1K uint32 `yaml:"completion_cost_per_1k,omitempty"`
 }
 
 // WeComBinding is one WeCom (企业微信) self-built app credential set. All

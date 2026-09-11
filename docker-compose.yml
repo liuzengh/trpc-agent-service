@@ -294,8 +294,10 @@ services:
       CONTROLPLANE_MYSQL_DSN: ${RELIABLE_MYSQL_DSN:-tas:taspw@tcp(mysql:3306)/tas}
       WORKER_ID: delivery-1
       # Replies go out through the same fake upstream the model does: its KF
-      # stub answers the official send_msg shape and records what it got.
+      # stub answers the official send_msg shape and records what it got, and
+      # its WeCom stub answers message/send the same way.
       KF_API_BASE: ${KF_API_BASE:-http://fake-model:9009}
+      WECOM_API_BASE: ${WECOM_API_BASE:-http://fake-model:9009}
     networks: [tas]
 
   jobs:
@@ -325,6 +327,31 @@ services:
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://fake-model:9009/v1}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-fake-embed}
       EMBEDDING_DIM: "64"
+    networks: [tas]
+
+  # The durable receive face: verified callbacks that persist before ACKing,
+  # plus the webchat mailbox. No runner and no session state live here —
+  # execution is the worker role's job — which is exactly what lets this
+  # process restart without dropping a message the platform has already been
+  # told "success" for. It inherits the image HEALTHCHECK (its /readyz pings
+  # MySQL, the store every ACK promise depends on).
+  gateway:
+    image: ${IMAGE:-trpc-agent-service:local}
+    container_name: tas-gateway
+    profiles: [reliable]
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: ["-role", "gateway", "-config", "/config/config.yaml"]
+    ports:
+      - "${RELIABLE_GATEWAY_PORT:-9020}:8080"
+    volumes:
+      - ${CONFIG_DIR:-./deploy/compose/config}:/config:ro
+    environment:
+      CONTROLPLANE_MODE: mysql
+      CONTROLPLANE_MYSQL_DSN: ${RELIABLE_MYSQL_DSN:-tas:taspw@tcp(mysql:3306)/tas}
+      WORKER_ID: gateway-1
     networks: [tas]
 
   # Qdrant and MinIO are part of the reliable profile because the pipeline

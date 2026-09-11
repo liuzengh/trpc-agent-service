@@ -705,3 +705,45 @@ func TestShippedExampleStaysUsable(t *testing.T) {
 		t.Fatalf("template does not survive a save/load round trip:\nbefore = %+v\nafter  = %+v", cfg, back)
 	}
 }
+
+func TestSkillsAndWorkspaceSections(t *testing.T) {
+	skillsRoot := t.TempDir()
+	wsRoot := t.TempDir()
+	yaml := "default_tenant: demo\nskills:\n  root: " + skillsRoot + "\nworkspace:\n  root: " + wsRoot + "\n  timeout: 12s\ntenants:\n  - id: demo\n    model:\n      name: gpt-4o-mini\n      api_key: sk-test\n"
+	cfg, err := LoadBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Skills.Root != skillsRoot {
+		t.Fatalf("Skills.Root = %q, want %q", cfg.Skills.Root, skillsRoot)
+	}
+	if cfg.Workspace.Root != wsRoot {
+		t.Fatalf("Workspace.Root = %q", cfg.Workspace.Root)
+	}
+	if cfg.Workspace.Timeout != 12*time.Second {
+		t.Fatalf("Workspace.Timeout = %v, want 12s", cfg.Workspace.Timeout)
+	}
+	if cfg.Workspace.MaxAge != DefaultWorkspaceMaxAge {
+		t.Fatalf("Workspace.MaxAge = %v, want 24h", cfg.Workspace.MaxAge)
+	}
+	data, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	cfg2, err := LoadBytes(data)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if cfg2.Skills.Root != skillsRoot || cfg2.Workspace.Timeout != 12*time.Second {
+		t.Fatalf("round-trip broke skills or workspace")
+	}
+	cfgBad := *cfg
+	cfgBad.Skills.Root = "/definitely/missing"
+	if err := cfgBad.Validate(); err == nil {
+		t.Fatal("missing Skills.Root must fail validation")
+	}
+	cfgBad.Workspace.Root = "/definitely/missing"
+	if err := cfgBad.Validate(); err == nil {
+		t.Fatal("missing Workspace.Root must fail validation")
+	}
+}

@@ -12,9 +12,11 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	frameworkskill "trpc.group/trpc-go/trpc-agent-go/skill"
 	frameworktool "trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	platformskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 )
@@ -35,11 +37,11 @@ const (
 // traces label model calls with it.
 const AgentName = "assistant"
 
-// NewRunner builds one tenant's walking-skeleton runner: an LLMAgent backed
-// by the tenant's OpenAI-compatible model, streaming output, over the shared
-// session service (memory or redis, selected platform-wide via trpcservice/
-// storage). All tenants share one session.Service instance; isolation comes
-// from the {tenant}:{channel}:{user} session ids.
+// NewRunner builds one tenant's runner: an LLMAgent backed by the tenant's
+// OpenAI-compatible model, streaming output, over the shared session service
+// (memory or redis, selected platform-wide via trpcservice/storage). All
+// tenants share one session.Service instance; isolation comes from the
+// {tenant}:{channel}:{user} session ids.
 //
 // maxLLMCalls is the per-message ceiling on model calls. It is a parameter
 // rather than an llmagent default because the framework treats a
@@ -48,12 +50,15 @@ const AgentName = "assistant"
 // (docs/spec-deployment-fault-drill.md §4.5), so it is corrected instead of
 // trusted.
 //
-// extra carries tools the caller has already assembled — in the reliable
+// tools carries tools the caller has already assembled — in the reliable
 // path, the revision's pinned tools wrapped by the tool governor. They are
 // appended to the legacy allowlist selection rather than replacing it so the
 // two paths keep sharing this one constructor; the reliable runner factory
 // never populates the legacy allowlist, so there is nothing to double-add.
-func NewRunner(t *tenant.Context, sess session.Service, maxLLMCalls int, extra ...frameworktool.Tool) (runner.Runner, error) {
+// opts are the remaining llmagent options a caller assembles (today: the
+// skill mounting from SkillOptions), kept as options so the two paths cannot
+// drift on how skills are wired.
+func NewRunner(t *tenant.Context, sess session.Service, maxLLMCalls int, tools []frameworktool.Tool, opts ...llmagent.Option) (runner.Runner, error) {
 	if t.Model.APIKey == "" {
 		return nil, fmt.Errorf("tenant %s: model api key is required", t.ID)
 	}
@@ -75,18 +80,52 @@ func NewRunner(t *tenant.Context, sess session.Service, maxLLMCalls int, extra .
 	}
 	llm := openai.New(modelName, modelOpts...)
 
-	tools := append(platformtool.Select(t.Tools.Allowed), extra...)
-	a := llmagent.New(AgentName,
+	allTools := append(platformtool.Select(t.Tools.Allowed), tools...)
+	base := []llmagent.Option{
 		llmagent.WithModel(llm),
 		llmagent.WithInstruction(instruction),
 		llmagent.WithGenerationConfig(model.GenerationConfig{Stream: true}),
 		llmagent.WithMaxLLMCalls(maxLLMCalls),
-		llmagent.WithTools(tools),
-	)
+		llmagent.WithTools(allTools),
+	}
+	base = append(base, opts...)
+	a := llmagent.New(AgentName, base...)
 
 	return runner.NewRunner(appName, a,
 		runner.WithSessionService(sess),
 	), nil
+}
+
+// SkillOptions returns the llmagent options that mount one tenant's skill
+// library, or nil when the deployment or the tenant has none. It is the
+// legacy path's entry point; the reliable runner factory resolves the same
+// options from a revision pin through SkillOptionsFor.
+func SkillOptions(root, tenantID string) ([]llmagent.Option, error) {
+	if root == "" {
+		return nil, nil
+	}
+	repo, ok, err := platformskill.For(root, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return SkillOptionsFor(repo), nil
+}
+
+// SkillOptionsFor mounts one already-resolved repository.
+func SkillOptionsFor(repo *frameworkskill.FSRepository) []llmagent.Option {
+	return []llmagent.Option{
+		llmagent.WithSkills(repo),
+		// Explicit knowledge-only profile: this is the documented opt-out
+		// from the framework's convenience executor fallback. Code execution
+		// is a separate, explicitly configured capability (G5); adding skills
+		// must never silently add a local executor.
+		llmagent.WithSkillToolProfile(llmagent.SkillToolProfileKnowledgeOnly),
+		llmagent.WithMaxLoadedSkills(8),
+		llmagent.WithMaxOverviewSkills(64),
+	}
 }
 
 // Registry holds one Runner per tenant over a shared session service.
@@ -98,7 +137,10 @@ type Registry struct {
 	mu      sync.RWMutex
 	runners map[string]runner.Runner
 	def     string
-	sess    session.Service
+	// sessionFor resolves one tenant's session service. It is re-queried on
+	// every Apply, so a reload picks up re-routed backends (see storage.Router
+	// for the legacy path's per-tenant backend selection).
+	sessionFor func(tenantID string) session.Service
 }
 
 // NewRegistry builds a Runner for every tenant in the loaded config, all
@@ -106,13 +148,24 @@ type Registry struct {
 // means a config change plus restart (first-phase limitation, see
 // docs/spec-storage-redis.md).
 func NewRegistry(cfg *config.Config, sess session.Service) (*Registry, error) {
+	return NewRegistryWith(cfg, func(string) session.Service { return sess })
+}
+
+// NewRegistryWith is NewRegistry over a per-tenant session-service provider,
+// which is how the legacy gateway path honours backend_profiles: each tenant
+// may land on its own backend instead of the platform default.
+func NewRegistryWith(cfg *config.Config, sessionFor func(tenantID string) session.Service) (*Registry, error) {
 	r := &Registry{
-		runners: make(map[string]runner.Runner, len(cfg.Tenants)),
-		def:     cfg.DefaultTenant,
-		sess:    sess,
+		runners:    make(map[string]runner.Runner, len(cfg.Tenants)),
+		def:        cfg.DefaultTenant,
+		sessionFor: sessionFor,
 	}
 	for id, t := range cfg.Tenants {
-		rr, err := NewRunner(t, sess, cfg.Agent.MaxLLMCalls)
+		opts, err := SkillOptions(cfg.Skills.Root, id)
+		if err != nil {
+			return nil, fmt.Errorf("tenant %s: skills: %w", id, err)
+		}
+		rr, err := NewRunner(t, sessionFor(id), cfg.Agent.MaxLLMCalls, nil, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -122,12 +175,16 @@ func NewRegistry(cfg *config.Config, sess session.Service) (*Registry, error) {
 }
 
 // Apply rebuilds the runner set for a new config (Admin API hot reload),
-// reusing the same session service. New runners are fully built before the
-// swap, so a build failure keeps the old set serving.
+// reusing each tenant's session provider. New runners are fully built before
+// the swap, so a build failure keeps the old set serving.
 func (r *Registry) Apply(cfg *config.Config) error {
 	runners := make(map[string]runner.Runner, len(cfg.Tenants))
 	for id, t := range cfg.Tenants {
-		rr, err := NewRunner(t, r.sess, cfg.Agent.MaxLLMCalls)
+		opts, err := SkillOptions(cfg.Skills.Root, id)
+		if err != nil {
+			return fmt.Errorf("tenant %s: skills: %w", id, err)
+		}
+		rr, err := NewRunner(t, r.sessionFor(id), cfg.Agent.MaxLLMCalls, nil, opts...)
 		if err != nil {
 			return err
 		}

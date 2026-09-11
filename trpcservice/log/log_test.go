@@ -3,6 +3,7 @@ package log
 import (
 	"bytes"
 	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -46,5 +47,24 @@ func TestRedact(t *testing.T) {
 		if got := Redact(c.in); got != c.want {
 			t.Fatalf("Redact(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// TestRedactedAttrLogger exercises the slog Handler wrapper that prevents
+// secret leakage to stderr in production.
+func TestRedactedAttrLogger(t *testing.T) {
+	var buf bytes.Buffer
+	h := slog.NewJSONHandler(&buf, nil)
+	secret := "sk-supersecret"
+	slog.SetDefault(slog.New(WithLogRedaction(h, []string{secret})))
+	t.Cleanup(func() { slog.SetDefault(slog.New(slog.NewJSONHandler(nil, nil))) })
+
+	slog.Info("the secret is sk-supersecret-dont-tell", "key", "sk-supersecret-value")
+	out := buf.String()
+	if strings.Contains(out, secret) {
+		t.Fatalf("log output must not contain the secret: %s", out)
+	}
+	if !strings.Contains(out, "<redacted>") {
+		t.Fatalf("log output should contain the redacted marker: %s", out)
 	}
 }

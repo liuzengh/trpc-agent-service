@@ -48,6 +48,8 @@ default_tenant: demo
 #   json: false        # true = JSON encoding for container deployments
 # audit:
 #   file: data/audit.jsonl   # append-only JSONL trail; omit = log-only audit
+#   max_size_mb: 0           # >0 rotates the trail at this size (e.g. 64)
+#   max_backups: 3           # rotated generations kept (default 3 once rotation is on)
 # admin:
 #   token: REPLACE_WITH_A_LONG_RANDOM_TOKEN  # or inject ADMIN_TOKEN (preferred)
 # telemetry:

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,11 +16,25 @@ import (
 type WebChat struct {
 	mu      sync.Mutex
 	streams map[string]chan *OutboundMessage // key: tenantID + ":" + userID
+
+	// accept, when set, switches the callback into durable mode: the message
+	// is persisted before the 202 is written. A nil accept keeps the legacy
+	// in-process flow.
+	accept func(ctx context.Context, in *InboundMessage) error
 }
 
 // NewWebChat builds the webchat adapter.
 func NewWebChat() *WebChat {
 	return &WebChat{streams: make(map[string]chan *OutboundMessage)}
+}
+
+// WithDurableAccept turns the callback into the durable receive path: once
+// an acceptor is set, Callback persists the normalized message through it
+// and only then answers 202. An acceptor error is returned to the HTTP layer
+// with no 202 written, so a client (or its retry) sees a real failure.
+func (c *WebChat) WithDurableAccept(accept func(ctx context.Context, in *InboundMessage) error) *WebChat {
+	c.accept = accept
+	return c
 }
 
 // Type implements Adapter.
@@ -46,8 +61,25 @@ func (c *WebChat) Callback(w http.ResponseWriter, r *http.Request) ([]*InboundMe
 	if req.MsgID == "" {
 		req.MsgID = fmt.Sprintf("%s-%d", req.User, time.Now().UnixNano())
 	}
+	// The tenant is parsed here, not inherited from the caller: the durable
+	// accept hook runs inside Callback, before any gateway wrapping could
+	// attach the path's tenant.
+	in := &InboundMessage{
+		TenantID: strings.Trim(strings.TrimPrefix(r.URL.Path, "/callback/"+string(TypeWebChat)+"/"), "/"),
+		Channel:  TypeWebChat,
+		UserID:   req.User,
+		MsgID:    req.MsgID,
+		Text:     req.Text,
+	}
+	if c.accept != nil {
+		// Durable mode: persist before the 202 so a failed write is a
+		// retryable error, not a silently accepted message.
+		if err := c.accept(r.Context(), in); err != nil {
+			return nil, fmt.Errorf("webchat: accept message: %w", err)
+		}
+	}
 	w.WriteHeader(http.StatusAccepted)
-	return []*InboundMessage{{UserID: req.User, MsgID: req.MsgID, Text: req.Text}}, nil
+	return []*InboundMessage{in}, nil
 }
 
 // Send implements Adapter: pushes one chunk/final to the user's SSE stream.

@@ -26,6 +26,7 @@
 | [`spec-deployment-fault-drill.md`](spec-deployment-fault-drill.md) | 9/9–9/10 | 部署与韧性：go.mod 冻结、Dockerfile/Compose/K8s 清单、端到端联调（44 条）、故障演练 D1–D7（143 条） |
 | [`spec-reliable-loop.md`](spec-reliable-loop.md) | 第二批 | 可靠消息闭环：MySQL 事实源、Inbox/租约/fencing/原子提交、分角色进程（worker/delivery/jobs）、KF durable 拉取，`scripts/reliable_e2e.sh` 74 条断言；故障矩阵 `scripts/reliable_fault_drill.sh` 29 条（R1 kill 接管 / R2 MySQL 停机 / R3 Qdrant 停机自愈） |
 | [`spec-tool-governance.md`](spec-tool-governance.md) | 第二批 | 受控工具与执行账本（P3）：`tool_calls` 台账、governor 检查链、SSRF/secret/schema 拒绝、unknown 阻断与人工处置（CLI + admin/v2），E2E 扩到 63 条断言 |
+| [`spec-platform-completion.md`](spec-platform-completion.md) | 第三批（待实施） | 平台补齐：可靠链路最后一公里（gateway 接收端与多通道投递、worker 工具接线）、Skill/Workspace 两空壳、租户级后端选择、迁移 CLI、灰度发布、审计轮转、验证补强（G1–G10 / S1–S6） |
 | [`deps-baseline.txt`](deps-baseline.txt) | 9/9 起冻结，第二批持续更新 | go.mod 冻结基线（第二批后 17 项直接依赖），由 `scripts/check_deps.sh` 当门禁读 |
 
 ## 部署与运维

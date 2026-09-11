@@ -125,3 +125,18 @@ func contains(list []string, want string) bool {
 	}
 	return false
 }
+
+// ResolvedSecrets returns every plaintext secret the resolver has been
+// configured to know about (env var values from the allowlist). These are
+// the values the log redactor should mask, collected at a point in time.
+// File-root secrets are not enumerated (and for log redaction the env-var
+// secrets — API keys, channel credentials — are the critical ones).
+func (r *Resolver) ResolvedSecrets() []string {
+	var out []string
+	for _, name := range r.allowed.EnvVars {
+		if v := os.Getenv(name); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}

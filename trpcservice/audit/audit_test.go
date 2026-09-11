@@ -168,3 +168,65 @@ func countLines(b []byte) int {
 	}
 	return n
 }
+
+// TestRotationDefaultsBackupGeneration pins the documented default: rotation
+// on with no MaxBackups keeps 3 generations, not "no backups".
+func TestRotationDefaultsBackupGeneration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	l, err := NewWithOptions(Options{Path: path, MaxSizeMB: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	if l.maxBackups != 3 {
+		t.Fatalf("maxBackups = %d, want 3 when rotation is on and no bound was given", l.maxBackups)
+	}
+}
+
+// TestRotationRollsAtThresholdAndBoundsBackups drives the size-based rotation
+// for real: the option is in whole megabytes, so the test writes whole
+// megabytes, crosses the cap twice, and then holds the contract to three
+// properties — the live file stays under the cap, the generations exist in
+// order, and every record survives across the live file plus the backups
+// (rotation must not lose a line).
+func TestRotationRollsAtThresholdAndBoundsBackups(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	l, err := NewWithOptions(Options{Path: path, MaxSizeMB: 1, MaxBackups: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ~4.1KB per record: 640 records ≈ 2.6MB, crossing a 1MB cap twice.
+	detail := strings.Repeat("x", 4096)
+	const records = 640
+	for i := 0; i < records; i++ {
+		l.Log(Record{Event: EventInbound, Detail: detail})
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("live file: %v", err)
+	}
+	if live.Size() >= 1<<20+8192 {
+		t.Fatalf("live file is %d bytes, want under the 1MB cap plus one record", live.Size())
+	}
+	for _, gen := range []string{path + ".1", path + ".2"} {
+		if _, err := os.Stat(gen); err != nil {
+			t.Fatalf("generation %s: %v", gen, err)
+		}
+	}
+	if _, err := os.Stat(path + ".3"); !os.IsNotExist(err) {
+		t.Fatalf("path.3 exists (err=%v): MaxBackups=2 must keep exactly two generations", err)
+	}
+
+	total := countLines(mustRead(t, path)) +
+		countLines(mustRead(t, path+".1")) +
+		countLines(mustRead(t, path+".2"))
+	if total != records {
+		t.Fatalf("records across live+backups = %d, want %d: rotation lost lines", total, records)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -511,10 +512,13 @@ drain:
 		AgentName: agent.AgentName, Decision: audit.DecisionOK,
 		LatencyMS:    latency.Milliseconds(),
 		PromptTokens: promptTokens, CompletionTokens: completionTokens,
+		CostMicroCents: computeCostMicroCents(promptTokens, completionTokens, lim.PromptCostPer1K, lim.CompletionCostPer1K),
 	})
 	g.gov.Metrics.ModelLatency(in.TenantID, latency)
 	g.gov.Metrics.Tokens(in.TenantID, "prompt", promptTokens)
 	g.gov.Metrics.Tokens(in.TenantID, "completion", completionTokens)
+	g.gov.Metrics.Cost(in.TenantID,
+		computeCostMicroCents(promptTokens, completionTokens, lim.PromptCostPer1K, lim.CompletionCostPer1K))
 
 	result, notice := resultOK, ""
 	replyDecision := audit.DecisionOK
@@ -568,16 +572,39 @@ func (g *Gateway) failModel(ctx context.Context, a Adapter, f modelFailure) {
 	g.reply(ctx, a, f.in, reply, audit.DecisionError)
 }
 
+// claim deduplicates an IM delivery. The shared coordinator is preferred —
+// two replicas must not both run the same message — but a coordinator that
+// cannot answer degrades to the in-process table instead of rejecting the
+// message: on a single replica that is the exact same semantics, and on
+// several it narrows dedup to per-replica, which is the honest cost of the
+// outage (the backend that would have prevented duplicates is the one that
+// is down). Rejecting here instead looked identical to a hang from the IM
+// side: the adapter had already ACKed the callback, so nothing retried and
+// nothing replied.
 func (g *Gateway) claim(ctx context.Context, id string) (bool, error) {
 	if g.coord != nil {
-		return g.coord.Claim(ctx, id, 10*time.Minute)
+		ok, err := g.coord.Claim(ctx, id, 10*time.Minute)
+		if err == nil {
+			return ok, nil
+		}
+		slog.Warn("gateway: dedup coordinator unavailable; falling back to the in-process table",
+			"err", err)
 	}
 	return !g.dedup.seen(id), nil
 }
 
+// lockSession serializes one session's dispatches. Same degradation rule as
+// claim: a coordinator outage falls back to the in-process lock rather than
+// failing the message, so the single-replica serialization the platform
+// started with still holds while Redis is away.
 func (g *Gateway) lockSession(ctx context.Context, sessionID string, ttl time.Duration) (func(), error) {
 	if g.coord != nil {
-		return g.coord.Lock(ctx, sessionID, ttl+10*time.Second)
+		release, err := g.coord.Lock(ctx, sessionID, ttl+10*time.Second)
+		if err == nil {
+			return release, nil
+		}
+		slog.Warn("gateway: session lock coordinator unavailable; falling back to the in-process lock",
+			"err", err)
 	}
 	return g.serial.lock(sessionID), nil
 }

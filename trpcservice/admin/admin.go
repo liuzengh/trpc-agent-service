@@ -29,13 +29,14 @@ import (
 // config, mutates the clone, then validates + saves + hot-applies it. A
 // failure at any stage leaves the running config untouched.
 type Service struct {
-	mu    sync.Mutex
-	path  string
-	cfg   *config.Config
-	reg   *agent.Registry
-	aud   *audit.Logger
-	store RuntimeStore
-	cp    *controlPlane
+	mu         sync.Mutex
+	path       string
+	cfg        *config.Config
+	reg        *agent.Registry
+	aud        *audit.Logger
+	store      RuntimeStore
+	cp         *controlPlane
+	commitHook func()
 }
 
 // NewService builds the admin service over the live config and registry.
@@ -49,6 +50,15 @@ func NewService(path string, cfg *config.Config, reg *agent.Registry, aud *audit
 // file remains a local recovery copy; the store is the shared source of truth.
 func (s *Service) WithRuntimeStore(store RuntimeStore) *Service {
 	s.store = store
+	return s
+}
+
+// WithCommitHook installs a callback that runs after a settings write is
+// committed (and not when it was rolled back). The session router uses it to
+// reload tenant backend choices from the control plane; the hook runs
+// without any lock of this service held, so it may take its own.
+func (s *Service) WithCommitHook(hook func()) *Service {
+	s.commitHook = hook
 	return s
 }
 
@@ -493,6 +503,9 @@ func (s *Service) commit(next *config.Config) error {
 		}
 	}
 	s.cfg = next
+	if s.commitHook != nil {
+		s.commitHook()
+	}
 	return nil
 }
 

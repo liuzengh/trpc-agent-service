@@ -73,14 +73,13 @@ func (k *WeChatKf) WithStateStore(state coordination.StateStore) *WeChatKf {
 }
 
 // WithDurableNotifications turns the callback into the durable receive path
-// (approved plan, "接收端"): once a notifier is set, Callback verifies, ACKs,
-// records a notification row through it, and stops. Pulling is the jobs
-// role's job then, using KfPuller.
+// (approved plan, "接收端"): once a notifier is set, Callback verifies,
+// records a notification row through it, and only then ACKs. Pulling is the
+// jobs role's job then, using KfPuller.
 //
-// A notifier error is returned to the HTTP layer: the ACK has already been
-// written by that point, so this is the caller's chance to log it — the row
-// either landed or it did not, and WeChat will retry the callback when it did
-// not get its "success".
+// A notifier error is returned to the HTTP layer with no ACK written: the
+// gateway turns it into a non-"success" response, which is exactly the
+// signal that makes WeChat retry the callback.
 func (k *WeChatKf) WithDurableNotifications(notify func(ctx context.Context, tenantID, eventToken, scopeKey string) error) *WeChatKf {
 	k.notify = notify
 	return k
@@ -163,21 +162,26 @@ func (k *WeChatKf) Callback(rw http.ResponseWriter, r *http.Request) ([]*Inbound
 	if err := xml.Unmarshal([]byte(plain), &ev); err != nil {
 		return nil, fmt.Errorf("parse decrypted event: %w", err)
 	}
-	_, _ = io.WriteString(rw, "success") // ACK 先落，拉取失败靠下次事件补齐
 	if ev.MsgType != "event" || ev.Event != "kf_msg_or_event" || ev.OpenKfId == "" {
-		return nil, nil // 非客服消息事件 v1 只 ACK 不处理
+		_, _ = io.WriteString(rw, "success") // 非客服消息事件 v1 只 ACK 不处理
+		return nil, nil
 	}
 	if k.notify != nil {
-		// Durable mode: the ACK above is the promise that survives this
-		// process. Pulling happens from the persisted notification, so a
-		// crash right here loses nothing but a race WeChat resolves by
-		// retrying the callback — and a retried callback that lands twice
-		// only produces a second notification, never a second message.
+		// Durable mode: the notification row must land BEFORE the ACK. The
+		// ACK is the promise that survives this process, so writing it first
+		// would turn a crash between ACK and record into a lost event —
+		// WeChat stops retrying a callback it saw acknowledged. Recording
+		// first makes that crash "no ACK yet", which WeChat resolves by
+		// retrying; a retried callback that lands twice only produces a
+		// second notification row, never a second message (both rows pull
+		// from the same persisted cursor and the inbox dedupes by id).
 		if err := k.notify(r.Context(), tenantID, ev.Token, ev.OpenKfId); err != nil {
 			return nil, fmt.Errorf("wechat_kf: record notification: %w", err)
 		}
+		_, _ = io.WriteString(rw, "success")
 		return nil, nil
 	}
+	_, _ = io.WriteString(rw, "success") // legacy inline flow: ACK, then pull
 	return k.syncMessages(r.Context(), tenantID, b, &ev)
 }
 

@@ -83,6 +83,8 @@ type fileYAML struct {
 	ControlPlane  *controlPlaneYAML `yaml:"control_plane,omitempty"`
 	Knowledge     *knowledgeYAML    `yaml:"knowledge,omitempty"`
 	Storage       *storageYAML      `yaml:"storage,omitempty"`
+	Skills        *skillsYAML       `yaml:"skills,omitempty"`
+	Workspace     *workspaceYAML    `yaml:"workspace,omitempty"`
 	Agent         *agentYAML        `yaml:"agent,omitempty"`
 	Log           *logYAML          `yaml:"log,omitempty"`
 	Audit         *auditYAML        `yaml:"audit,omitempty"`
@@ -155,6 +157,9 @@ type AgentConfig struct {
 	// quota above, 0 does not mean unlimited: it selects DefaultMaxLLMCalls,
 	// because "unlimited" is exactly the hole this field closes.
 	MaxLLMCalls int
+	// Model pricing for cost accounting (microcents per thousand tokens).
+	PromptCostPer1K     uint32
+	CompletionCostPer1K uint32
 }
 
 // LogConfig selects the structured log level and encoding.
@@ -165,8 +170,43 @@ type LogConfig struct {
 
 // AuditConfig points the append-only JSONL audit trail (proposal doc 3.5);
 // an empty File keeps audit records in the structured log only.
+//
+// MaxSizeMB rotates the trail when the current file reaches that size; 0
+// keeps the historical single append-only file. MaxBackups bounds how many
+// rotated generations are kept (the audit package defaults it to 3 once
+// rotation is on).
 type AuditConfig struct {
-	File string
+	File       string
+	MaxSizeMB  int
+	MaxBackups int
+}
+
+// SkillsConfig points the tenant skill library (SKILL.md repositories) at a
+// filesystem root; each tenant gets its own directory: <root>/<tenant_id>.
+// An empty root disables the capability. The root is deployment-owned, like
+// storage: it is never taken from a shared runtime snapshot.
+type SkillsConfig struct {
+	Root string
+}
+
+// Defaults for the workspace capability; the parser fills them and a
+// hand-made config that leaves zeros gets the same bounds from workspace.NewManager.
+const (
+	DefaultWorkspaceTimeout = 30 * time.Second
+	DefaultWorkspaceMaxAge  = 24 * time.Hour
+)
+
+// WorkspaceConfig enables the session-scoped sandbox working directory, one
+// directory per (tenant, session) under Root. The capability is off while
+// Root is empty; a revision that pins code_exec in such a deployment fails
+// loudly. Mode selects the executor: "local" (default) runs code as the
+// platform process — production deployments must add container-level
+// isolation rather than relying on this alone.
+type WorkspaceConfig struct {
+	Root    string
+	Mode    string
+	Timeout time.Duration
+	MaxAge  time.Duration
 }
 
 // AdminConfig protects the runtime configuration API. Prefer ADMIN_TOKEN in
@@ -202,6 +242,8 @@ type Config struct {
 	ControlPlane  ControlPlane
 	Knowledge     Knowledge
 	Storage       Storage
+	Skills        SkillsConfig
+	Workspace     WorkspaceConfig
 	Agent         AgentConfig
 	Log           LogConfig
 	Audit         AuditConfig
@@ -263,6 +305,10 @@ func LoadBytes(data []byte) (*Config, error) {
 	if cfg.Storage, err = parseStorage(f.Storage); err != nil {
 		return nil, err
 	}
+	cfg.Skills = parseSkills(f.Skills)
+	if cfg.Workspace, err = parseWorkspace(f.Workspace); err != nil {
+		return nil, err
+	}
 	if cfg.Agent, err = parseAgent(f.Agent); err != nil {
 		return nil, err
 	}
@@ -305,6 +351,12 @@ func (c *Config) Validate() error {
 		}
 	}
 	if err := c.validateStorage(); err != nil {
+		return err
+	}
+	if err := c.validateSkills(); err != nil {
+		return err
+	}
+	if err := c.validateWorkspace(); err != nil {
 		return err
 	}
 	if err := c.validateControlPlane(); err != nil {
@@ -357,6 +409,8 @@ func Marshal(cfg *Config) ([]byte, error) {
 		ControlPlane:  controlPlaneToYAML(cfg.ControlPlane),
 		Knowledge:     knowledgeToYAML(cfg.Knowledge),
 		Storage:       storageToYAML(cfg.Storage),
+		Skills:        skillsToYAML(cfg.Skills),
+		Workspace:     workspaceToYAML(cfg.Workspace),
 		Agent:         agentToYAML(cfg.Agent),
 		Log:           logToYAML(cfg.Log),
 		Audit:         auditToYAML(cfg.Audit),
@@ -510,6 +564,8 @@ type agentYAML struct {
 	MessageTimeout          string `yaml:"message_timeout,omitempty"`
 	MaxConcurrencyPerTenant int    `yaml:"max_concurrency_per_tenant,omitempty"`
 	MaxLLMCalls             int    `yaml:"max_llm_calls,omitempty"`
+	PromptCostPer1K         int    `yaml:"prompt_cost_per_1k,omitempty"`
+	CompletionCostPer1K     int    `yaml:"completion_cost_per_1k,omitempty"`
 }
 
 // parseAgent normalizes the agent section: it fills defaults, parses
@@ -616,11 +672,155 @@ type logYAML struct {
 }
 
 type auditYAML struct {
-	File string `yaml:"file,omitempty"`
+	File       string `yaml:"file,omitempty"`
+	MaxSizeMB  int    `yaml:"max_size_mb,omitempty"`
+	MaxBackups int    `yaml:"max_backups,omitempty"`
 }
 
 type adminYAML struct {
 	Token string `yaml:"token,omitempty"`
+}
+
+type skillsYAML struct {
+	Root string `yaml:"root,omitempty"`
+}
+
+type workspaceYAML struct {
+	Root    string `yaml:"root,omitempty"`
+	Mode    string `yaml:"mode,omitempty"`
+	Timeout string `yaml:"timeout,omitempty"`
+	MaxAge  string `yaml:"max_age,omitempty"`
+}
+
+// Workspace environment knobs, for deployments that mount the root per Pod
+// (the same convenience knowledge endpoints already have).
+const (
+	envWorkspaceRoot    = "WORKSPACE_ROOT"
+	envWorkspaceTimeout = "WORKSPACE_TIMEOUT"
+	envWorkspaceMaxAge  = "WORKSPACE_MAX_AGE"
+)
+
+// parseWorkspace normalizes the workspace section, filling defaults so the
+// rest of the platform reads concrete values.
+func parseWorkspace(w *workspaceYAML) (WorkspaceConfig, error) {
+	cfg := WorkspaceConfig{
+		Mode:    "local",
+		Timeout: DefaultWorkspaceTimeout,
+		MaxAge:  DefaultWorkspaceMaxAge,
+	}
+	if w != nil {
+		cfg.Root = strings.TrimSpace(w.Root)
+		if w.Mode != "" {
+			cfg.Mode = w.Mode
+		}
+		if w.Timeout != "" {
+			d, err := time.ParseDuration(w.Timeout)
+			if err != nil || d <= 0 {
+				return WorkspaceConfig{}, fmt.Errorf("workspace.timeout %q must be a positive duration", w.Timeout)
+			}
+			cfg.Timeout = d
+		}
+		if w.MaxAge != "" {
+			d, err := time.ParseDuration(w.MaxAge)
+			if err != nil || d <= 0 {
+				return WorkspaceConfig{}, fmt.Errorf("workspace.max_age %q must be a positive duration", w.MaxAge)
+			}
+			cfg.MaxAge = d
+		}
+	}
+	if v := os.Getenv(envWorkspaceRoot); v != "" {
+		cfg.Root = strings.TrimSpace(v)
+	}
+	if v := os.Getenv(envWorkspaceTimeout); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return WorkspaceConfig{}, fmt.Errorf("%s %q must be a positive duration", envWorkspaceTimeout, v)
+		}
+		cfg.Timeout = d
+	}
+	if v := os.Getenv(envWorkspaceMaxAge); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return WorkspaceConfig{}, fmt.Errorf("%s %q must be a positive duration", envWorkspaceMaxAge, v)
+		}
+		cfg.MaxAge = d
+	}
+	return cfg, nil
+}
+
+func workspaceToYAML(w WorkspaceConfig) *workspaceYAML {
+	if w.Root == "" {
+		return nil
+	}
+	y := &workspaceYAML{Root: w.Root}
+	if w.Mode != "" && w.Mode != "local" {
+		y.Mode = w.Mode
+	}
+	if w.Timeout > 0 && w.Timeout != DefaultWorkspaceTimeout {
+		y.Timeout = w.Timeout.String()
+	}
+	if w.MaxAge > 0 && w.MaxAge != DefaultWorkspaceMaxAge {
+		y.MaxAge = w.MaxAge.String()
+	}
+	return y
+}
+
+// validateWorkspace accepts the zero value as "disabled" and checks the
+// fields that only matter once the capability is on.
+func (c *Config) validateWorkspace() error {
+	switch c.Workspace.Mode {
+	case "", "local":
+	default:
+		return fmt.Errorf("workspace.mode %q must be local", c.Workspace.Mode)
+	}
+	if c.Workspace.Timeout < 0 {
+		return fmt.Errorf("workspace.timeout must not be negative")
+	}
+	if c.Workspace.MaxAge < 0 {
+		return fmt.Errorf("workspace.max_age must not be negative")
+	}
+	if c.Workspace.Root == "" {
+		return nil
+	}
+	info, err := os.Stat(c.Workspace.Root)
+	if err != nil {
+		return fmt.Errorf("workspace.root %q: %w", c.Workspace.Root, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("workspace.root %q is not a directory", c.Workspace.Root)
+	}
+	return nil
+}
+
+func parseSkills(s *skillsYAML) SkillsConfig {
+	if s == nil {
+		return SkillsConfig{}
+	}
+	return SkillsConfig{Root: strings.TrimSpace(s.Root)}
+}
+
+func skillsToYAML(s SkillsConfig) *skillsYAML {
+	if s.Root == "" {
+		return nil
+	}
+	return &skillsYAML{Root: s.Root}
+}
+
+// validateSkills fails fast on an unusable root: a configured directory that
+// does not exist is a deployment typo, and discovering it per message would
+// turn it into a runtime error instead.
+func (c *Config) validateSkills() error {
+	if c.Skills.Root == "" {
+		return nil
+	}
+	info, err := os.Stat(c.Skills.Root)
+	if err != nil {
+		return fmt.Errorf("skills.root %q: %w", c.Skills.Root, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("skills.root %q is not a directory", c.Skills.Root)
+	}
+	return nil
 }
 
 type telemetryYAML struct {
@@ -652,6 +852,8 @@ func parseObservability(l *logYAML, a *auditYAML, t *telemetryYAML) (LogConfig, 
 	ac := AuditConfig{}
 	if a != nil {
 		ac.File = a.File
+		ac.MaxSizeMB = a.MaxSizeMB
+		ac.MaxBackups = a.MaxBackups
 	}
 	tc := TelemetryConfig{
 		Traces:  ExporterConfig{Exporter: ExporterOff},
@@ -700,6 +902,12 @@ func (c *Config) validateObservability() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("log.level %q must be debug, info, warn, or error", c.Log.Level)
+	}
+	if c.Audit.MaxSizeMB < 0 {
+		return fmt.Errorf("audit.max_size_mb must not be negative")
+	}
+	if c.Audit.MaxBackups < 0 {
+		return fmt.Errorf("audit.max_backups must not be negative")
 	}
 	if err := validateExporter("telemetry.traces", c.Telemetry.Traces.Exporter, c.Telemetry.Traces.Endpoint); err != nil {
 		return err
@@ -776,7 +984,7 @@ func auditToYAML(a AuditConfig) *auditYAML {
 	if a.File == "" {
 		return nil
 	}
-	return &auditYAML{File: a.File}
+	return &auditYAML{File: a.File, MaxSizeMB: a.MaxSizeMB, MaxBackups: a.MaxBackups}
 }
 
 func adminToYAML(a AdminConfig) *adminYAML {

@@ -121,6 +121,9 @@ type Recorder struct {
 	latencyMS  metric.Float64Histogram
 	tokens     metric.Int64Counter
 	sendErrors metric.Int64Counter
+	// Cost aggregates per-tenant model spend in microcents (1 ¥ = 1_000_000 μ¢).
+	// The value is computed at dispatch time from token counts × model per-unit pricing.
+	Cost func(string, int64)
 }
 
 // NewRecorder builds the instruments on meter. Names follow the
@@ -152,6 +155,16 @@ func NewRecorder(meter metric.Meter) (*Recorder, error) {
 	if r.sendErrors, err = meter.Int64Counter("trpcservice.im.send_errors",
 		metric.WithDescription("Failed IM deliveries by tenant and channel")); err != nil {
 		return nil, err
+	}
+	costCounter, err := meter.Int64Counter("trpcservice.model.cost_microcents",
+		metric.WithDescription("Model cost in microcents by tenant"))
+	if err != nil {
+		return nil, err
+	}
+	r.Cost = func(tenant string, c int64) {
+		costCounter.Add(context.Background(), c, metric.WithAttributes(
+			attribute.String("tenant", tenant),
+		))
 	}
 	return r, nil
 }

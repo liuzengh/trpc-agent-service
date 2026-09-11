@@ -2,9 +2,11 @@
 package log
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 )
 
 // Init installs the process-wide structured logger described by the config
@@ -47,4 +49,72 @@ func Redact(secret string) string {
 		return "****"
 	}
 	return secret[:3] + "****" + secret[len(secret)-4:]
+}
+
+// redactAttrsHandler wraps an slog.Handler and replaces every occurrence of
+// any known secret pattern in the log message and its attributes with the
+// literal string "<redacted>". It is the platform's only run-time output
+// filter: secrets that reached the log (through error propagation, audit
+// detail, or trace attributes) are masked before they reach stderr.
+type redactAttrsHandler struct {
+	inner   slog.Handler
+	secrets []string
+}
+
+// WithLogRedaction wraps a handler with secret-text redaction. secrets is a
+// list of plaintext values that must never appear in logs; each is replaced
+// globally with "<redacted>".
+func WithLogRedaction(inner slog.Handler, secrets []string) slog.Handler {
+	if len(secrets) == 0 {
+		return inner // no secrets configured → pass through
+	}
+	dedup := make([]string, 0, len(secrets))
+	seen := make(map[string]struct{}, len(secrets))
+	for _, s := range secrets {
+		if s != "" {
+			if _, ok := seen[s]; !ok {
+				seen[s] = struct{}{}
+				dedup = append(dedup, s)
+			}
+		}
+	}
+	return &redactAttrsHandler{inner: inner, secrets: dedup}
+}
+
+func (h *redactAttrsHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	return h.inner.Enabled(ctx, l)
+}
+
+func (h *redactAttrsHandler) Handle(ctx context.Context, r slog.Record) error {
+	// Redact the message text.
+	msg := r.Message
+	for _, s := range h.secrets {
+		if strings.Contains(msg, s) {
+			msg = strings.ReplaceAll(msg, s, "<redacted>")
+		}
+	}
+	r2 := slog.NewRecord(r.Time, r.Level, msg, r.PC)
+	r.Attrs(func(a slog.Attr) bool {
+		key := a.Key
+		val := a.Value.String()
+		for _, s := range h.secrets {
+			if strings.Contains(val, s) {
+				if a.Value.Kind() == slog.KindString {
+					val = strings.ReplaceAll(val, s, "<redacted>")
+					a = slog.String(key, val)
+				}
+			}
+		}
+		r2.AddAttrs(a)
+		return true
+	})
+	return h.inner.Handle(ctx, r2)
+}
+
+func (h *redactAttrsHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &redactAttrsHandler{inner: h.inner.WithAttrs(attrs), secrets: h.secrets}
+}
+
+func (h *redactAttrsHandler) WithGroup(name string) slog.Handler {
+	return &redactAttrsHandler{inner: h.inner.WithGroup(name), secrets: h.secrets}
 }

@@ -149,6 +149,42 @@ func (s Scope) GetBackendProfile(ctx context.Context, publicID string) (BackendP
 	return p, nil
 }
 
+// BackendProfileRow is one tenant's latest session-backend choice, in the
+// shape the session router needs it (unscoped: the router serves every
+// tenant before any tenant scope exists).
+type BackendProfileRow struct {
+	TenantID          string
+	SessionBackend    string
+	RedisKeyPrefix    string
+	SessionTTLSeconds int64
+}
+
+// ListLatestBackendProfiles returns the newest backend profile of every
+// tenant that has one. Unscoped by design, like ListActiveTenants: gateway
+// boot resolves tenant backends before any tenant scope exists.
+func (d *DB) ListLatestBackendProfiles(ctx context.Context) ([]BackendProfileRow, error) {
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT bp.tenant_id, bp.session_backend, bp.redis_key_prefix, bp.session_ttl
+		FROM backend_profiles bp
+		JOIN (SELECT tenant_id, MAX(profile_id) AS pid
+		      FROM backend_profiles GROUP BY tenant_id) latest
+		  ON latest.pid = bp.profile_id
+		ORDER BY bp.tenant_id`)
+	if err != nil {
+		return nil, fmt.Errorf("controlplane: list backend profiles: %w", err)
+	}
+	defer rows.Close()
+	var out []BackendProfileRow
+	for rows.Next() {
+		var r BackendProfileRow
+		if err := rows.Scan(&r.TenantID, &r.SessionBackend, &r.RedisKeyPrefix, &r.SessionTTLSeconds); err != nil {
+			return nil, fmt.Errorf("controlplane: scan backend profile: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // nextProfileVersion reads the highest version already recorded for one
 // public id in this tenant. It is a plain read, not a lock: two concurrent
 // "bump this profile" calls for the same public id would both compute the

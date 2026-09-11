@@ -156,7 +156,7 @@ func TestNonPositiveCapIsCorrectedNotTrusted(t *testing.T) {
 		t.Run(fmt.Sprintf("asked=%d", asked), func(t *testing.T) {
 			srv, hits := countingModel(t, emptyStream)
 
-			r, err := NewRunner(demoTenant(srv.URL), inmemory.NewSessionService(), asked)
+			r, err := NewRunner(demoTenant(srv.URL), inmemory.NewSessionService(), asked, nil)
 			if err != nil {
 				t.Fatalf("runner: %v", err)
 			}
@@ -227,7 +227,7 @@ func TestApplyPicksUpANewCap(t *testing.T) {
 }
 
 func TestNewRunnerRequiresAnAPIKey(t *testing.T) {
-	_, err := NewRunner(&tenant.Context{ID: "demo"}, inmemory.NewSessionService(), 3)
+	_, err := NewRunner(&tenant.Context{ID: "demo"}, inmemory.NewSessionService(), 3, nil)
 	if err == nil {
 		t.Fatal("expected an error for a tenant without an api key")
 	}

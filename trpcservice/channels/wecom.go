@@ -51,6 +51,12 @@ type WeCom struct {
 	apiBase string
 	client  *http.Client
 
+	// accept, when set, switches the callback into durable mode: the
+	// normalized message is persisted before the ACK is written, so a crash
+	// can only lose a message WeChat still knows to retry. A nil accept
+	// keeps the legacy in-process flow.
+	accept func(ctx context.Context, in *InboundMessage) error
+
 	mu     sync.Mutex
 	tokens map[string]*wecomToken      // key: corp_id
 	bufs   map[string]*strings.Builder // key: SessionID(), pending aggregated reply
@@ -70,6 +76,16 @@ func NewWeCom(lookup func(tenantID string) (*tenant.WeComBinding, bool)) *WeCom 
 
 // Type implements Adapter.
 func (w *WeCom) Type() Type { return TypeWeCom }
+
+// WithDurableAccept turns the callback into the durable receive path: once
+// an acceptor is set, Callback persists the normalized message through it
+// and only then writes the "success" ACK. An acceptor error is returned to
+// the HTTP layer with no ACK written, which is the signal that makes WeChat
+// retry the callback.
+func (w *WeCom) WithDurableAccept(accept func(ctx context.Context, in *InboundMessage) error) *WeCom {
+	w.accept = accept
+	return w
+}
 
 // wecomEnvelope is the outer encrypted callback XML.
 type wecomEnvelope struct {
@@ -134,9 +150,9 @@ func (w *WeCom) Callback(rw http.ResponseWriter, r *http.Request) ([]*InboundMes
 	if err := xml.Unmarshal([]byte(plain), &msg); err != nil {
 		return nil, fmt.Errorf("parse decrypted msg: %w", err)
 	}
-	_, _ = io.WriteString(rw, "success") // ACK 先落，处理走异步
 	if msg.MsgType != "text" {
-		return nil, nil // 非文本消息（事件、图片等）v1 只 ACK 不处理
+		_, _ = io.WriteString(rw, "success") // 非文本消息（事件、图片等）v1 只 ACK 不处理
+		return nil, nil
 	}
 
 	in := &InboundMessage{
@@ -149,6 +165,16 @@ func (w *WeCom) Callback(rw http.ResponseWriter, r *http.Request) ([]*InboundMes
 	if msg.MsgID == 0 {
 		in.MsgID = fmt.Sprintf("%s-%d", msg.FromUserName, msg.CreateTime)
 	}
+	if w.accept != nil {
+		// Durable mode: the row must land before the ACK; an error leaves
+		// the callback unanswered and WeChat retries it.
+		if err := w.accept(r.Context(), in); err != nil {
+			return nil, fmt.Errorf("wecom: accept message: %w", err)
+		}
+		_, _ = io.WriteString(rw, "success")
+		return nil, nil
+	}
+	_, _ = io.WriteString(rw, "success") // ACK 先落，处理走异步
 	return []*InboundMessage{in}, nil
 }
 

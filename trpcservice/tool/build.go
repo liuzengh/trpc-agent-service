@@ -12,7 +12,20 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
+	platformskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
+	platformworkspace "github.com/liuzengh/trpc-agent-service/trpcservice/workspace"
 )
+
+// frameworkHosted names pinned "go" tools whose implementations are mounted
+// by the framework itself when the runner is assembled (today: the skill
+// tooling behind llmagent.WithSkills and the workspace execution surface
+// behind llmagent.WithCodeExecutor). The pin still needs its binding row —
+// that row is the governance record of what the revision attached — but
+// assembly neither wraps nor registers anything for these names here.
+var frameworkHosted = map[string]struct{}{
+	platformskill.Name:     {},
+	platformworkspace.Name: {},
+}
 
 // Assembly: turning one revision's pinned tool list into live tools.
 //
@@ -113,6 +126,11 @@ func BuildPinned(
 		}
 		switch b.Kind {
 		case "go":
+			if _, hosted := frameworkHosted[p.Name]; hosted {
+				// Mounted by the framework when the runner is assembled; the
+				// pin above is what turns it on. Nothing to resolve here.
+				continue
+			}
 			// A name in "extras" is a tool the caller assembled with request-
 			// scoped facts (the pinned knowledge bases, the execution identity)
 			// that a static builtin registry cannot carry (see

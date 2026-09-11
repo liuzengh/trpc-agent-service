@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
+	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
@@ -22,8 +24,10 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/memory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/sessionstore"
+	platformskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	platformtool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
+	platformworkspace "github.com/liuzengh/trpc-agent-service/trpcservice/workspace"
 )
 
 // RunnerFactory builds the agent runner for one claim, bound to that claim's
@@ -432,34 +436,119 @@ func ConfigForRevision(
 
 // runnerDeps are the optional collaborators the runner factory may need.
 // They are options rather than parameters because most factories (and most
-// tests) do not wire them at all, and a nil service must mean "this
+// tests) do not wire them at all, and a missing resolver must mean "this
 // deployment does not have the capability" (a pin then fails assembly
 // loudly) rather than a second code path.
+//
+// Each field is a resolver rather than a service so the worker role can wire
+// a deferred builder (see WithDeferredKnowledge): the store is built on the
+// first assembly that pins it and is never touched by the claim loop
+// otherwise.
 type runnerDeps struct {
-	knowledge *knowledge.Service
-	memory    *memory.Service
-	artifacts *artifact.Service
+	knowledge func(context.Context) (*knowledge.Service, error)
+	memory    func(context.Context) (*memory.Service, error)
+	artifacts func(context.Context) (*artifact.Service, error)
+	// skillsRoot is the deployment's SKILL.md root; the string type carries
+	// "not configured" as the empty value, so there is nothing to resolve
+	// lazily — one tenant directory per assembly, cached by the skill package.
+	skillsRoot string
+	// workspace is the session-scoped sandbox manager, nil when the capability
+	// is off.
+	workspace *platformworkspace.Manager
 }
 
 // RunnerOption configures DefaultRunnerFactory.
 type RunnerOption func(*runnerDeps)
+
+// fixed adapts a service already in hand into a resolver.
+func fixed[T any](svc T) func(context.Context) (T, error) {
+	return func(context.Context) (T, error) { return svc, nil }
+}
+
+// deferredService builds one optional dependency on first use. A successful
+// build is cached; a failed one is not, so the next claim retries instead of
+// the deployment remaining "disabled" for a condition (MinIO or Qdrant
+// briefly down) that was never a configuration choice. The mutex serializes
+// concurrent first assemblies, which also keeps two claims from building two
+// stacks at once.
+type deferredService[T any] struct {
+	mu    sync.Mutex
+	build func(context.Context) (T, error)
+	val   T
+	ready bool
+}
+
+func newDeferredService[T any](build func(context.Context) (T, error)) *deferredService[T] {
+	return &deferredService[T]{build: build}
+}
+
+// get resolves the service, running the builder at most once successfully.
+func (d *deferredService[T]) get(ctx context.Context) (T, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.ready {
+		return d.val, nil
+	}
+	v, err := d.build(ctx)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	d.val, d.ready = v, true
+	return v, nil
+}
 
 // WithKnowledge wires the knowledge service so a revision that pins
 // knowledge_search can be assembled. Without it, such a revision fails
 // assembly loudly (the pin has no implementation) instead of running with a
 // silently missing tool.
 func WithKnowledge(svc *knowledge.Service) RunnerOption {
-	return func(d *runnerDeps) { d.knowledge = svc }
+	return func(d *runnerDeps) { d.knowledge = fixed(svc) }
+}
+
+// WithDeferredKnowledge wires a builder called on the first assembly that
+// pins knowledge_search. The worker role uses this so its claim loop starts
+// without touching MinIO or Qdrant: a knowledge outage then fails only the
+// assemblies that need it (the message stays at its queue head and the next
+// attempt retries), instead of taking the whole loop down at boot.
+func WithDeferredKnowledge(build func(context.Context) (*knowledge.Service, error)) RunnerOption {
+	return func(d *runnerDeps) { d.knowledge = newDeferredService(build).get }
 }
 
 // WithMemory wires explicit memory (memory_write/search/delete).
 func WithMemory(svc *memory.Service) RunnerOption {
-	return func(d *runnerDeps) { d.memory = svc }
+	return func(d *runnerDeps) { d.memory = fixed(svc) }
+}
+
+// WithDeferredMemory wires a builder for the memory service; see
+// WithDeferredKnowledge for why the worker role defers.
+func WithDeferredMemory(build func(context.Context) (*memory.Service, error)) RunnerOption {
+	return func(d *runnerDeps) { d.memory = newDeferredService(build).get }
 }
 
 // WithArtifacts wires the artifact store (artifact_save).
 func WithArtifacts(svc *artifact.Service) RunnerOption {
-	return func(d *runnerDeps) { d.artifacts = svc }
+	return func(d *runnerDeps) { d.artifacts = fixed(svc) }
+}
+
+// WithDeferredArtifacts wires a builder for the artifact store; see
+// WithDeferredKnowledge for why the worker role defers.
+func WithDeferredArtifacts(build func(context.Context) (*artifact.Service, error)) RunnerOption {
+	return func(d *runnerDeps) { d.artifacts = newDeferredService(build).get }
+}
+
+// WithSkillStore wires the deployment's skills root so a revision that pins
+// skill mounts its tenant's library. Without it, such a pin fails assembly
+// loudly, matching knowledge's posture.
+func WithSkillStore(root string) RunnerOption {
+	return func(d *runnerDeps) { d.skillsRoot = root }
+}
+
+// WithWorkspaceManager wires the session-scoped sandbox so a revision that
+// pins code_exec can execute code. Without it, such a pin fails assembly
+// loudly.
+func WithWorkspaceManager(m *platformworkspace.Manager) RunnerOption {
+	return func(d *runnerDeps) { d.workspace = m }
 }
 
 // DefaultRunnerFactory is the real wiring: it resolves the revision this
@@ -504,6 +593,10 @@ func DefaultRunnerFactory(cdp *controlplane.DB, resolver *secrets.Resolver, opts
 			if deps.knowledge == nil {
 				return nil, fmt.Errorf("execution: revision %d pins %s but this deployment has knowledge disabled", rev.ID, knowledge.Name)
 			}
+			ksvc, err := deps.knowledge(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("execution: revision %d pins %s: %w", rev.ID, knowledge.Name, err)
+			}
 			kbIDs, err := scope.KnowledgeBindingIDs(ctx, rev.ID)
 			if err != nil {
 				return nil, err
@@ -511,7 +604,7 @@ func DefaultRunnerFactory(cdp *controlplane.DB, resolver *secrets.Resolver, opts
 			if len(kbIDs) == 0 {
 				return nil, fmt.Errorf("execution: revision %d pins %s but binds no knowledge base", rev.ID, knowledge.Name)
 			}
-			extras[knowledge.Name] = knowledge.NewSearchTool(deps.knowledge, knowledge.Scope{
+			extras[knowledge.Name] = knowledge.NewSearchTool(ksvc, knowledge.Scope{
 				TenantID:    c.TenantID,
 				AppID:       rev.AppID,
 				KBIDs:       kbIDs,
@@ -525,7 +618,11 @@ func DefaultRunnerFactory(cdp *controlplane.DB, resolver *secrets.Resolver, opts
 			if deps.memory == nil {
 				return nil, fmt.Errorf("execution: revision %d pins a memory tool but this deployment has memory disabled", rev.ID)
 			}
-			for _, t := range memory.NewTools(deps.memory, memory.Scope{
+			msvc, err := deps.memory(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("execution: revision %d pins a memory tool: %w", rev.ID, err)
+			}
+			for _, t := range memory.NewTools(msvc, memory.Scope{
 				TenantID: c.TenantID,
 				UserKey:  c.ActorKey,
 				IsGroup:  c.IsGroup,
@@ -540,18 +637,50 @@ func DefaultRunnerFactory(cdp *controlplane.DB, resolver *secrets.Resolver, opts
 			if deps.artifacts == nil {
 				return nil, fmt.Errorf("execution: revision %d pins %s but this deployment has an artifact store disabled", rev.ID, artifact.Name)
 			}
-			extras[artifact.Name] = artifact.NewSaveTool(deps.artifacts, artifact.Scope{
+			asvc, err := deps.artifacts(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("execution: revision %d pins %s: %w", rev.ID, artifact.Name, err)
+			}
+			extras[artifact.Name] = artifact.NewSaveTool(asvc, artifact.Scope{
 				TenantID:    c.TenantID,
 				ExecutionID: c.ExecutionID,
 				SessionPK:   c.SessionPK,
 			})
 		}
 
+		// Framework-hosted tools (skills, code execution) are runner options
+		// rather than extras: the pin turns them on, the framework mounts the
+		// tooling once the option is present.
+		var hostOpts []llmagent.Option
+		if pinsName(pinned, platformskill.Name) {
+			if deps.skillsRoot == "" {
+				return nil, fmt.Errorf("execution: revision %d pins %s but this deployment has no skills root configured", rev.ID, platformskill.Name)
+			}
+			repo, ok, err := platformskill.For(deps.skillsRoot, c.TenantID)
+			if err != nil {
+				return nil, fmt.Errorf("execution: revision %d pins %s: %w", rev.ID, platformskill.Name, err)
+			}
+			if !ok {
+				return nil, fmt.Errorf("execution: revision %d pins %s but tenant %q has no skill library", rev.ID, platformskill.Name, c.TenantID)
+			}
+			hostOpts = agent.SkillOptionsFor(repo)
+		}
+		if pinsName(pinned, platformworkspace.Name) {
+			if deps.workspace == nil {
+				return nil, fmt.Errorf("execution: revision %d pins %s but this deployment has no workspace configured", rev.ID, platformworkspace.Name)
+			}
+			exec, err := deps.workspace.Executor(c.TenantID, c.SessionPK)
+			if err != nil {
+				return nil, fmt.Errorf("execution: revision %d pins %s: %w", rev.ID, platformworkspace.Name, err)
+			}
+			hostOpts = append(hostOpts, llmagent.WithCodeExecutor(exec))
+		}
+
 		tools, err := platformtool.BuildPinned(ctx, scope, rev.AppID, rev.Spec.Tools, platformtool.GovernorFrom(ctx), resolver, extras)
 		if err != nil {
 			return nil, err
 		}
-		return agent.NewRunner(t, ws, maxLLMCalls, tools...)
+		return agent.NewRunner(t, ws, maxLLMCalls, tools, hostOpts...)
 	}
 }
 

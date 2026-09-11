@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"trpc.group/trpc-go/trpc-agent-go/session"
+
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/admin"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agent"
@@ -24,6 +26,8 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/log"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
+
 	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage"
 	tasmysql "github.com/liuzengh/trpc-agent-service/trpcservice/storage/mysql"
@@ -80,6 +84,14 @@ func main() {
 		"with -artifact-get: output path, or - for stdout")
 	docStatus := flag.String("doc-status", "",
 		"print one document's indexing state and exit")
+	sessionState := flag.Int64("session-state", 0,
+		"with -resolve-tenant: print one session's committed state (MySQL snapshot + Redis projection) and exit")
+	migrateSessions := flag.Bool("migrate-sessions", false,
+		"migrate all sessions from the configured Redis backend into the MySQL control plane and exit")
+	dryRun := flag.Bool("dry-run", false,
+		"with -migrate-sessions: print what would be migrated without writing")
+	reindexKB := flag.String("reindex-kb", "",
+		"with -resolve-tenant: re-index all ready documents of a knowledge base and exit")
 	flag.Parse()
 
 	// The self-probe runs before anything else: it must not load the config or
@@ -102,6 +114,17 @@ func main() {
 	if err := log.Init(cfg.Log.Level, cfg.Log.JSON); err != nil {
 		fmt.Fprintf(os.Stderr, "init log: %v\n", err)
 		os.Exit(1)
+	}
+	// Install the log redaction handler. Secrets that reach the log (through
+	// error propagation, audit detail, or trace attributes) are masked before
+	// hitting stderr. The pattern list is built from the same env var
+	// allowlist the platform uses for credential resolution — if a variable
+	// is allowed as a secret, its value is a pattern.
+	{
+		pat := secrets.NewResolver(secrets.AllowedPrefixes{EnvVars: allowedSecretEnv()}).ResolvedSecrets()
+		if len(pat) > 0 {
+			slog.SetDefault(slog.New(log.WithLogRedaction(slog.Default().Handler(), pat)))
+		}
 	}
 
 	// -migrate and -bootstrap-admin are one-shot control-plane operations an
@@ -155,13 +178,30 @@ func main() {
 		}
 		os.Exit(runDocStatus(cfg, *resolveTenant, *docStatus))
 	}
+	if *sessionState != 0 {
+		if *resolveTenant == "" {
+			fmt.Fprintln(os.Stderr, "session-state: -resolve-tenant is required")
+			os.Exit(2)
+		}
+		os.Exit(runSessionState(cfg, *resolveTenant, *sessionState))
+	}
+	if *migrateSessions {
+		os.Exit(runMigrateSessions(cfg, *dryRun))
+	}
+	if *reindexKB != "" {
+		if *resolveTenant == "" {
+			fmt.Fprintln(os.Stderr, "reindex-kb: -resolve-tenant is required")
+			os.Exit(2)
+		}
+		os.Exit(runReindexKB(cfg, *resolveTenant, *reindexKB))
+	}
 
 	// A reliable-mode role replaces the single-process platform entirely: it
 	// serves one part of the Inbox → Worker → Outbox chain and nothing else.
 	// Running both would be two answers to "who dispatches a message" in one
 	// deployment, which is exactly the ambiguity the roles exist to remove.
 	if *role != roleAll {
-		os.Exit(runRole(*role, cfg))
+		os.Exit(runRole(*role, cfg, *addr))
 	}
 
 	// Redis backs both framework sessions and cross-replica coordination. Load
@@ -182,11 +222,25 @@ func main() {
 		defer coord.Close()
 		if cfg.ControlPlane.Mode != config.ControlPlaneMySQL {
 			if persisted, err := admin.NewRedisRuntimeStore(coord).Load(context.Background()); err != nil {
-				fmt.Fprintf(os.Stderr, "load runtime config: %v\n", err)
-				os.Exit(1)
+				if !errors.Is(err, admin.ErrSnapshotUnavailable) {
+					fmt.Fprintf(os.Stderr, "load runtime config: %v\n", err)
+					os.Exit(1)
+				}
+				// The snapshot store is the same Redis the session probe a few
+				// lines below is about to test. Exiting here would blame
+				// "runtime config" for what is a session-backend outage; the
+				// probe's message names the real dependency. The file config
+				// stays in charge until the probe decides.
+				slog.Warn("runtime config: snapshot store unavailable; continuing with the file config", "err", err)
 			} else if persisted != nil {
 				// Storage is deployment-owned and must not be changed through admin.
 				persisted.Storage = cfg.Storage
+				// Skills are deployment-owned for the same reason: the root is a
+				// mount of this Pod, not a tenant setting.
+				persisted.Skills = cfg.Skills
+				// Workspace is deployment-owned too: the root and its bounds
+				// describe this process's filesystem, not the tenant's config.
+				persisted.Workspace = cfg.Workspace
 				if cfg.Admin.Token != "" {
 					persisted.Admin.Token = cfg.Admin.Token
 				}
@@ -195,8 +249,11 @@ func main() {
 		}
 	}
 	// Governance trail and telemetry (proposal doc 3.5): the audit file is
-	// optional, exporters default to off so local runs stay quiet.
-	aud, err := audit.New(cfg.Audit.File)
+	// optional, exporters default to off so local runs stay quiet. Rotation
+	// (audit.max_size_mb) is opt-in; 0 keeps the historical single file.
+	aud, err := audit.NewWithOptions(audit.Options{
+		Path: cfg.Audit.File, MaxSizeMB: cfg.Audit.MaxSizeMB, MaxBackups: cfg.Audit.MaxBackups,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init audit: %v\n", err)
 		os.Exit(1)
@@ -221,7 +278,43 @@ func main() {
 		os.Exit(1)
 	}
 	defer sess.Close()
-	reg, err := agent.NewRegistry(cfg, sess)
+
+	// control_plane.mode=mysql opens the authority this deployment is meant
+	// to read from. It is a separate failure from the session backend: a
+	// MySQL that cannot answer here must stop the boot outright, because a
+	// process serving only the legacy file-backed admin API while claiming to
+	// be in mysql mode would be worse than not starting. It opens before the
+	// runners because the session router reads tenant backend choices from
+	// backend_profiles.
+	var cdp *controlplane.DB
+	if cfg.ControlPlane.Mode == config.ControlPlaneMySQL {
+		cpCtx, cpCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cpDB, err := tasmysql.Open(cpCtx, cfg.ControlPlane.MySQLDSN)
+		cpCancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "init control plane: %v\n", err)
+			os.Exit(1)
+		}
+		defer cpDB.Close()
+		cdp = controlplane.NewDB(cpDB)
+	}
+
+	// Per-tenant session backends (backend_profiles): the router resolves one
+	// service per tenant over the deployment's Redis endpoint, so a tenant's
+	// session_backend choice is honoured at runtime instead of being a ledger
+	// entry. File-mode deployments keep the platform-wide single service.
+	sessionFor := func(string) session.Service { return sess }
+	var router *storage.Router
+	if cdp != nil {
+		router = storage.NewRouter(sess, cfg.Storage.Session.RedisURL)
+		defer router.Close()
+		if err := applyBackendProfiles(context.Background(), cdp, router); err != nil {
+			fmt.Fprintf(os.Stderr, "init backend profiles: %v\n", err)
+			os.Exit(1)
+		}
+		sessionFor = router.For
+	}
+	reg, err := agent.NewRegistryWith(cfg, sessionFor)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init runners: %v\n", err)
 		os.Exit(1)
@@ -233,22 +326,16 @@ func main() {
 	if coord != nil {
 		adm.WithRuntimeStore(admin.NewRedisRuntimeStore(coord))
 	}
-	// control_plane.mode=mysql opens the authority this deployment is meant
-	// to read from, and mounts /admin/v2 on it. It is a separate failure from
-	// the session backend: a MySQL that cannot answer here must stop the boot
-	// outright, because a process serving only the legacy file-backed admin
-	// API while claiming to be in mysql mode would be worse than not starting.
-	if cfg.ControlPlane.Mode == config.ControlPlaneMySQL {
-		cpCtx, cpCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		cpDB, err := tasmysql.Open(cpCtx, cfg.ControlPlane.MySQLDSN)
-		cpCancel()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "init control plane: %v\n", err)
-			os.Exit(1)
-		}
-		defer cpDB.Close()
-		cdp := controlplane.NewDB(cpDB)
+	if cdp != nil {
 		adm.WithControlPlane(cdp, auth.NewResolver(cdp))
+		// A settings write is the natural reload point for backend profiles:
+		// the operator just told the platform something changed, so the router
+		// re-reads the control plane here instead of waiting for a restart.
+		adm.WithCommitHook(func() {
+			if err := applyBackendProfiles(context.Background(), cdp, router); err != nil {
+				slog.Warn("backend profiles: reload after settings commit failed", "err", err)
+			}
+		})
 	}
 	kf := channels.NewWeChatKf(adm.WeChatKfBinding)
 	if coord != nil {
@@ -310,6 +397,26 @@ func main() {
 		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// applyBackendProfiles loads every tenant's latest backend profile into the
+// session router: the empty-table case clears it back to the platform
+// default, and a reload after a settings write is the same call.
+func applyBackendProfiles(ctx context.Context, cdp *controlplane.DB, router *storage.Router) error {
+	rows, err := cdp.ListLatestBackendProfiles(ctx)
+	if err != nil {
+		return err
+	}
+	settings := make(map[string]storage.BackendSetting, len(rows))
+	for _, row := range rows {
+		settings[row.TenantID] = storage.BackendSetting{
+			Backend:    row.SessionBackend,
+			KeyPrefix:  row.RedisKeyPrefix,
+			SessionTTL: time.Duration(row.SessionTTLSeconds) * time.Second,
+		}
+	}
+	router.ApplyProfiles(settings)
+	return nil
 }
 
 // runHealthcheck asks the local /readyz whether the process can serve traffic

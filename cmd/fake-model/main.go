@@ -114,6 +114,7 @@ type server struct {
 	embeds   atomic.Int64 // embeddings calls served (see embedding.go)
 	embed    embedState   // the embedding fault switch (see embedding.go)
 	kf       *kfState     // the 微信客服 stub (see kf.go)
+	wecom    *wecomState  // the 企业微信 send stub (see wecom.go)
 	tool     *toolState   // the tool-target stub (see tool.go)
 	log      *log.Logger
 }
@@ -121,6 +122,7 @@ type server struct {
 func newServer(mode string, delay float64, out io.Writer) *server {
 	s := &server{log: log.New(out, "[fake-model] ", log.LstdFlags|log.Lmsgprefix)}
 	s.kf = &kfState{log: s.log}
+	s.wecom = &wecomState{log: s.log}
 	s.tool = &toolState{mode: "ok"}
 	s.cfg.Store(&settings{Mode: mode, Delay: delay})
 	return s
@@ -139,6 +141,8 @@ func (s *server) Handler() http.Handler {
 	// completion — measured, not assumed: the script silently never took
 	// effect and send_msg looked recorded while nothing was.
 	mux.HandleFunc("/cgi-bin/", s.handleKF)
+	mux.HandleFunc(wecomSendPath, s.handleWeCom)
+	mux.HandleFunc(wecomSentPath, s.handleWeCom)
 	mux.HandleFunc(kfScriptPath, s.handleKF)
 	mux.HandleFunc(kfSentPath, s.handleKF)
 	mux.HandleFunc("/__tool/", s.handleTool)
