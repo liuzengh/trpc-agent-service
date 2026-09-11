@@ -4,11 +4,11 @@
 
 平台面向多个部门、业务线和外部 IM 入口，允许租户独立创建 Agent 应用，选择模型、工具、知识库和数据后端。运行面需要横向扩展，任意 Worker 都能处理任意租户的请求；节点退出后，其他节点可以接管未完成任务。平台还要保留完整的审计链路，避免租户配置、数据、工具权限和密钥相互串用。
 
-产品入口是浏览器工作台：首次创建工作空间 → 配置租户模型连接 → 创建/调试 Agent → 发布与接入业务通道。独立体验 Compose 包含一次性初始化、数据库迁移和 all 运行角色；它与开发者日常环境分开，不依赖作者的模型或 IM 账号。模型连接由平台管理员配置，租户选用；框架执行内核和原有环境变量模型模式不变。
+产品入口是浏览器工作台：首次创建工作空间 → 配置租户模型连接 → 创建/调试 Agent → 发布与接入业务通道。Compose 提供一次性初始化、数据库迁移和 all 运行角色。模型连接由平台管理员配置，租户选用。
 
 本方案以 tRPC-Agent-Go `v1.11.x` 为运行内核。框架负责 Agent 编排、Runner 事件流、Session、Memory、Artifact、Knowledge、Tool/MCP、Plugin/Guardrail 和 OpenTelemetry 埋点。平台层负责租户注册、配置发布、消息路由、分布式并发控制、后端选择、持久化任务、IM 账号绑定、审计与运维。
 
-图中标注“扩展”的后端、渠道和密钥服务是生产方案选项，不表示本版已接入。实际复用范围见第 9 节，验证层级见[验收说明](acceptance.md)。
+图中标注“扩展”的后端、渠道和密钥服务是生产方案选项，不表示本版已接入。实际复用范围见第 9 节，支持能力见[功能范围](acceptance.md)。
 
 设计遵循四条约束：
 
@@ -52,7 +52,7 @@ flowchart LR
         SANDBOX[Docker 隔离执行]
         LEASE[Session Coordinator<br/>Lease + Fencing Token]
         RUNNER[runner.Runner]
-        POLICY[Plugin / Guardrail<br/>权限、预算、脱敏]
+        POLICY[Callbacks / PermissionPolicy<br/>权限、预算、脱敏]
         APPROVAL[Approval + Tool Journal]
         QUOTA[Redis Quota Guard]
         JOB[Summary / Memory / Migration Worker]
@@ -165,26 +165,7 @@ tenant_id | app_id | runtime_user_id | session_id
 
 当前 Redis Streams 消费组不保证按会话分区。Worker 先读取持久化完成态，再做 Run 准入与前序 turn 检查，进入 Runtime 后才获取会话租约和 fencing token；关键提交同时核对所有权和调度代数。已完成请求从 Run/Outbound 恢复，finalized_at 区分是否还需补审计和后台任务，不因 Redis 缓存过期重跑 Agent。不同会话按近期/积压队列调度，默认每进程 4 个执行槽，其中一个预留给近期流量；同会话仍串行推进。
 
-平台复用共享 Runner，当前代码通过 RevisionCompiler 编译模型和 LLMAgent，再在请求中注入 Agent 与治理策略。以下展示框架支持的请求级组合接口，不表示代码同时使用了所有选项：
-
-```go
-events, err := sharedRunner.Run(
-    ctx,
-    runtimeUserID,
-    sessionID,
-    message,
-    agent.WithAppName(storageScope),
-    agent.WithAgent(compiledAgent),
-    agent.WithModel(tenantModel),
-    agent.WithRequestID(requestID),
-    agent.WithRuntimeState(runtimeState),
-    agent.WithToolFilter(visibleToolFilter),
-    agent.WithToolPermissionPolicy(permissionPolicy),
-    plugin.WithPlugins(tenantPlugins...),
-    agent.WithMaxRunDuration(runTimeout),
-    agent.WithSpanAttributes(traceAttributes...),
-)
-```
+平台复用共享 Runner，由 RevisionCompiler 编译模型和 LLMAgent，按请求注入 Agent、租户 AppName、request_id 与工具权限策略，消费 Runner 的 Event 流直至关闭。
 
 `storageScope` 固定为 `t/{tenant_id}/a/{app_id}`。它在框架内部充当 `AppName`，负责隔离 Session 和 Memory；发布 revision 不放入该字段，以免灰度或回滚后读不到历史会话。Agent 对象按 `revision_id` 编译并缓存，缓存对象必须不可变且并发安全。
 
@@ -245,9 +226,9 @@ Session 普通读写按用户/会话加锁，Memory 按用户加锁；两者同�
 
 `connections` 管理网页机器人接入和维护，不执行 Agent。企业微信以群和成员的对应授权约束接收；Token/地址更新、换绑与移除在暂停并核对未完成任务后执行。换绑创建独立 Binding/Session，旧绑定软退役；外部回调操作使用持久意图与只读对账，不能与数据库事务冒充跨系统原子操作。
 
-Console Worker 消费独立的 PostgreSQL 调试任务（开发模式可用 InMemory），通过内部上下文和仓储适配复用同一个 Runtime/Runner。调试审批与 Journal 独立存储，原 IM 外键不变；调试内容只有发起者能查看，元数据按租户/RBAC 查询。状态流来自持久记录，浏览器断线不重跑 Agent，节点中断时保守标记未知结果。
+Console Worker 消费独立的 PostgreSQL 调试任务（单进程可用 InMemory），通过内部上下文和仓储适配复用同一个 Runtime/Runner。调试审批与 Journal 独立存储，原 IM 外键不变；调试内容只有发起者能查看，元数据按租户/RBAC 查询。状态流来自持久记录，浏览器断线不重跑 Agent，节点中断时保守标记未知结果。
 
-`skill` 使用 tRPC 的正文加载和渐进注入，执行由平台固定入口 `skill_run` 连接 `workspace` Docker 沙箱；明确关闭框架的宿主机执行器自动回退。每次调用使用独立 tmpfs，不挂载宿主目录、不继承宿主密钥；Local 临时目录仅存 Docker CLI 状态，不作为安全隔离或执行回退。README 原文保持不变，边界见[验收范围](acceptance.md)。
+`skill` 使用 tRPC 的正文加载和渐进注入，执行由平台固定入口 `skill_run` 连接 `workspace` Docker 沙箱；明确关闭框架的宿主机执行器自动回退。每次调用使用独立 tmpfs，不挂载宿主目录、不继承宿主密钥；Local 临时目录仅存 Docker CLI 状态，不作为安全隔离或执行回退。功能边界见[功能范围](acceptance.md)。
 
 ## 10. 部署形态
 

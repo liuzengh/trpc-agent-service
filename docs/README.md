@@ -1,24 +1,21 @@
-# 交付文档
+# 文档目录
 
-本目录只保留最终设计、安装运维和验收资料。题目原文见根目录 [README](../README.md)；开发日志、逐轮测试记录和早期教程不随当前源码交付。
+## 安装与使用
 
-| 文档 | 用途 |
+| 文档 | 内容 |
 | --- | --- |
-| [architecture.md](architecture.md) | 总体架构、系统图、组件职责、租户隔离与框架复用边界 |
-| [sequence.md](sequence.md) | 企业微信完整消息时序、工具执行、Session/Memory 和回复链路 |
-| [data-model.md](data-model.md) | 核心实体、关系、表结构和索引 |
-| [data-consistency.md](data-consistency.md) | 并发写入、事件顺序、幂等、恢复与数据迁移 |
-| [backend-adapters.md](backend-adapters.md) | Redis / SQL / 向量库 / 对象存储选择和租户路由 |
-| [im-channels.md](im-channels.md) | Telegram、企业微信两种接入方式、配置及媒体边界 |
-| [governance-operations.md](governance-operations.md) | 鉴权、工具审批、密钥、预算、审计和监控 |
-| [operations-runbook.md](operations-runbook.md) | 安装、配置、手动启停、部署、升级、容量与恢复 |
-| [risks.md](risks.md) | 20 项生产风险及缓解措施 |
-| [acceptance.md](acceptance.md) | 题目映射、可重复验证入口和明确的交付限制 |
+| [安装运行手册](operations-runbook.md) | 安装、模型配置、控制台使用、部署、备份和排障 |
+| [功能范围](acceptance.md) | 支持的功能、通道、后端与使用条件 |
+| [IM 接入](im-channels.md) | Telegram 和企业微信的接入、授权、消息处理与连接维护 |
 
-从哪里开始：
+## 架构与运维
 
-- 部署到服务器：[公网部署步骤](operations-runbook.md#05-公网服务器部署)。
-- 本机体验：[Docker 启动步骤](operations-runbook.md#00-推荐只用-docker-打开平台)。
-- 了解实现：先读架构与时序；核对交付：读验收说明。
-
-默认交付只包含源码、配置模板、部署文件和自动测试。模型/IM 密钥、会话和后端数据、原始 trace、日志、二进制及本机备份不包含在源码包中。
+| 文档 | 内容 |
+| --- | --- |
+| [系统架构](architecture.md) | 组件职责、系统图、租户隔离和框架复用 |
+| [消息时序](sequence.md) | IM 消息、Runner、工具、存储和回复的完整链路 |
+| [数据模型](data-model.md) | 实体关系、表结构和索引 |
+| [数据同步与幂等](data-consistency.md) | 并发控制、事件顺序、恢复和迁移 |
+| [多后端适配](backend-adapters.md) | Redis、SQL、向量库与对象存储的选择和路由 |
+| [治理、安全与监控](governance-operations.md) | 鉴权、审批、密钥、预算、审计和观测 |
+| [生产风险](risks.md) | 风险、监控信号及缓解措施 |

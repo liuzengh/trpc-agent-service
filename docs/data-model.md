@@ -12,44 +12,29 @@
 
 以下 DDL 是最小逻辑模型，省略了组织成员、RBAC、计费明细和知识文档分片等扩展表。
 
-当前仓库的可执行 schema 由 [001–029 migrations](../trpcservice/database/migrations) 管理，核心包括：
+实际建表和约束定义见[数据库迁移文件](../trpcservice/database/migrations)。核心实体及职责如下：
 
-024 增加控制台存储：`admin_session`（登录摘要与到期时间）、`agent_draft`（带版本的草稿）、`debug_snapshot`（不可变执行配置）、`debug_session`（发起者与独立运行身份）、`debug_run`（消息、租约、审批关联和结果）、`debug_event`、`debug_tool_execution`、`debug_tool_approval`、`debug_approval_decision` 和 `console_worker`。这些表使用 tenant_id + record_id 主键、owner_id、app_id、status、version、JSONB data 和时间字段；具体数据形状由 Go 类型约束。
+| 数据域 | 核心表 | 关系与职责 |
+| --- | --- | --- |
+| 租户与应用 | `tenant`、`agent_app`、`agent_revision` | 租户拥有应用，应用发布不可变配置版本 |
+| 模型连接 | `model_connection` | 同租户连接 ID 固定模型与地址，凭据加密保存；配置版本与凭据版本分别管理 |
+| 存储配置 | `backend_binding`、`backend_migration` | 选择租户或应用后端，记录迁移状态、游标和校验证明 |
+| 通道与会话 | `channel_binding`、`conversation` | 外部账号绑定应用，会话固定运行身份与发布版本 |
+| 消息执行 | `inbound_message`、`agent_run`、`queue_outbox`、`outbound_message` | 入站去重、顺序调度、执行恢复与回复投递 |
+| 治理 | `tool_approval`、`tool_execution`、`audit_log` | 参数绑定审批、执行事实、脱敏审计 |
+| 后台处理 | `background_job`、`background_watermark` | 摘要、记忆提取和迁移任务及单调处理水位 |
+| 控制台 | `admin_session`、`agent_draft`、`debug_snapshot`、`debug_session`、`debug_run` | 登录、草稿与独立调试；按 tenant/app/owner 授权 |
+| 机器人连接 | `channel_connection`、`channel_credential`、`channel_connection_group`、`channel_connection_setting` | 连接状态、加密凭据、群元数据与部署地址 |
 
-认证表与调试表分开授予数据库权限，Worker 不获得 admin_session 读取权限。调试审批/Journal 不复用正式 IM 外键，避免把临时快照伪装成发布版本。调试快照不能从正常发布与通道路由中读取；草稿发布在 PostgreSQL 中对草稿/App 加锁，并原子创建版本、切换稳定指针和更新草稿发布标记。
+会话存储键由租户/应用 AppName、runtime_user_id 和 session_id 组成。Session、State、Event、Summary、Memory、向量和对象内容由对应的 tRPC-Agent-Go 后端管理；Control DB 保留消息、运行、审批、迁移和审计记录。
 
-发布、回滚和灰度操作的审计写入参与同一 PostgreSQL 事务，重复草稿发布不追加重复历史。`background_job.payload.source_request_id` 保存新任务的因果关联，查询接口只返回元数据；旧任务不回填推测的关联。`console_worker.data.checks` 保存带时间、租户、后端绑定和配置指纹的只读观测，心跳记录一分钟到期，过期数据由 Worker 清理。
+`agent_run.schedule_generation` 防止旧投递覆盖新调度；`next_attempt_at` 记录延迟恢复时间。`outbound_message.message_kind` 区分等待提示与最终回复，唯一约束为 `(request_id,message_kind)`。`finalized_at` 标识审计、用量和后台任务收尾完成；恢复已完成运行时只补收尾，不重新执行模型或工具。
 
-025 的 `message_mode/message_expires_at` 及过期终态保留用于历史审计；026 不再按消息年龄终止新请求。`agent_run` 新增 `schedule_generation`、`next_attempt_at`、`deferred_count`，用于等待恢复和拒绝旧投递；`queue_outbox.lane` 区分近期与积压任务。每次延迟调度在同一事务更新 Run 并追加下一代 Outbox，提交后才 ACK 旧 Redis 消息。
+调试身份与业务 IM 会话隔离。调试快照不作为发布版本使用，Worker 不读取登录凭据表。发布事务原子更新草稿、稳定版本指针和审计记录。
 
-`outbound_message.message_kind` 区分 `waiting` 与 `result`，唯一约束改为 `(request_id,message_kind)`，不会让等待提示占用最终回复的位置。受限触发器在 Run 结束时撤回尚未发送的等待提示，Worker 仍没有直接修改投递状态的权限。`channel_poll_gap` 新增状态、源配置指纹、补读游标和稳定错误分类；旧区间默认 `skipped`，新缺口从 `pending` 推进到 `completed` 或 `blocked`。`channel_message_disposition` 继续保存旧忽略记录与无效时间记录，不自动重放。
+模型连接以 `(tenant_id,connection_id)` 为主键；`root_connection_id/config_version` 形成配置版本链，`credential_version` 标识密钥更新。AES-GCM 密文绑定租户、连接、模型和地址。主密钥由部署者保管，数据库仅保存指纹。Admin 拥有受限的修改权限，Worker/Jobs 只读。
 
-027 增加 `agent_run.finalized_at`。completed 结果不可覆写；Worker 按 tenant/app/revision/conversation/turn/调度代数读取 Run 与 `message_kind=result` 的 Outbound，恢复时不依赖有 TTL 的 Redis 缓存。finalized_at 为空只允许补收尾，不重新调用 Agent。历史数据不批量回填该标记，避免把可能未提交的后台任务误认为已经完成；旧 dead/expired/unknown 记录仍不重放。
-
-028 增加 `model_connection`，主键 `(tenant_id, connection_id)`，包含 display_name、model_name、base_url、encrypted_key、key_id、created_by、created_at。API Key 的密文为 BYTEA；key_id 是独立部署主密钥的指纹，不能用于解密。Agent 版本只记录同租户 connection_id，创建连接与审计原子提交。
-
-029 保留既有 ID、模型、地址与密文，新增 root_connection_id、config_version、credential_version、version、superseded_by、updated_by、updated_at。每个 ID 仍固定模型/地址；改配置时插入同根的新版本，并原子标记旧版本的后继。唯一约束 `(tenant_id,root_connection_id,config_version)` 与行锁防止并发分叉；同租户外键约束根与后继。名称和 API Key 可更新，version 为乐观锁，只有重写密文时 credential_version 才递增。数据库触发器禁止原地更换执行配置、跳过版本或覆盖既有后继。Admin 有 SELECT/INSERT 及限定列 UPDATE，Worker/Jobs 仅 SELECT，其余角色无此表权限。
-
-```text
-tenant / agent_app / agent_revision / model_connection
-backend_binding / backend_migration
-channel_binding / external_identity / conversation
-inbound_message / agent_run / outbound_message / queue_outbox
-tool_approval / tool_execution / background_job / audit_log
-```
-
-Session/State/Event/Summary、Memory、向量和对象内容由租户选择的 tRPC-Agent-Go backend 管理；Control DB 保存消息、运行、审批、迁移、任务和审计真相。
-
-### 网页机器人连接（030）
-
-| 表 | 主要字段与约束 |
-| --- | --- |
-| `channel_credential` | `(tenant_id,reference)` 主键；用途数组、AES-GCM 密文、主密钥指纹。明文不入库；租户/引用/用途绑定到密文。 |
-| `channel_connection` | 租户、应用、通道、账号、内部 Binding、凭据引用、连接状态、版本、操作租约、校验状态与接收时间；账号唯一，应用/Binding/凭据使用同租户外键。 |
-| `channel_connection_group` | `(tenant_id,connection_id,chat_id)` 主键；只保存群名称和观察时间，不保存聊天正文。 |
-| `channel_connection_setting` | 部署级公网地址，平台管理员修改，已有连接保持其登记时的地址。 |
-
-Telegram 在准备阶段创建停用 Binding，远端登记确认后再激活。MCP 在群与成员确认后创建或更新 Binding。连接状态和操作版本用于控制设置流程；业务会话、消息和投递仍引用原有 `channel_binding`，不另外构造一套 Agent 执行记录。
+连接凭据使用 `(tenant_id,reference)` 和用途约束。群元数据仅保存群名称与观察时间，不保存聊天正文。Telegram 登记确认后激活 Binding；企业微信消息 MCP 经逐群成员授权后激活，业务消息继续引用同一通道模型。
 
 ## 2. 租户和 Agent App
 
@@ -316,22 +301,6 @@ CREATE TABLE artifact_metadata (
     UNIQUE (tenant_id, app_id, runtime_user_id, session_id, filename, version)
 );
 
-CREATE TABLE tool_execution (
-    execution_id     VARCHAR(64) PRIMARY KEY,
-    tenant_id        VARCHAR(64) NOT NULL,
-    request_id       VARCHAR(128) NOT NULL REFERENCES agent_run(request_id),
-    tool_call_id     VARCHAR(128) NOT NULL,
-    tool_name        VARCHAR(255) NOT NULL,
-    arguments_hash   VARCHAR(128) NOT NULL,
-    idempotency_key  VARCHAR(255),
-    decision         VARCHAR(32) NOT NULL,
-    status           VARCHAR(32) NOT NULL,
-    result_ref       VARCHAR(1024),
-    error_type       VARCHAR(128),
-    started_at       TIMESTAMPTZ,
-    completed_at     TIMESTAMPTZ,
-    UNIQUE (request_id, tool_call_id)
-);
 ```
 
 Artifact 内容放对象存储。当前实现使用进程 mutex，并在 PostgreSQL 控制面模式下使用 session-level advisory lock 覆盖多节点的 list-version + put 临界区；如果未来允许绕过 Runner 直接大规模并发上传，可再增加独立 artifact metadata/version allocator。
@@ -467,10 +436,10 @@ CREATE INDEX idx_audit_trace
 
 Session、Memory 和 Artifact 的保留期可以不同。Artifact 到期先删除对象，再标记元数据；如果对象删除失败，任务进入重试和人工对账，不能只删 SQL 记录后留下孤儿对象。
 
-## 10. 机器人连接维护（schema 31）
+## 10. 机器人连接维护
 
 - `channel_binding.retired_at` 标记退役；约束要求退役绑定保持 disabled。当前有效绑定使用部分唯一索引，退役记录仍供旧 conversation、inbound、outbound 和 audit 引用。
-- `channel_connection.status` 增加 removed；目录隐藏移除项，当前账号唯一索引排除 removed，允许重新添加。`operation` 区分 activate/remove，不能将待确认移除误判成激活成功。
+- `channel_connection.status` 使用 removed 表示移除；目录隐藏移除项，当前账号唯一索引排除 removed，允许重新添加。`operation` 区分 activate/remove，不能将待确认移除误判成激活成功。
 - 管理型企业微信 `config.group_grants` 以 chat_id 为键，每群记录 start_at 及成员的 id/name/since。新群和成员有各自时间下界；空成员列表表示不接收该群。接收进度与消息正文不存入授权配置。
 - 凭据更新写入新的加密引用，旧会话、审计和退役绑定保留；更换企业微信地址会清理旧群列表缓存并重新确认授权。换绑 Agent 创建新的 BindingID，不修改历史会话所属应用。
 

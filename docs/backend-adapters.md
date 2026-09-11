@@ -60,7 +60,7 @@ Router 按后端 Binding 和配置摘要缓存服务，不同资源的具体缓�
 
 ### InMemory
 
-适合单元测试、示例和本地单进程开发。它不支持多节点共享，进程退出后数据丢失，不能用于生产租户。
+适合单机演示与临时会话。它不支持多节点共享，进程退出后数据丢失，不能用于生产租户。
 
 ### Redis
 
@@ -108,13 +108,13 @@ Memory 与 Session 的生命周期不同。Session 记录完整对话，Memory �
 
 适合事实型 Memory、软删除、版本管理、合规查询和数据导出。框架 MySQL/PostgreSQL 实现通过稳定 memory ID 和 upsert 提供幂等写入。若需要语义检索，可以将 SQL 作为真相源，异步同步到 pgvector 或独立向量库。
 
-当前 PostgreSQL 包装器支持 `schema`、`table_name` 和 `skip_db_init`。先用迁移/运维身份初始化表，再配置 `skip_db_init=true` 和仅有表 DML 权限的 SecretRef，避免运行时要求建表权限。验证层级见[验收说明](acceptance.md)。
+当前 PostgreSQL 包装器支持 `schema`、`table_name` 和 `skip_db_init`。先用迁移/运维身份初始化表，再配置 `skip_db_init=true` 和仅有表 DML 权限的 SecretRef，避免运行时要求建表权限。支持后端见[功能范围](acceptance.md)。
 
 Memory 用户键不包含 Session ID。若不希望私聊事实被带入群聊，可设置 revision `memory_config.direct_only=true`，并保持 `preload_memory=0`、`auto_extract=false`；框架工具按可信请求受众过滤，群聊和未知受众无法调用 `memory_*`。该模式仅在用户明确操作时保存/读取，不等于自动长期记忆提取。
 
 ### 外部 Memory 服务
 
-Mem0 或企业自建 Memory API 适合把提取、去重、检索交给专用服务。平台仍要传入 tenant/app/user scope，并保存外部对象 ID、版本和审计记录。外部服务不可用时可以降级为“本轮不加载长期记忆”，但不能错误加载其他租户数据。
+Mem0 或企业自建 Memory API 适合把提取、去重、检索交给专用服务。平台仍要传入 tenant/app/user scope，并保存外部对象 ID、版本和审计记录。外部服务不可用时可以降级为“当前请求不加载长期记忆”，但不能错误加载其他租户数据。
 
 ### 自动 Memory 任务
 
@@ -247,7 +247,7 @@ SQL 保留结构化索引字段，原始大 payload 单独加密保存并记录�
 
 | 后端 | 适合数据 | 一致性和延迟 | 成本与运维 |
 | --- | --- | --- | --- |
-| InMemory | 测试、示例 | 单进程强一致，重启丢失 | 最低，不可生产 |
+| InMemory | 单机演示、临时会话 | 单进程强一致，重启丢失 | 最低，不可生产 |
 | Redis | 活跃 Session、租约、去重缓存 | 低延迟；主库写后可见 | 内存成本高，关注持久化和热 key |
 | PostgreSQL | 控制面、journal、Session、Memory、Audit | 事务强，延迟高于 Redis | 通用性强，需分区和连接池治理 |
 | MySQL | Session、Memory、既有业务数据 | 事务强 | 适合已有 MySQL 体系 |
@@ -257,15 +257,3 @@ SQL 保留结构化索引字段，原始大 payload 单独加密保存并记录�
 | pgvector | 中小知识库 | 与 PostgreSQL 事务体系接近 | 组件少，需隔离 OLTP 压力 |
 | S3 / MinIO | Artifact、知识原文、归档 | 对象写后读取决于实现 | 低成本，需处理版本和孤儿对象 |
 | External Memory | 长期记忆 | 取决于服务 SLA | 能力集中，但有供应商依赖 |
-
-## 9. 依赖版本管理
-
-tRPC-Agent-Go 主模块和 Session、Memory、Storage、VectorStore、AG-UI、OpenClaw 使用独立 Go module 和独立 tag，版本号并不总是完全一致。项目需要维护固定依赖清单和兼容矩阵。
-
-当前项目因 Qdrant adapter 使用 Go 1.24.0，并在 `go.mod` 固定 tRPC-Agent-Go 主模块 `v1.11.2`、各独立 Session/Memory/Artifact/Vector module `v1.11.0`。升级前在 CI 中运行：
-
-- 所有包单测和 race test；
-- Redis、PostgreSQL、MySQL、Qdrant、MinIO 集成测试；
-- Session 接口契约测试；
-- 后端迁移和双写故障测试；
-- 依赖升级前后的 Session/Event JSON 兼容测试。

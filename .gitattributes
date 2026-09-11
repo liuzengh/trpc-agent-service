@@ -1,0 +1,34 @@
+# Runtime source and operator documentation form the exported delivery.
+.gitattributes export-ignore
+.gitignore export-ignore
+.github export-ignore
+*_test.go export-ignore
+**/*_test.go export-ignore
+**/testdata export-ignore
+**/testdata/** export-ignore
+trpcservice/recovery export-ignore
+scripts/regression.sh export-ignore
+scripts/e2e-backup-restore.sh export-ignore
+coverage.sh export-ignore
+format.sh export-ignore
+lint.sh export-ignore
+clean.sh export-ignore
+examples export-ignore
+cmd/trpc-loadgen export-ignore
+cmd/trpc-tracecheck export-ignore
+cmd/trpc-wecomsample export-ignore
+deploy/compose/prometheus-rules.test.yaml export-ignore
+
+# Keep an explicit, recipient-facing documentation set.
+docs/* export-ignore
+docs/README.md -export-ignore
+docs/architecture.md -export-ignore
+docs/sequence.md -export-ignore
+docs/data-model.md -export-ignore
+docs/data-consistency.md -export-ignore
+docs/backend-adapters.md -export-ignore
+docs/im-channels.md -export-ignore
+docs/governance-operations.md -export-ignore
+docs/operations-runbook.md -export-ignore
+docs/risks.md -export-ignore
+docs/acceptance.md -export-ignore

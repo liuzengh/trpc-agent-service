@@ -23,6 +23,15 @@ func deliveryFixture(t *testing.T, name string) string {
 	if err := os.WriteFile(filepath.Join(root, name), raw, 0700); err != nil {
 		t.Fatal(err)
 	}
+	if name == "build.sh" {
+		attributes, err := os.ReadFile("../.gitattributes")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".gitattributes"), attributes, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	deliveryCommand(t, root, "git", "init", "-q")
 	deliveryCommand(t, root, "git", "config", "user.email", "fixture@example.invalid")
 	deliveryCommand(t, root, "git", "config", "user.name", "Fixture")
@@ -71,6 +80,12 @@ func TestSourcePackageOnlyCommittedPublicFiles(t *testing.T) {
 	writeDeliveryFixture(t, root, "data/private.dump", "PRIVATE_CANARY")
 	writeDeliveryFixture(t, root, "data/README.md", "public runtime instructions")
 	writeDeliveryFixture(t, root, ".env.example", "PROVIDER=mock")
+	for _, path := range []string{".github/workflows/ci.yml", "trpcservice/recovery/restore_test.go", "trpcservice/agent/runtime_test.go", "trpcservice/channels/wecommcp/testdata/messages.json", "scripts/regression.sh", "scripts/e2e-backup-restore.sh", "coverage.sh", "format.sh", "lint.sh", "clean.sh", "examples/knowledge-test.md", "cmd/trpc-loadgen/main.go", "cmd/trpc-tracecheck/main.go", "cmd/trpc-wecomsample/main.go", "deploy/compose/prometheus-rules.test.yaml", "docs/development-notes.md"} {
+		writeDeliveryFixture(t, root, path, "DEVELOPMENT_ONLY_CANARY")
+	}
+	for _, path := range []string{"README.md", "docs/README.md", "docs/architecture.md", "docs/operations-runbook.md", "docs/acceptance.md", "trpcservice/agent/runtime.go", "cmd/trpc-service/main.go", "scripts/local-process.sh", "skills/json-digest/SKILL.md"} {
+		writeDeliveryFixture(t, root, path, "DELIVERY_PUBLIC_CONTENT")
+	}
 	deliveryCommand(t, root, "git", "add", ".")
 	deliveryCommand(t, root, "git", "commit", "-qm", "fixture")
 	deliveryCommand(t, root, "bash", "build.sh", "--package")
@@ -103,12 +118,17 @@ func TestSourcePackageOnlyCommittedPublicFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(body), "PRIVATE_CANARY") {
-			t.Fatal("private data exported")
+		if strings.Contains(string(body), "PRIVATE_CANARY") || strings.Contains(string(body), "DEVELOPMENT_ONLY_CANARY") {
+			t.Fatal("private or development-only data exported")
 		}
 	}
 	if !names["trpc-agent-service/.env.example"] || names["trpc-agent-service/.env"] || names["trpc-agent-service/data/private.dump"] {
 		t.Fatal("wrong archive members")
+	}
+	for _, path := range []string{"docs/architecture.md", "docs/operations-runbook.md", "docs/acceptance.md", "trpcservice/agent/runtime.go", "cmd/trpc-service/main.go", "scripts/local-process.sh", "skills/json-digest/SKILL.md"} {
+		if !names["trpc-agent-service/"+path] {
+			t.Fatalf("delivery requirement excluded: %s", path)
+		}
 	}
 	deliveryCommand(t, filepath.Join(root, "dist"), "sha256sum", "-c", filepath.Base(archives[0])+".sha256")
 	deliveryMustFail(t, root, "build.sh --package") // no overwrite

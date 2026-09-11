@@ -44,22 +44,39 @@ func TestLocalDocumentLinks(t *testing.T) {
 	}
 }
 
-// Keep the supplied implementation requirement when restoring README versions.
-func TestReadmeRequirementBoundary(t *testing.T) {
+// The delivery README is a product entry point, not an assignment or build log.
+func TestReadmeDeliveryBoundary(t *testing.T) {
 	raw, err := os.ReadFile("../README.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(raw)
-	if strings.Contains(content, "不要求实现完整系统") {
-		t.Fatal("README restored an older, relaxed implementation requirement")
-	}
 	for _, required := range []string{
-		"一份基于该设计的 GitHub 实现代码",
-		"实现时不必严格按这个结构组织代码",
+		"tRPC-Agent-Go", "docs/architecture.md", "docs/sequence.md",
+		"docs/data-model.md", "docs/data-consistency.md", "docs/backend-adapters.md",
+		"docs/risks.md", "docs/operations-runbook.md", "compose.demo.yaml",
 	} {
 		if !strings.Contains(content, required) {
-			t.Fatalf("README lost the supplied requirement: %s", required)
+			t.Fatalf("README lost a delivery entry point: %s", required)
+		}
+	}
+}
+
+func TestDocumentationContainsNoDevelopmentHistory(t *testing.T) {
+	paths, err := filepath.Glob("*.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths = append(paths, "../README.md")
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, marker := range []string{"本轮", "本次修复", "验包报告", "封版", "本地提交", "Git HEAD", "workbuddy2api", "开发环境", "开发者日常", "联调记录", "回归入口", "regression.sh", "e2e-backup-restore.sh", "测试包", "测试条目"} {
+			if strings.Contains(string(raw), marker) {
+				t.Errorf("%s contains internal history: %s", path, marker)
+			}
 		}
 	}
 }

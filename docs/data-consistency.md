@@ -7,7 +7,7 @@
 运行面维护以下不变量：
 
 1. 同一 conversation 同一时刻最多有一个有效 fencing token。
-2. 一个外部消息最多创建一个 `request_id` 和一个逻辑 Agent run。
+2. 同一去重标识最多创建一个 `request_id` 和一个逻辑 Agent run；指纹去重的源消息区分限制见 IM 接入说明。
 3. Session Event 的顺序由 `event_seq` 或后端原子写入顺序确定，不能依赖客户端时间。
 4. Session state 只能由已提交 Event 的 `StateDelta` 推进。
 5. Summary 和 Memory 都不能越过尚未提交的 Event，也不能用旧水位覆盖新结果。
@@ -21,11 +21,11 @@ Redis、MySQL 和 PostgreSQL Session 适配器可以保证单次 `AppendEvent` �
 
 当前 Redis Streams 消费组不保证按 conversation 分区；同一会话整轮串行化依赖 Session Coordinator 的跨节点租约和 fencing token。队列分区是可选的调度优化，不能代替此正确性约束。重投和网络分区时仍可能短暂出现旧消费者，关键提交必须核对所有权。
 
-存储操作另外使用两层协调：普通 Session/Memory 操作持有应用级共享门禁，并分别按会话/用户串行；回填、验证、切换和应用级状态操作持有应用级排他门禁。`resource_sync` 的 inventory、fences、epoch 在短临界区内读取最新值并更新，不跨后端 I/O 持有元数据锁，也不使用旧快照整行覆盖其他会话的更新。继续使用 schema 21 的原表结构，无需新增数据库迁移；旧节点的应用级排他锁与新共享门禁仍互斥。
+存储操作另外使用两层协调：普通 Session/Memory 操作持有应用级共享门禁，并分别按会话/用户串行；回填、验证、切换和应用级状态操作持有应用级排他门禁。`resource_sync` 的 inventory、fences、epoch 在短临界区内读取最新值并更新，不跨后端 I/O 持有元数据锁，也不使用旧快照整行覆盖其他会话的更新。共享与排他门禁使用同一资源标识，切换后端时仍会等待正在进行的访问完成。
 
-schema 26 的 Worker 在运行记录行锁内检查更早 `turn_seq` 是否仍处于 queued/running/failed/waiting；后续请求通过现有 Outbox 延迟调度，不占住执行槽等待前文。恢复任务携带调度代数，旧 Redis 投递不能覆盖新一代任务。近期与积压各用一个现有 Redis Streams 队列，共享原租约/ACK/重领实现，按 4:1 的调度机会消费，空队列允许另一边借用；这不是耗时或成本的严格比例。
+Worker 在运行记录行锁内检查更早 `turn_seq` 是否仍处于 queued/running/failed/waiting；后续请求通过现有 Outbox 延迟调度，不占住执行槽等待前文。恢复任务携带调度代数，旧 Redis 投递不能覆盖新一代任务。近期与积压各用一个现有 Redis Streams 队列，共享原租约/ACK/重领实现，按 4:1 的调度机会消费，空队列允许另一边借用；这不是耗时或成本的严格比例。
 
-schema 27 将 completed Run/最终 Outbound 作为恢复真相：Worker 在检查执行次数、权限、配额和调用 Runtime 前先读取持久结果；并在准入竞态处再次拦截 completed。恢复不重做模型、附件导入、工具或审批文案，只补未完成的审计/用量/后台任务提交，并写 finalized_at。恢复收尾可以继续重试，不受原模型执行次数上限截断；后台 Job 使用原稳定去重键。收尾全部成功后再 ACK，Redis 完成缓存到期不改变持久完成态。收尾尝试的审计允许保留多条尝试记录，不能将其 cost 简单累加当作实际模型账单。
+completed Run/最终 Outbound 是恢复真相：Worker 在检查执行次数、权限、配额和调用 Runtime 前先读取持久结果；并在准入竞态处再次拦截 completed。恢复不重做模型、附件导入、工具或审批文案，只补未完成的审计/用量/后台任务提交，并写 finalized_at。恢复收尾可以继续重试，不受原模型执行次数上限截断；后台 Job 使用原稳定去重键。收尾全部成功后再 ACK，Redis 完成缓存到期不改变持久完成态。收尾尝试的审计允许保留多条尝试记录，不能将其 cost 简单累加当作实际模型账单。
 
 模型不可用的长延迟恢复只适用于尚未产生模型输出、没有工具执行记录的请求。已执行/未知工具结果继续按原 Journal 处理。tRPC-Agent-Go 仍负责 Runner/LLMAgent/模型 HTTP 与 Event；平台通过官方模型回调和 OpenAI middleware 扩展识别暂时故障，关闭 SDK 的叠加即时重试，延迟调度复用 PostgreSQL Outbox。Session Service 的薄适配在既有 Session 租约内按 RequestID 去重用户入站事件，其余存储行为仍委托框架后端。只有能够确认请求未发出的 dial 失败才释放模型预留，超时或未知计费结果保留保守结算。
 

@@ -6,15 +6,7 @@
 
 `/chat`、`/inbound` 默认不注册（404）。启用后，无有效 Bearer 返回 401，越权返回 403；失败不创建任务、不调用模型。loopback、代理头和难猜 URL 都不能代替身份校验。
 
-本地快捷配置：
-
-```dotenv
-TRPC_AGENT_HTTP_API_ENABLED=true
-TRPC_AGENT_HTTP_API_TOKEN="自行生成的至少 32 字符随机 Token"
-TRPC_AGENT_HTTP_API_PRINCIPALS_JSON=
-```
-
-用 `openssl rand -hex 24` 生成值并写入私有配置；该快捷身份只授权 `tutorial-tenant / tutorial-http / alice`。多租户改用 principals 数组，同时清空快捷 Token：
+通过 `TRPC_AGENT_HTTP_API_PRINCIPALS_JSON` 配置授权身份，并清空快捷 Token。每个身份只绑定必要的租户、入口和用户：
 
 ```json
 [
@@ -63,28 +55,28 @@ Kubernetes 的分角色 Secret、NetworkPolicy 和依赖标签要在实际集群
 
 ### 2.1 网页模型连接
 
-`modelregistry` 提供租户模型连接，schema 29 在原加密存储上增加编辑、配置版本链和 API Key 更新。仅 `superadmin` 可调用 `model-connections/create`、`update`、`rotate-key`；`list`、`get` 仍要求对应租户的读取权限，租户管理者不能自行授予凭据。所有变更与审计在同一 PostgreSQL 事务提交，带 `expected_version` 防止覆盖并发修改。Cookie 请求仍须通过同源和 CSRF 检查；没有匿名首次注册密钥的接口。
+`modelregistry` 提供租户模型连接、配置版本链和 API Key 更新。仅 `superadmin` 可调用 `model-connections/create`、`update`、`rotate-key`；`list`、`get` 仍要求对应租户的读取权限，租户管理者不能自行授予凭据。所有变更与审计在同一 PostgreSQL 事务提交，带 `expected_version` 防止覆盖并发修改。Cookie 请求仍须通过同源和 CSRF 检查；没有匿名首次注册密钥的接口。
 
 - API Key 使用 AES-256-GCM、随机 nonce 加密后写入 `model_connection`。附加认证数据绑定 tenant、connection ID、模型与地址，不能把密文复制给另一租户或换个地址继续解密。
 - 主密钥来自独立部署配置 `TRPC_AGENT_MODEL_MASTER_KEY`（base64 的 32 字节值），Admin/Worker/Jobs 必须一致。数据库只保存主密钥指纹，不存主密钥；配置缺失时功能关闭，不回退明文存储。指纹不匹配时启动失败。
 - 连接列表、Agent 草稿/版本和审计均不含 Key 或密文。模型配置只保存 `{"source":"connection","connection_id":"..."}`，不能同时覆盖 provider/name/base_url/api_key_ref；ID 固定一个模型/地址配置版本。Worker 按可信 tenant 解析，继续调用框架 `model/openai` 与 Runner。
 - `TRPC_AGENT_MODEL_ENDPOINT_POLICY` 默认 `public_https`，管理员可配置任意兼容协议的公网 HTTPS 供应商，不需逐个授权域名；可选 `allowlist` 模式只允许 `TRPC_AGENT_MODEL_ALLOWED_ORIGINS` 中的精确 origin。后者在公网模式下是受信任例外，用于本地/内网/HTTP 模型或企业代理，不接受路径、凭据、query 或通配符。保存、发布与运行均校验地址格式与策略；错误分别说明格式、严格白名单或非公网限制，不将其混称为 Key 错误。
 - 未列为例外的公网地址使用独立 transport：禁用代理，建连时验证全部 IPv4/IPv6 DNS 结果并直接连接已验证 IP，保留原域名的 TLS 校验，拒绝私有、回环、链路本地、保留及 IPv6 转换地址，防止二次解析改变目标。DNS 解析检查发生在实际连接时，保存不访问供应商。显式允许的 origin 使用部署者信任的 DNS/代理/别名，因而需要管理员审核；现有 `.env` 默认模型不经过网页模型策略。这些措施不代替出口防火墙、可信路由与代理策略。实现依据 [OWASP SSRF 防护指南](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)，特殊地址参考 [IANA IPv6 注册表](https://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xhtml)。
-- 所有网页模型请求仍拒绝重定向和跨 origin 转发凭据。策略仅由部署者设置，租户和模型输入不能修改；修改后重启 Admin/Worker/Jobs。升级后若要保持 rc.3 的严格限制，须显式设置 `allowlist`，不能仅凭旧地址列表推断仍是严格模式。
+- 所有网页模型请求仍拒绝重定向和跨 origin 转发凭据。策略仅由部署者设置，租户和模型输入不能修改；修改后重启 Admin/Worker/Jobs。需要严格限制供应商时，必须显式设置 `allowlist`。
 - 名称可原地修改，不改变模型或地址。修改模型 ID/地址时生成新 connection_id 和递增配置版本，旧 ID 与已有 Agent/调试快照继续有效；已有后继的旧配置不能再次分叉，但仍能更名或更新它自己的 Key。新配置须显式通过 Agent 草稿、调试与发布切换。
 - API Key 可以独立更新：留空表示保留，填写新值表示更新；更换地址必须重新填写目标服务的 Key，不能自动向新地址转发旧凭据。Key 的版本只属于所选配置版本，不自动联动同组其他版本。已经发出的请求可能仍持有旧 Key，紧急撤销仍须在供应商侧执行。
 - 框架模型实例只保留凭据占位符；受控 HTTP transport 在每次请求前从共享 PostgreSQL 读取和解密当前 Key，再克隆请求并注入认证头。因此更新已提交后，新取用凭据的请求使用新 Key，包括缓存模型实例和其他 Worker；读取失败不会回退到旧缓存。数据库需使用一致的写主库，代价是每次模型请求多一次 SQL 读取。SDK 响应中的 Request 不保留注入后的认证头。
 - 页面展示草稿、稳定/灰度和其他发布版本的引用关系，不列出聊天内容，也不将历史引用等同于活跃流量。调试快照与旧会话也可能引用旧配置。审计记录连接 ID、配置版本、凭据版本、操作者和是否换 Key，不记录密钥。
 
-API Key 更新不等于加密主密钥轮换：**仍不能直接替换 `TRPC_AGENT_MODEL_MASTER_KEY`**，也不能丢失 setup 卷后生成新主密钥冒充恢复。首次升级此功能必须停旧 Worker 并升级相关执行节点，旧版模型实例不会自动获得新的逐请求凭据机制。
+API Key 更新不等于加密主密钥轮换：**仍不能直接替换 `TRPC_AGENT_MODEL_MASTER_KEY`**，也不能丢失 setup 卷后生成新主密钥冒充恢复。不同执行节点必须使用兼容的凭据读取协议与一致的主密钥。
 
 容器与宿主机切换可选用部署级 `TRPC_AGENT_MODEL_HOST_ALIASES_JSON`，把模型连接中的 DNS 名映射到回环 IP。配置只影响显式允许 origin 的模型 transport，映射目标不允许非回环地址；对于映射命中的名称直连本机，其他受信任例外继续使用原代理/DNS 规则。未显式允许的公网目标不采用别名。租户边界、TLS 主机名与凭据绑定仍保留，不能从租户表单或模型输入设置此映射。
 
-完整体验 Compose 自动生成主密钥、数据库密码和 Admin Token 并放入专用 setup 卷；启动日志不输出它们。只有管理员显式执行 `trpc-init -show-token` 才显示登录凭据。数据库与 setup 卷应分别加密备份、限制访问；源码交付不包括这些卷。
+单机 Compose 自动生成主密钥、数据库密码和 Admin Token 并放入专用 setup 卷；启动日志不输出它们。只有管理员显式执行 `trpc-init -show-token` 才显示登录凭据。数据库与 setup 卷应分别加密备份、限制访问；源码交付不包括这些卷。
 
 ### 2.2 网页机器人连接
 
-schema 30 增加 `channel_connection`、`channel_credential`、`channel_connection_group` 和 `channel_connection_setting`。网页连接只允许平台管理员操作；列表读取仍检查租户范围。沿用同源、CSRF、请求限流和审计，不向模型开放这些管理接口。
+机器人连接数据使用 `channel_connection`、`channel_credential`、`channel_connection_group` 和 `channel_connection_setting`。网页连接只允许平台管理员操作；列表读取仍检查租户范围。沿用同源、CSRF、请求限流和审计，不向模型开放这些管理接口。
 
 - Bot Token、Webhook Secret 和完整 MCP URL 使用 AES-256-GCM 加密，认证数据绑定租户、引用和用途。复用已备份的 `TRPC_AGENT_MODEL_MASTER_KEY`；不得直接换值。Gateway、Sender 和需要下载 Telegram 附件的 Worker 也需注入此密钥。数据库分角色权限与运行时用途检查共同限制使用；这不等于不同角色持有独立加密主密钥，生产需保护密钥注入和数据库账号。
 - Admin 可验证和管理网页提交的 IM 凭据；该功能没有扩大对旧环境变量的读取授权。新引用使用 `managed://`，仅用于内部绑定，页面与连接 API 不返回密文或真实密钥。原 `env://` 授权继续有效，不会自动导入旧 Token。
@@ -92,7 +84,7 @@ schema 30 增加 `channel_connection`、`channel_credential`、`channel_connecti
 - 外部设置请求前持久记录操作状态，使用版本检查和有界租约防止并发覆盖。响应丢失时保存为待检查；只读检查确认 URL 已生效后完成本地激活，不自动重新登记。管理员可以明确重试同一回调设置，操作会审计。Telegram 不提供跨系统原子的 Webhook 比较交换，仍无法阻止外部管理员同时修改同一个 Bot。
 - MCP 验证阶段只执行初始化和工具发现。读取群列表、读取所选群确认消息分别要求用户同意。确认消息窗口最多 10 分钟；不保存非匹配消息正文，不查询其他群，不自动发送探测消息。识别出成员后仍须确认才激活接收。
 - 网页管理的 MCP 目标由数据库动态提供，与旧环境变量目标合并去重。群级租约、Inbox、Session、队列和 Runner 沿用现有实现。新增群/成员由 Binding 版本约束授权变化，管理型身份格式保持已有群检查点稳定；旧绑定的身份格式不变。
-- schema 31 的授权按群保存成员及授权起点，接收适配器逐条核对，不能将群名单与用户名单交叉组合。撤销某群成员不扩大其他群权限；重新授权不会放行撤权期间的积压消息。
+- 授权按群保存成员及授权起点，接收适配器逐条核对，不能将群名单与用户名单交叉组合。撤销某群成员不扩大其他群权限；重新授权不会放行撤权期间的积压消息。
 - 更新凭据、换绑、移除前要求暂停，并检查未完成请求、审批和未知投递。事务锁与入站准入的共享 advisory lock 配合，防止检查结束后旧绑定又入队。换绑创建新绑定/会话；旧绑定用 `retired_at` 保留且数据库禁止重新启用。管理型绑定不能绕过机器人 API，通过旧通用接口直接改写。
 - Telegram 移除的意图与激活意图区分持久化；只读对账不会把一次未确认移除当作重新激活。正常移除保留上游待处理更新，明确的“仅移除本地”不宣称已经更改上游。退役记录和旧凭据保留在受控数据库中，按备份及保留策略保护，不等于完成密钥销毁。
 
@@ -100,7 +92,7 @@ schema 30 增加 `channel_connection`、`channel_credential`、`channel_connecti
 
 维护前的未知结果检查同时查询 Outbound 分段和 Tool Journal，不能只看请求或出站总状态：总状态已进入 dead，仍可能存在 unknown/attempting 分段。必须先按证据对账，再更换或移除连接。
 
-公网诊断与连接设置共用地址来源，数据库读取失败时不回退到过时的环境变量。检查结果按目标地址缓存，修改地址后失效。显式健康检查复用公网模型传输层的 DNS/IP 防护，但不采用模型地址白名单例外：不使用代理、不开内网访问、不转发认证信息、不跟随重定向，只保留 HTTP 状态，不返回响应正文。公网服务器的 Nginx 模板仅暴露回调和健康检查，管理访问通过 SSH 端口转发，详见[运行手册](operations-runbook.md#05-公网服务器部署)。
+公网诊断与连接设置共用地址来源，数据库读取失败时不回退到过时的环境变量。检查结果按目标地址缓存，修改地址后失效。显式健康检查复用公网模型传输层的 DNS/IP 防护，但不采用模型地址白名单例外：不使用代理、不开内网访问、不转发认证信息、不跟随重定向，只保留 HTTP 状态，不返回响应正文。公网服务器的 Nginx 模板仅暴露回调和健康检查，管理访问通过 SSH 端口转发，详见[运行手册](operations-runbook.md#2-公网服务器部署)。
 
 ## 3. 工具、审批与业务幂等
 
@@ -121,7 +113,7 @@ Tool Execution Journal 使用 request_id/tool_call_id 和参数哈希记录授�
 
 托管写操作另有稳定 operation ID 和业务幂等键，`OperationProvider` 负责执行/查询；内置本地工作项示范批准后单次写入。对账只查询后端事实，不调用 Execute，也不允许用户填写成功状态。不存在记录不证明远端没有在途请求；无可靠幂等契约的后端不允许盲目重试。
 
-管理员通过 tool-executions/list、tool-operations/list/get/reconcile 查询，对账后 HTTP 200 仍可能表示业务 unknown。详见 [Admin 入口](operations-runbook.md#3-httpadmin-和-im)与 [幂等策略](data-consistency.md)。
+管理员通过 tool-executions/list、tool-operations/list/get/reconcile 查询，对账后 HTTP 200 仍可能表示业务 unknown。详见 [Admin 入口](operations-runbook.md#6-多节点监控与接口)与 [幂等策略](data-consistency.md)。
 
 ## 4. Agent MCP 与只读文档
 
@@ -184,11 +176,11 @@ PostgreSQL 的 platform_backlog 聚合视图由 Gateway/Admin 读取，只含租
 
 agent_backlog_snapshot_up=0 表示采集失败，不能导出假的零积压；timestamp 用于识别过期快照。无新消息时接收检查点也应推进。unknown/attempting 计入失败/待核对，不能当发送成功。
 
-Prometheus 规则、测试和 Grafana 配置见 [deploy/compose](../deploy/compose/prometheus-rules.yaml)。阈值是部署初始值，实际通知接收方、静默与 SLO 需另行配置；规则评估成功不代表已经有人收到通知。
+Prometheus 规则和 Grafana 配置见 [deploy/compose](../deploy/compose/prometheus-rules.yaml)。阈值是部署初始值，实际通知接收方、静默与 SLO 需另行配置；规则评估成功不代表已经有人收到通知。
 
 ## 8. 管理页面与 Skill 沙箱
 
-管理工作台位于 `/admin/ui/`，静态资源不带租户配置。浏览器首次使用已有 Admin Token 登录，之后使用最长 8 小时的 HttpOnly/SameSite Cookie；服务端只保存随机会话凭据摘要，长期 Token 不进入 localStorage。修改请求同时检查 CSRF 与 Origin，注销、到期或 Principal/Token 配置变化后旧会话失效。远程登录要求 HTTPS，本机回环 HTTP 仅用于开发。已有 Bearer API 保留，不通过伪造 Cookie 绕过其鉴权。租户、角色和资源归属都在服务器再次检查。
+管理工作台位于 `/admin/ui/`，静态资源不带租户配置。浏览器首次使用已有 Admin Token 登录，之后使用最长 8 小时的 HttpOnly/SameSite Cookie；服务端只保存随机会话凭据摘要，长期 Token 不进入 localStorage。修改请求同时检查 CSRF 与 Origin，注销、到期或 Principal/Token 配置变化后旧会话失效。远程登录要求 HTTPS，HTTP 只允许本机回环访问。已有 Bearer API 保留，不通过伪造 Cookie 绕过其鉴权。租户、角色和资源归属都在服务器再次检查。
 
 页面使用 React/TypeScript 与同源 CSP，不渲染不可信 HTML。Ant Design 动态样式通过当前页面 nonce 授权，样式属性用于组件布局；没有开放内联脚本或 eval。长期登录凭据、模型 Key、数据库密码、回调密钥均不通过工作台 API 返回。
 
@@ -198,9 +190,9 @@ Prometheus 规则、测试和 Grafana 配置见 [deploy/compose](../deploy/compo
 
 启用 skill_run 后，skill_load 必须在白名单中；“加载后执行”至少需要两次工具调用，正数 `max_tool_calls` 小于 2 时禁止新建/发布该执行配置。`0` 保持不限次数的含义，并返回警告；平台不会自动把 1 改为 4。只加载说明、不启用 skill_run 的只读配置不要求沙箱或两次额度。旧版本不被原地修改。
 
-`valid=true` 不等于真实模型联调成功。依赖只接受执行节点提供的有时效观测；过期、未来时间或非 Worker 来源按 `unknown` 处理。目前内置启动装配仅能明确报告本地 Worker 沙箱未启用，远端 Worker、模型和后端连通性未观测时保持未知，不能把 Admin 节点自身可用当作所有 Worker 就绪。主动模型检查仍需显式运行模型检查命令。
+`valid=true` 表示配置有效，不代表模型调用成功。依赖只接受执行节点提供的有时效观测；过期、未来时间或非 Worker 来源按 `unknown` 处理。未观测或过期的远端 Worker、模型和后端连通性显示为未知，不能以 Admin 节点自身状态代替执行节点的就绪状态。主动模型检查仍需显式运行模型检查命令。
 
-权限审计详情新增 `code`、`calls_used` 和 `call_limit`。运行中耗尽工具次数时，Runtime 使用固定平台反馈替换误导性的模型解释，包含 `tool_budget_exceeded` 和 request_id；缓存回复保证重复投递不重做。沙箱未启用的已批准调用记录为 `failed / sandbox_unavailable`（明确未开始执行）；其他沙箱失败仍保留未知结果边界，不因为错误分类就允许重放。审批的结构化类别为 `approval_required`，批准与执行成功继续分开。
+权限审计详情包含 `code`、`calls_used` 和 `call_limit`。运行中耗尽工具次数时，Runtime 使用固定平台反馈替换误导性的模型解释，包含 `tool_budget_exceeded` 和 request_id；缓存回复保证重复投递不重做。沙箱未启用的已批准调用记录为 `failed / sandbox_unavailable`（明确未开始执行）；其他沙箱失败仍保留未知结果边界，不因为错误分类就允许重放。审批的结构化类别为 `approval_required`，批准与执行成功继续分开。
 
 网页调试使用独立快照、队列、审批和 Journal 表，不创建虚假的 IM 绑定或可发布版本，也不放宽原 IM 表的外键。只有 Engine 注入的内部调试上下文才能解析快照和选择调试仓储；请求中的 tenant/user/session 不能直接成为可信身份。浏览器只能操作自己发起的调试会话，审计员不能因能看元数据就执行模型或读取调试正文。
 
