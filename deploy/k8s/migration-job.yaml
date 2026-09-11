@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trpc-agent-service-migrate
+  namespace: trpc-agent
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: database-migrator
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: database-migrator
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: trpc-agent-service:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/trpc-migrate"]
+          args: ["-dsn-env", "TRPC_AGENT_MIGRATION_DSN", "-config", "/etc/trpc-agent-service/service.yaml", "-timeout", "2m"]
+          env:
+            - name: TRPC_AGENT_MIGRATION_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-migration-secrets
+                  key: migration-postgres-dsn
+            - name: TRPC_SECRET_ROOT
+              value: /mnt/secrets-store
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/trpc-agent-service
+              readOnly: true
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: trpc-agent-service-config
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: trpc-agent-service-migration-secrets

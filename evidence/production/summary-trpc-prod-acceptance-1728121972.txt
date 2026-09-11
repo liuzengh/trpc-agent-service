@@ -1,0 +1,9 @@
+production_acceptance=passed
+project=trpc-prod-acceptance-1728121972
+replicas=2
+replica_exit=surviving_replica_ready=200
+postgres_disconnect=healthz=200 readyz=503
+postgres_recovery=readyz=200
+secret_scan=metrics_health_dependency_trace_logs_audit=clean
+skips=0
+unexecuted=0

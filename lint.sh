@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
+# 静态检查：go vet，若安装了 golangci-lint 则追加执行。
 set -euo pipefail
-
-ROOT="$(cd "$(dirname "$0")" && pwd)"
-cd "$ROOT"
+cd "$(dirname "$0")"
 
 go vet ./...
 if command -v golangci-lint >/dev/null 2>&1; then
-  golangci-lint run ./...
+  golangci-lint run
 fi
+echo "lint passed"

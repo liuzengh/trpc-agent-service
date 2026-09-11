@@ -1,0 +1,15 @@
+production_acceptance=failed
+project=trpc-prod-acceptance-56426319
+replicas=2
+rbac=viewer_read=200 viewer_write=403 cross_tenant=403
+dependencies=10
+replica_exit=surviving_replica_ready=200
+inbox_reclaim=queue_postgres_integration=passed
+postgres_disconnect=healthz=200 readyz=503
+postgres_recovery=readyz=200
+commit_ack_loss=canonical_replay_test=passed
+content_safety=lease_recovery_and_blocking=passed
+secret_scan=metrics_health_dependency_trace_logs_audit=clean
+trace_backend=jaeger_queryable=1
+skips=0
+unexecuted=0

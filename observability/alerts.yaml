@@ -1,0 +1,32 @@
+groups:
+  - name: storage-slo
+    rules:
+      - alert: AgentStorageLatencyHigh
+        expr: >-
+          histogram_quantile(0.95,
+            sum by (le, tenant, backend, component)
+              (rate(storage_operation_duration_seconds_bucket[5m]))) > 1
+          and on (tenant, backend, component)
+            sum by (tenant, backend, component)
+              (rate(storage_operation_duration_seconds_count[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent storage P95 latency exceeds one second"
+          description: "Inspect backend health and trace storage spans; adjust this example SLO to the deployment workload."
+      - alert: AgentStorageErrorRateHigh
+        expr: >-
+          (sum by (tenant, backend, component)
+            (rate(storage_operation_duration_seconds_count{result!="ok"}[5m]))
+          / sum by (tenant, backend, component)
+            (rate(storage_operation_duration_seconds_count[5m]))) > 0.05
+          and on (tenant, backend, component)
+            sum by (tenant, backend, component)
+              (rate(storage_operation_duration_seconds_count[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent storage error rate exceeds five percent"
+          description: "Check timeouts, backend availability, and lease/conflict errors before retrying operations."

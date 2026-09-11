@@ -1,0 +1,198 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-agent-service
+  namespace: trpc-agent
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: gateway-worker
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  minReadySeconds: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: gateway-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8080"
+    spec:
+      serviceAccountName: trpc-agent-service
+      automountServiceAccountToken: false
+      # Default Agent run timeout is 90s; leave time for preStop and queue drain.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: service
+          image: trpc-agent-service:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["-config", "/etc/trpc-agent-service/service.yaml"]
+          env:
+            - name: GOMEMLIMIT
+              value: 420MiB
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.cpu
+            - name: TRPC_CONFIG_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TRPC_SECRET_ROOT
+              value: /mnt/secrets-store
+            - name: DASHSCOPE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: dashscope-api-key
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: redis-url
+            - name: TRPC_AGENT_DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: runtime-postgres-dsn
+            - name: ACME_TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: acme-telegram-bot-token
+            - name: ACME_TELEGRAM_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: acme-telegram-webhook-secret
+            - name: ACME_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: acme-slack-bot-token
+            - name: ACME_SLACK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: acme-slack-signing-secret
+            - name: ACME_WECOM_AIBOT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: acme-wecom-aibot-id
+            - name: ACME_WECOM_AIBOT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: acme-wecom-aibot-secret
+            - name: GLOBEX_TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: globex-telegram-bot-token
+            - name: GLOBEX_TELEGRAM_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: trpc-agent-service-secrets
+                  key: globex-telegram-webhook-secret
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/trpc-agent-service
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+            - name: audit-spool
+              mountPath: /tmp/audit-spool
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "wget -q -O- --post-data='' http://127.0.0.1:8080/-/drain || true; sleep 10"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: trpc-agent-service-config
+            items:
+              - key: service.yaml
+                path: service.yaml
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: trpc-agent-service-runtime-secrets
+        - name: audit-spool
+          persistentVolumeClaim:
+            claimName: trpc-agent-audit-spool
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: trpc-agent-service
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: trpc-agent-service

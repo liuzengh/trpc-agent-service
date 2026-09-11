@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>IM 接入模拟控制台</title>
+  <!-- __VERSION__/__COMMIT__ 由 Go 网关在响应时替换（见 web/server.go index 处理器） -->
+  <script>window.__SERVICE__ = { version: "__VERSION__", commit: "__COMMIT__" };</script>
+</head>
+<body class="min-h-screen font-sans antialiased">
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

@@ -1,17 +1,16 @@
-.idea
-.vscode
-.DS_Store
-*.log
-*.swp
-
+# build artifacts
 bin/
-dist/
 coverage.out
-coverage.html
-*.test
-*.exe
+im-console/node_modules/
+im-console/dist/
+im-console/*.tsbuildinfo
 
-vendor/
-
+# local runtime state (keep directory placeholders)
 data/*
-!data/README.md
+!data/.gitkeep
+trpcservice/workspace/*
+!trpcservice/workspace/.gitkeep
+
+# local overrides
+*.local.yaml
+.env

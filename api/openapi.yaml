@@ -1,0 +1,437 @@
+openapi: 3.0.3
+info:
+  title: TRPC Agent Service API
+  version: 1.1.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        "200": {description: Alive}
+  /readyz:
+    get:
+      summary: Readiness probe
+      responses:
+        "200": {description: Ready}
+        "503": {description: Draining, queue saturated, or durable Store unavailable}
+  /admin/v1/health/dependencies:
+    get:
+      summary: Protected, redacted dependency health details
+      description: Returns component/backend/status/epoch/latency/error category only; DSNs, credentials, and provider error text are never returned.
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Dependency snapshot; optional components may be degraded}
+        "401": {description: Invalid OIDC/JWKS or local development bearer}
+        "403": {description: Principal lacks viewer scope}
+  /metrics:
+    get:
+      summary: Prometheus text exposition consumed by the console monitor
+      responses:
+        "200":
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema: {type: string}
+  /webhooks/{channel}/{binding}:
+    get:
+      summary: Provider callback URL verification (currently WeCom)
+      parameters:
+        - {name: channel, in: path, required: true, schema: {type: string, enum: [wecom]}}
+        - {name: binding, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: Decrypted verification challenge}
+        "401": {description: Signature or binding rejected}
+        "405": {description: Channel does not support GET verification}
+    post:
+      summary: Signed Telegram, Slack, or encrypted WeCom webhook
+      parameters:
+        - {name: channel, in: path, required: true, schema: {type: string, enum: [telegram, slack, wecom]}}
+        - {name: binding, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+          application/xml:
+            schema: {type: string, description: Encrypted WeCom callback envelope}
+          text/xml:
+            schema: {type: string, description: Encrypted WeCom callback envelope}
+      responses:
+        "200": {description: Provider URL-verification challenge handled}
+        "202": {description: Verified and queued}
+        "401": {description: Signature rejected}
+        "503": {description: Queue unavailable; provider should retry}
+  /v1/chat/{tenant}:
+    post:
+      summary: Admin-only synchronous smoke-test chat
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id, text]
+              properties:
+                message_id: {type: string}
+                user_id: {type: string}
+                conversation_id: {type: string, description: Explicit console conversation; separate values create separate API model sessions}
+                thread_id: {type: string}
+                scope: {type: string, enum: [direct, group], default: direct}
+                text: {type: string}
+      responses:
+        "200":
+          description: Agent result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  text: {type: string}
+                  request_id: {type: string}
+                  session_id: {type: string}
+                  duplicate: {type: boolean}
+                  cache_hit: {type: boolean, description: Reply served from dedup result replay instead of a fresh run}
+                  trace_id: {type: string, description: OpenTelemetry trace id; empty when no exporter is configured}
+                  prompt_tokens: {type: integer}
+                  completion_tokens: {type: integer}
+                  cost_usd: {type: number}
+                  latency_ms: {type: integer}
+                  tools:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: {type: string}
+                        decision: {type: string, enum: [allow, deny, ask, side_effect]}
+                        reason: {type: string}
+                        operation_key: {type: string, description: Opaque side-effect intent key; never a metric label}
+                        phase: {type: string, enum: [dispatch, finish, replay, block]}
+                        outcome: {type: string, description: Bounded side-effect operation state/outcome}
+                  timeline:
+                    type: array
+                    description: Real per-stage worker timings consumed by the console UI
+                    items:
+                      type: object
+                      properties:
+                        name: {type: string}
+                        start_ms: {type: integer}
+                        duration_ms: {type: integer}
+        "403": {description: User or operation is not authorized}
+        "400": {description: Invalid JSON, scope, or required fields}
+        "401": {description: Invalid admin bearer token}
+        "404": {description: Tenant not found}
+        "408": {description: Client request was canceled}
+        "409": {description: The same message is already being processed}
+        "413": {description: Tenant input limit exceeded}
+        "429": {description: Tenant rate or budget limit exceeded}
+        "502": {description: Model request failed; response contains a safe error code and request_id}
+        "504": {description: Model request timed out}
+  /admin/v1/tenants:
+    get:
+      summary: List redacted tenant configuration snapshots
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Tenant list}
+  /admin/v1/tenants/custom-model:
+    post:
+      summary: Provision a runtime OpenAI Chat Completions-compatible model as a tenant
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [base_url, model_id, api_key_env]
+              properties:
+                api_format: {type: string, enum: [openai-chat-completions], default: openai-chat-completions}
+                base_url: {type: string, format: uri, description: Base URL, or the full chat completions URL when full_url is true}
+                full_url: {type: boolean, default: false}
+                model_id: {type: string}
+                display_name: {type: string, maxLength: 32}
+                api_key_env: {type: string, description: Environment variable/secret reference; raw API keys are rejected}
+      responses:
+        "201":
+          description: Runtime tenant created; the key is never returned and the model is called on the first chat request
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, tenant_id, display_name, model]
+                properties:
+                  status: {type: string, enum: [created]}
+                  tenant_id: {type: string}
+                  display_name: {type: string}
+                  model:
+                    type: object
+                    required: [provider, name, base_url]
+                    properties:
+                      provider: {type: string, enum: [openai]}
+                      name: {type: string}
+                      base_url: {type: string, format: uri}
+        "400": {description: Invalid endpoint or model configuration}
+        "401": {description: Invalid admin bearer token}
+        "409": {description: Generated tenant id already exists}
+  /admin/v1/reload:
+    post:
+      summary: Import YAML tenant revisions and create persistent full releases
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: No changes were required}
+        "202": {description: Release records created; node ACKs are still pending}
+        "400": {description: Validation failed; last-known-good remains active}
+        "409": {description: Static server, queue, coordination, or telemetry changes require restart}
+  /admin/v1/tenants/{tenant}/rollback:
+    post:
+      summary: Create a persistent rollback release to an immutable revision
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: If-Match, in: header, required: false, schema: {type: integer, format: int64}, description: Expected control-plane generation}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_revision: {type: string}
+                expected_generation: {type: integer, format: int64}
+                reason: {type: string}
+      responses:
+        "202": {description: Rollback release is pending node confirmation}
+        "404": {description: Tenant or target revision not found}
+        "409": {description: CAS or release state conflict}
+  /admin/v1/tenants/{tenant}/revisions:
+    get:
+      summary: List immutable tenant revision summaries without secret values
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: Revision history}
+    post:
+      summary: Create an immutable tenant revision without activating it
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: If-Match, in: header, required: false, schema: {type: integer, format: int64}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision, config]
+              properties:
+                revision: {type: string}
+                reason: {type: string}
+                config: {type: object, additionalProperties: true}
+      responses:
+        "201": {description: Immutable revision created}
+        "400": {description: Configuration validation failed}
+        "409": {description: Revision content conflict}
+  /admin/v1/tenants/{tenant}/releases:
+    post:
+      summary: Create a full or canary release using generation CAS
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: If-Match, in: header, required: false, schema: {type: integer, format: int64}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, target_revision]
+              properties:
+                kind: {type: string, enum: [full, canary, promote, rollback]}
+                target_revision: {type: string}
+                rollout_percent: {type: integer, minimum: 0, maximum: 100}
+                expected_generation: {type: integer, format: int64}
+                reason: {type: string}
+      responses:
+        "202": {description: Release created; status is preparing or pending ACK}
+        "409": {description: Generation or release state conflict}
+  /admin/v1/tenants/{tenant}/releases/{release}/promote:
+    post:
+      summary: Explicitly promote the current canary revision
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: release, in: path, required: true, schema: {type: string}}
+        - {name: If-Match, in: header, required: false, schema: {type: integer, format: int64}}
+      responses:
+        "202": {description: Promote release created}
+        "409": {description: Generation or release state conflict}
+  /admin/v1/tenants/{tenant}/releases/{release}:
+    get:
+      summary: Inspect release status and per-node prepared/applied ACKs
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: tenant, in: path, required: true, schema: {type: string}}
+        - {name: release, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: Release status; verified only after all target nodes applied}
+        "404": {description: Release not found}
+  /admin/v1/config/nodes:
+    get:
+      summary: List node heartbeats, boot IDs, loaded generation and revisions
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Node control-plane readiness and loaded versions}
+  /admin/v1/outbox/uncertain:
+    get:
+      summary: List redacted delivery operations whose provider result is unknown
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+      responses:
+        "200":
+          description: Content-free operation metadata; message text, target, credentials, and trace carrier are omitted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operations]
+                properties:
+                  operations:
+                    type: array
+                    items:
+                      type: object
+                      required: [outbox_id, operation_key, tenant_id, channel_type, binding_id, part_index, part_count, attempt_no, state_version]
+                      properties:
+                        outbox_id: {type: string, format: uuid}
+                        operation_key: {type: string}
+                        tenant_id: {type: string}
+                        channel_type: {type: string}
+                        binding_id: {type: string}
+                        part_index: {type: integer, minimum: 0}
+                        part_count: {type: integer, minimum: 1}
+                        attempt_no: {type: integer, minimum: 1}
+                        state_version: {type: integer, format: int64, minimum: 1}
+                        error_type: {type: string}
+                        provider_code: {type: string}
+                        provider_message_id: {type: string}
+                        provider_request_id: {type: string}
+        "400": {description: Invalid limit}
+        "401": {description: Invalid admin bearer token}
+        "501": {description: Dispatcher does not use the durable Outbox ledger}
+        "503": {description: Outbox ledger unavailable}
+  /admin/v1/outbox/{outbox}/resolve:
+    post:
+      summary: Resolve one unknown delivery using version and attempt CAS
+      description: Retry explicitly accepts duplicate-delivery risk; assume_delivered and cancel do not call the provider.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: outbox, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [resolution_id, expected_version, expected_attempt, action, reason]
+              properties:
+                resolution_id: {type: string, format: uuid, description: Idempotency key for this operator decision}
+                expected_version: {type: integer, format: int64, minimum: 1}
+                expected_attempt: {type: integer, minimum: 1}
+                action: {type: string, enum: [assume_delivered, retry, cancel]}
+                reason: {type: string, minLength: 1, maxLength: 512}
+      responses:
+        "200": {description: Resolution committed with an immutable ledger entry}
+        "400": {description: Invalid request or action}
+        "401": {description: Invalid admin bearer token}
+        "404": {description: Outbox operation not found}
+        "409": {description: State/version/attempt changed or resolution id conflicts}
+        "501": {description: Dispatcher does not use the durable Outbox ledger}
+        "503": {description: Outbox ledger unavailable}
+  /admin/v1/tool-operations/uncertain:
+    get:
+      summary: List redacted side-effect operations with an unknown external outcome
+      description: Expired executing leases are first fenced into unknown; this endpoint never makes them automatically retryable.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: tenant_id, in: query, required: true, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+      responses:
+        "200":
+          description: Argument, response, error text, and lease capabilities are omitted; only hashes and bounded labels are returned
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operations]
+                properties:
+                  operations:
+                    type: array
+                    items:
+                      type: object
+                      required: [tenant_id, operation_key, payload_hash, metadata, state, state_version, attempt_count]
+                      properties:
+                        tenant_id: {type: string}
+                        operation_key: {type: string}
+                        payload_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        metadata:
+                          type: object
+                          required: [tool_name]
+                          properties:
+                            tool_name: {type: string}
+                            operation_class: {type: string}
+                            target_hash: {type: string, pattern: '^(|[0-9a-f]{64})$'}
+                        state: {type: string, enum: [unknown]}
+                        state_version: {type: integer, format: int64, minimum: 1}
+                        attempt_count: {type: integer, minimum: 1}
+                        current_attempt: {type: integer, minimum: 1}
+                        outcome_code: {type: string}
+                        created_at: {type: string, format: date-time}
+                        updated_at: {type: string, format: date-time}
+        "400": {description: Invalid or missing tenant id/limit}
+        "401": {description: Invalid admin bearer token}
+        "501": {description: Worker does not expose a tool operation ledger}
+        "503": {description: Tool operation ledger unavailable}
+  /admin/v1/tool-operations/{operation}/resolve:
+    post:
+      summary: Resolve one unknown tool side effect using version CAS
+      description: retry_not_applied is accepted only after external evidence proves no mutation occurred; confirm and reject never call the tool.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: operation, in: path, required: true, schema: {type: string, maxLength: 256}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [tenant_id, resolution_id, expected_version, action, reason_code]
+              properties:
+                tenant_id: {type: string}
+                resolution_id: {type: string, format: uuid, description: Idempotency key for this operator decision}
+                expected_version: {type: integer, format: int64, minimum: 1}
+                action: {type: string, enum: [confirm, retry_not_applied, reject]}
+                reason_code: {type: string, minLength: 1, maxLength: 256, pattern: '^[A-Za-z0-9_.:/-]+$'}
+                result_hash: {type: string, pattern: '^[0-9a-f]{64}$', description: Required for confirm}
+                replay_reference: {type: string, maxLength: 256, description: Optional opaque protected-result reference for confirm}
+                retry_at: {type: string, format: date-time, description: Required and future-dated for retry_not_applied}
+      responses:
+        "200": {description: Resolution committed with an immutable ledger entry}
+        "400": {description: Invalid identity, action, hash, or action-specific fields}
+        "401": {description: Invalid admin bearer token}
+        "404": {description: Tool operation not found in the requested tenant}
+        "409": {description: State/version changed or resolution id conflicts}
+        "501": {description: Worker does not expose a tool operation ledger}
+        "503": {description: Tool operation ledger unavailable}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

@@ -1,0 +1,72 @@
+/* ===== 自定义模型弹窗 ===== */
+
+/* 遮罩层：设计系统 modal 组件不含遮罩，这里补齐 */
+.cm-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--space-4); box-sizing: border-box;
+  background: rgba(12, 13, 14, 0.45);
+  animation: cm-fade-in 0.15s ease;
+}
+
+@keyframes cm-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.cm-modal { max-height: 90vh; }
+
+.cm-header { padding-bottom: var(--space-2); }
+
+.cm-close svg { width: 16px; height: 16px; }
+
+.cm-body {
+  display: flex; flex-direction: column; gap: var(--space-4);
+}
+
+/* 必填红星 */
+.cm-required { color: var(--danger-5); margin-right: 2px; }
+
+.cm-select {
+  width: 100%; cursor: pointer; appearance: auto;
+}
+
+/* 请求地址 + 完整URL 开关同一行 */
+.cm-url-row { display: flex; align-items: center; gap: var(--space-3); }
+.cm-url-input { flex: 1; min-width: 0; }
+.cm-url-switch { flex-shrink: 0; gap: var(--space-2); }
+.cm-url-switch-label {
+  font-size: var(--font-size-lead); color: var(--color-text-2);
+  user-select: none;
+}
+
+.cm-hint {
+  margin: 0; font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption); color: var(--color-text-3);
+}
+
+/* 展示名称与字符计数同行 */
+.cm-name-row {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.cm-counter {
+  font-size: var(--font-size-caption); color: var(--color-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* API 密钥显隐 */
+.cm-key-field { position: relative; }
+.cm-key-input { width: 100%; padding-right: 40px; }
+.cm-key-toggle { width: 26px; height: 26px; }
+.cm-key-toggle svg { width: 16px; height: 16px; }
+
+.cm-error { margin-top: 0; }
+
+.cm-footer { padding-top: var(--space-2); }
+
+/* 输入框在弹窗内占满宽度 */
+.cm-body .ui-input { width: 100%; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cm-overlay { animation: none; }
+}

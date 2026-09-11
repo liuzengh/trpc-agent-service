@@ -1,0 +1,11 @@
+.git
+.env
+*.local.yaml
+bin
+coverage.out
+data
+im-console/node_modules
+im-console/dist
+im-console-redesign.design
+trpcservice/web/static
+trpcservice/workspace

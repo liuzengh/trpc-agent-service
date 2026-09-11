@@ -1,0 +1,183 @@
+server:
+  address: ":8080"
+  queue_size: 1024
+  worker_count: 16
+  admin_token_env: ADMIN_TOKEN
+
+# This file is the local Compose baseline. deploy/production-config.yaml
+# replaces it for the production overlay with OIDC/JWKS, external Secret
+# references, fail-closed content safety and production health gates.
+deployment_mode: local
+admin:
+  mode: local_token
+  roles_claim: roles
+  tenants_claim: tenants
+secrets:
+  provider: env
+  fail_closed: false
+health:
+  probe_interval: 5s
+  probe_timeout: 2s
+content_safety:
+  enabled: false
+  backend: disabled
+  fail_closed: true
+  policy_version: default-v1
+  timeout: 2s
+  lease_ttl: 30s
+
+# Postgres-backed Inbox/Outbox: callbacks are ACKed only after the message is
+# persisted, and replies survive a restart or replica failover.
+queue:
+  backend: postgres
+  dsn_env: TRPC_AGENT_DB_DSN
+  poll_interval: 250ms
+  lease_ttl: 2m
+  batch_size: 32
+  inbox_max_attempts: 5
+  outbox_max_attempts: 8
+  retry_base: 500ms
+  retry_max: 1m
+
+control_plane:
+  backend: postgres
+  refresh_interval: 5s
+  heartbeat_interval: 5s
+  heartbeat_ttl: 30s
+  ack_timeout: 30s
+  node_id_env: TRPC_CONFIG_NODE_ID
+
+coordination:
+  backend: redis
+  redis_url_env: REDIS_URL
+  key_prefix: trpc-agent
+  lock_ttl: 2m
+  dedup_ttl: 24h
+
+telemetry:
+  service_name: trpc-agent-service
+  otlp_endpoint: otel-collector:4318
+  otlp_protocol: http
+
+tenants:
+  - tenant_id: acme
+    version: "2026-09-03.1"
+    enabled: true
+    app:
+      name: support-assistant
+      agent_name: support-agent
+      description: ACME support assistant
+      instruction: Answer concisely and never reveal credentials.
+    model:
+      provider: openai
+      name: qwen3.7-max-2026-06-08
+      variant: qwen
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      api_key_env: DASHSCOPE_API_KEY
+      fallback_provider: mock
+      max_tokens: 2048
+      temperature: 0
+      streaming: false
+      input_price_per_million: 0
+      output_price_per_million: 0
+    tools:
+      allow: [calculator, current_time, tenant_admin_action, memory_search, memory_load, memory_add, memory_update, memory_delete, memory_clear]
+      deny: []
+      require_confirmation: [tenant_admin_action, memory_update, memory_delete, memory_clear]
+      side_effects: [tenant_admin_action, memory_add, memory_update, memory_delete, memory_clear]
+    channels:
+      - type: telegram
+        binding_id: acme-telegram
+        enabled: false # enable only after injecting the referenced credentials
+        token_env: ACME_TELEGRAM_BOT_TOKEN
+        signing_secret_env: ACME_TELEGRAM_WEBHOOK_SECRET
+        max_message_length: 4096
+      - type: slack
+        binding_id: acme-slack
+        enabled: false # enable only after injecting the referenced credentials
+        workspace_id: example-workspace
+        application_id: example-application
+        token_env: ACME_SLACK_BOT_TOKEN
+        signing_secret_env: ACME_SLACK_SIGNING_SECRET
+        max_message_length: 40000
+      - type: wecom
+        binding_id: acme-wecom
+        enabled: false # enable only after injecting the referenced credentials
+        workspace_id: example-wecom-corp
+        application_id: "1000000"
+        token_env: ACME_WECOM_CORP_SECRET
+        signing_secret_env: ACME_WECOM_CALLBACK_TOKEN
+        encryption_key_env: ACME_WECOM_ENCODING_AES_KEY
+        max_message_length: 2048
+      - type: wecom-aibot
+        binding_id: acme-wecom-aibot
+        enabled: false # set true after provisioning the two referenced secrets
+        bot_id_env: ACME_WECOM_AIBOT_ID
+        bot_secret_env: ACME_WECOM_AIBOT_SECRET
+        max_message_length: 20480
+    data:
+      # Runner writes are staged in-process and committed with Session version,
+      # fencing token, events, state and replay in one PostgreSQL transaction.
+      session: {type: sql, dsn_env: TRPC_AGENT_DB_DSN, namespace: acme-session}
+      memory: {type: redis, dsn_env: REDIS_URL, namespace: acme-memory}
+      # Durable Summary jobs reuse the Queue PostgreSQL 008 lifecycle tables;
+      # coverage, boundary/version and source hash are checked before reads.
+      summary: {type: sql, dsn_env: TRPC_AGENT_DB_DSN, namespace: acme-session}
+      artifact: {type: inmemory, namespace: acme-artifact}
+      knowledge: {type: disabled}
+      # SQL audit is append-only and falls back to a 0600 fsynced spool.
+      audit_log: {type: sql, dsn_env: TRPC_AGENT_DB_DSN}
+    audit:
+      enabled: true
+      sink: sql
+      log_content: false
+      redact_patterns:
+        - '(?i)acme-[a-z0-9-]{12,}'
+    budget:
+      requests_per_minute: 120
+      max_input_chars: 12000
+      monthly_cost_usd: 100
+
+  - tenant_id: globex
+    version: "2026-08-20.1"
+    enabled: true
+    app:
+      name: operations-assistant
+      agent_name: operations-agent
+      description: Globex operations assistant
+      instruction: Administrative actions always require explicit confirmation.
+    model:
+      provider: mock
+      name: deterministic-mock
+      max_tokens: 1024
+      temperature: 0
+      streaming: false
+      input_price_per_million: 0
+      output_price_per_million: 0
+    tools:
+      allow: [current_time, memory_search, memory_load, memory_add, memory_update, memory_delete, memory_clear]
+      deny: [calculator, tenant_admin_action]
+      require_confirmation: [memory_update, memory_delete, memory_clear]
+      side_effects: [memory_add, memory_update, memory_delete, memory_clear]
+    channels:
+      - type: telegram
+        binding_id: globex-telegram
+        enabled: false # enable only after injecting the referenced credentials
+        token_env: GLOBEX_TELEGRAM_BOT_TOKEN
+        signing_secret_env: GLOBEX_TELEGRAM_WEBHOOK_SECRET
+        max_message_length: 4096
+    data:
+      session: {type: redis, dsn_env: REDIS_URL, namespace: globex-session}
+      memory: {type: redis, dsn_env: REDIS_URL, namespace: globex-memory}
+      summary: {type: redis, dsn_env: REDIS_URL, namespace: globex-session}
+      artifact: {type: inmemory, namespace: globex-artifact}
+      knowledge: {type: disabled}
+      audit_log: {type: stdout}
+    audit:
+      enabled: true
+      sink: stdout
+      log_content: false
+    budget:
+      requests_per_minute: 60
+      max_input_chars: 8000
+      monthly_cost_usd: 50

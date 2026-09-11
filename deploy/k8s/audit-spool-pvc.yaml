@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: trpc-agent-audit-spool
+  namespace: trpc-agent
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: audit-recovery
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi

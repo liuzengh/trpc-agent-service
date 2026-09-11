@@ -1,0 +1,165 @@
+/* ===== 页面专属样式 ===== */
+      body {
+        background: radial-gradient(120% 80% at 50% -10%, var(--color-primary-bg) 0%, var(--color-bg-4) 60%, var(--color-bg-4) 100%);
+        min-height: 100vh;
+      }
+
+      .login-main {
+        display: flex; align-items: center; justify-content: center;
+        min-height: 100vh; padding: var(--space-8) var(--space-4);
+        box-sizing: border-box;
+      }
+
+      .login-card {
+        width: 100%; max-width: 520px; box-sizing: border-box;
+        background: var(--color-bg-1); border: 1px solid var(--color-border);
+        border-radius: var(--radius-xl); padding: var(--space-8);
+        box-shadow: var(--shadow-3);
+      }
+
+      /* 品牌头部 */
+      .login-brand { display: flex; align-items: center; gap: var(--space-3); }
+      .login-brand-mark {
+        width: 40px; height: 40px; flex-shrink: 0;
+        border-radius: var(--radius-md);
+        background: linear-gradient(135deg, var(--color-primary), var(--violet-6));
+        color: var(--color-white);
+        display: inline-flex; align-items: center; justify-content: center;
+        font-size: var(--font-size-h2); font-weight: var(--font-weight-semibold);
+        box-shadow: 0 6px 14px rgba(22, 100, 255, 0.22);
+      }
+      .login-brand-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .login-title {
+        margin: 0; font-size: var(--font-size-h1); line-height: 1.3;
+        font-weight: var(--font-weight-semibold); color: var(--color-text-1);
+      }
+      .login-subtitle {
+        margin: 0; font-size: var(--font-size-lead); line-height: var(--line-height-h4);
+        color: var(--color-text-3);
+      }
+      .login-version {
+        margin: var(--space-2) 0 0; font-size: var(--font-size-caption);
+        line-height: var(--line-height-caption); color: var(--color-text-3);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* 表单区域微调 */
+      .login-form { margin-top: var(--space-6); }
+      .login-form .ui-input { width: 100%; }
+
+      /* 密码字段 + 显示/隐藏 */
+      .pwd-field { position: relative; }
+      .login-form .pwd-field .ui-input { padding-right: 40px; }
+      .pwd-toggle {
+        position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+        width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+        background: transparent; border: none; border-radius: var(--radius-sm);
+        color: var(--color-text-3); cursor: pointer; padding: 0;
+        transition: color 0.15s ease, background 0.15s ease;
+      }
+      .pwd-toggle:hover { color: var(--color-text-2); background: var(--color-bg-4); }
+      .pwd-toggle .ic { width: 16px; height: 16px; }
+      .pwd-toggle:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+
+      .login-form .checkbox { cursor: pointer; }
+      .login-form .checkbox-label { color: var(--color-text-2); }
+
+      /* 错误提示区域 */
+      .login-error {
+        display: flex; align-items: flex-start; gap: var(--space-2);
+        margin-top: var(--space-2); padding: var(--space-2) var(--space-3);
+        background: var(--color-danger-bg); border-radius: var(--radius-md);
+        color: var(--color-danger); font-size: var(--font-size-body);
+        line-height: var(--line-height-caption);
+      }
+      .login-error .ic { width: 14px; height: 14px; margin-top: 1px; flex-shrink: 0; }
+
+      /* 提交按钮 */
+      .login-actions { margin-top: var(--space-4); display: flex; }
+      .login-submit {
+        width: 100%; height: 40px; font-size: var(--font-size-h4);
+        font-weight: var(--font-weight-medium);
+      }
+      .login-submit .ic { width: 16px; height: 16px; }
+
+      /* 租户选择区域 */
+      .tenant-section { margin-top: var(--space-8); }
+      .tenant-head {
+        display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
+      }
+      .tenant-title {
+        margin: 0; font-size: var(--font-size-h3); line-height: var(--line-height-h4);
+        font-weight: var(--font-weight-semibold); color: var(--color-text-1);
+      }
+      .tenant-head-actions { display: flex; align-items: center; gap: var(--space-2); }
+      .tenant-refresh { color: var(--color-text-2); }
+      .tenant-refresh:disabled { cursor: progress; }
+      .tenant-add-model:disabled { cursor: not-allowed; }
+      .tenant-hint {
+        margin: var(--space-2) 0 var(--space-3); font-size: var(--font-size-body);
+        line-height: var(--line-height-caption); color: var(--color-text-3);
+      }
+      .tenant-hint.loading { color: var(--color-primary); }
+
+      .tenant-grid {
+        display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-3);
+      }
+
+      .tenant-card {
+        position: relative; display: flex; flex-direction: column; gap: var(--space-1);
+        padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-md);
+        background: var(--color-bg-1); cursor: pointer; outline: none;
+        transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+      }
+      .tenant-card:hover {
+        transform: translateY(-2px); box-shadow: var(--shadow-2);
+        border-color: var(--color-primary);
+      }
+      .tenant-card:focus-visible { border-color: var(--color-primary); box-shadow: 0 0 0 3px rgba(22, 100, 255, 0.2); }
+      .tenant-card.selected {
+        border: 1.5px solid var(--color-primary); background: var(--color-primary-bg);
+        box-shadow: 0 0 0 0 transparent;
+      }
+      .tenant-card.selected:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); }
+
+      .tenant-name {
+        font-size: var(--font-size-h4); line-height: var(--line-height-h4);
+        font-weight: var(--font-weight-semibold); color: var(--color-text-1);
+      }
+      .tenant-meta {
+        font-size: var(--font-size-body); line-height: var(--line-height-caption);
+        color: var(--color-text-3); font-variant-numeric: tabular-nums;
+      }
+      .tenant-channels { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-1); }
+      .tenant-check {
+        position: absolute; top: 8px; right: 8px; width: 18px; height: 18px;
+        display: none; align-items: center; justify-content: center; color: var(--color-primary);
+      }
+      .tenant-card.selected .tenant-check { display: inline-flex; }
+      .tenant-check .ic { width: 18px; height: 18px; }
+
+      /* ===== 图标（CSS mask 引用源力图标资产） ===== */
+      .ic {
+        display: inline-block; flex-shrink: 0; width: 16px; height: 16px;
+        background-color: currentColor;
+      }
+      .ic-eye { -webkit-mask: url('../assets/icons/dl_builtin_volcengine/eye.svg') no-repeat center / contain;
+                mask: url('../assets/icons/dl_builtin_volcengine/eye.svg') no-repeat center / contain; }
+      .ic-eye-off { -webkit-mask: url('../assets/icons/dl_builtin_volcengine/eye-invisible.svg') no-repeat center / contain;
+                    mask: url('../assets/icons/dl_builtin_volcengine/eye-invisible.svg') no-repeat center / contain; }
+      .ic-alert { -webkit-mask: url('../assets/icons/dl_builtin_volcengine/alert-triangle.svg') no-repeat center / contain;
+                  mask: url('../assets/icons/dl_builtin_volcengine/alert-triangle.svg') no-repeat center / contain; }
+      .ic-arrow { -webkit-mask: url('../assets/icons/dl_builtin_volcengine/arrow-right.svg') no-repeat center / contain;
+                  mask: url('../assets/icons/dl_builtin_volcengine/arrow-right.svg') no-repeat center / contain; }
+      .ic-check { -webkit-mask: url('../assets/icons/dl_builtin_volcengine/check-circle.svg') no-repeat center / contain;
+                  mask: url('../assets/icons/dl_builtin_volcengine/check-circle.svg') no-repeat center / contain; }
+
+      /* ===== 响应式 ===== */
+      @media (max-width: 480px) {
+        .login-card { padding: var(--space-6); border-radius: var(--radius-lg); box-shadow: var(--shadow-2); }
+        .login-main { padding: var(--space-4) var(--space-3); }
+        .tenant-grid { grid-template-columns: 1fr; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .tenant-card, .pwd-toggle, .checkbox-box { transition: none; }
+      }

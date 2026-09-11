@@ -1,0 +1,182 @@
+name: trpc-agent-production-acceptance
+
+services:
+  secret-materialize:
+    image: alpine:3.21
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["set -eu; rm -f /run/runtime/* /run/migration/*; for file in /input/*; do name=$$(basename \"$$file\"); target=/run/runtime/$$name; if [ \"$$name\" = db-migration-dsn ]; then target=/run/migration/$$name; fi; cp \"$$file\" \"$$target\"; chown 65532:65532 \"$$target\"; chmod 600 \"$$target\"; done"]
+    user: "0:0"
+    volumes:
+      - ${PROD_SECRET_DIR:?set PROD_SECRET_DIR}:/input:ro
+      - production-runtime-secrets:/run/runtime
+      - production-migration-secrets:/run/migration
+
+  service:
+    volumes:
+      - ./production-config.yaml:/etc/trpc-agent-service/config.yaml:ro
+      - production-runtime-secrets:/run/secrets:ro
+      - production-audit-spool:/tmp/audit-spool
+    environment:
+      # Production authentication is OIDC/JWKS; never pass the legacy shared
+      # bearer token into the service container.
+      ADMIN_TOKEN: ""
+      # The base local Compose file contains convenience environment defaults.
+      # Production resolves these values from the runtime secret volume or
+      # container identity instead; keep inherited plaintext defaults empty.
+      DASHSCOPE_API_KEY: ""
+      REDIS_URL: ""
+      TRPC_AGENT_DB_DSN: ""
+      TRPC_CONFIG_NODE_ID: ""
+      ACME_TELEGRAM_BOT_TOKEN: ""
+      ACME_TELEGRAM_WEBHOOK_SECRET: ""
+      ACME_SLACK_BOT_TOKEN: ""
+      ACME_SLACK_SIGNING_SECRET: ""
+      ACME_WECOM_CORP_SECRET: ""
+      ACME_WECOM_CALLBACK_TOKEN: ""
+      ACME_WECOM_ENCODING_AES_KEY: ""
+      ACME_WECOM_AIBOT_ID: ""
+      ACME_WECOM_AIBOT_SECRET: ""
+      GLOBEX_TELEGRAM_BOT_TOKEN: ""
+      GLOBEX_TELEGRAM_WEBHOOK_SECRET: ""
+      TRPC_SECRET_ROOT: /run/secrets
+    # Compose !reset removes the single-node host mapping inherited from the
+    # local file; only HAProxy publishes the production port.
+    ports: !reset []
+    depends_on:
+      runtime-grants:
+        condition: service_completed_successfully
+      secret-materialize:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      oidc-fixture:
+        condition: service_healthy
+      model-fixture:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    deploy:
+      replicas: 2
+      update_config:
+        order: start-first
+        parallelism: 1
+      restart_policy:
+        condition: on-failure
+
+  migrator:
+    volumes:
+      - ./production-config.yaml:/etc/trpc-agent-service/config.yaml:ro
+      - production-migration-secrets:/run/secrets:ro
+    environment:
+      TRPC_AGENT_MIGRATION_DSN: ${TRPC_AGENT_MIGRATION_DSN:?set TRPC_AGENT_MIGRATION_DSN}
+      TRPC_SECRET_ROOT: /run/secrets
+    depends_on:
+      runtime-role:
+        condition: service_completed_successfully
+      secret-materialize:
+        condition: service_completed_successfully
+
+  proxy:
+    image: haproxy:3.1-alpine
+    restart: unless-stopped
+    depends_on:
+      service:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${PRODUCTION_HTTP_PORT:-18080}:8080"
+    volumes:
+      - ./haproxy-production.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    read_only: true
+    tmpfs:
+      - /var/run:mode=1777,size=8m
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - frontend
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      LOG_LEVEL: error
+    ports:
+      - "127.0.0.1:${JAEGER_PORT:-16686}:16686"
+    networks:
+      - backend
+      - frontend
+
+  # The acceptance runner queries the local trace backend and database from
+  # the host. Keep the production network isolated while adding only the
+  # loopback-published endpoints needed by this disposable gate.
+  postgres:
+    networks:
+      - backend
+      - frontend
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-18T16-25-55Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    networks:
+      - backend
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-02-15T10-36-16Z
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["until mc alias set local http://minio:9000 \"$${MINIO_ROOT_USER}\" \"$${MINIO_ROOT_PASSWORD}\"; do sleep 1; done; mc mb --ignore-existing local/trpc-agent"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+    depends_on:
+      minio:
+        condition: service_started
+    networks:
+      - backend
+
+  oidc-fixture:
+    build:
+      context: ./oidc-fixture
+    image: trpc-agent-oidc-fixture:local
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    ports:
+      - "127.0.0.1:${OIDC_FIXTURE_PORT:-18081}:8081"
+    networks:
+      - backend
+      - frontend
+
+  # Disposable OpenAI-compatible endpoint used only by the local production
+  # gate. It returns fixed usage and never logs request content or credentials.
+  model-fixture:
+    build:
+      context: ./model-fixture
+    image: trpc-agent-model-fixture:local
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    networks:
+      - backend
+
+  otel-collector:
+    volumes:
+      - ./../observability/otel-collector-production.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      jaeger:
+        condition: service_started
+
+volumes:
+  minio-data:
+  production-runtime-secrets:
+  production-migration-secrets:
+  production-audit-spool:

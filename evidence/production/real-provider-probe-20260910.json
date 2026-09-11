@@ -1,0 +1,15 @@
+{
+  "checked_at": "2026-09-10T06:29:27.187086+00:00",
+  "scope": "real_provider_direct_probe_only",
+  "model": "qwen3.7-max-2026-06-08",
+  "fallback_enabled": false,
+  "result": "failed",
+  "http_status": 403,
+  "error_category": "provider_http_error",
+  "elapsed_ms": 383,
+  "diagnostic": {
+    "http_status": 403,
+    "provider_error_code": "AllocationQuota.FreeTierOnly",
+    "provider_error_type": "AllocationQuota.FreeTierOnly"
+  }
+}

@@ -1,0 +1,227 @@
+name: trpc-agent-service
+
+services:
+  # Ensure the least-privilege login exists even when an older named volume is
+  # reused (docker-entrypoint-initdb.d only runs for a fresh cluster).
+  runtime-role:
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "/bootstrap/000_runtime_role.sh"]
+    environment:
+      PGHOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-tenant_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-platform}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_RUNTIME_USER: ${POSTGRES_RUNTIME_USER:-runtime}
+      POSTGRES_RUNTIME_PASSWORD: ${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD}
+    volumes:
+      - ./postgres-init/000_runtime_role.sh:/bootstrap/000_runtime_role.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+  # One-shot schema owner. Production should inject this DSN from a migration
+  # secret that is not mounted into the long-running service container.
+  migrator:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: trpc-agent-service:local
+    entrypoint: ["/usr/local/bin/trpc-migrate"]
+    command: ["-dsn-env", "TRPC_AGENT_MIGRATION_DSN", "-config", "/etc/trpc-agent-service/config.yaml", "-timeout", "2m"]
+    environment:
+      TRPC_AGENT_MIGRATION_DSN: postgres://${POSTGRES_USER:-platform}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tenant_agent}?sslmode=disable
+    volumes:
+      - ./service-config.yaml:/etc/trpc-agent-service/config.yaml:ro
+    depends_on:
+      runtime-role:
+        condition: service_completed_successfully
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - backend
+
+  # Migrations create new data-plane objects after the role bootstrap. Re-run
+  # the idempotent grant step so the service account receives only those
+  # explicitly allowlisted objects, including when a named volume is reused.
+  runtime-grants:
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "/bootstrap/000_runtime_role.sh"]
+    environment:
+      PGHOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-tenant_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-platform}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_RUNTIME_USER: ${POSTGRES_RUNTIME_USER:-runtime}
+      POSTGRES_RUNTIME_PASSWORD: ${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD}
+    volumes:
+      - ./postgres-init/000_runtime_role.sh:/bootstrap/000_runtime_role.sh:ro
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+  # The service runs the durable Inbox/Outbox pipeline on Postgres, so it can
+  # be scaled to multiple replicas: leases (SELECT ... FOR UPDATE SKIP LOCKED)
+  # fence concurrent workers and replies survive restarts. The ACME tenant
+  # uses the strict PostgreSQL Session turn backend; Globex keeps Redis Session
+  # to demonstrate tenant-level backend routing. Memory and coordination remain
+  # Redis-backed.
+  service:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: trpc-agent-service:local
+    restart: unless-stopped
+    init: true
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      REDIS_URL: redis://redis:6379/0
+      TRPC_AGENT_DB_DSN: postgres://${POSTGRES_RUNTIME_USER:-runtime}:${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD}@postgres:5432/${POSTGRES_DB:-tenant_agent}?sslmode=disable
+      TRPC_CONFIG_NODE_ID: ${TRPC_CONFIG_NODE_ID:-trpc-service-local}
+    ports:
+      - "127.0.0.1:${SERVICE_PORT:-8080}:8080"
+    volumes:
+      - ./service-config.yaml:/etc/trpc-agent-service/config.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      runtime-grants:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 5
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - frontend
+      - backend
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - "60"
+      - "1000"
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tenant_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-platform}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_RUNTIME_USER: ${POSTGRES_RUNTIME_USER:-runtime}
+      POSTGRES_RUNTIME_PASSWORD: ${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD}
+      POSTGRES_INITDB_ARGS: --data-checksums
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init/000_runtime_role.sh:/docker-entrypoint-initdb.d/000_runtime_role.sh:ro
+      - ../migrations/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    shm_size: 256mb
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ../observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "127.0.0.1:${OTLP_GRPC_PORT:-4317}:4317"
+      - "127.0.0.1:${OTLP_HTTP_PORT:-4318}:4318"
+      - "127.0.0.1:${OTEL_HEALTH_PORT:-13133}:13133"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ../observability/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ../observability/alerts.yaml:/etc/prometheus/alerts.yaml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      service:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+volumes:
+  postgres-data:
+  redis-data:
+  prometheus-data:
+
+networks:
+  frontend:
+  backend:
+    internal: true

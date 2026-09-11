@@ -1,0 +1,40 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    service: trpc-agent
+    environment: local
+
+rule_files:
+  - alerts.yaml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+
+  - job_name: trpc-agent-service
+    honor_labels: true
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["service:8080"]
+        labels:
+          component: agent-service
+
+  - job_name: otel-collector
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["otel-collector:8888"]
+        labels:
+          component: telemetry-collector
+
+  - job_name: otlp-exported-metrics
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["otel-collector:9464"]
+        labels:
+          component: otlp-exporter
