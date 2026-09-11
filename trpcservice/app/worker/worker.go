@@ -21,6 +21,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/skill"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/bus"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/health"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage"
 
@@ -52,12 +53,15 @@ const Group = "workers"
 const runTimeout = 300 * time.Second
 
 // Idempotency is the cross-node dedup contract. Idempotent atomically claims
-// msgKey (SetNX) as a *lease* — true = first claim, false = another worker
-// holds or already committed it. CommitIdem makes the claim durable once the
-// work is recorded; ClearIdem releases it so a failed attempt can be retried on
-// redelivery; ExpireIdemLease keeps a long turn's claim alive.
+// msgKey as a *lease* and reports which state it found: IdemClaimed = process
+// it, IdemInFlight = another attempt owns it (retry the delivery later),
+// IdemCompleted = the work is already recorded (ack and drop). Collapsing the
+// last two into one answer is what loses messages when a worker is killed
+// mid-turn. CommitIdem makes the claim durable once the work is recorded;
+// ClearIdem releases it so a failed attempt can be retried on redelivery;
+// ExpireIdemLease keeps a long turn's claim alive.
 type Idempotency interface {
-	Idempotent(ctx context.Context, msgKey string) (bool, error)
+	Idempotent(ctx context.Context, msgKey string) (bus.IdemState, error)
 	CommitIdem(ctx context.Context, msgKey string) error
 	ClearIdem(ctx context.Context, msgKey string) error
 	ExpireIdemLease(ctx context.Context, msgKey string) (bool, error)
@@ -146,10 +150,67 @@ func (w *Worker) SetGovernance(tenants TenantSource, usage func(ctx context.Cont
 
 // Run joins the consumer group and blocks until ctx is done. The consumer name
 // is unique per process so XAUTOCLAIM can tell dead consumers apart.
+//
+// Transient bus errors are retried inside (see retryConsume): the consumer is
+// the only thing draining stream:inbound, so a Redis blip must not detach it for
+// the rest of the process's life.
 func (w *Worker) Run(ctx context.Context) error {
 	host, _ := os.Hostname()
 	consumer := fmt.Sprintf("%s-%d", host, os.Getpid())
-	return w.bus.ConsumeInbound(ctx, Group, consumer, w.handle)
+	// Attach the recovery signal before the loop starts: the bus reports every
+	// read the server answered, which is the only honest way to tell a
+	// reconnected consumer from one parked on a dead socket.
+	if rs, ok := w.bus.(readySignaler); ok {
+		rs.SetConsumeReady(consumerSupervisor.Attached)
+	}
+	return retryConsume(ctx, func(ctx context.Context) error {
+		return w.bus.ConsumeInbound(ctx, Group, consumer, w.handle)
+	})
+}
+
+// readySignaler is the optional bus capability behind the recovery signal (see
+// bus.RedisBus.SetConsumeReady). It is optional so that test buses and
+// alternative backends do not have to fake it.
+type readySignaler interface {
+	SetConsumeReady(func())
+}
+
+// Consumer reconnect policy. The base delay is short because a Redis restart is
+// usually over in seconds; the cap keeps a long outage from becoming a hot loop
+// against a dead socket.
+const (
+	consumeRetryBase    = time.Second
+	consumeRetryMax     = 30 * time.Second
+	consumeDegradeAfter = 3
+	// consumeGrace is the silence budget of the consumer. The bus answers about
+	// once a second (the 1s XREADGROUP block), so no answer for 5s is an outage;
+	// a single failed attempt is not (a stale pooled connection costs seconds to
+	// detect on its own).
+	consumeGrace = 5 * time.Second
+)
+
+// consumerSupervisor owns the reconnect loop. It is shared by every worker
+// process (the loop itself is stateless), and it is what lets the consumer
+// report *recovery*: a healthy consume loop never returns, so the attachment
+// signal comes from the bus (RedisBus.SetConsumeReady → Attached).
+var consumerSupervisor = &health.Supervisor{
+	Name: "worker: consumer", Base: consumeRetryBase, Max: consumeRetryMax,
+	DegradeAfter: consumeDegradeAfter, Grace: consumeGrace,
+}
+
+// retryConsume keeps a consume loop attached across transient bus failures.
+//
+// Returning on the first failed XREADGROUP turns a Redis blip into a permanent
+// outage: publishing works again as soon as Redis is back, so every new message
+// is accepted and then never processed — while /healthz keeps answering 200,
+// i.e. the node becomes a black hole that looks healthy. This exact failure was
+// observed on the deployed stack (a 20s Redis stop killed both the consumer and
+// the IM follower for good), which is why the loop reconnects with bounded
+// backoff until the context is cancelled, marks the node degraded after
+// consumeDegradeAfter consecutive failures, and clears the mark once it is
+// consuming again.
+func retryConsume(ctx context.Context, consume func(context.Context) error) error {
+	return consumerSupervisor.Run(ctx, consume)
 }
 
 // startTurnHeartbeat keeps this worker's claims alive until the returned stop
@@ -242,12 +303,36 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 	// outcome, so a worker that dies mid-turn does not swallow the message —
 	// the lease expires, the redelivery reprocesses the turn, and the durable
 	// MySQL marker keeps the reprocess from double-replying.
-	first, err := w.bus.Idempotent(ctx, m.ID)
+	//
+	// The two "not ours" answers must NOT be treated the same, which is exactly
+	// the bug the node-failure drill found (scripts/faults/node-failure.ps1):
+	// after a SIGKILL, XAUTOCLAIM handed the dead worker's 3 in-flight messages
+	// to a survivor within the 90s lease, the survivor read "not first" as
+	// "already handled" and ACKED them — 3 of 20 messages were dropped without
+	// ever running, while /healthz, lag and pending all looked clean.
+	state, err := w.bus.Idempotent(ctx, m.ID)
 	if err != nil {
 		return err // transient Redis error: retry later
 	}
-	if !first {
-		return nil // another worker holds or completed this message
+	switch state {
+	case bus.IdemCompleted:
+		// The turn already produced a durable outcome (reply in the outbox, or a
+		// deliberate drop): this is a provider re-push or a redelivery of
+		// finished work. Ack it — and say so, because "a delivery was acked
+		// without doing any work" is exactly the shape of a silent message loss
+		// and must be distinguishable from "handled" in the logs.
+		slog.Info("worker: delivery already completed, acking",
+			"message", m.ID, "tenant", m.TenantID, "session", m.SessionID)
+		return nil
+	case bus.IdemInFlight:
+		// Some attempt owns the message: a concurrent delivery of the same
+		// envelope, or a worker that died with its lease still alive. Leaving it
+		// pending is the only safe answer — the owner commits (the next reclaim
+		// then sees IdemCompleted and acks) or its lease expires (the next
+		// reclaim claims it and runs the turn). Acking here loses the message.
+		return bus.ErrRequeue
+	case bus.IdemClaimed:
+		// Ours to process.
 	}
 	// fail releases the claim so a transient failure is retried on redelivery,
 	// rather than being silently dropped.
@@ -260,7 +345,11 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 	// failure is not fatal — the lease still holds the message for a while, and
 	// the worst case is one redundant reprocess blocked by the outbox marker.
 	done := func() {
-		if err := w.bus.CommitIdem(ctx, m.ID); err != nil {
+		// Detached: a graceful shutdown must not turn a finished turn into an
+		// uncommitted one (see shutdownSafe).
+		c, cancel := shutdownSafe(ctx)
+		defer cancel()
+		if err := w.bus.CommitIdem(c, m.ID); err != nil {
 			slog.Warn("worker: idempotency commit failed", "message", m.ID, "err", err)
 		}
 	}
@@ -385,9 +474,35 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 	}
 	// The reply is durable now: only here may the claim become permanent.
 	done()
-	w.recordLedger(ctx, m, agentID, reply)
+	// The ledger is the turn's user-visible history and is written last, so it
+	// is the write most exposed to a shutdown: the node-failure drill showed
+	// turns with a durable reply in the outbox and NO ledger row, because the
+	// rolling restart cancelled the context between the two writes. Detach it
+	// (bounded) so a graceful restart finishes recording what it already
+	// answered.
+	lc, cancel := shutdownSafe(ctx)
+	defer cancel()
+	w.recordLedger(lc, m, agentID, reply)
 	return nil
 }
+
+// shutdownSafe detaches a best-effort write from ctx cancellation and bounds it.
+//
+// A rolling restart (SIGTERM) cancels the consumer context while turns are in
+// flight. The turn itself is fine — its reply is already in the outbox — but
+// every write after that point used the cancelled context and silently failed:
+// the drill's log showed "worker: usage metering skipped (best-effort)
+// err=... context canceled" and "worker: idempotency commit failed
+// err=bus: commit idem: context canceled", and the affected turns ended up with
+// no ledger row. Accounting writes about work that is already durable must
+// survive the shutdown that interrupted them; the timeout keeps a dead database
+// from holding the process open.
+func shutdownSafe(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), shutdownWriteTimeout)
+}
+
+// shutdownWriteTimeout bounds a detached accounting write.
+const shutdownWriteTimeout = 5 * time.Second
 
 // recordLedger writes the USER + ASSISTANT rows of the finished turn into the
 // business conversation ledger, best-effort: a ledger failure must never fail
@@ -455,6 +570,23 @@ func classifyRunError(err error) string {
 	default:
 		return "run_error"
 	}
+}
+
+// timeoutAware keeps the platform's own deadline visible to the classifier.
+//
+// When runTimeout cuts a turn, the framework reports the cancelled model call in
+// its own words, so errors.Is(err, context.DeadlineExceeded) is false and the
+// audit row said run_error — indistinguishable from "the provider answered with
+// an error". The model-timeout drill measured exactly that: a hung upstream was
+// cut at ~283s and audited as run_error (2026-09-11), even though the turn was
+// terminated by our budget, not by the provider.
+func timeoutAware(ctx context.Context, err error) error {
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// Both errors stay wrapped: the classifier sees the deadline, the logs
+		// keep the framework's own description of what it was doing.
+		return fmt.Errorf("%w: %w", context.DeadlineExceeded, err)
+	}
+	return err
 }
 
 // resumeRecordedTurn looks for a completed answer of this inbound message in
@@ -547,7 +679,7 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 	// release is applied here: the session id decides which version serves the
 	// whole conversation, and the chosen version is recorded on the span so a
 	// rollout can be told apart from the baseline in traces.
-	profile, agentVersion, err := w.agents.ResolveForSession(ctx, agentID, m.SessionID)
+	profile, agentVersion, err := w.agents.ProfileForSession(ctx, agentID, m.SessionID)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -628,14 +760,22 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 		metrics.ModelCallDuration(ctx, m.TenantID, agentID, md)
 	}
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("worker: run agent %q: %w", agentID, err)
+		return nil, nil, 0, timeoutAware(runCtx, fmt.Errorf("worker: run agent %q: %w", agentID, err))
 	}
 	text, tokens, toolNames, toolDur, toolCalls, err := finalTextWithUsage(events)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, timeoutAware(runCtx, err)
 	}
 	w.recordTurnUsage(ctx, m, agentID, tokens, toolDur, toolCalls, usedSkills, artMeter)
 	if text == "" {
+		// A turn that ends without assistant text is acked with nothing to send
+		// back: the user asked and got silence. Log it loudly — it is a visible
+		// product gap, not a transient failure to retry (the model answered, it
+		// just answered with no text), and without this line the only symptom is
+		// a missing reply.
+		slog.Warn("worker: agent produced no text, acking without a reply",
+			"tenant", m.TenantID, "session", m.SessionID, "agent", agentID,
+			"tools", toolNames, "tokens", tokens)
 		return nil, nil, 0, nil
 	}
 	reply := model.NewAssistantMessage(text)
@@ -758,7 +898,12 @@ func (w *Worker) recordTurnUsage(ctx context.Context, m *bus.Message, agentID st
 	if artMeter != nil {
 		artSaves = artMeter.count()
 	}
-	w.recordUsage(ctx, m, agentID, buildUsageEntries(m, agentID, tokens, toolCalls, usedSkills, artSaves))
+	// Usage rows are metering of a turn that has already been produced; a
+	// shutdown in the middle of them must not lose the record (see
+	// shutdownSafe).
+	uc, cancel := shutdownSafe(ctx)
+	defer cancel()
+	w.recordUsage(uc, m, agentID, buildUsageEntries(m, agentID, tokens, toolCalls, usedSkills, artSaves))
 }
 
 // skillInstruction splices the text of the skills mounted on the agent's

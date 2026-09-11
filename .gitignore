@@ -42,3 +42,5 @@ credentials.json
 *.tmp
 *~
 
+
+deployments/prod/certs/

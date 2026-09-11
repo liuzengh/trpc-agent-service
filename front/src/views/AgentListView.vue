@@ -6,7 +6,7 @@ import { useEndpointStore } from '../stores/endpoint'
 import { useKBStore } from '../stores/kb'
 import { useSkillStore } from '../stores/skill'
 import { listTools, type ToolDef } from '../api/tool'
-import { listVersions, setAgentGray, clearAgentGray, type Agent, type VersionInfo } from '../api/agent'
+import { listVersions, type Agent, type VersionInfo } from '../api/agent'
 import { useAuthStore } from '../stores/auth'
 
 const store = useAgentStore()
@@ -191,43 +191,6 @@ async function rollback() {
   }
 }
 
-// gray release dialog
-const grayVisible = ref(false)
-const graying = ref('')
-const grayVersion = ref(0)
-const grayPercent = ref(10)
-
-async function openGray(row: Agent) {
-  graying.value = row.id
-  versions.value = await listVersions(row.id)
-  // Default to the newest version that is not the current one: that is the
-  // release an operator wants to canary.
-  const candidate = versions.value.map((v) => v.version).filter((v) => v !== row.current_version)
-  grayVersion.value = row.gray?.version ?? candidate[candidate.length - 1] ?? row.current_version
-  grayPercent.value = row.gray?.percent ?? 10
-  grayVisible.value = true
-}
-
-async function saveGray() {
-  try {
-    await setAgentGray(graying.value, { version: grayVersion.value, percent: grayPercent.value })
-    grayVisible.value = false
-    ElMessage.success(`已灰度：${grayPercent.value}% 会话走 v${grayVersion.value}`)
-    await store.fetch()
-  } catch (e) {
-    ElMessage.error(String(e))
-  }
-}
-
-async function clearGray(row: Agent) {
-  try {
-    await clearAgentGray(row.id)
-    ElMessage.success('已清除灰度，全部流量回到当前版本')
-    await store.fetch()
-  } catch (e) {
-    ElMessage.error(String(e))
-  }
-}
 
 function statusTag(s: string) {
   return s === 'published' ? 'success' : s === 'disabled' ? 'info' : 'warning'
@@ -267,26 +230,16 @@ function statusTag(s: string) {
         </template>
       </el-table-column>
       <el-table-column prop="current_version" label="版本" width="80" />
-      <el-table-column label="灰度" width="150">
-        <template #default="{ row }">
-          <el-tag v-if="row.gray" type="warning" size="small">
-            {{ row.gray.percent }}% → v{{ row.gray.version }}
-          </el-tag>
-          <span v-else class="muted">全量 v{{ row.current_version }}</span>
-        </template>
-      </el-table-column>
+
       <el-table-column prop="description" label="描述" show-overflow-tooltip />
-      <el-table-column label="操作" width="440">
+      <el-table-column label="操作" width="400">
         <template #default="{ row }">
           <template v-if="canManage(row)">
             <el-button size="small" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" @click="toggle(row)">{{ row.status === 'disabled' ? '启用' : '禁用' }}</el-button>
             <el-button size="small" type="primary" @click="openPublish(row)">发布</el-button>
             <el-button size="small" @click="openRollback(row)">回滚</el-button>
-            <el-button size="small" @click="openGray(row)">灰度</el-button>
-            <el-button v-if="row.gray" size="small" type="warning" plain @click="clearGray(row)">
-              清除灰度
-            </el-button>
+
             <el-button size="small" @click="toggleVisibility(row)">
               {{ row.visibility === 'shared' ? '收回' : '共享' }}
             </el-button>
@@ -393,27 +346,6 @@ function statusTag(s: string) {
         <el-button type="primary" @click="rollback">回滚</el-button>
       </template>
     </el-dialog>
-
-    <!-- gray release -->
-    <el-dialog v-model="grayVisible" :title="`灰度发布 ${graying}`" width="460px">
-      <el-form label-width="110px">
-        <el-form-item label="灰度版本">
-          <el-select v-model="grayVersion" style="width: 100%">
-            <el-option v-for="v in versions" :key="v.version" :label="`v${v.version} (${v.status})`" :value="v.version" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="流量比例">
-          <el-slider v-model="grayPercent" :min="1" :max="100" show-input />
-        </el-form-item>
-        <div class="form-tip">
-          按会话 id 稳定分桶：同一会话始终走同一版本，不会中途切换。清除灰度即回滚，无需重新发布。
-        </div>
-      </el-form>
-      <template #footer>
-        <el-button @click="grayVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveGray">保存</el-button>
-      </template>
-    </el-dialog>
   </main>
 </template>
 
@@ -436,3 +368,5 @@ function statusTag(s: string) {
   margin-top: 4px;
 }
 </style>
+
+

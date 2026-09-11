@@ -3,6 +3,10 @@
 # ---- Build stage ----
 FROM golang:1.26-alpine AS build
 ARG GOPROXY=https://goproxy.cn,direct
+# Release label stamped into the binary and reported by GET /version. The
+# canary/blue-green overlay passes v2 here; a normal build leaves it empty and
+# the binary falls back to its own VCS revision.
+ARG APP_VERSION=""
 ENV GOPROXY=${GOPROXY} \
     CGO_ENABLED=0 \
     GOOS=linux \
@@ -16,7 +20,7 @@ RUN go mod download
 
 # Build the service binary.
 COPY . .
-RUN go build -trimpath -ldflags="-s -w" -o /out/trpc-service ./cmd/trpc-service
+RUN go build -trimpath -ldflags="-s -w -X main.buildVersion=${APP_VERSION}" -o /out/trpc-service ./cmd/trpc-service
 
 # ---- Runtime stage ----
 FROM alpine:3.20

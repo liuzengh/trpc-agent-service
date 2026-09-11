@@ -18,17 +18,25 @@ sequenceDiagram
     Note over A: 若跨进程/重启后仍到达
     A->>B: PublishInbound(id=channel:platformMsgID)
     B->>W: XReadGroup 投递
-    W->>B: Idempotent(msgID)=false（租约或已提交）→ 直接 ack，不执行
+    alt Idempotent(msgID)=已完成（值=2，24h 标记）
+        W->>B: XAck —— 已处理过，直接确认并丢弃
+    else Idempotent(msgID)=进行中（租约仍在，值=1）
+        W->>B: ErrRequeue —— **不 ack**，留待下一次 XAUTOCLAIM
+        Note over W: 认领方要么已提交（下次看到「已完成」→ ack），<br/>要么已崩溃（租约 90s 到期 → 下次真正执行）
+    end
     end
 
     rect rgb(227, 242, 253)
     Note over W,O: 路径二：回合执行到一半进程崩溃
-    W->>B: Idempotent(msgID)=true（租约 90s，心跳续期）
+    W->>B: Idempotent(msgID)=认领成功（租约 90s，心跳续期）
     W->>L: runner 逐步写事件（RequestID=msgID）
     W--xB: 进程崩溃（未 CommitIdem、未 Append 回复）
-    Note over B: 租约到期 → 消息仍 pending → XAUTOCLAIM 认领
+    Note over B: 消息仍 pending（PEL 里挂着）→ 30s 后 XAUTOCLAIM 认领
     B->>W: 重投给存活节点
-    W->>B: Idempotent(msgID)=true（租约已过期）
+    W->>B: Idempotent(msgID)=进行中（死者的租约还没到期）
+    W->>B: ErrRequeue —— **绝不能当成「已处理」而 ack**<br/>（否则这条消息就凭空消失了：实测曾丢 3/20）
+    Note over B: 租约 90s 到期后，下一次 XAUTOCLAIM 真正认领
+    W->>B: Idempotent(msgID)=认领成功
     W->>L: resumeRecordedTurn：查本 RequestID 已产出的回复
     alt 找到已产出的回复
         L-->>W: 复用该回复，不再调用模型

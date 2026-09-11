@@ -136,6 +136,10 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      # Stamped into the binary so /version can name the running release; a
+      # blue/green or canary edge decides by version, not by container age.
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
     restart: unless-stopped
     # The platform reads a single YAML config file; the credential-store
     # master key is injected via env (TRPC_SECRET_MASTER_KEY) so it never
@@ -197,6 +201,7 @@ services:
       - --storage.tsdb.path=/prometheus
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"

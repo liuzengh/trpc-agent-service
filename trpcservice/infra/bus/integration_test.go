@@ -131,23 +131,53 @@ func TestBusIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Idempotent: %v", err)
 	}
-	if !first {
-		t.Error("first sighting should be processable")
+	if first != IdemClaimed {
+		t.Errorf("first sighting = %v, want IdemClaimed", first)
 	}
 	second, err := b.Idempotent(ctx, "msg-42")
 	if err != nil {
 		t.Fatalf("Idempotent: %v", err)
 	}
-	if second {
-		t.Error("second sighting of the same key must be rejected")
+	if second != IdemInFlight {
+		t.Errorf("second sighting = %v, want IdemInFlight (a lease is not a completion)", second)
 	}
 	// a different key is independent
 	other, err := b.Idempotent(ctx, "msg-43")
 	if err != nil {
 		t.Fatalf("Idempotent: %v", err)
 	}
-	if !other {
-		t.Error("a distinct key should be processable")
+	if other != IdemClaimed {
+		t.Errorf("a distinct key = %v, want IdemClaimed", other)
+	}
+}
+
+// TestBusIdempotencyDistinguishesLeaseFromCompletion is the contract the
+// node-failure drill depends on: "someone is working on it" and "it is done"
+// must be different answers. When they were the same, a consumer that reclaimed
+// a killed worker's in-flight message acked it without ever running the turn.
+func TestBusIdempotencyDistinguishesLeaseFromCompletion(t *testing.T) {
+	ctx := context.Background()
+	b := newBusForTest(t)
+
+	if state, err := b.Idempotent(ctx, "msg-states"); err != nil || state != IdemClaimed {
+		t.Fatalf("claim: state=%v err=%v", state, err)
+	}
+	if state, err := b.Idempotent(ctx, "msg-states"); err != nil || state != IdemInFlight {
+		t.Fatalf("while leased: state=%v err=%v, want IdemInFlight", state, err)
+	}
+	if err := b.CommitIdem(ctx, "msg-states"); err != nil {
+		t.Fatalf("CommitIdem: %v", err)
+	}
+	if state, err := b.Idempotent(ctx, "msg-states"); err != nil || state != IdemCompleted {
+		t.Fatalf("after commit: state=%v err=%v, want IdemCompleted", state, err)
+	}
+	// Releasing puts the key back to the claimable state (used when an attempt
+	// fails and the message must be retried).
+	if err := b.ClearIdem(ctx, "msg-states"); err != nil {
+		t.Fatalf("ClearIdem: %v", err)
+	}
+	if state, err := b.Idempotent(ctx, "msg-states"); err != nil || state != IdemClaimed {
+		t.Fatalf("after release: state=%v err=%v, want IdemClaimed", state, err)
 	}
 }
 
@@ -162,7 +192,7 @@ func TestBusIdempotencyIsATwoPhaseLease(t *testing.T) {
 	b := newBusForTest(t)
 
 	claimed, err := b.Idempotent(ctx, "msg-lease")
-	if err != nil || !claimed {
+	if err != nil || claimed != IdemClaimed {
 		t.Fatalf("Idempotent: claimed=%v err=%v", claimed, err)
 	}
 	lease, err := b.client.TTL(ctx, IdemKey("msg-lease")).Result()
@@ -208,8 +238,8 @@ func TestBusIdempotencyIsATwoPhaseLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Idempotent after commit: %v", err)
 	}
-	if again {
-		t.Error("a committed message must never be reprocessed")
+	if again != IdemCompleted {
+		t.Errorf("a committed message = %v, want IdemCompleted (never reprocessed)", again)
 	}
 }
 

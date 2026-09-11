@@ -4,7 +4,6 @@ package agentstore
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/testcontainers/testcontainers-go/modules/mysql"
@@ -13,10 +12,11 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage"
 )
 
-// TestMySQLAgentVersionsAndGrayRelease exercises the SQL the canary release
-// depends on: publishing freezes versions, ResolveVersion reads a non-current
-// one, and the gray column round-trips (including clearing it).
-func TestMySQLAgentVersionsAndGrayRelease(t *testing.T) {
+// TestMySQLAgentVersions exercises the SQL the version lifecycle depends on:
+// publishing freezes an immutable version and switching the current pointer is
+// atomic. (The asset-level canary release was removed: platform rollout is a
+// deployment concern, so agent versions only move through Publish/Rollback.)
+func TestMySQLAgentVersions(t *testing.T) {
 	ctx := context.Background()
 	c, err := mysql.Run(ctx, "mysql:8.0",
 		mysql.WithUsername("test"), mysql.WithPassword("test"), mysql.WithDatabase("test"),
@@ -49,51 +49,29 @@ func TestMySQLAgentVersionsAndGrayRelease(t *testing.T) {
 		t.Fatalf("publish v2: version=%d err=%v", v2, err)
 	}
 
-	// The current profile is v2; the canary needs v1's frozen profile.
+	// The current profile is v2...
 	cur, err := mgr.Resolve(ctx, "a1")
 	if err != nil || cur.SystemPrompt != "second" {
 		t.Fatalf("resolve current = %q (%v), want second", cur.SystemPrompt, err)
 	}
-	old, err := mgr.ResolveVersion(ctx, "a1", 1)
-	if err != nil || old.SystemPrompt != "first" {
-		t.Fatalf("resolve v1 = %q (%v), want first", old.SystemPrompt, err)
-	}
-	if _, err := mgr.ResolveVersion(ctx, "a1", 9); !errors.Is(err, agent.ErrNotFound) {
-		t.Errorf("unknown version err = %v, want ErrNotFound", err)
-	}
 
-	// Install, read back and clear the release.
-	if err := mgr.SetGray(ctx, "a1", &agent.GrayRelease{Version: 1, Percent: 25}); err != nil {
-		t.Fatalf("set gray: %v", err)
+	// ...and rolling back to v1 switches the pointer without touching history.
+	if err := mgr.Rollback(ctx, "a1", 1); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	back, err := mgr.Resolve(ctx, "a1")
+	if err != nil || back.SystemPrompt != "first" {
+		t.Fatalf("resolve after rollback = %q (%v), want first", back.SystemPrompt, err)
 	}
 	ag, err := mgr.Get(ctx, "a1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if ag.Gray == nil || ag.Gray.Version != 1 || ag.Gray.Percent != 25 {
-		t.Fatalf("gray = %+v, want {1 25}", ag.Gray)
+	if ag.CurrentVersion != 1 {
+		t.Errorf("current_version = %d after rollback, want 1", ag.CurrentVersion)
 	}
-
-	// A 100% release sends every session to v1 through the manager.
-	if err := mgr.SetGray(ctx, "a1", &agent.GrayRelease{Version: 1, Percent: 100}); err != nil {
-		t.Fatalf("set gray 100: %v", err)
-	}
-	p, version, err := mgr.ResolveForSession(ctx, "a1", "session-1")
-	if err != nil || version != 1 || p.SystemPrompt != "first" {
-		t.Fatalf("gray resolve = v%d %q (%v), want v1 first", version, p.SystemPrompt, err)
-	}
-
-	if err := mgr.ClearGray(ctx, "a1"); err != nil {
-		t.Fatalf("clear gray: %v", err)
-	}
-	ag, err = mgr.Get(ctx, "a1")
-	if err != nil {
-		t.Fatalf("get after clear: %v", err)
-	}
-	if ag.Gray != nil {
-		t.Errorf("gray = %+v after clearing, want nil", ag.Gray)
-	}
-	if _, version, _ := mgr.ResolveForSession(ctx, "a1", "session-1"); version != 2 {
-		t.Errorf("version = %d after clearing, want 2 (current)", version)
+	vs, err := mgr.Versions(ctx, "a1")
+	if err != nil || len(vs) != 2 {
+		t.Fatalf("versions = %+v (%v), want both frozen versions", vs, err)
 	}
 }

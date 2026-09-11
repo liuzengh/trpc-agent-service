@@ -123,6 +123,13 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", health.Handler())
+	// Build identity for rollouts: which platform version is this process, and
+	// which instance answered. Public on purpose (see web/version.go).
+	mux.Handle("/version", web.VersionHandler(web.BuildInfo{
+		Version: buildVersion,
+		GitSHA:  buildGitSHA,
+		Role:    cfg.Role,
+	}))
 
 	// With a MySQL DSN configured, the management domains (tenants, endpoints,
 	// tools, agents) persist across restarts; otherwise they stay in memory.
@@ -135,7 +142,7 @@ func main() {
 			// A configured-but-unreachable MySQL is a degraded state, not a
 			// silent fallback: persistence, audit and the worker all stay off.
 			// Make it loud (/healthz 503) so the outage is visible.
-			health.SetDegraded("mysql unavailable")
+			health.Report("mysql", "unavailable")
 		}
 	}
 	var reg *llm.Registry
@@ -319,11 +326,12 @@ func main() {
 		mux.HandleFunc("/auth/me", authMW.Me)
 	}
 
-	// Routes that must bypass the platform auth middleware: the health probe and
-	// login are public by nature, and the IM callback ingress is authenticated
-	// by the platform's own signature. startDataPlane mounts the ingress (it owns
-	// the IM manager) and reports the paths it needs in the skip list.
-	skipAuth := []string{"/healthz", "/auth/login"}
+	// Routes that must bypass the platform auth middleware: the health probe,
+	// the build-identity probe (a rollout has to be verifiable before anyone
+	// logs in) and login are public by nature, and the IM callback ingress is
+	// authenticated by the platform's own signature. startDataPlane mounts the
+	// ingress (it owns the IM manager) and reports the paths it needs here.
+	skipAuth := []string{"/healthz", "/version", "/auth/login"}
 
 	// Data plane: the worker loop, the outbox dispatcher and the IM gateway, each
 	// gated by the role plan. All three need Redis; the worker and the ledger

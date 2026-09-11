@@ -81,8 +81,17 @@ func (s *mysqlStore) Update(ctx context.Context, ep llm.Endpoint) error {
 }
 
 func (s *mysqlStore) Delete(ctx context.Context, id string) error {
+	// The name is freed as part of the soft delete: `uk_endpoint_scope_tenant_name`
+	// does not include is_deleted, so a soft-deleted row would otherwise keep the
+	// name reserved forever and recreating an endpoint with the same name in the
+	// same scope/tenant would fail with a duplicate-key error. The drill hit
+	// exactly that (a temporary endpoint named "drill hanging endpoint" blocked
+	// the next run's create). The deleted row keeps its identity through
+	// endpoint_id, and the suffix makes the tombstone unique without a DDL change.
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE model_endpoints SET is_deleted = 1 WHERE endpoint_id = ? AND is_deleted = 0`, id)
+		`UPDATE model_endpoints
+		 SET is_deleted = 1, name = CONCAT(LEFT(name, 80), '#deleted#', endpoint_id)
+		 WHERE endpoint_id = ? AND is_deleted = 0`, id)
 	if err != nil {
 		return err
 	}

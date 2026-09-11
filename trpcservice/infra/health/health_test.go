@@ -24,8 +24,8 @@ func TestHandlerReturnsOK(t *testing.T) {
 }
 
 func TestHandlerReportsDegraded(t *testing.T) {
-	SetDegraded("mysql unavailable")
-	t.Cleanup(ClearDegraded)
+	Report("mysql", "unavailable")
+	t.Cleanup(func() { Resolve("mysql") })
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()

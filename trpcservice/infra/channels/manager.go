@@ -14,6 +14,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/health"
 	"sync"
 	"time"
 )
@@ -218,6 +220,30 @@ func (m *Manager) SetRateLimiter(rl RateLimiter) {
 
 // Run follows the outbound stream and dispatches replies (blocks until ctx is
 // done).
+//
+// A transient bus failure is retried rather than returned: this loop is the only
+// thing delivering replies to IM users, so returning would end IM delivery for
+// the rest of the process's life (a 20s Redis stop was observed doing exactly
+// that on the deployed stack, while /healthz still answered 200). The supervisor
+// also clears the degraded mark once the follower is reading again.
 func (m *Manager) Run(ctx context.Context) error {
-	return m.gw.Run(ctx)
+	// The gateway reports every answered outbound read; that is the attachment
+	// signal the supervisor needs to clear an outage it reported.
+	m.gw.SetReady(outboundSupervisor.Attached)
+	return outboundSupervisor.Run(ctx, m.gw.Run)
+}
+
+// Outbound follower reconnect policy, mirroring the worker consumer's.
+const (
+	gatewayRetryBase    = time.Second
+	gatewayRetryMax     = 30 * time.Second
+	gatewayDegradeAfter = 3
+	// gatewayGrace mirrors consumeGrace: the follower reads once a second, so
+	// silence beyond it means the bus is gone.
+	gatewayGrace = 5 * time.Second
+)
+
+var outboundSupervisor = &health.Supervisor{
+	Name: "channels: outbound follower", Base: gatewayRetryBase, Max: gatewayRetryMax,
+	DegradeAfter: gatewayDegradeAfter, Grace: gatewayGrace,
 }

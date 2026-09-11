@@ -9,15 +9,16 @@
 --   * Immutable versioning: each publish freezes a new agent_versions row; the
 --     runtime_profile JSON snapshot is the single atomic unit for rollback.
 --
--- gray holds an optional canary release: {"version":2,"percent":10} routes 10%
--- of the sessions (bucketed by session id) to version 2 while the rest stay on
--- current_version. Clearing the column is the immediate rollback.
+-- (The gray column was removed together with the asset-level canary release:
+-- rolling out a new PLATFORM version is a deployment concern, handled by the
+-- blue/green ingress in deployments/, not by an agent row. An agent's published
+-- versions are immutable and move only through Publish / Rollback.)
 --
 -- The earlier agent_code / `group` columns were dropped: agent_code was always
 -- written as the agent id itself (so it duplicated the primary key) and `group`
 -- had no reader or writer. Existing volumes need:
 --   ALTER TABLE agents DROP COLUMN agent_code, DROP COLUMN `group`,
---     ADD COLUMN gray JSON NULL;
+--     DROP COLUMN gray;
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -30,7 +31,6 @@ CREATE TABLE IF NOT EXISTS agents (
     created_by      VARCHAR(64)  NULL                   COMMENT 'authoring member id (weak ref); NULL = pre-authorship row, treated as tenant-shared',
     visibility      ENUM('private','shared') NOT NULL DEFAULT 'private'
                                                         COMMENT 'private = author + tenant managers only; shared = tenant-readable (others read-only)',
-    gray            JSON         NULL                   COMMENT 'canary release {version,percent}; NULL = all traffic on current_version',
     created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     is_deleted      TINYINT      NOT NULL DEFAULT 0,

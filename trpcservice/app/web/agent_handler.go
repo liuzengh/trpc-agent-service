@@ -58,8 +58,6 @@ func (a *AgentAPI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /agents/{id}/publish", a.publish)
 	mux.HandleFunc("POST /agents/{id}/rollback", a.rollback)
 	mux.HandleFunc("GET /agents/{id}/versions", a.versions)
-	mux.HandleFunc("PUT /agents/{id}/gray", a.setGray)
-	mux.HandleFunc("DELETE /agents/{id}/gray", a.clearGray)
 	mux.HandleFunc("GET /agents/{id}/profile", a.profile)
 }
 
@@ -303,41 +301,4 @@ func (a *AgentAPI) versions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, vs)
-}
-
-// setGray installs or clears the agent's canary release. Clearing is the fast
-// rollback of a bad rollout: no publish, no restart, all traffic back on the
-// current version.
-func (a *AgentAPI) setGray(w http.ResponseWriter, r *http.Request) {
-	var req agent.GrayRelease
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	id := r.PathValue("id")
-	existing, ok := a.writable(w, r, id)
-	if !ok {
-		return
-	}
-	if err := a.mgr.SetGray(r.Context(), id, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	recordAssetAllowed(GetClaims(r.Context()), a.auditor, assetKindAgent, id, existing.TenantID)
-	writeJSON(w, http.StatusOK, req)
-}
-
-// clearGray removes the canary release.
-func (a *AgentAPI) clearGray(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	existing, ok := a.writable(w, r, id)
-	if !ok {
-		return
-	}
-	if err := a.mgr.ClearGray(r.Context(), id); err != nil {
-		writeError(w, http.StatusNotFound, err)
-		return
-	}
-	recordAssetAllowed(GetClaims(r.Context()), a.auditor, assetKindAgent, id, existing.TenantID)
-	w.WriteHeader(http.StatusNoContent)
 }

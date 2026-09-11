@@ -165,12 +165,94 @@ func TestWorkerReleasesTheLeaseOnAFailedTurn(t *testing.T) {
 	}
 
 	// The claim is gone: the redelivery can take it right away.
-	first, err := rb.Idempotent(ctx, in.ID)
+	state, err := rb.Idempotent(ctx, in.ID)
 	if err != nil {
 		t.Fatalf("Idempotent: %v", err)
 	}
-	if !first {
-		t.Error("a failed turn must release the claim instead of holding the message for the lease window")
+	if state != bus.IdemClaimed {
+		t.Errorf("after a failed turn the claim = %v, want IdemClaimed", state)
+	}
+}
+
+// TestWorkerLeavesAnInFlightMessagePending is the regression for the defect the
+// node-failure drill found (scripts/faults/node-failure.ps1): a worker was
+// SIGKILLed with 3 messages in flight, XAUTOCLAIM handed them to a survivor
+// while their 90s lease was still alive, the survivor read "the marker exists"
+// as "already handled" and ACKED them. 3 of 20 messages were lost with lag=0,
+// pending=0 and /healthz green.
+//
+// The contract pinned here: an in-flight claim means "retry the delivery later"
+// (ErrRequeue, which by design does not count toward the dead-letter threshold),
+// while a committed marker means "ack and drop". Only the second one is an ack.
+func TestWorkerLeavesAnInFlightMessagePending(t *testing.T) {
+	once.Do(startContainers)
+	if platform.err != nil {
+		t.Skip(platform.err)
+	}
+	ctx := context.Background()
+
+	db, err := storage.OpenMySQL(platform.dsn)
+	if err != nil {
+		t.Fatalf("open mysql: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	rb, err := bus.NewRedisFromURL(platform.redisURL)
+	if err != nil {
+		t.Fatalf("redis bus: %v", err)
+	}
+	t.Cleanup(func() { _ = rb.Client().Close() })
+
+	factory := func(_ context.Context, _ llm.Endpoint) (model.Model, error) {
+		return &cannedModel{text: "inflight reply"}, nil
+	}
+	reg := llmstore.NewMySQLRegistry(db, factory)
+	tenants := tenantstore.NewMySQLManager(db)
+	agents := agentstore.NewMySQLManager(db, reg)
+	tools := toolstore.NewMySQLRegistry(db)
+	outbox := bus.NewOutbox(db)
+	router := storage.NewRouter(tenants,
+		storage.SessionConfig{Backend: storage.BackendInMemory},
+		storage.MemoryConfig{Backend: storage.BackendInMemory},
+	)
+	w := New(rb, agents, NewToolResolver(tools, nil, nil), outbox, router, nil, nil, nil, nil)
+
+	if err := reg.Create(ctx, llm.Endpoint{
+		ID: "e-inflight", Scope: llm.ScopeTenant, TenantID: "t-inflight", Name: "main",
+		Provider: "openai", BaseURL: "http://localhost", ModelName: "m",
+	}); err != nil {
+		t.Fatalf("endpoint: %v", err)
+	}
+	if err := agents.Create(ctx, agent.Agent{ID: "a-inflight", TenantID: "t-inflight", Name: "helper"}); err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	if _, err := agents.Publish(ctx, "a-inflight", agent.RuntimeProfile{
+		SystemPrompt: "be helpful", EndpointID: "e-inflight",
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	userMsg := model.NewUserMessage("hi")
+	in := &bus.Message{
+		ID: "in-inflight-1", TenantID: "t-inflight", AgentID: "a-inflight",
+		SessionID: "s-inflight", Channel: "admin", UserID: "u-1",
+		Content: &userMsg,
+	}
+
+	// Stand in for the crashed worker: it claimed the message and died before
+	// producing anything.
+	if state, err := rb.Idempotent(ctx, in.ID); err != nil || state != bus.IdemClaimed {
+		t.Fatalf("simulated claim: state=%v err=%v", state, err)
+	}
+	if err := w.handle(ctx, in); !bus.Requeue(err) {
+		t.Fatalf("handle = %v, want a requeue (the message must not be acked as done)", err)
+	}
+
+	// Once the owner commits, the same redelivery is an ack-and-drop.
+	if err := rb.CommitIdem(ctx, in.ID); err != nil {
+		t.Fatalf("CommitIdem: %v", err)
+	}
+	if err := w.handle(ctx, in); err != nil {
+		t.Fatalf("handle after the owner committed = %v, want nil (ack and drop)", err)
 	}
 }
 

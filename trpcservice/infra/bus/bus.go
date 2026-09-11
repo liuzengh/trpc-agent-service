@@ -267,6 +267,11 @@ type RedisBus struct {
 	dlqMu         sync.Mutex
 	maxDeliveries int
 	sink          DeadLetterSink
+
+	// readyMu guards ready, the "the server answered us" callback a reconnect
+	// supervisor installs before the consumer starts (see SetConsumeReady).
+	readyMu sync.Mutex
+	ready   func()
 }
 
 // NewRedis returns a Redis-backed bus over an existing client.
@@ -303,6 +308,30 @@ func (b *RedisBus) WithConsumeWorkers(n int) *RedisBus {
 // inspection; message flow should go through the bus API).
 func (b *RedisBus) Client() *redis.Client {
 	return b.client
+}
+
+// SetConsumeReady installs a callback the consumer invokes whenever Redis
+// answered a read. It is how a reconnect supervisor learns that the loop is
+// attached, and it must be installed before ConsumeInbound starts.
+//
+// This exists because "the consume loop is still running" is not evidence that
+// Redis is reachable: a blocking XREADGROUP handed a stale pooled connection can
+// sit there for seconds while the server is gone. A read that returned —
+// including the empty one that ends the 1s block — is evidence.
+func (b *RedisBus) SetConsumeReady(fn func()) {
+	b.readyMu.Lock()
+	b.ready = fn
+	b.readyMu.Unlock()
+}
+
+// notifyReady reports an answered read to the installed callback, if any.
+func (b *RedisBus) notifyReady() {
+	b.readyMu.Lock()
+	fn := b.ready
+	b.readyMu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // PublishInbound enqueues an inbound message for workers.
@@ -440,6 +469,10 @@ loop:
 		}).Result()
 		if err != nil {
 			if errors.Is(err, redis.Nil) {
+				// The 1s block timed out, which still proves the server
+				// answered: report it so a supervisor can consider the loop
+				// attached.
+				b.notifyReady()
 				continue // block timeout, loop and re-check ctx
 			}
 			if ctx.Err() != nil {
@@ -449,6 +482,7 @@ loop:
 			wg.Wait()
 			return fmt.Errorf("bus: xreadgroup: %w", err)
 		}
+		b.notifyReady()
 		for _, stream := range streams {
 			for _, msg := range stream.Messages {
 				if !enqueue(msg) {
@@ -657,24 +691,73 @@ func (b *RedisBus) Route(ctx context.Context, tenantID, sessionID string) (strin
 	return v, nil
 }
 
+// IdemState is the outcome of claiming a message key. The two "not ours"
+// outcomes have to be distinguishable, and conflating them silently loses
+// messages: an in-flight lease means some attempt owns the message (possibly a
+// worker that was killed a moment ago and whose lease has not expired yet), so
+// the delivery must stay pending until that attempt commits or its lease
+// expires. A committed marker means the work is recorded and the delivery can be
+// acked.
+type IdemState int
+
+const (
+	// IdemClaimed: this caller took the lease and must process the message.
+	IdemClaimed IdemState = iota
+	// IdemInFlight: another attempt holds the lease; retry the delivery later.
+	IdemInFlight
+	// IdemCompleted: the message was already handled durably; ack and drop it.
+	IdemCompleted
+)
+
+// Idempotency marker values. They must differ: the whole point of the state is
+// that "leased" and "done" are not the same answer.
+const (
+	idemLeaseValue     = "1"
+	idemCommittedValue = "2"
+)
+
+// idemClaimScript claims msgKey atomically, reporting which state it found. A
+// script (not SetNX + a second round trip) so two consumers can never both
+// believe they own the message.
+var idemClaimScript = redis.NewScript(`
+local v = redis.call('GET', KEYS[1])
+if not v then
+  redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[1])
+  return 'claimed'
+end
+if v == ARGV[3] then
+  return 'completed'
+end
+return 'inflight'
+`)
+
 // Idempotent claims msgKey for processing. The claim is a *lease*
 // (idemLeaseTTL), not a durable marker: the caller must CommitIdem once the
 // work is durably recorded, or the claim expires and the message is processed
 // again. That two-phase shape is what stops a crash mid-turn from dropping the
-// message on the floor.
-func (b *RedisBus) Idempotent(ctx context.Context, msgKey string) (bool, error) {
-	ok, err := b.client.SetNX(ctx, IdemKey(msgKey), "1", idemLeaseTTL).Result()
+// message on the floor — but only if the caller treats IdemInFlight as "retry
+// later" and IdemCompleted as "already done".
+func (b *RedisBus) Idempotent(ctx context.Context, msgKey string) (IdemState, error) {
+	res, err := idemClaimScript.Run(ctx, b.client, []string{IdemKey(msgKey)},
+		idemLeaseTTL.Milliseconds(), idemLeaseValue, idemCommittedValue).Text()
 	if err != nil {
-		return false, fmt.Errorf("bus: setnx idem: %w", err)
+		return IdemInFlight, fmt.Errorf("bus: claim idem: %w", err)
 	}
-	return ok, nil
+	switch res {
+	case "claimed":
+		return IdemClaimed, nil
+	case "completed":
+		return IdemCompleted, nil
+	default:
+		return IdemInFlight, nil
+	}
 }
 
 // CommitIdem turns the in-flight lease into a durable marker: the message is
 // handled (its reply is in the outbox, or it was deliberately dropped) and must
 // never be processed again within idemTTL.
 func (b *RedisBus) CommitIdem(ctx context.Context, msgKey string) error {
-	if err := b.client.Set(ctx, IdemKey(msgKey), "1", idemTTL).Err(); err != nil {
+	if err := b.client.Set(ctx, IdemKey(msgKey), idemCommittedValue, idemTTL).Err(); err != nil {
 		return fmt.Errorf("bus: commit idem: %w", err)
 	}
 	return nil

@@ -90,6 +90,11 @@ type Gateway struct {
 
 	mu     sync.RWMutex
 	routes map[string]routeEntry // sessionID -> adapter + chatID
+
+	// readyMu guards ready, the "the bus answered us" callback a reconnect
+	// supervisor installs before Run (see SetReady).
+	readyMu sync.Mutex
+	ready   func()
 }
 
 // NewGateway returns a bridge over the bus. bindings may be nil (agent id is
@@ -121,6 +126,26 @@ func (g *Gateway) Attach(ctx context.Context, a Adapter, opt Attach) {
 	go g.pumpInbound(ctx, a, opt)
 }
 
+// SetReady installs a callback Run invokes whenever the outbound read was
+// answered by the bus (including an empty poll). A reconnect supervisor uses it
+// as the attachment signal, and it must be installed before Run starts: see
+// health.Supervisor for why "the loop is still running" is not enough.
+func (g *Gateway) SetReady(fn func()) {
+	g.readyMu.Lock()
+	g.ready = fn
+	g.readyMu.Unlock()
+}
+
+// notifyReady reports an answered outbound read to the installed callback.
+func (g *Gateway) notifyReady() {
+	g.readyMu.Lock()
+	fn := g.ready
+	g.readyMu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
 // Run follows stream:outbound and dispatches replies to the originating
 // adapter. It blocks until ctx is done. It resumes from the persisted cursor
 // when the bus supports it, so a reply published while this node was down is
@@ -149,6 +174,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 			}
 			return err
 		}
+		g.notifyReady()
 		// Always advance: the returned cursor is also how a "$" start becomes a
 		// concrete position (see bus.ReadOutbound), and keeping "$" would skip
 		// anything published between two polls.
