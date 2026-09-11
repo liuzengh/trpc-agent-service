@@ -15,6 +15,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	platformskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
 )
 
 func TestPolicyRenderingFailsClosed(t *testing.T) {
@@ -133,6 +134,15 @@ func TestPostgresRolePermissionsIntegration(t *testing.T) {
 		role, statement string
 		allow           bool
 	}{
+		{"admin", "SELECT connection_id FROM backend_connection", true},
+		{"admin", "INSERT INTO backend_connection SELECT * FROM backend_connection WHERE false", true},
+		{"admin", "UPDATE backend_connection SET display_name='changed' WHERE false", false},
+		{"worker", "SELECT connection_id FROM backend_connection", false},
+		{"worker", "SELECT script FROM skill_bundle", true},
+		{"worker", "UPDATE skill_bundle SET status='approved' WHERE false", false},
+		{"admin", "UPDATE skill_bundle SET status='approved' WHERE false", true},
+		{"jobs", "SELECT ciphertext FROM channel_credential", true},
+		{"gateway", "SELECT script FROM skill_bundle", false},
 		{"gateway", "SELECT tenant_id FROM tenant", true},
 		{"gateway", "SELECT items FROM platform_backlog", true},
 		{"relay", "SELECT items FROM platform_backlog", false},
@@ -178,5 +188,23 @@ func TestPostgresRolePermissionsIntegration(t *testing.T) {
 				t.Fatalf("allowed=%t actual error=%v", tc.allow, err)
 			}
 		})
+	}
+	repo, err := controlplane.NewPostgresRepository(scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploads := platformskill.NewStore(repo)
+	if err := database.InTransaction(ctx, scoped, func(ctx context.Context) error {
+		if _, err := database.Transaction(ctx, scoped).ExecContext(ctx, "SET LOCAL ROLE "+schema+"_admin"); err != nil {
+			return err
+		}
+		d, err := uploads.Upload(ctx, "tutorial-tenant", "permission-admin", platformskill.Upload{Name: "permission-skill", Version: "1", Markdown: "---\nname: permission-skill\ndescription: Permission fixture\n---\nRead the input.\n", Script: "echo sandbox"})
+		if err != nil {
+			return err
+		}
+		_, err = uploads.Review(ctx, "tutorial-tenant", d.Name, d.Version, "approved", "permission-admin", d.Revision)
+		return err
+	}); err != nil {
+		t.Fatal("least-privilege admin cannot manage uploaded Skill", err)
 	}
 }

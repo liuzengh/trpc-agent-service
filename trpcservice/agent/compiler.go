@@ -223,6 +223,14 @@ func (c *RevisionCompiler) Compile(
 	if revision.AppID != scope.AppID || revision.TenantID != scope.TenantID {
 		return nil, fmt.Errorf("agent revision scope mismatch")
 	}
+	// Uploaded Skill approval can change independently of the cached Agent.
+	policy, err := governance.ParseToolPolicy(revision.ToolPolicy)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.skills.ValidateContext(ctx, scope.TenantID, revision.AgentConfig, policy.AllowedTools); err != nil {
+		return nil, err
+	}
 	if runtimecontext.IsDebugExecution(ctx) {
 		// Preview IDs are short-lived and user-created. Do not retain their
 		// prompt/model objects forever in the published-revision cache.
@@ -323,7 +331,7 @@ func (c *RevisionCompiler) compileRevision(
 	if err != nil {
 		return nil, err
 	}
-	refs, err := c.skills.Validate(scope.TenantID, revision.AgentConfig, policy.AllowedTools)
+	refs, err := c.skills.ValidateContext(ctx, scope.TenantID, revision.AgentConfig, policy.AllowedTools)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +375,7 @@ func (c *RevisionCompiler) compileRevision(
 		agentOptions = append(agentOptions, llmagent.WithMessageBranchFilterMode(llmagent.BranchFilterModeAll))
 	}
 	if len(refs) > 0 {
-		repo, err := c.skills.RepositoryFor(scope.TenantID, refs)
+		repo, err := c.skills.RepositoryForContext(ctx, scope.TenantID, refs)
 		if err != nil {
 			return nil, err
 		}

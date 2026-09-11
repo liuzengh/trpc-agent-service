@@ -22,8 +22,8 @@ func LoadSkillsConfigFromEnv() (SkillsConfig, error) {
 	}
 	cfg := SkillsConfig{Root: os.Getenv("TRPC_AGENT_SKILLS_ROOT"), GrantsJSON: os.Getenv("TRPC_AGENT_SKILL_GRANTS_JSON"), SandboxEnabled: enabled,
 		Sandbox: workspace.Config{Image: os.Getenv("TRPC_AGENT_SANDBOX_IMAGE"), Socket: os.Getenv("TRPC_AGENT_SANDBOX_SOCKET"), Timeout: 10 * time.Second}}
-	if enabled && (cfg.Root == "" || cfg.Sandbox.Image == "") {
-		return cfg, errors.New("sandbox requires a skills root and local image")
+	if enabled && cfg.Sandbox.Image == "" {
+		return cfg, errors.New("sandbox requires an explicitly configured local image")
 	}
 	return cfg, nil
 }

@@ -343,9 +343,11 @@ export function Workbench({
       setBusy("");
     }
   }
-  function chooseSkill(name: string, checked: boolean) {
+  function chooseSkill(name: string, version: string, checked: boolean) {
     if (!cfg || !workspace) return;
-    const item = workspace.skills.find((s) => s.name === name);
+    const item = workspace.skills.find(
+      (s) => s.name === name && s.version === version,
+    );
     if (!item) return;
     const refs = (cfg.agent_config.skills || []).filter(
       (s: Dict) => s.name !== name,
@@ -359,7 +361,17 @@ export function Workbench({
     const allowed = new Set<string>(cfg.tool_policy.allowed_tools || []);
     if (refs.length) {
       allowed.add("skill_load");
-      allowed.add("skill_run");
+      const executable = refs.some((ref: Dict) =>
+        workspace.skills.some(
+          (s) =>
+            s.name === ref.name &&
+            s.version === ref.version &&
+            s.checksum === ref.checksum &&
+            s.executable,
+        ),
+      );
+      if (executable) allowed.add("skill_run");
+      else allowed.delete("skill_run");
     } else {
       allowed.delete("skill_load");
       allowed.delete("skill_run");
@@ -883,7 +895,7 @@ export function Workbench({
                   </Form.Item>
                 </div>
                 {cfg.tool_policy.max_tool_calls === 1 &&
-                  (cfg.agent_config.skills || []).length > 0 && (
+                  selectedTools.includes("skill_run") && (
                     <Alert
                       type="warning"
                       showIcon
@@ -894,7 +906,7 @@ export function Workbench({
               </Panel>
               <Panel
                 title="Skills"
-                subtitle="加载经过授权、固定版本的任务说明与脚本。"
+                subtitle="选择已授权的具体版本。说明型仅加载内容，脚本型执行需要审批和沙箱。"
               >
                 {workspace.skills.length ? (
                   workspace.skills.map((skill) => (
@@ -909,7 +921,11 @@ export function Workbench({
                             s.checksum === skill.checksum,
                         )}
                         onChange={(e) =>
-                          chooseSkill(skill.name, e.target.checked)
+                          chooseSkill(
+                            skill.name,
+                            skill.version,
+                            e.target.checked,
+                          )
                         }
                       />
                       <span className="skill-icon">
@@ -920,7 +936,11 @@ export function Workbench({
                           {skill.name} <Tag>v{skill.version}</Tag>
                         </strong>
                         <p>{skill.description}</p>
-                        <small>已授权 · 脚本执行需审批 · Docker 沙箱</small>
+                        <small>
+                          {skill.executable
+                            ? "已授权 · 脚本执行需审批 · Docker 沙箱"
+                            : "已授权 · 说明型 · 不执行脚本"}
+                        </small>
                       </div>
                     </label>
                   ))

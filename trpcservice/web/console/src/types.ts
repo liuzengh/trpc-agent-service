@@ -63,6 +63,7 @@ export interface Skill {
   version: string;
   checksum: string;
   description: string;
+  executable: boolean;
 }
 export interface Tool {
   name: string;

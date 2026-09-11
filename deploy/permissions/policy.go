@@ -72,7 +72,7 @@ func roleGrants(role string) map[string][]string {
 			}
 		}
 	}
-	if role == "gateway" || role == "sender" || role == "worker" || role == "admin" {
+	if role == "gateway" || role == "sender" || role == "worker" || role == "admin" || role == "jobs" {
 		add("SELECT", "channel_credential")
 	}
 	if role == "gateway" {
@@ -80,6 +80,8 @@ func roleGrants(role string) map[string][]string {
 		add("SELECT,INSERT,UPDATE", "channel_connection_group")
 	}
 	if role == "admin" {
+		add("SELECT,INSERT", "backend_connection")
+		add("SELECT,INSERT,UPDATE", "skill_bundle")
 		add("INSERT", "channel_credential")
 		add("SELECT,INSERT,UPDATE", "channel_connection", "channel_connection_group", "channel_connection_setting")
 		add("DELETE", "channel_connection_group")
@@ -94,6 +96,7 @@ func roleGrants(role string) map[string][]string {
 		add("SELECT,INSERT", "queue_outbox", "outbound_message", "channel_poll_seen")
 		add("SELECT,INSERT", "channel_message_rejection")
 	case "worker":
+		add("SELECT", "skill_bundle")
 		add("SELECT", "model_connection")
 		add("SELECT", "schema_migration")
 		add("SELECT,DELETE", "debug_snapshot", "debug_session", "debug_approval_decision")

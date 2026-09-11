@@ -29,6 +29,8 @@ import {
 import { navigate } from "./App";
 import { channelLabels } from "./channel-types";
 import { JobTable } from "./ActivityPanel";
+import { BackendConnections } from "./BackendConnections";
+import { SkillManager } from "./SkillManager";
 
 export function AgentList({
   tenant,
@@ -268,7 +270,58 @@ const ids = (v: Dict) =>
   v.operation_id ||
   v.tenant_id ||
   v.name;
-export function ResourcePage({
+export function ResourcePage(props: {
+  tenant: string;
+  principal: Principal;
+  initial?: string;
+  onChanged?: () => void;
+}) {
+  const [kind, setKind] = useState("skills");
+  if (props.initial && props.initial !== "skills")
+    return <LegacyResourcePage {...props} />;
+  return (
+    <>
+      <PageHeading
+        eyebrow="RESOURCES"
+        title="资源中心"
+        subtitle="管理当前工作空间的资源、存储连接和 Skill 版本。"
+      />
+      <Tabs
+        activeKey={kind}
+        onChange={setKind}
+        items={[
+          "models",
+          "knowledge",
+          "skills",
+          "backends",
+          "audit",
+          "operations",
+        ].map((key) => ({ key, label: resourceNames[key] }))}
+      />
+      {kind === "skills" ? (
+        <SkillManager
+          key={props.tenant}
+          tenant={props.tenant}
+          principal={props.principal}
+        />
+      ) : kind === "backends" ? (
+        <BackendConnections
+          key={props.tenant}
+          tenant={props.tenant}
+          principal={props.principal}
+        />
+      ) : (
+        <LegacyResourcePage
+          key={props.tenant + kind}
+          {...props}
+          initial={kind}
+        />
+      )}
+    </>
+  );
+}
+
+function LegacyResourcePage({
   tenant,
   principal,
   initial = "skills",

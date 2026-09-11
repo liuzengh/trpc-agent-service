@@ -200,7 +200,7 @@ Session 普通读写按用户/会话加锁，Memory 按用户加锁；两者同�
 | 领域 | 直接复用 tRPC-Agent-Go | 平台新增 |
 | --- | --- | --- |
 | Agent 编排 | LLMAgent；其他编排可扩展 | Agent App 注册、revision 编译和灰度 |
-| Skill | SKILL.md Repository、WithSkills、skill_load | 不可变授权快照、强制审批、容器入口；显式禁止本地执行器自动回退 |
+| Skill | SKILL.md Repository、WithSkills、skill_load | 网页上传与版本审核、租户授权、不可变快照、强制审批与沙箱；禁止宿主执行器回退 |
 | 执行 | `runner.Runner`、Event 流、取消、恢复 | Worker 调度、session 租约、事件排空 |
 | Session | InMemory、Redis、PostgreSQL；其他后端可扩展 | Storage Router、幂等 journal、迁移 |
 | Memory | 内置接口、InMemory、Redis/PostgreSQL、Extractor | 租户路由、持久化提取任务和水位 |
@@ -210,6 +210,8 @@ Session 普通读写按用户/会话加锁，Memory 按用户加锁；两者同�
 | 治理 | Model/Tool Callbacks、ToolFilter、PermissionPolicy | Guardrail 规则、策略中心、预算、审计和 IM 身份校验；未直接注册原生 Plugin/Guardrail 模块 |
 | 协议 | OpenAI-compatible 模型、MCP；server/*/OpenClaw 可扩展 | 统一 Gateway、Telegram/企业微信 Channel |
 | 可观测性 | OpenTelemetry spans/metrics | 租户成本、审计索引、告警和 SLO |
+
+存储连接和上传的 Skill 都使用共享控制面。存储连接通过现有加密凭据库保存秘密值，再生成兼容 Storage Router 的绑定；Skill 文件经框架解析后保存为不可变版本，管理员审核状态独立更新。Worker 在每次新运行和脚本执行前核对上传版本的当前授权，不能仅凭缓存的 Agent 对象跳过撤销检查。
 
 平台组件在仓库中的实际对应关系如下，代码模块不必各自成为独立进程：
 

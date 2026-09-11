@@ -5,13 +5,10 @@ package skill
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -52,17 +49,22 @@ type Grant struct {
 type Descriptor struct {
 	Ref
 	Description string `json:"description"`
+	Source      string `json:"source,omitempty"`
+	Executable  bool   `json:"executable"`
 }
 type bundle struct {
 	descriptor Descriptor
 	content    native.Skill
+	markdown   []byte
 	script     []byte
 }
 
-// Registry owns read-only snapshots; no live file reads occur during execution.
+// Registry combines immutable deployment snapshots with approved database
+// versions. Managed authorization is checked without rereading deployment files.
 type Registry struct {
 	bundles map[string]bundle
 	grants  map[string]bool
+	managed *Store
 }
 
 func decode(raw []byte, out any) error {
@@ -141,40 +143,19 @@ func Load(path, grantsJSON string) (*Registry, error) {
 		}
 		md, mdErr := readFile(dir, "SKILL.md", 64<<10)
 		script, scriptErr := readFile(dir, "run.sh", 64<<10)
+		if _, err := dir.Lstat("run.sh"); errors.Is(err, os.ErrNotExist) {
+			script = []byte{}
+			scriptErr = nil
+		}
 		_ = dir.Close()
-		if mdErr != nil || scriptErr != nil || len(script) == 0 {
+		if mdErr != nil || scriptErr != nil {
 			return nil, ErrDenied
 		}
-		// A private staging copy prevents the framework filesystem reader from
-		// observing symlinks or concurrent edits in the deployment directory.
-		tmp, err := os.MkdirTemp("", "trpc-skill-parse-")
+		b, err := parseBundle(entry.Name, entry.Version, md, script)
 		if err != nil {
 			return nil, ErrDenied
 		}
-		parse := func() (*native.Skill, error) {
-			defer func() { _ = os.RemoveAll(tmp) }()
-			folder := filepath.Join(tmp, entry.Name)
-			if os.Mkdir(folder, 0700) != nil || os.WriteFile(filepath.Join(folder, "SKILL.md"), md, 0600) != nil {
-				return nil, ErrDenied
-			}
-			repo, e := native.NewFSRepository(tmp)
-			if e != nil {
-				return nil, ErrDenied
-			}
-			return repo.Get(entry.Name)
-		}
-		content, err := parse()
-		if err != nil || content.Summary.Name != entry.Name || len(content.Summary.Description) > 2048 {
-			return nil, ErrDenied
-		}
-		// Length-delimited JSON/base64 avoids ambiguous separators in file bytes.
-		encoded, _ := json.Marshal(struct {
-			Name, Version    string
-			Markdown, Script []byte
-		}{entry.Name, entry.Version, md, script})
-		digest := sha256.Sum256(encoded)
-		descriptor := Descriptor{Ref: Ref{Name: entry.Name, Version: entry.Version, Checksum: hex.EncodeToString(digest[:])}, Description: content.Summary.Description}
-		r.bundles[k] = bundle{descriptor: descriptor, content: *content, script: append([]byte(nil), script...)}
+		r.bundles[k] = b
 	}
 	var grants []Grant
 	if grantsJSON == "" {
@@ -258,6 +239,10 @@ func (*snapshot) Path(string) (string, error) {
 
 // RepositoryFor binds framework discovery/loading to exactly one tenant revision.
 func (r *Registry) RepositoryFor(tenantID string, refs []Ref) (native.Repository, error) {
+	return r.RepositoryForContext(context.Background(), tenantID, refs)
+}
+
+func (r *Registry) RepositoryForContext(ctx context.Context, tenantID string, refs []Ref) (native.Repository, error) {
 	s := &snapshot{selected: map[string]bundle{}}
 	if len(refs) == 0 {
 		return s, nil
@@ -270,8 +255,16 @@ func (r *Registry) RepositoryFor(tenantID string, refs []Ref) (native.Repository
 			return nil, ErrDenied
 		}
 		b, ok := r.bundles[key(ref.Name, ref.Version)]
-		if !ok || !r.grants[grantKey(tenantID, ref.Name, ref.Version)] || b.descriptor.Checksum != ref.Checksum {
-			return nil, ErrDenied
+		if ok {
+			if !r.grants[grantKey(tenantID, ref.Name, ref.Version)] || b.descriptor.Checksum != ref.Checksum {
+				return nil, ErrDenied
+			}
+		} else {
+			var err error
+			b, err = r.managed.approved(ctx, tenantID, ref)
+			if err != nil {
+				return nil, err
+			}
 		}
 		s.selected[ref.Name] = b
 	}
@@ -292,6 +285,10 @@ func LocalTools(refs []Ref, names []string) []string {
 
 // Validate checks revision references before publication and again at runtime.
 func (r *Registry) Validate(tenantID string, raw json.RawMessage, allowed []string) ([]Ref, error) {
+	return r.ValidateContext(context.Background(), tenantID, raw, allowed)
+}
+
+func (r *Registry) ValidateContext(ctx context.Context, tenantID string, raw json.RawMessage, allowed []string) ([]Ref, error) {
 	refs, err := ParseRefs(raw)
 	if err != nil {
 		return nil, err
@@ -301,8 +298,20 @@ func (r *Registry) Validate(tenantID string, raw json.RawMessage, allowed []stri
 			return nil, ErrDenied
 		}
 	}
-	if _, err := r.RepositoryFor(tenantID, refs); err != nil {
+	repo, err := r.RepositoryForContext(ctx, tenantID, refs)
+	if err != nil {
 		return nil, err
+	}
+	for _, name := range allowed {
+		if name == "skill_run" {
+			executable := false
+			for _, b := range repo.(*snapshot).selected {
+				executable = executable || b.descriptor.Executable
+			}
+			if !executable {
+				return nil, ErrDenied
+			}
+		}
 	}
 	return refs, nil
 }
@@ -378,12 +387,12 @@ func (s *Service) run(ctx context.Context, in runInput) (workspace.Result, error
 	if err != nil {
 		return workspace.Result{}, err
 	}
-	repo, err := s.Registry.RepositoryFor(tenantID, refs)
+	repo, err := s.Registry.RepositoryForContext(ctx, tenantID, refs)
 	if err != nil {
 		return workspace.Result{}, err
 	}
 	b, ok := repo.(*snapshot).selected[in.Skill]
-	if !ok {
+	if !ok || !b.descriptor.Executable {
 		return workspace.Result{}, ErrDenied
 	}
 	input, err := json.Marshal(in.Input)

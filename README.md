@@ -8,6 +8,7 @@
 - Agent 草稿、在线调试、不可变版本发布、灰度和回滚。
 - Gateway、Worker、消息投递与后台任务分角色部署，支持共享后端下的多节点运行。
 - Session/Memory 支持 Redis、PostgreSQL 和 InMemory；Knowledge 支持 Qdrant；Artifact 支持 S3-compatible 存储。
+- 网页管理具名存储连接与加密凭据，支持 Skill 文件上传、版本审核和租户授权。
 - IM 消息去重、持久化任务、失败恢复、工具审批和投递状态查询。
 - 租户预算、日志脱敏、OpenTelemetry、监控告警和审计。
 

@@ -340,7 +340,12 @@ func (h *Handler) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.writeResult(w, 0, nil, stableErr)
 		return
 	}
-	h.writeResult(w, 200, safeConsoleValue(map[string]any{"app": app, "draft": draft, "stable": stable, "skills": h.service.skills.List(in.TenantID), "tools": tools, "startup_model_name": h.service.startupModelName}), nil)
+	skills, err := h.service.skills.ListContext(r.Context(), in.TenantID)
+	if err != nil {
+		h.writeResult(w, 0, nil, err)
+		return
+	}
+	h.writeResult(w, 200, safeConsoleValue(map[string]any{"app": app, "draft": draft, "stable": stable, "skills": skills, "tools": tools, "startup_model_name": h.service.startupModelName}), nil)
 }
 
 func newConsoleID(prefix string) string {

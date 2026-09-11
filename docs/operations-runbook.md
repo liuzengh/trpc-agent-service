@@ -213,7 +213,33 @@ API Key 更新不等于加密主密钥轮换。不得直接替换 `TRPC_AGENT_MO
 
 配置方式见[多后端适配](backend-adapters.md)。容器部署使用容器可达的资源地址，不照搬宿主机回环地址。S3 bucket 应预先创建，并使用限定前缀和操作范围的身份。
 
-以随系统提供的 `json-digest` Skill 为例，将租户 ID 替换为实际授权租户：
+### 网页配置数据后端
+
+1. 进入“资源中心 → 数据后端”，点击“新建连接”，填写便于识别的连接名称。
+2. 选择保存的数据和后端类型。Redis/PostgreSQL 填写主机、端口和数据库；Qdrant 填写 Collection 与向量维度；S3/MinIO 填写 Endpoint、Bucket 和访问密钥。InMemory 不显示凭据字段。
+3. 保存连接。真实凭据加密保存，列表不回显；保存仅校验格式，不代表已通过连通性验证。
+4. 在连接列表点击“绑定到 Agent”，选择应用，或作为工作空间默认后端。已有同类绑定不会被覆盖，后端切换需使用受控迁移流程。
+
+新的外部地址与凭据仅由平台管理员配置。租户管理员可以选择当前空间已有连接，或创建 InMemory 连接。已使用环境变量管理凭据的部署，平台管理员可选择“已授权凭据”，无需手工填写引用。SQL 表、Bucket、网络连通性和运行身份权限由部署者准备。
+
+### 网页上传与授权 Skill
+
+1. 进入“资源中心 → Skill 目录”，点击“上传 Skill”。平台管理员和当前租户管理员可提交。
+2. 填写名称和版本，选择必需的 `SKILL.md` 和可选的 `run.sh`，也可上传仅含这些文件的 ZIP。ZIP 可使用根目录，或一个与 Skill 名称一致的文件夹；不接受其他文件、符号链接和路径跳转。`SKILL.md` 的 YAML 头部须包含对应的 `name` 和 `description`。
+3. 上传后状态为“待审核”，不会执行脚本。平台管理员通过“查看 / 审核”检查正文和脚本，再批准对当前工作空间授权。
+4. 在 Agent 工作台选择已批准的具体版本，保存草稿并按通常流程调试、发布。新版本不会自动替换已发布 Agent 的引用。
+
+每个文本文件最多 64 KiB，ZIP 最多 256 KiB，每租户最多 128 个上传版本。版本内容和校验值不可修改，变更内容必须使用新版本号。撤销授权会阻止新运行和后续脚本执行，不会强行终止已经开始的沙箱进程。上传版本保存在共享 PostgreSQL 中，其他节点无需重启即可读取审核结果；备份数据库时一并保存。
+
+仅有 `SKILL.md` 的说明型 Skill 通过 `skill_load` 加载，不需要沙箱。带 `run.sh` 的版本执行脚本前需部署者显式配置隔离执行环境；只使用网页上传版本时，不需要设置本地 Skill 目录：
+
+```dotenv
+TRPC_AGENT_SANDBOX_ENABLED=true
+TRPC_AGENT_SANDBOX_IMAGE=alpine:3.22
+TRPC_AGENT_SANDBOX_SOCKET=/var/run/docker.sock
+```
+
+如需使用部署目录中的 `json-digest` 等预置 Skill，再配置目录和授权，将租户 ID 替换为实际租户：
 
 ```dotenv
 TRPC_AGENT_SKILLS_ROOT=./skills
@@ -225,9 +251,9 @@ TRPC_AGENT_SANDBOX_SOCKET=/var/run/docker.sock
 
 Worker 需要 Docker CLI，指定 daemon 中需已有镜像，镜像提供 `/bin/sh` 和 `/bin/busybox`。服务固定镜像 ID，不自动拉取。默认容器模板不开放 Docker socket；应配置专用执行节点或受控 daemon，不能将宿主机 root socket 暴露给租户。
 
-在 Agent 工作台选择已授权 Skill。平台保存 name/version/checksum，并加入 `skill_load`、`skill_run` 白名单；执行仍需审批。正数 `max_tool_calls` 至少为 2，才能完成加载与执行；0 表示不限制调用次数。
+在 Agent 工作台选择已授权的具体版本。平台保存 name/version/checksum，说明型只启用 `skill_load`，脚本型同时启用 `skill_run`；脚本执行仍需审批。脚本型的正数 `max_tool_calls` 至少为 2，才能完成加载与执行；0 表示不限制调用次数。
 
-`json-digest` 计算输入 JSON 的字节数和 SHA-256。执行结果通过有界工具输出返回。新增 Skill 通过 `skills/catalog.json` 注册新的目录和版本，不覆盖已发布版本；页面不提供任意脚本上传。
+`json-digest` 计算输入 JSON 的字节数和 SHA-256。执行结果通过有界工具输出返回。部署目录中的 Skill 继续通过 `skills/catalog.json` 注册版本，并按原有授权配置加载；网页上传不能覆盖这些版本。
 
 ## 5. 宿主机安装
 
@@ -288,6 +314,8 @@ OpenTelemetry 配置使用 `TRPC_AGENT_OTEL_ENABLED`、OTLP endpoint、service n
 HTTP 接口默认关闭。启用 `/chat`、`/inbound` 时必须配置精确的租户、Binding 和用户授权；`/chat` 返回完整回复，`/inbound` 返回 202 表示已持久接收，不表示 Agent 或 IM 投递已完成。Admin 使用独立凭据，不能复用模型或 IM Key。
 
 ## 7. 升级、备份与回退
+
+网页存储连接与 Skill 上传需要 schema 32，迁移增加资源表和不可变版本约束，不清空已有空间、模型、会话或凭据。分角色部署还需补齐 Admin 对新资源表的管理权限、Worker 对 Skill 表的读取权限及 Jobs 对存储凭据的读取权限；沿用已有主密钥，不重新初始化安装数据卷。
 
 1. 备份私有配置、加密主密钥、当前程序和数据库，核对未完成工具与 unknown/attempting 投递。
 2. 停止接收与相关执行角色，避免混跑不兼容的消息、权限或数据库协议。

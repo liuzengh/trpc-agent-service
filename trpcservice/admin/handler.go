@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
@@ -80,6 +81,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/admin/skills/manage/list", "/admin/skills/upload", "/admin/skills/inspect", "/admin/skills/review":
+		h.handleSkillManagement(w, r)
+	case "/admin/backend-connections/list", "/admin/backend-connections/create", "/admin/backend-connections/bind":
+		h.handleBackendConnections(w, r)
 	case "/admin/connections/list", "/admin/connections/get", "/admin/connections/prepare", "/admin/connections/activate", "/admin/connections/check", "/admin/connections/retry", "/admin/connections/pause", "/admin/connections/groups", "/admin/connections/select-group", "/admin/connections/check-message", "/admin/connections/save-groups", "/admin/connections/public-address", "/admin/connections/legacy-toggle", "/admin/connections/update-credential", "/admin/connections/rebind", "/admin/connections/remove", "/admin/connections/revoke-member":
 		h.handleConnections(w, r)
 	case "/admin/model-connections/list", "/admin/model-connections/create", "/admin/model-connections/get", "/admin/model-connections/update", "/admin/model-connections/rotate-key":
@@ -119,7 +124,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !decodeAdmin(w, r, &input) || !h.require(w, r, input.TenantID, PermissionRead) {
 			return
 		}
-		adminJSON(w, http.StatusOK, map[string]any{"items": h.service.skills.List(input.TenantID)})
+		items, err := h.service.skills.ListContext(r.Context(), input.TenantID)
+		h.writeResult(w, http.StatusOK, map[string]any{"items": items}, err)
 	case "/admin/outbound-parts/list", "/admin/outbound-parts/reconcile":
 		h.handleOutboundParts(w, r)
 	case "/admin/channel-rejections/list", "/admin/channel-checkpoints/list", "/admin/channel-checkpoints/recover":
@@ -283,6 +289,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !h.require(w, r, input.TenantID, PermissionWrite) {
+			return
+		}
+		if principal.Role != RoleSuperAdmin && input.BackendType != "inmemory" && !strings.HasPrefix(input.SecretRef, "managed://") {
+			adminJSON(w, http.StatusForbidden, map[string]string{"error": "外部后端由平台管理员配置，请选择当前空间已授权的存储连接"})
 			return
 		}
 		value, err := h.service.CreateBackendBinding(r.Context(), input)

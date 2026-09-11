@@ -12,11 +12,15 @@ func TestSandboxConfigurationIsExplicit(t *testing.T) {
 	}
 	t.Setenv("TRPC_AGENT_SANDBOX_ENABLED", "true")
 	if _, err := LoadSkillsConfigFromEnv(); err == nil {
-		t.Fatal("execution enabled without root/image")
+		t.Fatal("execution enabled without an explicit image")
 	}
 	t.Setenv("TRPC_AGENT_SKILLS_ROOT", "./skills")
 	t.Setenv("TRPC_AGENT_SANDBOX_IMAGE", "alpine:3.22")
 	if _, err := LoadSkillsConfigFromEnv(); err != nil {
 		t.Fatal(err)
+	}
+	t.Setenv("TRPC_AGENT_SKILLS_ROOT", "")
+	if _, err := LoadSkillsConfigFromEnv(); err != nil {
+		t.Fatal("database uploads must not require a deployment skill directory", err)
 	}
 }

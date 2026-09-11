@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/backendregistry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/connections"
@@ -42,6 +43,7 @@ type Service struct {
 	debugMu                sync.Mutex
 	startupModelName       string
 	models                 *modelregistry.Store
+	backends               *backendregistry.Store
 	connections            *connections.Store
 	consoleStore           *console.Store
 	dependencyObservations func() []DependencyCheck
@@ -57,6 +59,7 @@ type Service struct {
 	toolJournal            toolexec.Journal
 	channelState           wecommcp.Store
 	skills                 *platformskill.Registry
+	skillUploads           *platformskill.Store
 }
 
 func (s *Service) WithSkills(registry *platformskill.Registry) *Service {
@@ -659,9 +662,17 @@ func (s *Service) CreateBackendBinding(
 	if err := normalizeJSON(&binding.Config); err != nil {
 		return controlplane.BackendBinding{}, invalidf("backend binding config: %v", err)
 	}
+	if err := platformstorage.ValidateBackendBindingConfig(binding); err != nil {
+		return controlplane.BackendBinding{}, invalidf("invalid backend configuration")
+	}
 	if binding.SecretRef != "" {
 		if err := s.authorizeSecret(ctx, binding.TenantID, binding.ResourceType, binding.SecretRef); err != nil {
 			return controlplane.BackendBinding{}, err
+		}
+		if strings.HasPrefix(binding.SecretRef, "managed://") {
+			if err := s.backends.ValidateBinding(ctx, binding); err != nil {
+				return controlplane.BackendBinding{}, err
+			}
 		}
 	}
 	if binding.IsolationLevel == "" {

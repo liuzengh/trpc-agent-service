@@ -138,7 +138,7 @@ func (s *Service) ValidateRevision(ctx context.Context, revision controlplane.Ag
 	if policyErr != nil {
 		r.add("invalid_tool_policy", "tool_policy", "error", "工具权限配置无效。", "检查工具名单、用户范围、次数和执行时长。")
 	} else {
-		if _, err := s.skills.Validate(revision.TenantID, revision.AgentConfig, policy.AllowedTools); err != nil {
+		if _, err := s.skills.ValidateContext(ctx, revision.TenantID, revision.AgentConfig, policy.AllowedTools); err != nil {
 			r.add("skill_not_available", "agent_config.skills", "error", "Skill 未获授权、版本校验不符或缺少必需工具。", "重新选择已授权 Skill，并确认 skill_load / skill_run 权限。")
 		}
 		if serverErr == nil && refsErr == nil {

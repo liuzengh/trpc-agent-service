@@ -19,6 +19,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/approval"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/attachments"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/backendregistry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
@@ -240,7 +241,9 @@ func run() error {
 		return fmt.Errorf("build control-plane repository: %w", err)
 	}
 	var credentialVault *credentials.Vault
-	if roles.Admin || roles.Gateway || roles.Sender || roles.Worker {
+	managedSkills := platformskill.NewStore(controlPlaneRepository)
+	skillRegistry.WithManagedStore(managedSkills)
+	if roles.Admin || roles.Gateway || roles.Sender || roles.Worker || roles.Jobs {
 		credentialVault, err = credentials.New(controlPlaneRepository, os.Getenv("TRPC_AGENT_MODEL_MASTER_KEY"))
 		if err != nil {
 			return err
@@ -685,6 +688,7 @@ func run() error {
 		}
 		adminService.WithAuditWriter(auditWriter)
 		adminService.WithSkills(skillRegistry)
+		adminService.WithSkillUploads(managedSkills)
 		adminService.WithConsoleStore(consoleStore)
 		adminService.WithModelConnections(modelConnections)
 		adminService.WithConnections(connectionStore)
@@ -714,7 +718,9 @@ func run() error {
 		adminService.WithToolOperations(operations, toolExecutionJournal)
 		// Admin checks grants but cannot resolve model/IM values on an Admin-only node.
 		grantAuthorizer, _ := secret.NewEnvStore(secretGrants)
-		adminService.WithSecretAuthorizer(credentials.Routed{Vault: credentialVault, Fallback: grantAuthorizer, Allowed: credentials.Purposes})
+		connectionAuthorizer := credentials.Routed{Vault: credentialVault, Fallback: grantAuthorizer, Allowed: credentials.Purposes}
+		adminService.WithSecretAuthorizer(connectionAuthorizer)
+		adminService.WithBackendConnections(backendregistry.New(controlPlaneRepository, credentialVault, connectionAuthorizer))
 		principals := make([]adminservice.Principal, 0, len(adminConfig.Principals))
 		for _, principal := range adminConfig.Principals {
 			principals = append(principals, adminservice.Principal{

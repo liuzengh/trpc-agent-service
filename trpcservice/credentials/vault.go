@@ -1,4 +1,4 @@
-// Package credentials holds encrypted, tenant-scoped IM credentials.
+// Package credentials holds encrypted, tenant-scoped connection credentials.
 package credentials
 
 import (
@@ -23,7 +23,7 @@ import (
 )
 
 var ErrUnavailable = errors.New("连接存储不可用，请联系管理员检查数据库和加密配置")
-var Purposes = []string{secret.TelegramBot, secret.TelegramWebhook, secret.TelegramMedia, secret.WeComMCPRead, secret.WeComMCPSend}
+var Purposes = []string{secret.TelegramBot, secret.TelegramWebhook, secret.TelegramMedia, secret.WeComMCPRead, secret.WeComMCPSend, secret.Session, secret.Memory, secret.Knowledge, secret.Artifact}
 
 type Vault struct {
 	db    *sql.DB
@@ -81,6 +81,9 @@ func (v *Vault) Put(ctx context.Context, tenant string, purposes []string, value
 	}
 	purposes = slices.Clone(purposes)
 	slices.Sort(purposes)
+	if len(purposes) == 0 || len(purposes) > 3 || len(slices.Compact(slices.Clone(purposes))) != len(purposes) {
+		return "", secret.ErrForbidden
+	}
 	for _, p := range purposes {
 		if !slices.Contains(Purposes, p) {
 			return "", secret.ErrForbidden
