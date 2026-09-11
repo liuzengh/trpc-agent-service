@@ -47,6 +47,9 @@ const (
 	modeLimit429 = "limit429" // upstream rate limit (D2, risk #2)
 	modeSlow     = "slow"     // slow but inside the budget: streaming + latency (D7)
 	modeEmpty    = "empty"    // degenerate stream: 200 and nothing but [DONE]
+	// modeTools streams one function call, then answers with text once the
+	// payload carries the tool result — the P3 tool-loop drill (see tool.go).
+	modeTools = "tools"
 )
 
 // Scripted reply, identical to scripts/fake_model.py. 内部资料 is split across
@@ -71,7 +74,7 @@ const (
 // any message_timeout a drill would set.
 func defaultDelay(mode string) float64 {
 	switch mode {
-	case modeOK:
+	case modeOK, modeTools:
 		return 0.05
 	case modeTimeout:
 		return 30
@@ -84,17 +87,20 @@ func defaultDelay(mode string) float64 {
 
 func knownMode(m string) bool {
 	switch m {
-	case modeOK, modeTimeout, modeError500, modeLimit429, modeSlow, modeEmpty:
+	case modeOK, modeTimeout, modeError500, modeLimit429, modeSlow, modeEmpty, modeTools:
 		return true
 	}
 	return false
 }
 
 // settings is the immutable snapshot a request reads, so switching modes never
-// races an in-flight stream.
+// races an in-flight stream. ToolName/ToolArgs are the scripted call the
+// tools mode emits.
 type settings struct {
-	Mode  string  `json:"mode"`
-	Delay float64 `json:"delay"`
+	Mode     string  `json:"mode"`
+	Delay    float64 `json:"delay"`
+	ToolName string  `json:"tool,omitempty"`
+	ToolArgs string  `json:"tool_args,omitempty"`
 }
 
 func (s settings) gap() time.Duration {
@@ -105,11 +111,16 @@ type server struct {
 	cfg      atomic.Pointer[settings]
 	requests atomic.Int64
 	lastMsgs atomic.Int64 // messages in the most recent completion request
+	embeds   atomic.Int64 // embeddings calls served (see embedding.go)
+	kf       *kfState     // the 微信客服 stub (see kf.go)
+	tool     *toolState   // the tool-target stub (see tool.go)
 	log      *log.Logger
 }
 
 func newServer(mode string, delay float64, out io.Writer) *server {
 	s := &server{log: log.New(out, "[fake-model] ", log.LstdFlags|log.Lmsgprefix)}
+	s.kf = &kfState{log: s.log}
+	s.tool = &toolState{mode: "ok"}
 	s.cfg.Store(&settings{Mode: mode, Delay: delay})
 	return s
 }
@@ -117,6 +128,20 @@ func newServer(mode string, delay float64, out io.Writer) *server {
 // Handler routes the control plane and the completion endpoint.
 func (s *server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	// The KF stub is more specific than "/" so ServeMux routes it first
+	// regardless of registration order; the completion catch-all below stays
+	// as permissive as it was for every other path.
+	//
+	// The two control paths are registered individually: they are not under
+	// /cgi-bin/ (they are this binary's own surface, not a WeCom API shape),
+	// and without an explicit route the catch-all would answer them as a chat
+	// completion — measured, not assumed: the script silently never took
+	// effect and send_msg looked recorded while nothing was.
+	mux.HandleFunc("/cgi-bin/", s.handleKF)
+	mux.HandleFunc(kfScriptPath, s.handleKF)
+	mux.HandleFunc(kfSentPath, s.handleKF)
+	mux.HandleFunc("/__tool/", s.handleTool)
+	mux.HandleFunc("/v1/embeddings", s.handleEmbeddings)
 	mux.HandleFunc(modePath, s.handleMode)
 	mux.HandleFunc(healthPath, s.handleHealth)
 	// Every other path is a completion, whatever its shape: base_url is
@@ -128,9 +153,11 @@ func (s *server) Handler() http.Handler {
 }
 
 type modeRequest struct {
-	Mode  string   `json:"mode"`
-	Delay *float64 `json:"delay"`
-	Reset bool     `json:"reset"`
+	Mode     string   `json:"mode"`
+	Delay    *float64 `json:"delay"`
+	Reset    bool     `json:"reset"`
+	ToolName string   `json:"tool"`
+	ToolArgs string   `json:"tool_args"`
 }
 
 // stateResponse is what GET /__mode answers. requests counts completion calls,
@@ -144,6 +171,9 @@ type stateResponse struct {
 	// see the package comment for why D6 needs it. Zero until the first call, and
 	// zero after a body that did not parse.
 	LastMessages int64 `json:"last_messages"`
+	// Embeddings counts /v1/embeddings calls, so a drill can assert that the
+	// index job actually embedded through the configured endpoint.
+	Embeddings int64 `json:"embeddings"`
 }
 
 func (s *server) handleMode(w http.ResponseWriter, r *http.Request) {
@@ -160,7 +190,7 @@ func (s *server) handleMode(w http.ResponseWriter, r *http.Request) {
 func (s *server) state() stateResponse {
 	set := s.cfg.Load()
 	return stateResponse{Mode: set.Mode, Delay: set.Delay, Requests: s.requests.Load(),
-		LastMessages: s.lastMsgs.Load()}
+		LastMessages: s.lastMsgs.Load(), Embeddings: s.embeds.Load()}
 }
 
 func (s *server) switchMode(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +201,7 @@ func (s *server) switchMode(w http.ResponseWriter, r *http.Request) {
 	}
 	if !knownMode(p.Mode) {
 		writeErr(w, http.StatusBadRequest,
-			fmt.Sprintf("unknown mode %q: want one of ok, timeout, error500, limit429, slow, empty", p.Mode))
+			fmt.Sprintf("unknown mode %q: want one of ok, timeout, error500, limit429, slow, empty, tools", p.Mode))
 		return
 	}
 	delay := defaultDelay(p.Mode)
@@ -182,9 +212,18 @@ func (s *server) switchMode(w http.ResponseWriter, r *http.Request) {
 		}
 		delay = *p.Delay
 	}
-	s.cfg.Store(&settings{Mode: p.Mode, Delay: delay})
+	toolName := p.ToolName
+	if toolName == "" {
+		toolName = defaultToolName
+	}
+	toolArgs := p.ToolArgs
+	if toolArgs == "" {
+		toolArgs = `{"text":"ping-from-tool"}`
+	}
+	s.cfg.Store(&settings{Mode: p.Mode, Delay: delay, ToolName: toolName, ToolArgs: toolArgs})
 	if p.Reset {
 		s.requests.Store(0)
+		s.embeds.Store(0)
 	}
 	s.log.Printf("mode=%s delay=%gs reset=%t", p.Mode, delay, p.Reset)
 	writeJSON(w, http.StatusOK, s.state())
@@ -241,6 +280,30 @@ func (s *server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		set = &settings{Mode: set.Mode, Delay: defaultDelay(modeOK)}
 	}
 
+	// A request that asked for stream:false gets the non-streaming shape
+	// (the summary job consumes a whole answer, not a stream). The scripted
+	// text is the joined chunks, so a drill asserts the same content either
+	// way; tool scripting does not apply to this shape.
+	if !last.wantsStream {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":      completionID,
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   modelName,
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]string{"role": "assistant", "content": strings.Join(chunks, "")},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]int{
+				"prompt_tokens":     promptTokens,
+				"completion_tokens": completionTokens,
+				"total_tokens":      promptTokens + completionTokens,
+			},
+		})
+		return
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
@@ -257,12 +320,31 @@ func (s *server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, text := range chunks {
+	// Requests in tools mode split on whether the payload already carries the
+	// tool result: the first round scripts a function call, the second (with a
+	// role=tool message) answers with text.
+	if set.Mode == modeTools && !last.hasToolRole {
+		writeToolCallStream(w, flusher, set.ToolName, set.ToolArgs)
+		return
+	}
+	toolChunks := chunks
+	if set.Mode == modeTools {
+		// The second round echoes the tool result it was given: that makes
+		// "the model saw the retrieved passage" an assertion on the delivered
+		// reply instead of a guess about what the platform sent.
+		round := "tool round complete"
+		if last.toolContent != "" {
+			round += ": " + truncateForEcho(last.toolContent, 400)
+		}
+		toolChunks = []string{round}
+	}
+
+	for _, text := range toolChunks {
 		if !writeSSE(w, flusher, event(chunkPayload(delta{Content: text}, "", nil))) {
 			return
 		}
 		if !sleep(r.Context(), set.gap()) {
-			s.log.Printf("request #%d: caller left mid-stream after %d chunks", n, len(chunks))
+			s.log.Printf("request #%d: caller left mid-stream after %d chunks", n, len(toolChunks))
 			return
 		}
 	}
@@ -300,6 +382,16 @@ func writeSSE(w http.ResponseWriter, f http.Flusher, payload string) bool {
 }
 
 func event(payload string) string { return "data: " + payload + "\n\n" }
+
+// truncateForEcho cuts a tool result to a prompt-sized echo, on a rune
+// boundary.
+func truncateForEcho(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
 
 type delta struct {
 	Content string `json:"content,omitempty"`
@@ -342,8 +434,11 @@ func chunkPayload(d delta, finish string, usage map[string]int) string {
 // lastRequest is what the log line and the state endpoint report about the most
 // recent completion request.
 type lastRequest struct {
-	text     string // content of the final message
-	messages int    // how many messages the caller sent; 0 if the body did not parse
+	text        string // content of the final message
+	messages    int    // how many messages the caller sent; 0 if the body did not parse
+	hasToolRole bool   // the payload already carries a tool result (second round)
+	wantsStream bool   // stream defaults to true; summary jobs ask for false
+	toolContent string // content of the last tool-role message, echoed in tools mode
 }
 
 // lastRequestOf extracts the final message and the message count. It always
@@ -356,12 +451,27 @@ func lastRequestOf(body io.Reader) lastRequest {
 		return lastRequest{}
 	}
 	var req struct {
+		Stream   *bool `json:"stream"`
 		Messages []struct {
 			Content json.RawMessage `json:"content"`
+			Role    string          `json:"role"`
 		} `json:"messages"`
 	}
 	if err := json.Unmarshal(data, &req); err != nil || len(req.Messages) == 0 {
 		return lastRequest{}
+	}
+	out := lastRequest{messages: len(req.Messages), wantsStream: true}
+	if req.Stream != nil {
+		out.wantsStream = *req.Stream
+	}
+	for _, m := range req.Messages {
+		if m.Role == "tool" {
+			out.hasToolRole = true
+			var content string
+			if err := json.Unmarshal(m.Content, &content); err == nil {
+				out.toolContent = content
+			}
+		}
 	}
 	last := req.Messages[len(req.Messages)-1].Content
 	var text string
@@ -370,7 +480,8 @@ func lastRequestOf(body io.Reader) lastRequest {
 		// rendering it raw is enough to keep the log line honest.
 		text = strings.TrimSpace(string(last))
 	}
-	return lastRequest{text: text, messages: len(req.Messages)}
+	out.text = text
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

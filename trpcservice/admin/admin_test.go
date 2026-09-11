@@ -475,6 +475,47 @@ func TestAgentSurvivesTenantMutations(t *testing.T) {
 	}
 }
 
+// TestControlPlaneSurvivesTenantMutations is the same trap the observability
+// spec recorded for Telemetry (docs/spec-governance-observability.md §6):
+// cloneConfig deep-copies the running config on every tenant mutation, and a
+// field it forgets to copy silently resets on the first unrelated admin write.
+// For control_plane that would be worse than the Telemetry case: a deployment
+// that meant to be in mysql mode would quietly fall back to legacy, re-opening
+// the Redis snapshot path that mode exists to close.
+func TestControlPlaneSurvivesTenantMutations(t *testing.T) {
+	t.Setenv("MODEL_API_KEY", "")
+	t.Setenv("STORAGE_SESSION_BACKEND", "")
+	t.Setenv("STORAGE_SESSION_REDIS_URL", "")
+	t.Setenv("CONTROLPLANE_MODE", "")
+	t.Setenv("CONTROLPLANE_MYSQL_DSN", "")
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "control_plane:\n  mode: legacy\n" + initialYAML
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	reg, err := agent.NewRegistry(cfg, inmemory.NewSessionService())
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	s := NewService(path, cfg, reg, nil)
+
+	rw := do(t, s.Handler(), http.MethodPut, "/admin/tenants/demo",
+		`{"name":"Demo2","model":{"name":"m","api_key":""}}`)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("tenant update = %d: %s", rw.Code, rw.Body.String())
+	}
+
+	want := config.ControlPlane{Mode: config.ControlPlaneLegacy}
+	if got := reload(t, path).ControlPlane; got != want {
+		t.Fatalf("control_plane reloaded from disk = %+v, want %+v", got, want)
+	}
+}
+
 // TestSettingsHotUpdate covers the envelope's write side end to end: GET
 // renders the effective values so a client can round-trip them, PUT retunes a
 // running process (the accessor the gateway reads per dispatch sees it at once,

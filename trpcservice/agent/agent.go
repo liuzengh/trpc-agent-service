@@ -12,6 +12,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	frameworktool "trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -21,6 +22,13 @@ import (
 const (
 	appName      = "trpc-agent-service"
 	defaultModel = "gpt-4o-mini"
+
+	// DefaultInstruction is what an agent says about itself when nothing more
+	// specific was published. It is a named constant, not an inline string, so
+	// the legacy path (no instruction configured) and the reliable path (a
+	// revision that happens to store exactly this text) agree on what "no
+	// opinion" means.
+	DefaultInstruction = "You are a helpful assistant."
 )
 
 // AgentName is the single first-phase agent identity; audit records and
@@ -39,7 +47,13 @@ const AgentName = "assistant"
 // would silently reopen the unbounded-call hole the cap exists to close
 // (docs/spec-deployment-fault-drill.md §4.5), so it is corrected instead of
 // trusted.
-func NewRunner(t *tenant.Context, sess session.Service, maxLLMCalls int) (runner.Runner, error) {
+//
+// extra carries tools the caller has already assembled — in the reliable
+// path, the revision's pinned tools wrapped by the tool governor. They are
+// appended to the legacy allowlist selection rather than replacing it so the
+// two paths keep sharing this one constructor; the reliable runner factory
+// never populates the legacy allowlist, so there is nothing to double-add.
+func NewRunner(t *tenant.Context, sess session.Service, maxLLMCalls int, extra ...frameworktool.Tool) (runner.Runner, error) {
 	if t.Model.APIKey == "" {
 		return nil, fmt.Errorf("tenant %s: model api key is required", t.ID)
 	}
@@ -51,18 +65,23 @@ func NewRunner(t *tenant.Context, sess session.Service, maxLLMCalls int) (runner
 	if modelName == "" {
 		modelName = defaultModel
 	}
+	instruction := t.Instruction
+	if instruction == "" {
+		instruction = DefaultInstruction
+	}
 	modelOpts := []openai.Option{openai.WithAPIKey(t.Model.APIKey)}
 	if t.Model.BaseURL != "" {
 		modelOpts = append(modelOpts, openai.WithBaseURL(t.Model.BaseURL))
 	}
 	llm := openai.New(modelName, modelOpts...)
 
+	tools := append(platformtool.Select(t.Tools.Allowed), extra...)
 	a := llmagent.New(AgentName,
 		llmagent.WithModel(llm),
-		llmagent.WithInstruction("You are a helpful assistant."),
+		llmagent.WithInstruction(instruction),
 		llmagent.WithGenerationConfig(model.GenerationConfig{Stream: true}),
 		llmagent.WithMaxLLMCalls(maxLLMCalls),
-		llmagent.WithTools(platformtool.Select(t.Tools.Allowed)),
+		llmagent.WithTools(tools),
 	)
 
 	return runner.NewRunner(appName, a,

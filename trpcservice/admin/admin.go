@@ -35,6 +35,7 @@ type Service struct {
 	reg   *agent.Registry
 	aud   *audit.Logger
 	store RuntimeStore
+	cp    *controlPlane
 }
 
 // NewService builds the admin service over the live config and registry.
@@ -114,7 +115,20 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/admin/tenants", s.handleCollection)
 	mux.HandleFunc("/admin/tenants/", s.handleItem)
 	mux.HandleFunc("/admin/settings", s.handleSettings)
+	// The control-plane routes authenticate against MySQL, not the static
+	// admin token, so they must not pass through the authorized() gate below;
+	// they mount on their own mux and are dispatched before it, only when a
+	// control plane is actually wired.
+	var cpMux *http.ServeMux
+	if s.cp != nil {
+		cpMux = http.NewServeMux()
+		cpMux.HandleFunc("/admin/v2/", s.handleControlPlane)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cpMux != nil && strings.HasPrefix(r.URL.Path, "/admin/v2/") {
+			cpMux.ServeHTTP(w, r)
+			return
+		}
 		if !s.authorized(r) {
 			writeErr(w, http.StatusUnauthorized, "admin bearer token required")
 			return
@@ -605,10 +619,12 @@ func fromDTO(p tenantDTO) *tenant.Context {
 func cloneConfig(c *config.Config) *config.Config {
 	n := &config.Config{
 		DefaultTenant: c.DefaultTenant,
-		Storage:       c.Storage, // plain value: backend is not tenant-editable
-		Agent:         c.Agent,   // plain value: Save validates the envelope,
-		Log:           c.Log,     // so it must survive a tenant-only mutation
-		Audit:         c.Audit,   // plain values: observability is not
+		ControlPlane:  c.ControlPlane, // plain value: which source is authoritative is
+		Knowledge:     c.Knowledge,    // not tenant-editable, but it must survive a
+		Storage:       c.Storage,      // clone the way the observability blocks do
+		Agent:         c.Agent,        // so it must survive a tenant-only mutation
+		Log:           c.Log,          // plain values: observability is not
+		Audit:         c.Audit,        // plain values: observability is not
 		Admin:         c.Admin,
 		Telemetry:     c.Telemetry, // tenant-editable either, but Save
 		Tenants:       make(map[string]*tenant.Context, len(c.Tenants)),

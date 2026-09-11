@@ -235,7 +235,33 @@ bash scripts/fault_drill.sh --keep         # 跑完不拆栈，供人工取证
 
 每条 PASS 都带着实测量（耗时、审计字段、指标增量、退出码），所以日志本身就能当证据归档。
 
-### 5. 门禁
+### 5. 可靠模式全链路联调（74 条断言）
+
+`scripts/reliable_e2e.sh` 验的是**另一条链路**（第二批）：MySQL 为事实源，消息走
+Inbox → Worker（两个副本）→ 原子提交 → reply_outbox → Delivery 角色投递 → 假 KF
+上游；工具只能来自 revision 固定的绑定，每次调用进 `tool_calls` 账本；不碰 Redis，
+不需要真实 API key。它自己起栈、自己拆栈，用独立 compose 项目（`tas-reliable`）
+与默认栈共存。
+
+```bash
+bash scripts/reliable_e2e.sh                 # 74 PASS / 0 FAIL → RELIABLE E2E PASS
+RELIABLE_KEEP=1 bash scripts/reliable_e2e.sh # 跑完不拆栈，供人工取证
+```
+
+证据里值得单独看的几条：一条消息在**两个 worker 竞争**下只被执行一次（上游模型
+调用计数 == 1）；`in_seq|head_seq|session_version` 随提交原子推进；第二条消息
+回到同一会话（`session_pk` 不变）；回复的投递目标（`ext-seed-1` + `wk1`）来自
+提交事务里写入的 reply route，而不是任何进程内存；**受控 HTTP 工具**从模型流式
+`tool_call` 到账本 `succeeded`、物理 attempt（200）与上游二轮调用全程留证；
+**write 工具超时**进入 unknown 阻断（队头不动、零回复、不重试），
+`-list-blocked` 查得出来、`-resolve-session cancelled` 处置后重跑成功，账本留下
+`unknown+cancelled` 与 `succeeded` 两段历史。
+
+两处如实标注：回调那一步用 SQL 模拟「已可靠记下 notification」（可靠 gateway 的
+HTTP 挂载点还没接，见下）；webchat / 企微 的可靠投递尚未接线，Delivery 对它们
+返回明确拒绝而不是静默成功。
+
+### 6. 门禁
 
 ```bash
 bash scripts/check_deps.sh      # go.mod 冻结：直接依赖与基线一致（--tidy 验幂等）
@@ -255,4 +281,11 @@ K8s 清单在集群里的实际行为（本机无 kind/minikube/k3d，只做了�
 otel-collector 真收到 span（镜像拉不到，只能用 stdout exporter）、Linux 宿主机上 UID 65534
 对挂载目录的写权（本机是 macOS，Docker Desktop 会自动映射）。详见
 [`deploy/README.md`](deploy/README.md) 与 [`docs/spec-deployment-fault-drill.md`](docs/spec-deployment-fault-drill.md)。
+
+可靠模式（第二批）同样只标到验过的为止：角色进程、双 worker 竞争、KF 拉取→入库→
+提交→投递（假 KF 上游）、重启不吃游标、受控工具全链路与 unknown 阻断→人工处置→
+重跑、三类文档 pipeline（上传→索引→ready→embedding），都在 `scripts/reliable_e2e.sh` 里真跑了受控工具与知识管道（P3/P4）；
+**可靠 gateway 角色（企微/webchat 的接收端持久化与 HTTP 挂载）尚未接线**，投递侧
+也仅 微信客服 一个通道；针对可靠链路的故障矩阵（kill worker、MySQL 闪断、
+delivery unknown 等）还没写成脚本 —— 仓库现有的 D1–D7 矩阵验的是旧链路。
 

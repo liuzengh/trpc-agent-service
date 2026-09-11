@@ -13,23 +13,30 @@ type ModelConfig struct {
 // WeComBinding is one WeCom (企业微信) self-built app credential set. All
 // fields are secrets or identifiers filled by the tenant admin; they must
 // never be written to logs, traces, or error reports.
+//
+// Tagged for json as well as yaml: in the reliable path a binding lives in
+// channel_bindings.config, and a struct without json tags serializes with Go
+// field names — so the same credential would have two spellings depending on
+// which mode read it. That trap already caught Guardrails; this is the same
+// fix applied before it bites.
 type WeComBinding struct {
-	CorpID         string `yaml:"corp_id"`
-	CorpSecret     string `yaml:"corp_secret"`
-	AgentID        int    `yaml:"agent_id"`
-	Token          string `yaml:"token"`
-	EncodingAESKey string `yaml:"encoding_aes_key"`
+	CorpID         string `yaml:"corp_id" json:"corp_id"`
+	CorpSecret     string `yaml:"corp_secret" json:"corp_secret"`
+	AgentID        int    `yaml:"agent_id" json:"agent_id"`
+	Token          string `yaml:"token" json:"token"`
+	EncodingAESKey string `yaml:"encoding_aes_key" json:"encoding_aes_key"`
 }
 
 // WeChatKfBinding is one WeChat customer service (微信客服) credential set.
 // Unlike WeCom there is no agent_id: replies target the open_kfid carried by
 // each callback event. All fields are secrets or identifiers filled by the
 // tenant admin; they must never be written to logs, traces, or error reports.
+// Tagged for json for the same reason as WeComBinding.
 type WeChatKfBinding struct {
-	CorpID         string `yaml:"corp_id"`
-	Secret         string `yaml:"secret"` // 微信客服 secret, distinct from the WeCom app secret
-	Token          string `yaml:"token"`
-	EncodingAESKey string `yaml:"encoding_aes_key"`
+	CorpID         string `yaml:"corp_id" json:"corp_id"`
+	Secret         string `yaml:"secret" json:"secret"` // 微信客服 secret, distinct from the WeCom app secret
+	Token          string `yaml:"token" json:"token"`
+	EncodingAESKey string `yaml:"encoding_aes_key" json:"encoding_aes_key"`
 }
 
 // Channels holds the IM channel bindings of one tenant.
@@ -41,21 +48,30 @@ type Channels struct {
 // Guardrails is the per-tenant governance policy enforced by the Gateway
 // (proposal doc 3.5): input checks run before the model call, output checks
 // run as a streaming tripwire over reply chunks. Zero value means no policy.
+//
+// The json tags match the yaml tags on purpose. This struct is serialized
+// two ways: into config.yaml the same way everything else on a tenant is,
+// and into a JSON column of a published revision. Without explicit json
+// tags, the second path silently uses Go field names instead, so the same
+// policy would have two spellings depending on which table it was read from
+// — measured while wiring the execution loop, not anticipated.
 type Guardrails struct {
 	// MaxInputBytes rejects longer inputs; 0 means unlimited.
-	MaxInputBytes int `yaml:"max_input_bytes,omitempty"`
+	MaxInputBytes int `yaml:"max_input_bytes,omitempty" json:"max_input_bytes,omitempty"`
 	// BlockedKeywords are matched case-insensitively against user input.
-	BlockedKeywords []string `yaml:"blocked_keywords,omitempty"`
+	BlockedKeywords []string `yaml:"blocked_keywords,omitempty" json:"blocked_keywords,omitempty"`
 	// OutputBlockedKeywords trip the streaming output checker.
-	OutputBlockedKeywords []string `yaml:"output_blocked_keywords,omitempty"`
+	OutputBlockedKeywords []string `yaml:"output_blocked_keywords,omitempty" json:"output_blocked_keywords,omitempty"`
 }
 
 // Tools is the tenant-scoped capability policy. Allowed controls which built-in
 // tools are visible to its agent; ApprovalRequired keeps a visible tool from
 // executing until a host-side approval workflow supplies an allow decision.
+//
+// Tagged for both yaml and json for the same reason as Guardrails.
 type Tools struct {
-	Allowed          []string `yaml:"allowed,omitempty"`
-	ApprovalRequired []string `yaml:"approval_required,omitempty"`
+	Allowed          []string `yaml:"allowed,omitempty" json:"allowed,omitempty"`
+	ApprovalRequired []string `yaml:"approval_required,omitempty" json:"approval_required,omitempty"`
 }
 
 // Context is the per-tenant configuration carried across the platform.
@@ -68,4 +84,10 @@ type Context struct {
 	Channels   Channels    `yaml:"channels,omitempty"`
 	Guardrails Guardrails  `yaml:"guardrails,omitempty"`
 	Tools      Tools       `yaml:"tools,omitempty"`
+	// Instruction is the agent's system prompt. Empty means "use the built-in
+	// default", which is what every config written before this field existed
+	// has; a published revision always sets it explicitly, since the revision
+	// spec is the only place a prompt is allowed to be defined once an
+	// app is under version control.
+	Instruction string `yaml:"instruction,omitempty"`
 }

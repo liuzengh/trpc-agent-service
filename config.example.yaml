@@ -8,9 +8,26 @@
 # section below the same way; AGENT_MESSAGE_TIMEOUT /
 # AGENT_MAX_CONCURRENCY_PER_TENANT / AGENT_MAX_LLM_CALLS override the agent
 # section — which is how a container or a Pod tunes the envelope without editing
-# a mounted file.
+# a mounted file. CONTROLPLANE_MODE / CONTROLPLANE_MYSQL_DSN do the same for
+# the block below.
 
 default_tenant: demo
+
+# Control plane (second batch, approved plan). "legacy" is the file-backed
+# behaviour this project shipped first: config.yaml is authoritative and the
+# Redis runtime store is a hot-update copy. "mysql" makes a MySQL 8.4 database
+# the source of truth for tenants, apps, immutable revisions, channel/tool/
+# knowledge bindings, and the admin credentials that manage them — at which
+# point the Redis snapshot is no longer consulted at boot, and YAML keeps only
+# what it must: the DSN itself and the deploy-only settings below.
+#
+# Switching to mysql is a deliberate, one-way move per deployment: run
+#   trpc-service -migrate           # apply schema
+#   trpc-service -bootstrap-admin ... # create the first tenant admin
+# before starting any role in mysql mode; see docs/README.md.
+# control_plane:
+#   mode: legacy                      # legacy (default) | mysql
+#   mysql_dsn: user:pass@tcp(127.0.0.1:3306)/tas  # required for mode: mysql
 
 # Shared session backend (docs/spec-storage-redis.md). Omit the whole block
 # for the in-process memory default; switch to redis for restart-safe and

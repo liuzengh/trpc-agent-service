@@ -50,6 +50,12 @@ type WeChatKf struct {
 	client  *http.Client
 	bootAt  int64 // unix time; guards against replaying 3 days of history on a fresh cursor
 
+	// notify, when set, switches the callback into durable mode: the event is
+	// recorded (by the jobs role's puller) instead of being pulled inline.
+	// A nil notify keeps the legacy in-process flow, so both modes share one
+	// verified callback path rather than forking it.
+	notify func(ctx context.Context, tenantID, eventToken, scopeKey string) error
+
 	mu      sync.Mutex
 	tokens  map[string]*wecomToken      // key: corp_id (own cache: the kf secret differs from the WeCom app secret)
 	cursors map[string]string           // key: tenant_id + ":" + open_kfid -> next_cursor
@@ -63,6 +69,20 @@ type WeChatKf struct {
 // without replaying the customer-service backlog.
 func (k *WeChatKf) WithStateStore(state coordination.StateStore) *WeChatKf {
 	k.state = state
+	return k
+}
+
+// WithDurableNotifications turns the callback into the durable receive path
+// (approved plan, "接收端"): once a notifier is set, Callback verifies, ACKs,
+// records a notification row through it, and stops. Pulling is the jobs
+// role's job then, using KfPuller.
+//
+// A notifier error is returned to the HTTP layer: the ACK has already been
+// written by that point, so this is the caller's chance to log it — the row
+// either landed or it did not, and WeChat will retry the callback when it did
+// not get its "success".
+func (k *WeChatKf) WithDurableNotifications(notify func(ctx context.Context, tenantID, eventToken, scopeKey string) error) *WeChatKf {
+	k.notify = notify
 	return k
 }
 
@@ -146,6 +166,17 @@ func (k *WeChatKf) Callback(rw http.ResponseWriter, r *http.Request) ([]*Inbound
 	_, _ = io.WriteString(rw, "success") // ACK 先落，拉取失败靠下次事件补齐
 	if ev.MsgType != "event" || ev.Event != "kf_msg_or_event" || ev.OpenKfId == "" {
 		return nil, nil // 非客服消息事件 v1 只 ACK 不处理
+	}
+	if k.notify != nil {
+		// Durable mode: the ACK above is the promise that survives this
+		// process. Pulling happens from the persisted notification, so a
+		// crash right here loses nothing but a race WeChat resolves by
+		// retrying the callback — and a retried callback that lands twice
+		// only produces a second notification, never a second message.
+		if err := k.notify(r.Context(), tenantID, ev.Token, ev.OpenKfId); err != nil {
+			return nil, fmt.Errorf("wechat_kf: record notification: %w", err)
+		}
+		return nil, nil
 	}
 	return k.syncMessages(r.Context(), tenantID, b, &ev)
 }

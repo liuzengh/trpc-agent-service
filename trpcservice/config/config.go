@@ -79,14 +79,40 @@ const (
 // fileYAML is the on-disk shape; tenant.Context carries the yaml tags so
 // Load and Save round-trip through the same schema.
 type fileYAML struct {
-	DefaultTenant string           `yaml:"default_tenant,omitempty"`
-	Storage       *storageYAML     `yaml:"storage,omitempty"`
-	Agent         *agentYAML       `yaml:"agent,omitempty"`
-	Log           *logYAML         `yaml:"log,omitempty"`
-	Audit         *auditYAML       `yaml:"audit,omitempty"`
-	Admin         *adminYAML       `yaml:"admin,omitempty"`
-	Telemetry     *telemetryYAML   `yaml:"telemetry,omitempty"`
-	Tenants       []tenant.Context `yaml:"tenants"`
+	DefaultTenant string            `yaml:"default_tenant,omitempty"`
+	ControlPlane  *controlPlaneYAML `yaml:"control_plane,omitempty"`
+	Knowledge     *knowledgeYAML    `yaml:"knowledge,omitempty"`
+	Storage       *storageYAML      `yaml:"storage,omitempty"`
+	Agent         *agentYAML        `yaml:"agent,omitempty"`
+	Log           *logYAML          `yaml:"log,omitempty"`
+	Audit         *auditYAML        `yaml:"audit,omitempty"`
+	Admin         *adminYAML        `yaml:"admin,omitempty"`
+	Telemetry     *telemetryYAML    `yaml:"telemetry,omitempty"`
+	Tenants       []tenant.Context  `yaml:"tenants"`
+}
+
+// Control-plane mode selects where the platform's configuration actually
+// lives (approved plan, "MySQL 是权威事实源"). legacy keeps the pre-second-
+// batch behaviour: a YAML file, with the Redis runtime store as a hot-update
+// copy. mysql makes the control plane authoritative and turns the YAML file
+// into bootstrap-only input.
+const (
+	ControlPlaneLegacy = "legacy"
+	ControlPlaneMySQL  = "mysql"
+
+	envControlPlaneMode = "CONTROLPLANE_MODE"
+	envControlPlaneDSN  = "CONTROLPLANE_MYSQL_DSN"
+)
+
+type controlPlaneYAML struct {
+	Mode  string `yaml:"mode,omitempty"`
+	MySQL string `yaml:"mysql_dsn,omitempty"`
+}
+
+// ControlPlane is the validated configuration-source selection.
+type ControlPlane struct {
+	Mode     string // ControlPlaneLegacy (default) or ControlPlaneMySQL
+	MySQLDSN string // required for ControlPlaneMySQL
 }
 
 type storageYAML struct {
@@ -173,6 +199,8 @@ type TelemetryConfig struct {
 // Config is the loaded and validated platform configuration.
 type Config struct {
 	DefaultTenant string
+	ControlPlane  ControlPlane
+	Knowledge     Knowledge
 	Storage       Storage
 	Agent         AgentConfig
 	Log           LogConfig
@@ -226,6 +254,12 @@ func LoadBytes(data []byte) (*Config, error) {
 	if cfg.DefaultTenant == "" && len(f.Tenants) > 0 {
 		cfg.DefaultTenant = f.Tenants[0].ID
 	}
+	if cfg.ControlPlane, err = parseControlPlane(f.ControlPlane); err != nil {
+		return nil, err
+	}
+	if cfg.Knowledge, err = parseKnowledge(f.Knowledge); err != nil {
+		return nil, err
+	}
 	if cfg.Storage, err = parseStorage(f.Storage); err != nil {
 		return nil, err
 	}
@@ -273,6 +307,9 @@ func (c *Config) Validate() error {
 	if err := c.validateStorage(); err != nil {
 		return err
 	}
+	if err := c.validateControlPlane(); err != nil {
+		return err
+	}
 	if err := c.validateAgent(); err != nil {
 		return err
 	}
@@ -317,6 +354,8 @@ func Marshal(cfg *Config) ([]byte, error) {
 
 	f := fileYAML{
 		DefaultTenant: cfg.DefaultTenant,
+		ControlPlane:  controlPlaneToYAML(cfg.ControlPlane),
+		Knowledge:     knowledgeToYAML(cfg.Knowledge),
 		Storage:       storageToYAML(cfg.Storage),
 		Agent:         agentToYAML(cfg.Agent),
 		Log:           logToYAML(cfg.Log),
@@ -332,6 +371,62 @@ func Marshal(cfg *Config) ([]byte, error) {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
 	return data, nil
+}
+
+// parseControlPlane normalizes the control_plane section: an absent section
+// means legacy, and the CONTROLPLANE_* variables override it the same way
+// STORAGE_SESSION_* overrides storage.
+func parseControlPlane(y *controlPlaneYAML) (ControlPlane, error) {
+	cp := ControlPlane{Mode: ControlPlaneLegacy}
+	if y != nil {
+		if y.Mode != "" {
+			cp.Mode = strings.ToLower(y.Mode)
+		}
+		cp.MySQLDSN = y.MySQL
+	}
+	applyControlPlaneEnv(&cp)
+	return cp, nil
+}
+
+func applyControlPlaneEnv(cp *ControlPlane) {
+	if v := os.Getenv(envControlPlaneMode); v != "" {
+		cp.Mode = strings.ToLower(v)
+	}
+	if v := os.Getenv(envControlPlaneDSN); v != "" {
+		cp.MySQLDSN = v
+	}
+}
+
+// validateControlPlane rejects an unknown mode, and a mysql mode without a
+// DSN, at load time rather than at first use. An empty mode is legal here
+// and means legacy: a Config assembled by hand, without going through
+// parseControlPlane, leaves the field zero, and treating that as invalid
+// would make every literal construction site a latent validation failure.
+// This was measured — it is exactly how a cloneConfig that forgot the new
+// field would have surfaced, and the same trap caught a Telemetry field once
+// before (docs/spec-governance-observability.md §6).
+func (c *Config) validateControlPlane() error {
+	switch c.ControlPlane.Mode {
+	case "", ControlPlaneLegacy:
+		return nil
+	case ControlPlaneMySQL:
+		if c.ControlPlane.MySQLDSN == "" {
+			return fmt.Errorf("control_plane.mysql_dsn is required when mode is %s", ControlPlaneMySQL)
+		}
+		return nil
+	default:
+		return fmt.Errorf("control_plane.mode %q must be %s or %s",
+			c.ControlPlane.Mode, ControlPlaneLegacy, ControlPlaneMySQL)
+	}
+}
+
+// controlPlaneToYAML omits the section entirely when it is the default, so
+// an existing config file round-trips unchanged if it never mentions it.
+func controlPlaneToYAML(cp ControlPlane) *controlPlaneYAML {
+	if cp.Mode == "" || cp.Mode == ControlPlaneLegacy {
+		return nil
+	}
+	return &controlPlaneYAML{Mode: cp.Mode, MySQL: cp.MySQLDSN}
 }
 
 // parseStorage normalizes the on-disk storage section: it fills defaults,
@@ -789,8 +884,13 @@ func fromEnv(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	cp, err := parseControlPlane(nil)
+	if err != nil {
+		return nil, err
+	}
 	return &Config{
 		DefaultTenant: t.ID,
+		ControlPlane:  cp,
 		Storage:       st,
 		Agent:         ag,
 		Log:           lc,

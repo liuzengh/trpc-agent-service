@@ -172,9 +172,195 @@ services:
       - "4318:4318" # OTLP/HTTP, what telemetry.*.endpoint speaks
     networks: [tas]
 
+  # ---------------------------------------------------------------------------
+  # Reliable mode (second batch): MySQL is the source of truth and each role of
+  # the Inbox → Worker → Outbox chain runs as its own service.
+  #
+  # Started explicitly, by service list, never by a bare `up`:
+  #   docker compose --profile reliable up -d --build \
+  #       mysql worker-a worker-b delivery jobs
+  # scripts/reliable_e2e.sh does exactly that (plus fake-model) and tears the
+  # stack down again.
+  #
+  # redis is deliberately absent: no reliable-mode role uses it yet — the KF
+  # cursor lives in MySQL now — and shipping an unused service would advertise
+  # a dependency that does not exist.
+  #
+  # Two workers from the start, because "does two replicas really execute one
+  # message once" is a property worth being able to run, not configure.
+  mysql:
+    # The plain `mysql:8` tag is not pullable on this machine (Docker Hub is
+    # unreachable, spec fact #1); the daocloud mirror of the same 8.4 image is
+    # what is cached locally. Override MYSQL_IMAGE to use a different host.
+    image: ${MYSQL_IMAGE:-docker.m.daocloud.io/library/mysql:8}
+    container_name: tas-mysql
+    profiles: [reliable]
+    restart: "no"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-tas}
+      MYSQL_USER: ${MYSQL_USER:-tas}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-taspw}
+    # Numeric offset, not a name: the platform compares UTC_TIMESTAMP(6)
+    # against TIMESTAMP columns for every lease, and a host time zone leaking
+    # in here would make "is this lease still valid" depend on the server's
+    # locale rather than on the clock.
+    command: ["--default-time-zone=+00:00"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-rootpass}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - mysqldata:/var/lib/mysql
+    networks: [tas]
+
+  worker-a:
+    image: ${IMAGE:-trpc-agent-service:local}
+    container_name: tas-worker-a
+    profiles: [reliable]
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: ["-role", "worker", "-config", "/config/config.yaml"]
+    volumes:
+      - ${CONFIG_DIR:-./deploy/compose/config}:/config:ro
+    environment:
+      CONTROLPLANE_MODE: mysql
+      CONTROLPLANE_MYSQL_DSN: ${RELIABLE_MYSQL_DSN:-tas:taspw@tcp(mysql:3306)/tas}
+      WORKER_ID: worker-a
+      # The model profile this stack seeds references env:MODEL_API_KEY, and
+      # the resolver refuses references outside the allowlist below — both
+      # halves have to be set or every run fails with "resolve api key ref".
+      MODEL_API_KEY: ${MODEL_API_KEY:-sk-demo-not-a-secret}
+      RELIABLE_SECRET_ENV_ALLOW: MODEL_API_KEY
+      # Workers need the same knowledge endpoints as the jobs role: the
+      # knowledge_search tool is assembled per claim from these stores, and a
+      # revision that pins it fails loudly on a worker without them.
+      KNOWLEDGE_QDRANT_URL: ${KNOWLEDGE_QDRANT_URL:-http://qdrant:6333}
+      KNOWLEDGE_MINIO_ENDPOINT: ${KNOWLEDGE_MINIO_ENDPOINT:-http://minio:9000}
+      KNOWLEDGE_MINIO_USER: ${KNOWLEDGE_MINIO_USER:-tasminio}
+      KNOWLEDGE_MINIO_PASSWORD: ${KNOWLEDGE_MINIO_PASSWORD:-tasminiopw}
+      KNOWLEDGE_MINIO_BUCKET: tas-knowledge
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://fake-model:9009/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-fake-embed}
+      EMBEDDING_DIM: "64"
+    networks: [tas]
+
+  worker-b:
+    image: ${IMAGE:-trpc-agent-service:local}
+    container_name: tas-worker-b
+    profiles: [reliable]
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: ["-role", "worker", "-config", "/config/config.yaml"]
+    volumes:
+      - ${CONFIG_DIR:-./deploy/compose/config}:/config:ro
+    environment:
+      CONTROLPLANE_MODE: mysql
+      CONTROLPLANE_MYSQL_DSN: ${RELIABLE_MYSQL_DSN:-tas:taspw@tcp(mysql:3306)/tas}
+      WORKER_ID: worker-b
+      MODEL_API_KEY: ${MODEL_API_KEY:-sk-demo-not-a-secret}
+      RELIABLE_SECRET_ENV_ALLOW: MODEL_API_KEY
+      # Workers need the same knowledge endpoints as the jobs role: the
+      # knowledge_search tool is assembled per claim from these stores, and a
+      # revision that pins it fails loudly on a worker without them.
+      KNOWLEDGE_QDRANT_URL: ${KNOWLEDGE_QDRANT_URL:-http://qdrant:6333}
+      KNOWLEDGE_MINIO_ENDPOINT: ${KNOWLEDGE_MINIO_ENDPOINT:-http://minio:9000}
+      KNOWLEDGE_MINIO_USER: ${KNOWLEDGE_MINIO_USER:-tasminio}
+      KNOWLEDGE_MINIO_PASSWORD: ${KNOWLEDGE_MINIO_PASSWORD:-tasminiopw}
+      KNOWLEDGE_MINIO_BUCKET: tas-knowledge
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://fake-model:9009/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-fake-embed}
+      EMBEDDING_DIM: "64"
+    networks: [tas]
+
+  delivery:
+    image: ${IMAGE:-trpc-agent-service:local}
+    container_name: tas-delivery
+    profiles: [reliable]
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: ["-role", "delivery", "-config", "/config/config.yaml"]
+    volumes:
+      - ${CONFIG_DIR:-./deploy/compose/config}:/config:ro
+    environment:
+      CONTROLPLANE_MODE: mysql
+      CONTROLPLANE_MYSQL_DSN: ${RELIABLE_MYSQL_DSN:-tas:taspw@tcp(mysql:3306)/tas}
+      WORKER_ID: delivery-1
+      # Replies go out through the same fake upstream the model does: its KF
+      # stub answers the official send_msg shape and records what it got.
+      KF_API_BASE: ${KF_API_BASE:-http://fake-model:9009}
+    networks: [tas]
+
+  jobs:
+    image: ${IMAGE:-trpc-agent-service:local}
+    container_name: tas-jobs
+    profiles: [reliable]
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: ["-role", "jobs", "-config", "/config/config.yaml"]
+    volumes:
+      - ${CONFIG_DIR:-./deploy/compose/config}:/config:ro
+    environment:
+      CONTROLPLANE_MODE: mysql
+      CONTROLPLANE_MYSQL_DSN: ${RELIABLE_MYSQL_DSN:-tas:taspw@tcp(mysql:3306)/tas}
+      WORKER_ID: jobs-1
+      KF_API_BASE: ${KF_API_BASE:-http://fake-model:9009}
+      # The knowledge pipeline needs all four endpoints or none: the config
+      # validates partial sections away (config.parseKnowledge), so a typo
+      # here fails the process at boot instead of half-indexing documents.
+      KNOWLEDGE_QDRANT_URL: ${KNOWLEDGE_QDRANT_URL:-http://qdrant:6333}
+      KNOWLEDGE_MINIO_ENDPOINT: ${KNOWLEDGE_MINIO_ENDPOINT:-http://minio:9000}
+      KNOWLEDGE_MINIO_USER: ${KNOWLEDGE_MINIO_USER:-tasminio}
+      KNOWLEDGE_MINIO_PASSWORD: ${KNOWLEDGE_MINIO_PASSWORD:-tasminiopw}
+      KNOWLEDGE_MINIO_BUCKET: tas-knowledge
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://fake-model:9009/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-fake-embed}
+      EMBEDDING_DIM: "64"
+    networks: [tas]
+
+  # Qdrant and MinIO are part of the reliable profile because the pipeline
+  # that uses them is part of it: without these two the knowledge roles
+  # cannot boot their stores, which is exactly the point (an absent section
+  # means the capability is off, not silently degraded).
+  qdrant:
+    image: docker.m.daocloud.io/qdrant/qdrant:v1.12.4
+    container_name: tas-qdrant
+    profiles: [reliable]
+    restart: "no"
+    volumes:
+      - qdrantdata:/qdrant/storage
+    networks: [tas]
+
+  minio:
+    image: docker.m.daocloud.io/minio/minio:RELEASE.2024-08-17T01-24-54Z
+    container_name: tas-minio
+    profiles: [reliable]
+    restart: "no"
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${KNOWLEDGE_MINIO_USER:-tasminio}
+      MINIO_ROOT_PASSWORD: ${KNOWLEDGE_MINIO_PASSWORD:-tasminiopw}
+    volumes:
+      - miniodata:/data
+    networks: [tas]
+
 networks:
   tas:
     driver: bridge
 
 volumes:
   audit:
+  # MySQL data volume: `docker compose down -v` is the only thing that removes
+  # it, which is exactly the lifetime a reliable-mode E2E wants.
+  mysqldata:
+  qdrantdata:
+  miniodata:
