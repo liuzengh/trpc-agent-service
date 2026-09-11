@@ -121,6 +121,7 @@ func (s *Service) UpsertKnowledgeDocument(
 	if err != nil {
 		return 0, err
 	}
+	ctx = runtimecontext.WithStorageScope(ctx, scope.StorageScope)
 	chunks, err := s.knowledge.UpsertDocument(ctx, scope, revision, platformstorage.KnowledgeDocument{
 		ID: input.DocumentID, Name: input.Name, Content: input.Content, Metadata: input.Metadata,
 	})
@@ -204,6 +205,7 @@ func (s *Service) DeleteKnowledgeDocument(
 	if err != nil {
 		return err
 	}
+	ctx = runtimecontext.WithStorageScope(ctx, scope.StorageScope)
 	if err := s.knowledge.DeleteDocument(ctx, scope, revision, documentID); err != nil {
 		return err
 	}

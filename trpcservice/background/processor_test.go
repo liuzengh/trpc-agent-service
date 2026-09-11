@@ -102,12 +102,12 @@ func TestProcessorRunsKnowledgeJob(t *testing.T) {
 		t.Fatalf("processed=%t err=%v", processed, err)
 	}
 	kb, _, err := knowledgeRouter.KnowledgeForRevision(
-		context.Background(), runtimecontext.TutorialScope(), data.Revisions[0],
+		runtimecontext.WithStorageScope(context.Background(), runtimecontext.TutorialScope().StorageScope), runtimecontext.TutorialScope(), data.Revisions[0],
 	)
 	if err != nil {
 		t.Fatalf("knowledge: %v", err)
 	}
-	result, err := kb.Search(context.Background(), &knowledge.SearchRequest{Query: "refunds"})
+	result, err := kb.Search(runtimecontext.WithStorageScope(context.Background(), runtimecontext.TutorialScope().StorageScope), &knowledge.SearchRequest{Query: "refunds"})
 	if err != nil || result.Document == nil {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -247,7 +247,7 @@ func TestProcessorExtractsMemoryAndAdvancesWatermark(t *testing.T) {
 	if processed, err := processor.ProcessOne(context.Background()); err != nil || !processed {
 		t.Fatalf("processed=%t err=%v", processed, err)
 	}
-	entries, err := memories.ReadMemories(context.Background(), memory.UserKey{
+	entries, err := memories.ReadMemories(runtimecontext.WithStorageScope(context.Background(), key.AppName), memory.UserKey{
 		AppName: key.AppName, UserID: key.UserID,
 	}, 10)
 	if err != nil || len(entries) != 1 || entries[0].Memory.Memory != "User likes tea" {

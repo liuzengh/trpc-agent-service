@@ -195,6 +195,7 @@ func TestIsolatedTwoTenantTwoWorkerWorkflow(t *testing.T) {
 	defer func(closer interface{ Close() error }) { _ = closer.Close() }(kb)
 	for i, id := range []string{"a", "b"} {
 		scope, _ := runtimecontext.NewScope("joint-"+id, "joint-app-"+id, "joint-rev-"+id, "http", "joint-binding-"+id)
+		ctx := runtimecontext.WithStorageScope(ctx, scope.StorageScope)
 		if err := mem.AddMemory(ctx, memory.UserKey{AppName: scope.StorageScope, UserID: "alice"}, "ONLY_"+strings.ToUpper(id)+"_MEMORY", nil); err != nil {
 			t.Fatal(err)
 		}

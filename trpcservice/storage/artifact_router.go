@@ -222,7 +222,7 @@ func (r *ArtifactRouter) withDistributedLock(
 }
 
 func (r *ArtifactRouter) serviceFor(ctx context.Context, appName string) (artifact.Service, error) {
-	tenantID, appID, err := runtimecontext.ParseStorageScope(appName)
+	tenantID, appID, err := runtimecontext.ValidateStorageScope(ctx, appName)
 	if err != nil {
 		return nil, err
 	}

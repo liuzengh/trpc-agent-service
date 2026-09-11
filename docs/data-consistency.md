@@ -21,6 +21,8 @@ Redis、MySQL 和 PostgreSQL Session 适配器可以保证单次 `AppendEvent` �
 
 当前 Redis Streams 消费组不保证按 conversation 分区；同一会话整轮串行化依赖 Session Coordinator 的跨节点租约和 fencing token。队列分区是可选的调度优化，不能代替此正确性约束。重投和网络分区时仍可能短暂出现旧消费者，关键提交必须核对所有权。
 
+存储操作另外使用两层协调：普通 Session/Memory 操作持有应用级共享门禁，并分别按会话/用户串行；回填、验证、切换和应用级状态操作持有应用级排他门禁。`resource_sync` 的 inventory、fences、epoch 在短临界区内读取最新值并更新，不跨后端 I/O 持有元数据锁，也不使用旧快照整行覆盖其他会话的更新。继续使用 schema 21 的原表结构，无需新增数据库迁移；旧节点的应用级排他锁与新共享门禁仍互斥。
+
 schema 26 的 Worker 在运行记录行锁内检查更早 `turn_seq` 是否仍处于 queued/running/failed/waiting；后续请求通过现有 Outbox 延迟调度，不占住执行槽等待前文。恢复任务携带调度代数，旧 Redis 投递不能覆盖新一代任务。近期与积压各用一个现有 Redis Streams 队列，共享原租约/ACK/重领实现，按 4:1 的调度机会消费，空队列允许另一边借用；这不是耗时或成本的严格比例。
 
 schema 27 将 completed Run/最终 Outbound 作为恢复真相：Worker 在检查执行次数、权限、配额和调用 Runtime 前先读取持久结果；并在准入竞态处再次拦截 completed。恢复不重做模型、附件导入、工具或审批文案，只补未完成的审计/用量/后台任务提交，并写 finalized_at。恢复收尾可以继续重试，不受原模型执行次数上限截断；后台 Job 使用原稳定去重键。收尾全部成功后再 ACK，Redis 完成缓存到期不改变持久完成态。收尾尝试的审计允许保留多条尝试记录，不能将其 cost 简单累加当作实际模型账单。
@@ -61,6 +63,10 @@ terminal_event_id
 自定义 SQL Session Service 在事务中锁定 Session 行，分配 `event_seq`，插入 Event，再合并 StateDelta。Redis Service 使用 Lua 将 Event 和 StateDelta 一次提交。禁止先更新 state、后写 Event，否则发生中断时无法解释状态来源。
 
 Summary Job 的 payload 不携带完整 Session 副本，只保存 Session Key 和 `turn_seq`。Job Worker 重新读取已提交 Session，tRPC-Agent-Go Summary boundary 记录实际 cutoff；Job 以 `conversation_id:turn_seq` 去重。
+
+生成时先取得已提交快照，释放存储锁，再通过临时的框架 Session Service 计算滚动摘要和 cutoff。提交时重新获取会话锁，核对会话创建时间、历史前缀和原摘要/边界仍一致；新追加的事件保留，已被其他摘要、会话重建或历史改写取代的结果不写回。双写迁移中主端成功、次端失败仍返回错误；重试即使没有新事件也会复制已有摘要，修复次端而不重复调用模型。
+
+当前只发布单 LLMAgent。`summary_every_turns > 0` 同时启用框架摘要注入与整会话投影，对应 Jobs 生成的空 filter key 摘要；下一轮使用摘要加尚未覆盖的消息。禁用时保持原历史投影，未来接入多 Agent 分支时需单独设计分支摘要策略。
 
 ```sql
 INSERT INTO session_summary (..., high_watermark)

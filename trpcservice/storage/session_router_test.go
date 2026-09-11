@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -29,14 +28,14 @@ func TestSessionRouterUsesStartupBinding(t *testing.T) {
 	key := session.Key{
 		AppName: "t/tutorial-tenant/a/tutorial-app", UserID: "alice", SessionID: "session",
 	}
-	if _, err := router.CreateSession(context.Background(), key, session.StateMap{"name": []byte("Alice")}); err != nil {
+	if _, err := router.CreateSession(storageTestContext(), key, session.StateMap{"name": []byte("Alice")}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	stored, err := router.GetSession(context.Background(), key)
+	stored, err := router.GetSession(storageTestContext(), key)
 	if err != nil || string(stored.State["name"]) != "Alice" {
 		t.Fatalf("stored=%+v err=%v", stored, err)
 	}
-	if err := router.Ready(context.Background()); err != nil {
+	if err := router.Ready(storageTestContext()); err != nil {
 		t.Fatalf("ready: %v", err)
 	}
 }
@@ -62,10 +61,10 @@ func TestSessionRouterRedisBinding(t *testing.T) {
 		_ = repository.Close()
 	})
 	key := session.Key{AppName: "t/tenant-a/a/app-a", UserID: "alice", SessionID: "redis"}
-	if _, err := router.CreateSession(context.Background(), key, nil); err != nil {
+	if _, err := router.CreateSession(storageTestContext("t/tenant-a/a/app-a"), key, nil); err != nil {
 		t.Fatalf("create Redis session: %v", err)
 	}
-	if _, err := router.GetSession(context.Background(), key); err != nil {
+	if _, err := router.GetSession(storageTestContext("t/tenant-a/a/app-a"), key); err != nil {
 		t.Fatalf("get Redis session: %v", err)
 	}
 }
@@ -79,8 +78,8 @@ func TestSessionRouterMigrationDualWritesEvents(t *testing.T) {
 		ResourceType: "session", BackendType: "inmemory", Config: json.RawMessage(`{}`),
 		MigrationState: "migration_target", Version: 1,
 	}
-	_ = repository.CreateBackendBinding(context.Background(), target)
-	_ = repository.CreateBackendMigration(context.Background(), controlplane.BackendMigration{
+	_ = repository.CreateBackendBinding(storageTestContext(), target)
+	_ = repository.CreateBackendMigration(storageTestContext(), controlplane.BackendMigration{
 		ID: "session-migration", TenantID: "tutorial-tenant", AppID: "tutorial-app",
 		ResourceType: "session", SourceBindingID: "tutorial-session-backend",
 		TargetBindingID: target.ID, State: controlplane.MigrationDualWrite,
@@ -97,7 +96,7 @@ func TestSessionRouterMigrationDualWritesEvents(t *testing.T) {
 	key := session.Key{
 		AppName: "t/tutorial-tenant/a/tutorial-app", UserID: "alice", SessionID: "dual",
 	}
-	sess, err := router.CreateSession(context.Background(), key, nil)
+	sess, err := router.CreateSession(storageTestContext(), key, nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -105,14 +104,14 @@ func TestSessionRouterMigrationDualWritesEvents(t *testing.T) {
 		ID: "event-1", Timestamp: time.Now(),
 		Response: &model.Response{Choices: []model.Choice{{Message: model.NewUserMessage("hello")}}},
 	}
-	if err := router.AppendEvent(context.Background(), sess, item); err != nil {
+	if err := router.AppendEvent(storageTestContext(), sess, item); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	targetService, err := router.cachedService(context.Background(), target)
+	targetService, err := router.cachedService(storageTestContext(), target)
 	if err != nil {
 		t.Fatalf("target: %v", err)
 	}
-	targetSession, err := targetService.GetSession(context.Background(), key)
+	targetSession, err := targetService.GetSession(storageTestContext(), key)
 	if err != nil || len(targetSession.Events) != 1 ||
 		targetSession.Events[0].Choices[0].Message.Content != "hello" {
 		t.Fatalf("target session=%+v err=%v", targetSession, err)
@@ -128,7 +127,7 @@ func TestSessionRouterBackfillsExistingSession(t *testing.T) {
 		ResourceType: "session", BackendType: "inmemory", Config: json.RawMessage(`{}`),
 		MigrationState: "migration_target", Version: 1,
 	}
-	_ = repository.CreateBackendBinding(context.Background(), target)
+	_ = repository.CreateBackendBinding(storageTestContext(), target)
 	migration := controlplane.BackendMigration{
 		ID: "session-backfill", TenantID: "tutorial-tenant", AppID: "tutorial-app",
 		ResourceType: "session", SourceBindingID: "tutorial-session-backend",
@@ -136,7 +135,7 @@ func TestSessionRouterBackfillsExistingSession(t *testing.T) {
 		Checkpoint: json.RawMessage(`{}`), Verification: json.RawMessage(`{}`),
 		Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
-	_ = repository.CreateBackendMigration(context.Background(), migration)
+	_ = repository.CreateBackendMigration(storageTestContext(), migration)
 	startup := inmemory.NewSessionService()
 	router, _ := NewSessionRouter(repository, secret.StaticStore{}, startup, nil)
 	t.Cleanup(func() {
@@ -146,17 +145,17 @@ func TestSessionRouterBackfillsExistingSession(t *testing.T) {
 	key := session.Key{
 		AppName: "t/tutorial-tenant/a/tutorial-app", UserID: "alice", SessionID: "existing",
 	}
-	sourceSession, _ := startup.CreateSession(context.Background(), key, session.StateMap{
+	sourceSession, _ := startup.CreateSession(storageTestContext(), key, session.StateMap{
 		"name": []byte("Alice"),
 	})
 	for _, content := range []string{"first", "second"} {
-		_ = startup.AppendEvent(context.Background(), sourceSession, &event.Event{
+		_ = startup.AppendEvent(storageTestContext(), sourceSession, &event.Event{
 			Timestamp: time.Now(),
 			Response:  &model.Response{Choices: []model.Choice{{Message: model.NewUserMessage(content)}}},
 		})
 	}
 	verification, err := router.BackfillSession(
-		context.Background(), "tutorial-tenant", migration.ID,
+		storageTestContext(), "tutorial-tenant", migration.ID,
 		SessionMigrationItem{UserID: "alice", SessionID: "existing"},
 	)
 	if err != nil || !verification.Passed || verification.SourceEvents != 2 ||

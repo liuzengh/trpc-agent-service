@@ -8,6 +8,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 type ResourceProof struct {
@@ -32,9 +34,10 @@ type ResourceSyncRepository interface {
 	WithResourceSync(context.Context, string, string, string, func(context.Context, *ResourceSync, func() error) error) error
 }
 type resourceContext struct {
-	Key   string
-	State *ResourceSync
-	Save  func() error
+	Key     string
+	State   *ResourceSync
+	Save    func() error
+	Subject string // empty only while holding the exclusive application gate
 }
 type resourceContextKey struct{}
 
@@ -49,6 +52,9 @@ func (r *PostgresRepository) WithResourceSync(ctx context.Context, t, a, kind st
 		return errors.New("invalid synchronized resource")
 	}
 	if s, save, ok := ResourceFromContext(ctx, t, a, kind); ok {
+		if ctx.Value(resourceContextKey{}).(resourceContext).Subject != "" {
+			return errors.New("cannot upgrade a subject resource lock to an application lock")
+		}
 		return fn(ctx, s, save)
 	}
 	conn, err := r.db.Conn(ctx)
@@ -88,13 +94,14 @@ func (r *PostgresRepository) WithResourceSync(ctx context.Context, t, a, kind st
 		return err
 	}
 	ctx = context.WithValue(ctx, knowledgeConnectionKey{}, scopedKnowledgeConnection{r.db, conn})
-	return fn(context.WithValue(ctx, resourceContextKey{}, resourceContext{key, &s, save}), &s, save)
+	return fn(context.WithValue(ctx, resourceContextKey{}, resourceContext{Key: key, State: &s, Save: save}), &s, save)
 }
 
 type resourceMemory struct {
 	mu     sync.Mutex
 	locks  map[string]chan struct{}
 	states map[string][]byte
+	gates  map[string]*semaphore.Weighted
 }
 
 func (m *resourceMemory) lock(key string) chan struct{} {
@@ -102,6 +109,8 @@ func (m *resourceMemory) lock(key string) chan struct{} {
 	defer m.mu.Unlock()
 	if m.locks == nil {
 		m.locks = map[string]chan struct{}{}
+	}
+	if m.states == nil {
 		m.states = map[string][]byte{}
 	}
 	if m.locks[key] == nil {
@@ -114,16 +123,17 @@ func (r *MemoryRepository) WithResourceSync(ctx context.Context, t, a, kind stri
 		return errors.New("invalid synchronized resource")
 	}
 	if s, save, ok := ResourceFromContext(ctx, t, a, kind); ok {
+		if ctx.Value(resourceContextKey{}).(resourceContext).Subject != "" {
+			return errors.New("cannot upgrade a subject resource lock to an application lock")
+		}
 		return fn(ctx, s, save)
 	}
 	key := ResourceLockName(t, a, kind)
-	lock := r.resourceMemory.lock(key)
-	select {
-	case lock <- struct{}{}:
-	case <-ctx.Done():
-		return context.Cause(ctx)
+	gate := r.resourceMemory.gate(key)
+	if err := gate.Acquire(ctx, resourceGateCapacity); err != nil {
+		return err
 	}
-	defer func() { <-lock }()
+	defer gate.Release(resourceGateCapacity)
 	r.resourceMemory.mu.Lock()
 	raw := append([]byte(nil), r.resourceMemory.states[key]...)
 	r.resourceMemory.mu.Unlock()
@@ -143,7 +153,7 @@ func (r *MemoryRepository) WithResourceSync(ctx context.Context, t, a, kind stri
 		r.resourceMemory.mu.Unlock()
 		return nil
 	}
-	return fn(context.WithValue(ctx, resourceContextKey{}, resourceContext{key, &s, save}), &s, save)
+	return fn(context.WithValue(ctx, resourceContextKey{}, resourceContext{Key: key, State: &s, Save: save}), &s, save)
 }
 func validResourceProof(s ResourceSync, m BackendMigration) bool {
 	p, ok := s.Proofs[m.ID]

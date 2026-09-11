@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -36,17 +35,17 @@ func TestKnowledgeRouterInMemorySearchAndScope(t *testing.T) {
 	})
 	scope := runtimecontext.TutorialScope()
 	revision := data.Revisions[0]
-	chunks, err := router.UpsertDocument(context.Background(), scope, revision, KnowledgeDocument{
+	chunks, err := router.UpsertDocument(storageTestContext(), scope, revision, KnowledgeDocument{
 		ID: "handbook", Name: "Handbook", Content: "refund policy allows returns within thirty days",
 	})
 	if err != nil || chunks < 2 {
 		t.Fatalf("chunks=%d err=%v", chunks, err)
 	}
-	kb, enabled, err := router.KnowledgeForRevision(context.Background(), scope, revision)
+	kb, enabled, err := router.KnowledgeForRevision(storageTestContext(), scope, revision)
 	if err != nil || !enabled {
 		t.Fatalf("enabled=%t err=%v", enabled, err)
 	}
-	result, err := kb.Search(context.Background(), &knowledge.SearchRequest{Query: "refund policy"})
+	result, err := kb.Search(storageTestContext(), &knowledge.SearchRequest{Query: "refund policy"})
 	if err != nil || result.Document == nil || !strings.Contains(result.Text, "refund") {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -60,8 +59,8 @@ func TestKnowledgeRouterInMemorySearchAndScope(t *testing.T) {
 
 func TestHashEmbedderDeterministic(t *testing.T) {
 	embedder := NewHashEmbedder(32)
-	first, _ := embedder.GetEmbedding(context.Background(), "same text")
-	second, _ := embedder.GetEmbedding(context.Background(), "same text")
+	first, _ := embedder.GetEmbedding(storageTestContext(), "same text")
+	second, _ := embedder.GetEmbedding(storageTestContext(), "same text")
 	if len(first) != 32 || len(second) != 32 {
 		t.Fatalf("dimensions=%d/%d", len(first), len(second))
 	}
@@ -91,10 +90,10 @@ func TestKnowledgeRouterMigrationDualWrite(t *testing.T) {
 		ResourceType: "knowledge", BackendType: "inmemory", MigrationState: "migration_target",
 		Config: json.RawMessage(`{"dimensions":32}`), Version: 1,
 	}
-	if err := repository.CreateBackendBinding(context.Background(), target); err != nil {
+	if err := repository.CreateBackendBinding(storageTestContext(), target); err != nil {
 		t.Fatalf("create target: %v", err)
 	}
-	if err := repository.CreateBackendMigration(context.Background(), controlplane.BackendMigration{
+	if err := repository.CreateBackendMigration(storageTestContext(), controlplane.BackendMigration{
 		ID: "knowledge-migration", TenantID: "tutorial-tenant", AppID: "tutorial-app",
 		ResourceType: "knowledge", SourceBindingID: source.ID, TargetBindingID: target.ID,
 		State: controlplane.MigrationDualWrite, Checkpoint: json.RawMessage(`{}`),
@@ -109,18 +108,18 @@ func TestKnowledgeRouterMigrationDualWrite(t *testing.T) {
 	})
 	scope := runtimecontext.TutorialScope()
 	revision := data.Revisions[0]
-	if _, err := router.UpsertDocument(context.Background(), scope, revision, KnowledgeDocument{
+	if _, err := router.UpsertDocument(storageTestContext(), scope, revision, KnowledgeDocument{
 		ID: "migration-doc", Content: "dual written knowledge",
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	config, _ := parseRevisionKnowledgeConfig(revision.KnowledgeConfig)
-	targetHandle, err := router.cachedHandle(context.Background(), scope, revision, config, target)
+	targetHandle, err := router.cachedHandle(storageTestContext(), scope, revision, config, target)
 	if err != nil {
 		t.Fatalf("target handle: %v", err)
 	}
 	result, err := targetHandle.knowledge.Search(
-		context.Background(), &knowledge.SearchRequest{Query: "dual written knowledge"},
+		storageTestContext(), &knowledge.SearchRequest{Query: "dual written knowledge"},
 	)
 	if err != nil || result.Document == nil {
 		t.Fatalf("target result=%+v err=%v", result, err)

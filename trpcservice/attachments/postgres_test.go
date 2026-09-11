@@ -137,6 +137,7 @@ func TestAttachmentPostgresPipelineIntegration(t *testing.T) {
 		t.Fatalf("idempotent import: %v", err)
 	}
 	info := artifact.SessionInfo{AppName: scope.StorageScope, UserID: task.UserID, SessionID: task.SessionID}
+	ctx = runtimecontext.WithStorageScope(ctx, scope.StorageScope)
 	versions, err := artifacts.ListVersions(ctx, info, attachmentID(task))
 	if err != nil || len(versions) != 1 {
 		t.Fatalf("versions=%v err=%v", versions, err)

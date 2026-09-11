@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"testing"
@@ -36,12 +35,12 @@ func TestArtifactRouterS3Integration(t *testing.T) {
 	info := artifact.SessionInfo{
 		AppName: "t/tenant-s3/a/app-s3", UserID: "integration-user", SessionID: "session",
 	}
-	if _, err := router.SaveArtifact(context.Background(), info, "integration.txt", &artifact.Artifact{
+	if _, err := router.SaveArtifact(storageTestContext("t/tenant-s3/a/app-s3"), info, "integration.txt", &artifact.Artifact{
 		Data: []byte("s3-compatible"), MimeType: "text/plain",
 	}); err != nil {
 		t.Fatalf("save artifact: %v", err)
 	}
-	loaded, err := router.LoadArtifact(context.Background(), info, "integration.txt", nil)
+	loaded, err := router.LoadArtifact(storageTestContext("t/tenant-s3/a/app-s3"), info, "integration.txt", nil)
 	if err != nil || string(loaded.Data) != "s3-compatible" {
 		t.Fatalf("artifact=%+v err=%v", loaded, err)
 	}
@@ -57,20 +56,20 @@ func TestArtifactRouterS3Integration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	loaded, err = reopened.LoadArtifact(context.Background(), info, "integration.txt", nil)
+	loaded, err = reopened.LoadArtifact(storageTestContext("t/tenant-s3/a/app-s3"), info, "integration.txt", nil)
 	if err != nil || loaded == nil || string(loaded.Data) != "s3-compatible" {
 		t.Fatalf("reopened artifact missing: %v", err)
 	}
-	if _, err := reopened.SaveArtifactOnce(context.Background(), info, "integration.txt", loaded); err != nil {
+	if _, err := reopened.SaveArtifactOnce(storageTestContext("t/tenant-s3/a/app-s3"), info, "integration.txt", loaded); err != nil {
 		t.Fatal(err)
 	}
-	versions, err := reopened.ListVersions(context.Background(), info, "integration.txt")
+	versions, err := reopened.ListVersions(storageTestContext("t/tenant-s3/a/app-s3"), info, "integration.txt")
 	if err != nil || len(versions) != 1 || versions[0] != 0 {
 		t.Fatalf("immutable reopen versions=%v err=%v", versions, err)
 	}
 	otherSession := info
 	otherSession.SessionID = "another-session"
-	if value, err := reopened.LoadArtifact(context.Background(), otherSession, "integration.txt", nil); err == nil && value != nil {
+	if value, err := reopened.LoadArtifact(storageTestContext("t/tenant-s3/a/app-s3"), otherSession, "integration.txt", nil); err == nil && value != nil {
 		t.Fatal("different session read the original artifact")
 	}
 }

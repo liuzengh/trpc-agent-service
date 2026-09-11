@@ -61,6 +61,7 @@ func TestRunnerKnowledgeToolUsesRemoteEmbeddingAndJournal(t *testing.T) {
 	defer func(closer interface{ Close() error }) { _ = closer.Close() }(router)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	ctx = runtimecontext.WithStorageScope(ctx, runtimecontext.TutorialScope().StorageScope)
 	if _, err := router.UpsertDocument(ctx, runtimecontext.TutorialScope(), data.Revisions[0], storage.KnowledgeDocument{ID: "synthetic-borrowing", Content: "The test document may be borrowed for seventeen days."}); err != nil {
 		t.Fatal(err)
 	}

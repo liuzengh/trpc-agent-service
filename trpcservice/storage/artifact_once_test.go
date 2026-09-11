@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"context"
 	"sync"
 	"testing"
 
@@ -15,7 +14,7 @@ func TestImmutableArtifactRetriesDoNotCreateNewVersions(t *testing.T) {
 	defer func(closer interface{ Close() error }) { _ = closer.Close() }(repo)
 	r, _ := NewArtifactRouter(repo, secret.StaticStore{})
 	defer func(closer interface{ Close() error }) { _ = closer.Close() }(r)
-	ctx := context.Background()
+	ctx := storageTestContext()
 	info := artifact.SessionInfo{AppName: "t/tutorial-tenant/a/tutorial-app", UserID: "user", SessionID: "session"}
 	value := &artifact.Artifact{Data: []byte("same"), MimeType: "text/plain"}
 	var wg sync.WaitGroup

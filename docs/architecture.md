@@ -194,6 +194,10 @@ tRPC-Agent-Go 的 Runner 在构造时接收 Session、Memory 和 Artifact Servic
 
 路由过程必须包含两次校验：先解析内部 `storage_scope`，再核对 context 中的 `tenant_id` 和 `app_id`。两者不一致时直接拒绝，不能继续访问后端。后端服务按 Binding/配置摘要复用；当前旧服务随 Router 关闭，不承诺引用计数式热淘汰。密钥或连接配置更新应配合受控重启，不能把缓存重建机制当作在线密钥轮换。
 
+运行入口通过 `runtimecontext.WithStorageScope` 注入可信边界；Router 同时核对该边界和框架 Invocation，缺少身份或任一身份不一致都拒绝。后台任务、已授权的管理操作和附件导入必须显式携带作用域，不能用 `context.Background()` 加一个合法的 AppName 作为访问授权。
+
+Session 普通读写按用户/会话加锁，Memory 按用户加锁；两者同时持有应用级共享迁移门禁。迁移回填、验证、切换和应用级状态操作使用排他门禁，元数据登记、fencing 和 epoch 更新只占用短临界区。摘要模型调用不持有存储锁，提交时重新获取会话锁并检查原快照及摘要边界，防止旧完成结果覆盖新摘要。
+
 共享后端采用逻辑隔离：Redis key prefix、SQL `tenant_id/app_id` 条件、向量 metadata filter、对象存储 prefix。高安全租户可以选择独立数据库、schema、Redis 集群、bucket 或 vector collection。向量库还要使用包装器强制注入租户过滤条件，并给文档 ID 加命名空间，不能依赖调用方传入 `KnowledgeFilter`。
 
 ## 7. 会话路由与 sticky session
@@ -219,10 +223,10 @@ tRPC-Agent-Go 的 Runner 在构造时接收 Session、Memory 和 Artifact Servic
 | 执行 | `runner.Runner`、Event 流、取消、恢复 | Worker 调度、session 租约、事件排空 |
 | Session | InMemory、Redis、PostgreSQL；其他后端可扩展 | Storage Router、幂等 journal、迁移 |
 | Memory | 内置接口、InMemory、Redis/PostgreSQL、Extractor | 租户路由、持久化提取任务和水位 |
-| Knowledge | Source、Chunking、Embedder、Retriever、VectorStore | 知识库控制面、强制租户过滤和迁移 |
+| Knowledge | Knowledge/Embedder/VectorStore 接口、OpenAI Embedding 和 Qdrant 适配 | 文本分块、检索编排、知识库控制面、强制租户过滤和迁移 |
 | Artifact | InMemory、S3-compatible | 版本锁与受控附件导入；完整扫描/生命周期待扩展 |
-| Tool/MCP | Function Tool、MCP Tool、运行时过滤 | 工具目录、租户授权、密钥注入和审批 |
-| 治理 | Plugin、Guardrail、Callbacks | 策略中心、预算、审计和 IM 身份校验 |
+| Tool/MCP | Function Tool、Tool 接口、运行时过滤；MCP 使用 trpc-mcp-go | MCP Tool 包装、工具目录、租户授权、密钥注入和审批 |
+| 治理 | Model/Tool Callbacks、ToolFilter、PermissionPolicy | Guardrail 规则、策略中心、预算、审计和 IM 身份校验；未直接注册原生 Plugin/Guardrail 模块 |
 | 协议 | OpenAI-compatible 模型、MCP；server/*/OpenClaw 可扩展 | 统一 Gateway、Telegram/企业微信 Channel |
 | 可观测性 | OpenTelemetry spans/metrics | 租户成本、审计索引、告警和 SLO |
 

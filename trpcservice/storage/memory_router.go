@@ -64,8 +64,8 @@ func (r *MemoryRouter) AddMemory(
 	topics []string,
 	opts ...memory.AddOption,
 ) error {
-	if !resourceHeld(ctx, key.AppName, "memory") {
-		return resourceDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.AddMemory(ctx, key, value, topics, opts...) })
+	if !resourceHeld(ctx, key.AppName, "memory", resourceSubject(key.UserID, "")) {
+		return resourceAccessDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.AddMemory(ctx, key, value, topics, opts...) })
 	}
 	ctx, span := startStorageSpan(ctx, "memory.add", key.AppName)
 	defer span.End()
@@ -83,8 +83,8 @@ func (r *MemoryRouter) UpdateMemory(
 	topics []string,
 	opts ...memory.UpdateOption,
 ) error {
-	if !resourceHeld(ctx, key.AppName, "memory") {
-		return resourceDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.UpdateMemory(ctx, key, value, topics, opts...) })
+	if !resourceHeld(ctx, key.AppName, "memory", resourceSubject(key.UserID, "")) {
+		return resourceAccessDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.UpdateMemory(ctx, key, value, topics, opts...) })
 	}
 	ctx, span := startStorageSpan(ctx, "memory.update", key.AppName)
 	defer span.End()
@@ -96,8 +96,8 @@ func (r *MemoryRouter) UpdateMemory(
 }
 
 func (r *MemoryRouter) DeleteMemory(ctx context.Context, key memory.Key) error {
-	if !resourceHeld(ctx, key.AppName, "memory") {
-		return resourceDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.DeleteMemory(ctx, key) })
+	if !resourceHeld(ctx, key.AppName, "memory", resourceSubject(key.UserID, "")) {
+		return resourceAccessDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.DeleteMemory(ctx, key) })
 	}
 	ctx, span := startStorageSpan(ctx, "memory.delete", key.AppName)
 	defer span.End()
@@ -109,8 +109,8 @@ func (r *MemoryRouter) DeleteMemory(ctx context.Context, key memory.Key) error {
 }
 
 func (r *MemoryRouter) ClearMemories(ctx context.Context, key memory.UserKey) error {
-	if !resourceHeld(ctx, key.AppName, "memory") {
-		return resourceDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.ClearMemories(ctx, key) })
+	if !resourceHeld(ctx, key.AppName, "memory", resourceSubject(key.UserID, "")) {
+		return resourceAccessDo(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), true, func(ctx context.Context) error { return r.ClearMemories(ctx, key) })
 	}
 	ctx, span := startStorageSpan(ctx, "memory.clear", key.AppName)
 	defer span.End()
@@ -126,8 +126,8 @@ func (r *MemoryRouter) ReadMemories(
 	key memory.UserKey,
 	limit int,
 ) ([]*memory.Entry, error) {
-	if !resourceHeld(ctx, key.AppName, "memory") {
-		return resourceValue(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), false, func(ctx context.Context) ([]*memory.Entry, error) { return r.ReadMemories(ctx, key, limit) })
+	if !resourceHeld(ctx, key.AppName, "memory", resourceSubject(key.UserID, "")) {
+		return resourceAccessValue(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), false, func(ctx context.Context) ([]*memory.Entry, error) { return r.ReadMemories(ctx, key, limit) })
 	}
 	ctx, span := startStorageSpan(ctx, "memory.read", key.AppName)
 	defer span.End()
@@ -144,8 +144,8 @@ func (r *MemoryRouter) SearchMemories(
 	query string,
 	opts ...memory.SearchOption,
 ) ([]*memory.Entry, error) {
-	if !resourceHeld(ctx, key.AppName, "memory") {
-		return resourceValue(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), false, func(ctx context.Context) ([]*memory.Entry, error) { return r.SearchMemories(ctx, key, query, opts...) })
+	if !resourceHeld(ctx, key.AppName, "memory", resourceSubject(key.UserID, "")) {
+		return resourceAccessValue(ctx, r.repository, key.AppName, "memory", resourceSubject(key.UserID, ""), false, func(ctx context.Context) ([]*memory.Entry, error) { return r.SearchMemories(ctx, key, query, opts...) })
 	}
 	ctx, span := startStorageSpan(ctx, "memory.search", key.AppName)
 	defer span.End()
@@ -389,7 +389,7 @@ func (r *MemoryRouter) Close() error {
 }
 
 func (r *MemoryRouter) serviceFor(ctx context.Context, appName string) (memory.Service, error) {
-	tenantID, appID, err := runtimecontext.ParseStorageScope(appName)
+	tenantID, appID, err := runtimecontext.ValidateStorageScope(ctx, appName)
 	if err != nil {
 		return nil, err
 	}

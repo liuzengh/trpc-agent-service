@@ -79,8 +79,8 @@ func (r *SessionRouter) CreateSession(
 	if strings.HasPrefix(key.SessionID, stagingSessionPrefix) {
 		return nil, errors.New("reserved Session ID")
 	}
-	if !resourceHeld(ctx, key.AppName, "session") {
-		return resourceValue(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), true, func(ctx context.Context) (*session.Session, error) { return r.CreateSession(ctx, key, state, opts...) })
+	if !resourceHeld(ctx, key.AppName, "session", resourceSubject(key.UserID, key.SessionID)) {
+		return resourceAccessValue(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), true, func(ctx context.Context) (*session.Session, error) { return r.CreateSession(ctx, key, state, opts...) })
 	}
 	ctx, span := startStorageSpan(ctx, "session.create", key.AppName)
 	defer span.End()
@@ -97,8 +97,8 @@ func (r *SessionRouter) GetSession(
 	opts ...session.Option,
 ) (*session.Session, error) {
 
-	if !resourceHeld(ctx, key.AppName, "session") {
-		return resourceValue(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), false, func(ctx context.Context) (*session.Session, error) { return r.GetSession(ctx, key, opts...) })
+	if !resourceHeld(ctx, key.AppName, "session", resourceSubject(key.UserID, key.SessionID)) {
+		return resourceAccessValue(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), false, func(ctx context.Context) (*session.Session, error) { return r.GetSession(ctx, key, opts...) })
 	}
 	ctx, span := startStorageSpan(ctx, "session.get", key.AppName)
 	defer span.End()
@@ -115,8 +115,8 @@ func (r *SessionRouter) ListSessions(
 	opts ...session.Option,
 ) ([]*session.Session, error) {
 
-	if !resourceHeld(ctx, key.AppName, "session") {
-		return resourceValue(ctx, r.repository, key.AppName, "session", "", false, func(ctx context.Context) ([]*session.Session, error) { return r.ListSessions(ctx, key, opts...) })
+	if !resourceHeld(ctx, key.AppName, "session", "") {
+		return resourceAccessValue(ctx, r.repository, key.AppName, "session", "", false, func(ctx context.Context) ([]*session.Session, error) { return r.ListSessions(ctx, key, opts...) })
 	}
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
@@ -131,8 +131,8 @@ func (r *SessionRouter) DeleteSession(
 	opts ...session.Option,
 ) error {
 
-	if !resourceHeld(ctx, key.AppName, "session") {
-		return resourceDo(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), true, func(ctx context.Context) error { return r.DeleteSession(ctx, key, opts...) })
+	if !resourceHeld(ctx, key.AppName, "session", resourceSubject(key.UserID, key.SessionID)) {
+		return resourceAccessDo(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), true, func(ctx context.Context) error { return r.DeleteSession(ctx, key, opts...) })
 	}
 	ctx, span := startStorageSpan(ctx, "session.delete", key.AppName)
 	defer span.End()
@@ -149,8 +149,8 @@ func (r *SessionRouter) UpdateAppState(
 	state session.StateMap,
 ) error {
 
-	if appName != readinessAppName && !resourceHeld(ctx, appName, "session") {
-		return resourceDo(ctx, r.repository, appName, "session", "", true, func(ctx context.Context) error { return r.UpdateAppState(ctx, appName, state) })
+	if appName != readinessAppName && !resourceHeld(ctx, appName, "session", "") {
+		return resourceAccessDo(ctx, r.repository, appName, "session", "", true, func(ctx context.Context) error { return r.UpdateAppState(ctx, appName, state) })
 	}
 	service, err := r.serviceFor(ctx, appName)
 	if err != nil {
@@ -161,8 +161,8 @@ func (r *SessionRouter) UpdateAppState(
 
 func (r *SessionRouter) DeleteAppState(ctx context.Context, appName string, key string) error {
 
-	if appName != readinessAppName && !resourceHeld(ctx, appName, "session") {
-		return resourceDo(ctx, r.repository, appName, "session", "", true, func(ctx context.Context) error { return r.DeleteAppState(ctx, appName, key) })
+	if appName != readinessAppName && !resourceHeld(ctx, appName, "session", "") {
+		return resourceAccessDo(ctx, r.repository, appName, "session", "", true, func(ctx context.Context) error { return r.DeleteAppState(ctx, appName, key) })
 	}
 	service, err := r.serviceFor(ctx, appName)
 	if err != nil {
@@ -173,8 +173,8 @@ func (r *SessionRouter) DeleteAppState(ctx context.Context, appName string, key 
 
 func (r *SessionRouter) ListAppStates(ctx context.Context, appName string) (session.StateMap, error) {
 
-	if appName != readinessAppName && !resourceHeld(ctx, appName, "session") {
-		return resourceValue(ctx, r.repository, appName, "session", "", false, func(ctx context.Context) (session.StateMap, error) { return r.ListAppStates(ctx, appName) })
+	if appName != readinessAppName && !resourceHeld(ctx, appName, "session", "") {
+		return resourceAccessValue(ctx, r.repository, appName, "session", "", false, func(ctx context.Context) (session.StateMap, error) { return r.ListAppStates(ctx, appName) })
 	}
 	service, err := r.serviceFor(ctx, appName)
 	if err != nil {
@@ -189,8 +189,8 @@ func (r *SessionRouter) UpdateUserState(
 	state session.StateMap,
 ) error {
 
-	if !resourceHeld(ctx, key.AppName, "session") {
-		return resourceDo(ctx, r.repository, key.AppName, "session", "", true, func(ctx context.Context) error { return r.UpdateUserState(ctx, key, state) })
+	if !resourceHeld(ctx, key.AppName, "session", "") {
+		return resourceAccessDo(ctx, r.repository, key.AppName, "session", "", true, func(ctx context.Context) error { return r.UpdateUserState(ctx, key, state) })
 	}
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
@@ -204,8 +204,8 @@ func (r *SessionRouter) ListUserStates(
 	key session.UserKey,
 ) (session.StateMap, error) {
 
-	if !resourceHeld(ctx, key.AppName, "session") {
-		return resourceValue(ctx, r.repository, key.AppName, "session", "", false, func(ctx context.Context) (session.StateMap, error) { return r.ListUserStates(ctx, key) })
+	if !resourceHeld(ctx, key.AppName, "session", "") {
+		return resourceAccessValue(ctx, r.repository, key.AppName, "session", "", false, func(ctx context.Context) (session.StateMap, error) { return r.ListUserStates(ctx, key) })
 	}
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
@@ -220,8 +220,8 @@ func (r *SessionRouter) DeleteUserState(
 	stateKey string,
 ) error {
 
-	if !resourceHeld(ctx, key.AppName, "session") {
-		return resourceDo(ctx, r.repository, key.AppName, "session", "", true, func(ctx context.Context) error { return r.DeleteUserState(ctx, key, stateKey) })
+	if !resourceHeld(ctx, key.AppName, "session", "") {
+		return resourceAccessDo(ctx, r.repository, key.AppName, "session", "", true, func(ctx context.Context) error { return r.DeleteUserState(ctx, key, stateKey) })
 	}
 	service, err := r.serviceFor(ctx, key.AppName)
 	if err != nil {
@@ -238,8 +238,8 @@ func (r *SessionRouter) UpdateSessionState(
 	if err := rejectPrivateState(state); err != nil {
 		return err
 	}
-	if !resourceHeld(ctx, key.AppName, "session") {
-		return resourceDo(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), true, func(ctx context.Context) error { return r.UpdateSessionState(ctx, key, state) })
+	if !resourceHeld(ctx, key.AppName, "session", resourceSubject(key.UserID, key.SessionID)) {
+		return resourceAccessDo(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), true, func(ctx context.Context) error { return r.UpdateSessionState(ctx, key, state) })
 	}
 	ctx, span := startStorageSpan(ctx, "session.state.update", key.AppName)
 	defer span.End()
@@ -264,8 +264,8 @@ func (r *SessionRouter) AppendEvent(
 			return err
 		}
 	}
-	if !resourceHeld(ctx, sess.AppName, "session") {
-		return resourceDo(ctx, r.repository, sess.AppName, "session", resourceSubject(sess.UserID, sess.ID), true, func(ctx context.Context) error { return r.AppendEvent(ctx, sess, item, opts...) })
+	if !resourceHeld(ctx, sess.AppName, "session", resourceSubject(sess.UserID, sess.ID)) {
+		return resourceAccessDo(ctx, r.repository, sess.AppName, "session", resourceSubject(sess.UserID, sess.ID), true, func(ctx context.Context) error { return r.AppendEvent(ctx, sess, item, opts...) })
 	}
 	if sess == nil {
 		return session.ErrNilSession
@@ -288,19 +288,112 @@ func (r *SessionRouter) CreateSessionSummary(
 	if sess == nil {
 		return session.ErrNilSession
 	}
-	if !resourceHeld(ctx, sess.AppName, "session") {
-		return resourceDo(ctx, r.repository, sess.AppName, "session", resourceSubject(sess.UserID, sess.ID), true, func(ctx context.Context) error { return r.CreateSessionSummary(ctx, sess, filterKey, force) })
+	if _, _, err := runtimecontext.ValidateStorageScope(ctx, sess.AppName); err != nil {
+		return err
 	}
-	if sess == nil {
-		return session.ErrNilSession
+	if resourceHeld(ctx, sess.AppName, "session") {
+		return errors.New("summary generation must start outside storage locks")
+	}
+	if r.summarizer == nil {
+		return nil
 	}
 	ctx, span := startStorageSpan(ctx, "session.summary.create", sess.AppName)
 	defer span.End()
-	service, err := r.serviceFor(ctx, sess.AppName)
+	key := session.Key{AppName: sess.AppName, UserID: sess.UserID, SessionID: sess.ID}
+	snapshot, err := r.GetSession(ctx, key)
 	if err != nil {
 		return err
 	}
-	return service.CreateSessionSummary(ctx, sess, filterKey, force)
+	if snapshot == nil {
+		return errors.New("session missing")
+	}
+	candidate := snapshot.Clone()
+	if !summaryCoversEvents(snapshot, filterKey) {
+		// Reuse the framework's rolling-summary and cutoff calculation in an
+		// ephemeral service. No durable backend/migration lock spans a model call.
+		scratch := inmemory.NewSessionService(inmemory.WithSummarizer(r.summarizer))
+		defer func() { _ = scratch.Close() }()
+		if _, err := scratch.CreateSession(ctx, key, nil); err != nil {
+			return err
+		}
+		if err := scratch.CreateSessionSummary(ctx, candidate, filterKey, force); err != nil {
+			return err
+		}
+	}
+	if len(candidate.Summaries) == 0 {
+		return nil
+	}
+	// Even an unchanged summary must be copied: a previous dual-write may have
+	// committed the primary and failed before updating the secondary.
+	return r.commitSessionSummary(ctx, sess, snapshot, candidate)
+}
+
+// An exact event boundary, unlike a timestamp, proves that a retry has no new
+// transcript to summarize. Still commit/copy it to repair a partial dual write.
+func summaryCoversEvents(sess *session.Session, filter string) bool {
+	sum := sess.Summaries[filter]
+	if sum == nil || sum.Summary == "" {
+		return false
+	}
+	boundary := sum.CutoffBoundary()
+	if boundary == nil || boundary.LastEventID == "" {
+		return false
+	}
+	for i := len(sess.Events) - 1; i >= 0; i-- {
+		if filter == "" || sess.Events[i].Filter(filter) {
+			return sess.Events[i].ID == boundary.LastEventID
+		}
+	}
+	return false
+}
+
+func (r *SessionRouter) commitSessionSummary(ctx context.Context, sess, snapshot, candidate *session.Session) error {
+	key := session.Key{AppName: sess.AppName, UserID: sess.UserID, SessionID: sess.ID}
+	return resourceAccessDo(ctx, r.repository, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), true, func(ctx context.Context) error {
+		service, err := r.serviceFor(ctx, key.AppName)
+		if err != nil {
+			return err
+		}
+		current, err := service.GetSession(ctx, key)
+		if err != nil {
+			return err
+		}
+		if !summarySnapshotCurrent(snapshot, current) {
+			// Another summary, deletion/recreation or migration superseded this
+			// snapshot. Do not overwrite newer state or regenerate in this lock.
+			return nil
+		}
+		copier, ok := service.(interface {
+			CopySummaries(context.Context, session.Key, *session.Session) error
+		})
+		if !ok {
+			return errors.New("summary import unavailable")
+		}
+		if err := copier.CopySummaries(ctx, key, candidate); err != nil {
+			return err
+		}
+		copySummaries(sess, candidate)
+		return nil
+	})
+}
+
+func summarySnapshotCurrent(snapshot, current *session.Session) bool {
+	if current == nil || !snapshot.CreatedAt.Equal(current.CreatedAt) || !sameSummaries(snapshot, current) || len(current.Events) < len(snapshot.Events) {
+		return false
+	}
+	for _, key := range []string{session.SummaryLastIncludedTimestampStateKey, session.SummaryLastIncludedEventIDStateKey} {
+		a, _ := snapshot.GetState(key)
+		b, _ := current.GetState(key)
+		if !bytes.Equal(a, b) {
+			return false
+		}
+	}
+	for i := range snapshot.Events {
+		if dataDigest(snapshot.Events[i]) != dataDigest(current.Events[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *SessionRouter) EnqueueSummaryJob(
@@ -463,7 +556,7 @@ func (r *SessionRouter) serviceFor(ctx context.Context, appName string) (session
 	if appName == readinessAppName {
 		return r.startup, nil
 	}
-	tenantID, appID, err := runtimecontext.ParseStorageScope(appName)
+	tenantID, appID, err := runtimecontext.ValidateStorageScope(ctx, appName)
 	if err != nil {
 		return nil, err
 	}

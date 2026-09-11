@@ -212,6 +212,10 @@ func (c *RevisionCompiler) Compile(
 	if err := scope.Validate(); err != nil {
 		return nil, err
 	}
+	ctx = runtimecontext.WithStorageScope(ctx, scope.StorageScope)
+	if _, _, err := runtimecontext.ValidateStorageScope(ctx, scope.StorageScope); err != nil {
+		return nil, err
+	}
 	revision, err := c.repository.GetRevision(ctx, scope.TenantID, scope.RevisionID)
 	if err != nil {
 		return nil, fmt.Errorf("load Agent revision: %w", err)
@@ -354,6 +358,13 @@ func (c *RevisionCompiler) compileRevision(
 		llmagent.WithInstruction(agentConfig.Instruction),
 		llmagent.WithGenerationConfig(model.GenerationConfig{Stream: stream}),
 		llmagent.WithTools(tools),
+		llmagent.WithAddSessionSummary(agentConfig.SummaryEveryTurns > 0),
+	}
+	if agentConfig.SummaryEveryTurns > 0 {
+		// The platform currently compiles single LLMAgents and Jobs produce a
+		// full-session summary (empty filter key). The framework's default
+		// branch-prefix projection does not fall back to that summary.
+		agentOptions = append(agentOptions, llmagent.WithMessageBranchFilterMode(llmagent.BranchFilterModeAll))
 	}
 	if len(refs) > 0 {
 		repo, err := c.skills.RepositoryFor(scope.TenantID, refs)

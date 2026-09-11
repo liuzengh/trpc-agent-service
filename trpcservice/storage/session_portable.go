@@ -29,7 +29,7 @@ func (p *portableSession) aliasKey(key session.Key) string {
 }
 func (p *portableSession) nativeKey(ctx context.Context, key session.Key) (session.Key, error) {
 	var result = key
-	_, err := resourceValue(ctx, p.repo, key.AppName, "session", "", false, func(ctx context.Context) (struct{}, error) {
+	readAlias := func(ctx context.Context) (struct{}, error) {
 		s, _, err := resourceState(ctx, key.AppName, "session")
 		if err != nil {
 			return struct{}{}, err
@@ -38,7 +38,13 @@ func (p *portableSession) nativeKey(ctx context.Context, key session.Key) (sessi
 			result.SessionID = id
 		}
 		return struct{}{}, nil
-	})
+	}
+	var err error
+	if resourceHeld(ctx, key.AppName, "session") {
+		_, err = readAlias(ctx)
+	} else {
+		_, err = resourceAccessValue(ctx, p.repo, key.AppName, "session", resourceSubject(key.UserID, key.SessionID), false, readAlias)
+	}
 	return result, err
 }
 func hydrateSummaries(sess *session.Session) error {
@@ -115,7 +121,7 @@ func (p *portableSession) ListSessions(ctx context.Context, key session.UserKey,
 		return nil, err
 	}
 	var aliases map[string]string
-	_, err = resourceValue(ctx, p.repo, key.AppName, "session", "", false, func(ctx context.Context) (struct{}, error) {
+	readAliases := func(ctx context.Context) (struct{}, error) {
 		s, _, err := resourceState(ctx, key.AppName, "session")
 		if err != nil {
 			return struct{}{}, err
@@ -125,7 +131,12 @@ func (p *portableSession) ListSessions(ctx context.Context, key session.UserKey,
 			aliases[k] = v
 		}
 		return struct{}{}, nil
-	})
+	}
+	if resourceHeld(ctx, key.AppName, "session") {
+		_, err = readAliases(ctx)
+	} else {
+		_, err = resourceValue(ctx, p.repo, key.AppName, "session", "", false, readAliases)
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -97,6 +97,7 @@ func (s *Service) Import(ctx context.Context, task workqueue.AgentTask) (string,
 	if t.Status != controlplane.StatusActive || app.Status != controlplane.StatusActive {
 		return s.reject(ctx, task, "scope_disabled")
 	}
+	ctx = runtimecontext.WithStorageScope(ctx, task.Scope.StorageScope)
 	if task.Media.FileID == "" || len(task.Media.FileID) > 1024 || task.Media.Size < 0 || task.Media.Size > MaxBytes {
 		return s.reject(ctx, task, "size_or_identity")
 	}

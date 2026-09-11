@@ -20,6 +20,9 @@ const maxMigrationChunks = 100000
 const migrationBatch = 50
 
 func (r *KnowledgeRouter) withSync(ctx context.Context, scope runtimecontext.Scope, fn func(context.Context, *controlplane.KnowledgeSync, func() error) error) error {
+	if _, _, err := runtimecontext.ValidateStorageScope(ctx, scope.StorageScope); err != nil {
+		return err
+	}
 	repo, ok := r.repository.(controlplane.KnowledgeSyncRepository)
 	if !ok {
 		return errors.New("durable knowledge coordination unavailable")

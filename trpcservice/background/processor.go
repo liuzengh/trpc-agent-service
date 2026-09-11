@@ -134,6 +134,7 @@ func (p *Processor) process(ctx context.Context, job Job) error {
 	if revision.AppID != job.AppID {
 		return errors.New("background job revision scope mismatch")
 	}
+	ctx = runtimecontext.WithStorageScope(ctx, "t/"+job.TenantID+"/a/"+job.AppID)
 	switch job.Type {
 	case JobKnowledgeBackfill, JobKnowledgeVerify:
 		return p.processKnowledgeMigration(ctx, job, revision)

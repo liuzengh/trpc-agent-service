@@ -45,7 +45,7 @@ func attachmentFixture(t *testing.T) (*Service, workqueue.AgentTask) {
 }
 func TestAttachmentImportIsImmutableAndSessionScoped(t *testing.T) {
 	s, task := attachmentFixture(t)
-	ctx := context.Background()
+	ctx := runtimecontext.WithStorageScope(context.Background(), task.Scope.StorageScope)
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
@@ -95,7 +95,7 @@ func TestAttachmentContentAllowlist(t *testing.T) {
 	if err != nil || !strings.Contains(reply, "未导入") {
 		t.Fatal("rejection feedback missing")
 	}
-	keys, err := s.artifacts.ListArtifactKeys(context.Background(), artifact.SessionInfo{AppName: task.Scope.StorageScope, UserID: task.UserID, SessionID: task.SessionID})
+	keys, err := s.artifacts.ListArtifactKeys(runtimecontext.WithStorageScope(context.Background(), task.Scope.StorageScope), artifact.SessionInfo{AppName: task.Scope.StorageScope, UserID: task.UserID, SessionID: task.SessionID})
 	if err != nil || len(keys) != 0 {
 		t.Fatal("rejected file was persisted")
 	}

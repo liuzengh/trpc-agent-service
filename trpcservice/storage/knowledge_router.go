@@ -101,6 +101,9 @@ func (r *KnowledgeRouter) UpsertDocument(
 	if err := scope.Validate(); err != nil {
 		return 0, err
 	}
+	if _, _, err := runtimecontext.ValidateStorageScope(ctx, scope.StorageScope); err != nil {
+		return 0, err
+	}
 	if revision.TenantID != scope.TenantID || revision.AppID != scope.AppID || revision.ID != scope.RevisionID {
 		return 0, errors.New("knowledge revision scope mismatch")
 	}
@@ -203,6 +206,9 @@ func (r *KnowledgeRouter) DeleteDocument(
 	ctx context.Context, scope runtimecontext.Scope, revision controlplane.AgentRevision, documentID string,
 ) error {
 	if err := scope.Validate(); err != nil {
+		return err
+	}
+	if _, _, err := runtimecontext.ValidateStorageScope(ctx, scope.StorageScope); err != nil {
 		return err
 	}
 	if revision.TenantID != scope.TenantID || revision.AppID != scope.AppID || revision.ID != scope.RevisionID {
@@ -379,6 +385,9 @@ func (r *KnowledgeRouter) handleFor(
 	revision controlplane.AgentRevision,
 ) (*knowledgeHandle, bool, error) {
 	if err := scope.Validate(); err != nil {
+		return nil, false, err
+	}
+	if _, _, err := runtimecontext.ValidateStorageScope(ctx, scope.StorageScope); err != nil {
 		return nil, false, err
 	}
 	if revision.TenantID != scope.TenantID || revision.AppID != scope.AppID || revision.ID != scope.RevisionID {
@@ -666,6 +675,9 @@ func (k *scopedKnowledge) Search(
 	ctx context.Context,
 	request *knowledge.SearchRequest,
 ) (*knowledge.SearchResult, error) {
+	if _, _, err := runtimecontext.ValidateStorageScope(ctx, "t/"+k.tenantID+"/a/"+k.appID); err != nil {
+		return nil, err
+	}
 	ctx, span := startStorageSpan(
 		ctx, "knowledge.search", "t/"+k.tenantID+"/a/"+k.appID,
 	)

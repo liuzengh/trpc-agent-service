@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -24,18 +23,18 @@ func TestArtifactRouterVersionsAndTenantScope(t *testing.T) {
 		AppName: "t/tutorial-tenant/a/tutorial-app", UserID: "alice", SessionID: "session-a",
 	}
 	for index, data := range []string{"version-zero", "version-one"} {
-		version, err := router.SaveArtifact(context.Background(), info, "report.txt", &artifact.Artifact{
+		version, err := router.SaveArtifact(storageTestContext(), info, "report.txt", &artifact.Artifact{
 			Data: []byte(data), MimeType: "text/plain",
 		})
 		if err != nil || version != index {
 			t.Fatalf("version=%d err=%v", version, err)
 		}
 	}
-	loaded, err := router.LoadArtifact(context.Background(), info, "report.txt", nil)
+	loaded, err := router.LoadArtifact(storageTestContext(), info, "report.txt", nil)
 	if err != nil || string(loaded.Data) != "version-one" {
 		t.Fatalf("artifact=%+v err=%v", loaded, err)
 	}
-	if _, err := router.ListArtifactKeys(context.Background(), artifact.SessionInfo{
+	if _, err := router.ListArtifactKeys(storageTestContext(), artifact.SessionInfo{
 		AppName: "tutorial-app", UserID: "alice", SessionID: "session-a",
 	}); err == nil || !strings.Contains(err.Error(), "storage scope") {
 		t.Fatalf("forged scope error=%v", err)

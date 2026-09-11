@@ -156,12 +156,12 @@ func TestAdminUpsertsKnowledgeDocument(t *testing.T) {
 		t.Fatalf("chunks=%d err=%v", chunks, err)
 	}
 	kb, enabled, err := router.KnowledgeForRevision(
-		context.Background(), runtimecontext.TutorialScope(), data.Revisions[0],
+		runtimecontext.WithStorageScope(context.Background(), runtimecontext.TutorialScope().StorageScope), runtimecontext.TutorialScope(), data.Revisions[0],
 	)
 	if err != nil || !enabled {
 		t.Fatalf("enabled=%t err=%v", enabled, err)
 	}
-	result, err := kb.Search(context.Background(), &knowledge.SearchRequest{Query: "refunds"})
+	result, err := kb.Search(runtimecontext.WithStorageScope(context.Background(), runtimecontext.TutorialScope().StorageScope), &knowledge.SearchRequest{Query: "refunds"})
 	if err != nil || result.Document == nil {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}

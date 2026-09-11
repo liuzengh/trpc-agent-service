@@ -294,6 +294,10 @@ func (r *Runtime) ChatWithScope(
 	if err := input.Scope.Validate(); err != nil {
 		return ChatResult{}, fmt.Errorf("validate runtime scope: %w", err)
 	}
+	ctx = runtimecontext.WithStorageScope(ctx, input.Scope.StorageScope)
+	if _, _, err := runtimecontext.ValidateStorageScope(ctx, input.Scope.StorageScope); err != nil {
+		return ChatResult{}, err
+	}
 	input.MessageID = strings.TrimSpace(input.MessageID)
 	input.UserID = strings.TrimSpace(input.UserID)
 	input.SessionID = strings.TrimSpace(input.SessionID)

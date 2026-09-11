@@ -39,6 +39,7 @@ func TestKnowledgeRouterRemoteQdrantIntegration(t *testing.T) {
 	var scopes []runtimecontext.Scope
 	for _, identity := range [][2]string{{"tenant-a", "app-a"}, {"tenant-a", "app-b"}, {"tenant-b", "app-a"}} {
 		scope, _ := runtimecontext.NewScope(identity[0], identity[1], identity[0]+"-"+identity[1]+"-v1", "http", "test-binding")
+		ctx := runtimecontext.WithStorageScope(ctx, scope.StorageScope)
 		rev := controlplane.AgentRevision{ID: scope.RevisionID, TenantID: scope.TenantID, AppID: scope.AppID}
 		rev.KnowledgeConfig, _ = json.Marshal(map[string]any{"enabled": true, "embedding": map[string]any{"provider": "openai", "model": "test-model", "base_url": server.URL, "dimensions": 3, "secret_ref": "test://embedding"}})
 		backendConfig, _ := json.Marshal(map[string]any{"host": host, "port": port, "collection_name": collection, "dimensions": 3})
@@ -61,6 +62,7 @@ func TestKnowledgeRouterRemoteQdrantIntegration(t *testing.T) {
 		scopes = append(scopes, scope)
 	}
 	for i, router := range routers {
+		ctx := runtimecontext.WithStorageScope(ctx, scopes[i].StorageScope)
 		kb, enabled, err := router.KnowledgeForRevision(ctx, scopes[i], revisions[i])
 		if err != nil || !enabled {
 			t.Fatal(err)

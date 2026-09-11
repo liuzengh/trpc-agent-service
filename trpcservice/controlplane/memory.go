@@ -454,7 +454,7 @@ func (r *MemoryRepository) TransitionBackendMigration(
 		return BackendMigration{}, err
 	}
 	if validResource(current.ResourceType) {
-		if _, _, held := ResourceFromContext(ctx, tenantID, current.AppID, current.ResourceType); !held {
+		if !ResourceAccessHeld(ctx, tenantID, current.AppID, current.ResourceType, "") {
 			var out BackendMigration
 			err := r.WithResourceSync(ctx, tenantID, current.AppID, current.ResourceType, func(ctx context.Context, s *ResourceSync, _ func() error) error {
 				if (nextState == MigrationCutover || nextState == MigrationCompleted) && !validResourceProof(*s, current) {

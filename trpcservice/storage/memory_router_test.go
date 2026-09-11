@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -25,14 +24,14 @@ func TestMemoryRouterUsesTenantScopedAppName(t *testing.T) {
 		_ = repository.Close()
 	})
 	key := memory.UserKey{AppName: "t/tutorial-tenant/a/tutorial-app", UserID: "alice"}
-	if err := router.AddMemory(context.Background(), key, "likes tea", []string{"preference"}); err != nil {
+	if err := router.AddMemory(storageTestContext(), key, "likes tea", []string{"preference"}); err != nil {
 		t.Fatalf("add memory: %v", err)
 	}
-	entries, err := router.ReadMemories(context.Background(), key, 10)
+	entries, err := router.ReadMemories(storageTestContext(), key, 10)
 	if err != nil || len(entries) != 1 || entries[0].Memory.Memory != "likes tea" {
 		t.Fatalf("entries=%+v err=%v", entries, err)
 	}
-	if _, err := router.ReadMemories(context.Background(), memory.UserKey{
+	if _, err := router.ReadMemories(storageTestContext(), memory.UserKey{
 		AppName: "tutorial-app", UserID: "alice",
 	}, 10); err == nil || !strings.Contains(err.Error(), "storage scope") {
 		t.Fatalf("forged scope error=%v", err)
@@ -61,10 +60,10 @@ func TestMemoryRouterRedisBackend(t *testing.T) {
 		_ = repository.Close()
 	})
 	key := memory.UserKey{AppName: "t/tenant-a/a/app-a", UserID: "alice"}
-	if err := router.AddMemory(context.Background(), key, "redis memory", nil); err != nil {
+	if err := router.AddMemory(storageTestContext("t/tenant-a/a/app-a"), key, "redis memory", nil); err != nil {
 		t.Fatalf("add memory: %v", err)
 	}
-	entries, err := router.ReadMemories(context.Background(), key, 10)
+	entries, err := router.ReadMemories(storageTestContext("t/tenant-a/a/app-a"), key, 10)
 	if err != nil || len(entries) != 1 || entries[0].Memory.Memory != "redis memory" {
 		t.Fatalf("entries=%+v err=%v", entries, err)
 	}
@@ -80,7 +79,7 @@ func TestResolveBackendBindingPrefersAppOverride(t *testing.T) {
 		},
 	}
 	repository := controlplane.NewMemoryRepository(data)
-	binding, err := resolveBackendBinding(context.Background(), repository, "tenant-a", "app-a", "memory")
+	binding, err := resolveBackendBinding(storageTestContext(), repository, "tenant-a", "app-a", "memory")
 	if err != nil || binding.ID != "app" {
 		t.Fatalf("binding=%+v err=%v", binding, err)
 	}
@@ -95,7 +94,7 @@ func TestMemoryRouterMigrationDualWriteAndCutover(t *testing.T) {
 		ResourceType: "memory", BackendType: "inmemory", Config: json.RawMessage(`{}`),
 		MigrationState: "migration_target", Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
-	if err := repository.CreateBackendBinding(context.Background(), target); err != nil {
+	if err := repository.CreateBackendBinding(storageTestContext(), target); err != nil {
 		t.Fatalf("create target: %v", err)
 	}
 	migration := controlplane.BackendMigration{
@@ -105,7 +104,7 @@ func TestMemoryRouterMigrationDualWriteAndCutover(t *testing.T) {
 		Checkpoint: json.RawMessage(`{}`), Verification: json.RawMessage(`{}`),
 		Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
-	if err := repository.CreateBackendMigration(context.Background(), migration); err != nil {
+	if err := repository.CreateBackendMigration(storageTestContext(), migration); err != nil {
 		t.Fatalf("create migration: %v", err)
 	}
 	router, _ := NewMemoryRouter(repository, secret.StaticStore{})
@@ -114,30 +113,30 @@ func TestMemoryRouterMigrationDualWriteAndCutover(t *testing.T) {
 		_ = repository.Close()
 	})
 	key := memory.UserKey{AppName: "t/tutorial-tenant/a/tutorial-app", UserID: "alice"}
-	if err := router.AddMemory(context.Background(), key, "written to both", nil); err != nil {
+	if err := router.AddMemory(storageTestContext(), key, "written to both", nil); err != nil {
 		t.Fatalf("dual write: %v", err)
 	}
-	targetService, err := router.cachedService(context.Background(), target)
+	targetService, err := router.cachedService(storageTestContext(), target)
 	if err != nil {
 		t.Fatalf("target service: %v", err)
 	}
-	targetEntries, err := targetService.ReadMemories(context.Background(), key, 10)
+	targetEntries, err := targetService.ReadMemories(storageTestContext(), key, 10)
 	if err != nil || len(targetEntries) != 1 {
 		t.Fatalf("target entries=%+v err=%v", targetEntries, err)
 	}
-	if verified, err := router.VerifyUser(context.Background(), "tutorial-tenant", migration.ID, "alice"); err != nil || !verified.Passed {
+	if verified, err := router.VerifyUser(storageTestContext(), "tutorial-tenant", migration.ID, "alice"); err != nil || !verified.Passed {
 		t.Fatalf("verify=%+v err=%v", verified, err)
 	}
 	if _, err := repository.TransitionBackendMigration(
-		context.Background(), "tutorial-tenant", migration.ID,
+		storageTestContext(), "tutorial-tenant", migration.ID,
 		controlplane.MigrationCutover, 1, nil, nil,
 	); err != nil {
 		t.Fatalf("cutover: %v", err)
 	}
-	if err := router.AddMemory(context.Background(), key, "target primary", nil); err != nil {
+	if err := router.AddMemory(storageTestContext(), key, "target primary", nil); err != nil {
 		t.Fatalf("cutover write: %v", err)
 	}
-	entries, err := router.ReadMemories(context.Background(), key, 10)
+	entries, err := router.ReadMemories(storageTestContext(), key, 10)
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("cutover entries=%+v err=%v", entries, err)
 	}
@@ -152,7 +151,7 @@ func TestMemoryRouterRecordsRepairBacklogOnSecondaryFailure(t *testing.T) {
 		ResourceType: "memory", BackendType: "inmemory",
 		Config: json.RawMessage(`{"memory_limit":1}`), MigrationState: "migration_target", Version: 1,
 	}
-	_ = repository.CreateBackendBinding(context.Background(), target)
+	_ = repository.CreateBackendBinding(storageTestContext(), target)
 	migration := controlplane.BackendMigration{
 		ID: "repair-migration", TenantID: "tutorial-tenant", AppID: "tutorial-app",
 		ResourceType: "memory", SourceBindingID: "tutorial-memory-backend",
@@ -160,21 +159,21 @@ func TestMemoryRouterRecordsRepairBacklogOnSecondaryFailure(t *testing.T) {
 		Checkpoint: json.RawMessage(`{}`), Verification: json.RawMessage(`{}`),
 		Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
-	_ = repository.CreateBackendMigration(context.Background(), migration)
+	_ = repository.CreateBackendMigration(storageTestContext(), migration)
 	router, _ := NewMemoryRouter(repository, secret.StaticStore{})
 	t.Cleanup(func() {
 		_ = router.Close()
 		_ = repository.Close()
 	})
 	key := memory.UserKey{AppName: "t/tutorial-tenant/a/tutorial-app", UserID: "alice"}
-	if err := router.AddMemory(context.Background(), key, "first", nil); err != nil {
+	if err := router.AddMemory(storageTestContext(), key, "first", nil); err != nil {
 		t.Fatalf("first add: %v", err)
 	}
-	if err := router.AddMemory(context.Background(), key, "second", nil); err == nil {
+	if err := router.AddMemory(storageTestContext(), key, "second", nil); err == nil {
 		t.Fatal("expected secondary limit error")
 	}
 	stored, err := repository.GetBackendMigration(
-		context.Background(), "tutorial-tenant", migration.ID,
+		storageTestContext(), "tutorial-tenant", migration.ID,
 	)
 	if err != nil || stored.RepairBacklog != 1 {
 		t.Fatalf("migration=%+v err=%v", stored, err)
@@ -190,7 +189,7 @@ func TestMemoryRouterBackfillsAndVerifiesUser(t *testing.T) {
 		ResourceType: "memory", BackendType: "inmemory", Config: json.RawMessage(`{}`),
 		MigrationState: "migration_target", Version: 1,
 	}
-	_ = repository.CreateBackendBinding(context.Background(), target)
+	_ = repository.CreateBackendBinding(storageTestContext(), target)
 	migration := controlplane.BackendMigration{
 		ID: "backfill-migration", TenantID: "tutorial-tenant", AppID: "tutorial-app",
 		ResourceType: "memory", SourceBindingID: "tutorial-memory-backend",
@@ -198,22 +197,22 @@ func TestMemoryRouterBackfillsAndVerifiesUser(t *testing.T) {
 		Checkpoint: json.RawMessage(`{}`), Verification: json.RawMessage(`{}`),
 		Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
-	_ = repository.CreateBackendMigration(context.Background(), migration)
+	_ = repository.CreateBackendMigration(storageTestContext(), migration)
 	router, _ := NewMemoryRouter(repository, secret.StaticStore{})
 	t.Cleanup(func() {
 		_ = router.Close()
 		_ = repository.Close()
 	})
 	sourceBinding, _ := repository.GetBackendBinding(
-		context.Background(), "tutorial-tenant", "tutorial-memory-backend",
+		storageTestContext(), "tutorial-tenant", "tutorial-memory-backend",
 	)
-	source, _ := router.cachedService(context.Background(), sourceBinding)
+	source, _ := router.cachedService(storageTestContext(), sourceBinding)
 	key := memory.UserKey{AppName: "t/tutorial-tenant/a/tutorial-app", UserID: "alice"}
-	if err := source.AddMemory(context.Background(), key, "source-only", nil); err != nil {
+	if err := source.AddMemory(storageTestContext(), key, "source-only", nil); err != nil {
 		t.Fatalf("source add: %v", err)
 	}
 	verification, err := router.BackfillUser(
-		context.Background(), "tutorial-tenant", migration.ID, "alice",
+		storageTestContext(), "tutorial-tenant", migration.ID, "alice",
 	)
 	if err != nil || !verification.Passed || verification.SourceCount != 1 ||
 		verification.TargetCount != 1 {

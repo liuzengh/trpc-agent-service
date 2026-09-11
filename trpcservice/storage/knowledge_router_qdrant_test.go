@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"strconv"
@@ -44,17 +43,17 @@ func TestKnowledgeRouterQdrantIntegration(t *testing.T) {
 	})
 	scope := runtimecontext.TutorialScope()
 	revision := data.Revisions[0]
-	if _, err := router.UpsertDocument(context.Background(), scope, revision, KnowledgeDocument{
+	if _, err := router.UpsertDocument(storageTestContext(), scope, revision, KnowledgeDocument{
 		ID: "qdrant-handbook", Name: "Qdrant handbook",
 		Content: "enterprise refund policy permits returns within thirty days",
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-	kb, _, err := router.KnowledgeForRevision(context.Background(), scope, revision)
+	kb, _, err := router.KnowledgeForRevision(storageTestContext(), scope, revision)
 	if err != nil {
 		t.Fatalf("knowledge: %v", err)
 	}
-	result, err := kb.Search(context.Background(), &knowledge.SearchRequest{
+	result, err := kb.Search(storageTestContext(), &knowledge.SearchRequest{
 		Query: "enterprise refund policy", MaxResults: 3,
 	})
 	if err != nil || result.Document == nil {

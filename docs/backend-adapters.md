@@ -15,6 +15,8 @@
 
 路由器不接收外部 `tenant_id` 参数，而是从内部 `storage_scope` 和可信 context 中取值，并要求两者一致。
 
+可信调用方使用 `runtimecontext.WithStorageScope(ctx, storageScope)` 注入授权范围。Router 不接受无身份的 context，并交叉检查框架 Invocation；嵌套绑定不能扩大原授权范围。健康探测使用保留的无业务数据命名空间，不构成租户访问入口。
+
 当前代码已接入的物理实现：Session startup/InMemory/Redis/PostgreSQL，Memory InMemory/Redis/PostgreSQL，Artifact InMemory/S3-compatible，Knowledge InMemory/Qdrant，Control/Audit/Job PostgreSQL。MySQL、MongoDB、Milvus 等仍属于框架可扩展选项，不在默认二进制依赖中。
 
 ```go
@@ -116,7 +118,7 @@ Mem0 或企业自建 Memory API 适合把提取、去重、检索交给专用服
 
 ### 自动 Memory 任务
 
-框架内置 auto-memory worker 是进程内队列。生产环境由 `TenantMemoryRouter.EnqueueAutoMemoryJob` 写持久化任务，再由 Job Worker 调用 `memory/extractor.MemoryExtractor` 和目标 `memory.Service`。这样可以记录重试次数、提取水位、模型成本和失败原因。
+框架内置 auto-memory worker 是进程内队列。生产路径由平台 Worker 的 `enqueueSessionJobs` 写持久化任务，再由 Job Worker 调用 `memory/extractor.MemoryExtractor` 和目标 `memory.Service`，不依赖框架进程内队列。这样可以记录重试次数、提取水位、模型成本和失败原因。
 
 ## 4. Summary 存储
 
@@ -134,6 +136,8 @@ summarizer model and revision
 ```
 
 异步任务只能以更高水位更新 Summary。任务队列按 Session Key 去重，同一 filter 可以合并到最高目标水位。
+
+当前实现生成时不持有存储锁，提交时校验快照与摘要边界，旧结果不能覆盖已更新的摘要。配置 `summary_every_turns > 0` 后，单 LLMAgent 使用框架的整会话摘要投影；后续模型请求包含持久摘要及未覆盖的历史，而不是仅生成摘要后继续发送全部原始消息。
 
 ## 5. Knowledge 和向量库
 

@@ -201,6 +201,24 @@ func (s *dualSessionService) CreateSessionSummary(
 	return nil
 }
 
+func (s *dualSessionService) CopySummaries(ctx context.Context, key session.Key, snapshot *session.Session) error {
+	for index, backend := range []session.Service{s.primary, s.secondary} {
+		copier, ok := backend.(interface {
+			CopySummaries(context.Context, session.Key, *session.Session) error
+		})
+		if !ok {
+			return fmt.Errorf("summary import unavailable")
+		}
+		if err := copier.CopySummaries(ctx, key, snapshot); err != nil {
+			if index == 1 {
+				return s.secondaryError(ctx, err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *dualSessionService) EnqueueSummaryJob(
 	ctx context.Context,
 	sess *session.Session,

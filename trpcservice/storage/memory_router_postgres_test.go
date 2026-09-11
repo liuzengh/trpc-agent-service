@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"testing"
@@ -34,13 +33,13 @@ func TestMemoryRouterPostgresIntegration(t *testing.T) {
 		_ = repository.Close()
 	})
 	key := memory.UserKey{AppName: "t/tenant-pg/a/app-pg", UserID: "integration-user"}
-	if err := router.ClearMemories(context.Background(), key); err != nil {
+	if err := router.ClearMemories(storageTestContext("t/tenant-pg/a/app-pg"), key); err != nil {
 		t.Fatalf("clear old memories: %v", err)
 	}
-	if err := router.AddMemory(context.Background(), key, "postgres memory", []string{"test"}); err != nil {
+	if err := router.AddMemory(storageTestContext("t/tenant-pg/a/app-pg"), key, "postgres memory", []string{"test"}); err != nil {
 		t.Fatalf("add memory: %v", err)
 	}
-	entries, err := router.ReadMemories(context.Background(), key, 10)
+	entries, err := router.ReadMemories(storageTestContext("t/tenant-pg/a/app-pg"), key, 10)
 	if err != nil || len(entries) != 1 || entries[0].Memory.Memory != "postgres memory" {
 		t.Fatalf("entries=%+v err=%v", entries, err)
 	}
@@ -57,20 +56,20 @@ func TestMemoryRouterPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func(closer interface{ Close() error }) { _ = closer.Close() }(reopened)
-	entries, err = reopened.ReadMemories(context.Background(), key, 10)
+	entries, err = reopened.ReadMemories(storageTestContext("t/tenant-pg/a/app-pg"), key, 10)
 	if err != nil || len(entries) != 1 || entries[0].Memory.Memory != "postgres memory" {
 		t.Fatal("memory missing after reopen", err)
 	}
-	if err := reopened.AddMemory(context.Background(), key, "postgres memory", []string{"test"}); err != nil {
+	if err := reopened.AddMemory(storageTestContext("t/tenant-pg/a/app-pg"), key, "postgres memory", []string{"test"}); err != nil {
 		t.Fatal(err)
 	}
-	entries, err = reopened.ReadMemories(context.Background(), key, 10)
+	entries, err = reopened.ReadMemories(storageTestContext("t/tenant-pg/a/app-pg"), key, 10)
 	if err != nil || len(entries) != 1 {
 		t.Fatal("idempotent write changed memory count", err)
 	}
 	other := key
 	other.UserID = "other-user"
-	entries, err = reopened.ReadMemories(context.Background(), other, 10)
+	entries, err = reopened.ReadMemories(storageTestContext("t/tenant-pg/a/app-pg"), other, 10)
 	if err != nil || len(entries) != 0 {
 		t.Fatal("cross-user memory read", err)
 	}

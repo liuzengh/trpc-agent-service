@@ -38,14 +38,14 @@ func safeSessionFixture(t *testing.T) (*controlplane.MemoryRepository, *SessionR
 	}
 	t.Cleanup(func() { _ = r.Close(); _ = repo.Close() })
 	b := controlplane.BackendBinding{ID: "target-safe", TenantID: "tutorial-tenant", AppID: "tutorial-app", ResourceType: "session", BackendType: "inmemory", Config: json.RawMessage(`{}`), Version: 1, MigrationState: "migration_target"}
-	if err := repo.CreateBackendBinding(context.Background(), b); err != nil {
+	if err := repo.CreateBackendBinding(storageTestContext(), b); err != nil {
 		t.Fatal(err)
 	}
 	m := controlplane.BackendMigration{ID: "migration-safe", TenantID: b.TenantID, AppID: b.AppID, ResourceType: "session", SourceBindingID: "tutorial-session-backend", TargetBindingID: b.ID, State: controlplane.MigrationBackfill, Version: 1, Checkpoint: json.RawMessage(`{}`), Verification: json.RawMessage(`{}`)}
-	if err := repo.CreateBackendMigration(context.Background(), m); err != nil {
+	if err := repo.CreateBackendMigration(storageTestContext(), m); err != nil {
 		t.Fatal(err)
 	}
-	target, err := r.cachedService(context.Background(), b)
+	target, err := r.cachedService(storageTestContext(), b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func safeSessionFixture(t *testing.T) (*controlplane.MemoryRepository, *SessionR
 }
 func TestSessionDualWriteKeepsEventIdentityAndSingleSummary(t *testing.T) {
 	repo, r, m, sum, key, target := safeSessionFixture(t)
-	ctx := context.Background()
+	ctx := storageTestContext()
 	sess, err := r.CreateSession(ctx, key, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +113,7 @@ func (s *stagingFault) AppendEvent(ctx context.Context, sess *session.Session, e
 }
 func TestSessionImportStagesWithoutDestroyingTargetAndCoordinatesWrites(t *testing.T) {
 	_, r, m, _, key, target := safeSessionFixture(t)
-	ctx := context.Background()
+	ctx := storageTestContext()
 	source, _ := r.startup.CreateSession(ctx, key, session.StateMap{"value": []byte("original")})
 	for i := 0; i < 3; i++ {
 		if err := r.startup.AppendEvent(ctx, source, &event.Event{ID: fmt.Sprint(i), Timestamp: time.Now(), Response: &model.Response{Choices: []model.Choice{{Message: model.NewUserMessage(fmt.Sprint(i))}}}}); err != nil {
@@ -176,7 +176,7 @@ func TestSessionImportStagesWithoutDestroyingTargetAndCoordinatesWrites(t *testi
 }
 func TestSessionStorageRejectsStaleFencingToken(t *testing.T) {
 	_, r, _, _, key, _ := safeSessionFixture(t)
-	ctx := context.Background()
+	ctx := storageTestContext()
 	sess, _ := r.CreateSession(ctx, key, nil)
 	if _, err := r.GetSession(coordination.ContextWithFencingToken(ctx, 4), key); err != nil {
 		t.Fatal(err)
@@ -184,5 +184,45 @@ func TestSessionStorageRejectsStaleFencingToken(t *testing.T) {
 	err := r.AppendEvent(coordination.ContextWithFencingToken(ctx, 3), sess, &event.Event{ID: "stale", Response: &model.Response{}})
 	if !errors.Is(err, coordination.ErrLeaseLost) {
 		t.Fatal("stale token reached storage")
+	}
+}
+
+type summaryWriteFault struct {
+	session.Service
+	fail bool
+}
+
+func (s *summaryWriteFault) UpdateSessionState(ctx context.Context, key session.Key, state session.StateMap) error {
+	if _, summaryWrite := state[portableSummariesKey]; summaryWrite && s.fail {
+		return errors.New("synthetic secondary summary failure")
+	}
+	return s.Service.UpdateSessionState(ctx, key, state)
+}
+
+func TestSummaryRetryRepairsSecondaryWithoutRegenerating(t *testing.T) {
+	_, r, m, sum, key, target := safeSessionFixture(t)
+	ctx := storageTestContext()
+	sess, err := r.CreateSession(ctx, key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AppendEvent(ctx, sess, &event.Event{ID: "one", Timestamp: time.Now(), Response: &model.Response{Choices: []model.Choice{{Message: model.NewUserMessage("hello")}}}}); err != nil {
+		t.Fatal(err)
+	}
+	fault := &summaryWriteFault{Service: target.Service, fail: true}
+	target.Service = fault
+	if err := r.CreateSessionSummary(ctx, sess, "", true); err == nil {
+		t.Fatal("secondary failure was hidden")
+	}
+	fault.fail = false
+	if err := r.CreateSessionSummary(ctx, sess, "", true); err != nil {
+		t.Fatal(err)
+	}
+	if sum.calls.Load() != 1 {
+		t.Fatal("repair unnecessarily called the model again")
+	}
+	v, err := r.VerifySession(ctx, m.TenantID, m.ID, SessionMigrationItem{key.UserID, key.SessionID})
+	if err != nil || !v.Passed {
+		t.Fatalf("secondary summary not repaired: %+v %v", v, err)
 	}
 }

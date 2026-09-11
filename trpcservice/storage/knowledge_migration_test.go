@@ -41,7 +41,7 @@ func migrationFixture(t *testing.T, override ...controlplane.BackendBinding) (*c
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = r.Close(); _ = repo.Close() })
-	ctx := context.Background()
+	ctx := storageTestContext()
 	scope := runtimecontext.TutorialScope()
 	rev := data.Revisions[0]
 	cfg, _ := parseRevisionKnowledgeConfig(rev.KnowledgeConfig)
@@ -65,7 +65,7 @@ func TestKnowledgeMigrationQdrantIntegration(t *testing.T) {
 	}
 	cfg, _ := json.Marshal(map[string]any{"host": host, "port": port, "collection_name": fmt.Sprintf("migration_%x", time.Now().UnixNano()), "dimensions": 32})
 	_, r, rev, m, source, target := migrationFixture(t, controlplane.BackendBinding{BackendType: "qdrant", Config: cfg})
-	ctx := context.Background()
+	ctx := storageTestContext()
 	scope := runtimecontext.TutorialScope()
 	for i := 0; i < 61; i++ {
 		if _, err := upsertKnowledgeHandle(ctx, scope, source, KnowledgeDocument{ID: fmt.Sprintf("legacy-%d", i), Content: fmt.Sprintf("legacy migration policy %d", i)}); err != nil {
@@ -80,7 +80,7 @@ func TestKnowledgeMigrationQdrantIntegration(t *testing.T) {
 }
 func finishKnowledgeMigration(t *testing.T, r *KnowledgeRouter, rev controlplane.AgentRevision, id string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := storageTestContext()
 	scope := runtimecontext.TutorialScope()
 	for i := 0; i < 20; i++ {
 		done, err := r.BackfillKnowledgeBatch(ctx, scope, rev, id)
@@ -107,7 +107,7 @@ func finishKnowledgeMigration(t *testing.T, r *KnowledgeRouter, rev controlplane
 }
 func TestKnowledgeHistoricalMigrationAndStaleProof(t *testing.T) {
 	repo, r, rev, m, source, target := migrationFixture(t)
-	ctx := context.Background()
+	ctx := storageTestContext()
 	scope := runtimecontext.TutorialScope()
 	// Legacy history exists only in the source vector store: no document
 	// manifest or pending intent can enumerate it for us.
@@ -186,7 +186,7 @@ func (s *failingVector) Add(ctx context.Context, doc *document.Document, v []flo
 }
 func TestKnowledgePendingIntentRepairAndVerificationMismatch(t *testing.T) {
 	repo, r, rev, m, _, target := migrationFixture(t)
-	ctx := context.Background()
+	ctx := storageTestContext()
 	scope := runtimecontext.TutorialScope()
 	broken := &failingVector{target.store, true}
 	target.store = broken
