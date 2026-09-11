@@ -1,0 +1,154 @@
+name: trpc-agent-control
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PLATFORM_POSTGRES_DB:-agent_platform}
+      POSTGRES_USER: ${PLATFORM_POSTGRES_USER:-platform_admin}
+      POSTGRES_PASSWORD: ${PLATFORM_POSTGRES_PASSWORD:?set PostgreSQL administrator password}
+    volumes:
+      - control-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  control-api:
+    image: ${CONTROL_API_IMAGE:-trpc-agent-service/control-api:local}
+    restart: unless-stopped
+    depends_on:
+      database-schemas:
+        condition: service_completed_successfully
+    environment:
+      CONTROL_HTTP_ADDRESS: :8080
+      CONTROL_DATABASE_URL: ${CONTROL_DATABASE_URL:?set control_runtime DSN for the shared database}
+      CONTROL_MIGRATION_DATABASE_URL: ${CONTROL_MIGRATION_DATABASE_URL:?set control_migrator DSN for the same database/schema}
+      CONTROL_PROFILE_CREDENTIAL_KEY: ${CONTROL_PROFILE_CREDENTIAL_KEY:?set a base64-encoded 32-byte profile encryption key}
+      CONTROL_DEPLOYMENT_EXPECTED_CONTRACT_DIGEST: ${CONTROL_DEPLOYMENT_EXPECTED_CONTRACT_DIGEST:?set the release-pinned deployment platform contract digest}
+      CONTROL_SESSION_LIFETIME: ${CONTROL_SESSION_LIFETIME:-24h}
+      CONTROL_SESSION_COOKIE_NAME: ${CONTROL_SESSION_COOKIE_NAME:-control_session}
+      CONTROL_SESSION_COOKIE_SECURE: ${CONTROL_SESSION_COOKIE_SECURE:-true}
+      CONTROL_BOOTSTRAP_MODE: ${CONTROL_BOOTSTRAP_MODE:-auto}
+      CONTROL_BOOTSTRAP_USERNAME: ${CONTROL_BOOTSTRAP_USERNAME:-platform-admin}
+      CONTROL_BOOTSTRAP_DISPLAY_NAME: ${CONTROL_BOOTSTRAP_DISPLAY_NAME:-Platform Operator}
+      CONTROL_BOOTSTRAP_PASSWORD: ${CONTROL_BOOTSTRAP_PASSWORD:-admin1234567}
+    expose:
+      - "8080"
+    stop_grace_period: 30s
+
+  database-schemas:
+    image: postgres:17.6-alpine
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${PLATFORM_POSTGRES_USER:-platform_admin}
+      PGDATABASE: ${PLATFORM_POSTGRES_DB:-agent_platform}
+      PGPASSWORD: ${PLATFORM_POSTGRES_PASSWORD:?set PostgreSQL administrator password}
+      CONTROL_MIGRATOR_PASSWORD: ${CONTROL_MIGRATOR_PASSWORD:?set control_migrator password}
+      CONTROL_RUNTIME_PASSWORD: ${CONTROL_RUNTIME_PASSWORD:?set control_runtime password}
+      GATEWAY_MIGRATOR_PASSWORD: ${GATEWAY_MIGRATOR_PASSWORD:?set gateway_migrator password}
+      GATEWAY_RUNTIME_PASSWORD: ${GATEWAY_RUNTIME_PASSWORD:?set gateway_runtime password}
+      WORKER_MIGRATOR_PASSWORD: ${WORKER_MIGRATOR_PASSWORD:?set worker_migrator password}
+      WORKER_RUNTIME_PASSWORD: ${WORKER_RUNTIME_PASSWORD:?set worker_runtime password}
+      SESSION_MIGRATOR_PASSWORD: ${SESSION_MIGRATOR_PASSWORD:?set session_migrator password}
+      SESSION_RUNTIME_PASSWORD: ${SESSION_RUNTIME_PASSWORD:?set session_runtime password}
+    volumes:
+      - ./provision-schemas.sh:/provision-schemas.sh:ro
+      - ./provision-schemas.sql:/provision-schemas.sql:ro
+    entrypoint: ["/bin/sh", "/provision-schemas.sh"]
+
+  nats:
+    image: nats:2.11.8-alpine
+    restart: unless-stopped
+    command: ["-c", "/etc/nats/server.conf"]
+    environment:
+      NATS_GATEWAY_PASSWORD: ${NATS_GATEWAY_PASSWORD:?set Gateway NATS password}
+      NATS_CONTROL_PASSWORD: ${NATS_CONTROL_PASSWORD:?set Control publisher NATS password}
+      NATS_RECONCILER_PASSWORD: ${NATS_RECONCILER_PASSWORD:?set NATS topology administration password}
+      NATS_WORKER_PASSWORD: ${NATS_WORKER_PASSWORD:?set Worker NATS password}
+    volumes:
+      - ../nats/server.conf:/etc/nats/server.conf:ro
+      - gateway-nats-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4222"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    expose: ["4222"]
+
+  nats-reconcile:
+    image: ${CHANNEL_GATEWAY_IMAGE:-trpc-agent-service/channel-gateway:local}
+    restart: "no"
+    command: ["reconcile"]
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      GATEWAY_NATS_URL: nats://nats:4222
+      GATEWAY_NATS_USER: reconciler
+      GATEWAY_NATS_PASSWORD: ${NATS_RECONCILER_PASSWORD:?set NATS topology administration password}
+      GATEWAY_NATS_TOPOLOGY_FILE: /etc/gateway/streams.yaml
+    volumes:
+      - ../nats/streams.yaml:/etc/gateway/streams.yaml:ro
+
+  channel-gateway:
+    image: ${CHANNEL_GATEWAY_IMAGE:-trpc-agent-service/channel-gateway:local}
+    restart: unless-stopped
+    depends_on:
+      database-schemas:
+        condition: service_completed_successfully
+      nats-reconcile:
+        condition: service_completed_successfully
+    environment:
+      GATEWAY_HTTP_ADDRESS: :8090
+      GATEWAY_ADMIN_ADDRESS: :8091
+      GATEWAY_DATABASE_URL: ${GATEWAY_DATABASE_URL:?set gateway_runtime DSN for the shared database}
+      GATEWAY_MIGRATION_DATABASE_URL: ${GATEWAY_MIGRATION_DATABASE_URL:?set gateway_migrator DSN for the same database/schema}
+      GATEWAY_NATS_URL: nats://nats:4222
+      GATEWAY_NATS_USER: gateway
+      GATEWAY_NATS_PASSWORD: ${NATS_GATEWAY_PASSWORD:?set Gateway NATS password}
+      GATEWAY_NATS_TOPOLOGY_FILE: /etc/gateway/streams.yaml
+      GATEWAY_ACCOUNT_SOURCE: control
+      GATEWAY_TELEGRAM_API_URL: ${GATEWAY_TELEGRAM_API_URL:-}
+      GATEWAY_INSTANCE_ID: ${GATEWAY_INSTANCE_ID:-gateway-1}
+      GATEWAY_CONTROL_URL: ${GATEWAY_CONTROL_URL:-}
+      GATEWAY_CONTROL_SCOPE_ID: ${GATEWAY_CONTROL_SCOPE_ID:-}
+      GATEWAY_CONTROL_SOURCE_EPOCH: ${GATEWAY_CONTROL_SOURCE_EPOCH:-}
+      # Optional for pure long_polling; required by each enabled webhook account.
+      GATEWAY_PUBLIC_ORIGIN: ${GATEWAY_PUBLIC_ORIGIN:-}
+      # Outbound access applies to both receive modes. Keep Control on NO_PROXY.
+      HTTPS_PROXY: ${GATEWAY_HTTPS_PROXY:-}
+      HTTP_PROXY: ${GATEWAY_HTTP_PROXY:-}
+      NO_PROXY: ${GATEWAY_NO_PROXY:-localhost,127.0.0.1,control-api,postgres,nats}
+      GATEWAY_TELEGRAM_PREFLIGHT_ENABLED: ${GATEWAY_TELEGRAM_PREFLIGHT_ENABLED:-true}
+      GATEWAY_WECOM_PREFLIGHT_ENABLED: ${GATEWAY_WECOM_PREFLIGHT_ENABLED:-true}
+      GATEWAY_CONTROL_CA_FILE: /run/gateway-control/ca.pem
+      GATEWAY_CONTROL_CERT_FILE: /run/gateway-control/client.pem
+      GATEWAY_CONTROL_KEY_FILE: /run/gateway-control/client-key.pem
+      GATEWAY_WORKER_URL: ${GATEWAY_WORKER_URL:-}
+      GATEWAY_WORKER_CA_FILE: ${GATEWAY_WORKER_CA_FILE:-}
+      GATEWAY_WORKER_CERT_FILE: ${GATEWAY_WORKER_CERT_FILE:-}
+      GATEWAY_WORKER_KEY_FILE: ${GATEWAY_WORKER_KEY_FILE:-}
+    volumes:
+      - ../nats/streams.yaml:/etc/gateway/streams.yaml:ro
+      - ${GATEWAY_CONTROL_CERTS_DIR:-./control-mtls}:/run/gateway-control:ro
+    expose: ["8090", "8091"]
+    healthcheck:
+      test: ["CMD", "/channel-gateway", "probe", "http://127.0.0.1:8091/readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 30s
+
+volumes:
+  control-postgres-data:
+  gateway-nats-data:

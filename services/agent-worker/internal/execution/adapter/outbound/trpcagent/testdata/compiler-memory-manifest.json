@@ -1,0 +1,142 @@
+{
+  "manifest_id": "rmf_worker_sdk_memory",
+  "tenant_id": "tenant-1",
+  "deployment_id": "dpl_worker_sdk_memory",
+  "deployment_revision_id": "dpr_worker_sdk_memory",
+  "revision_number": 1,
+  "content": {
+    "agent_plan": {
+      "nodes": {
+        "assistant": {
+          "callable_entries": [],
+          "instruction": "Use memory when appropriate.",
+          "kind": "llm",
+          "knowledge_resources": [],
+          "memory": {
+            "preload_limit": 0,
+            "resource": "memory",
+            "tools": [
+              "memory_add",
+              "memory_load"
+            ]
+          },
+          "model_resource": "primary",
+          "tool_resources": []
+        }
+      },
+      "root": "assistant"
+    },
+    "compiler_version": "deployment-compiler-v1",
+    "execution": {
+      "allowed_endpoint_hosts": [
+        "db.example.test",
+        "models.example.test",
+        "redis.internal"
+      ],
+      "backend": "worker-process-v1",
+      "max_output_tokens": 4096,
+      "max_run_seconds": 120,
+      "max_tool_calls": 16
+    },
+    "platform_contract": {
+      "digest": "sha256:1d178c65d7601143d462777b8cf63eb2262f3e1a7be5a53c0017b2de86906b1c",
+      "version": "platform-v1"
+    },
+    "resolved_requirements": {
+      "knowledge": {},
+      "models": {
+        "primary": "primary"
+      },
+      "tools": {}
+    },
+    "resources": {
+      "knowledge": {},
+      "models": {
+        "primary": {
+          "adapter_version": "openai-compatible-v1",
+          "base_url": "https://models.example.test/v1",
+          "capabilities": [
+            "chat",
+            "tool_call"
+          ],
+          "credential": {
+            "audience_digest": "sha256:735b091eb7354ee37b2b18a57b023e4e699e13a929d879579d8be3c5544a80a5",
+            "credential_id": "crd_00000000000000000000000000000001",
+            "purpose": "api_key"
+          },
+          "kind": "openai_compatible",
+          "model": "chat-model"
+        }
+      },
+      "storage": {
+        "memory": {
+          "adapter_version": "managed-memory-v1",
+          "backend": {
+            "adapter": "managed-redis-v1",
+            "backend_id": "redis-memory",
+            "backend_revision": 1,
+            "isolation": "tenant-subject-agent-v1",
+            "kind": "redis",
+            "limits": {
+              "max_bytes": 1024,
+              "max_concurrency": 1,
+              "timeout_ms": 1000
+            },
+            "redis": {
+              "database": 0,
+              "host": "redis.internal",
+              "port": 6379,
+              "tls": true,
+              "username": "runtime"
+            },
+            "schema_version": "v1",
+            "tenant_id": "tenant-1"
+          },
+          "kind": "managed_memory"
+        },
+        "session": {
+          "adapter_version": "postgres-state-v1",
+          "credential": {
+            "audience_digest": "sha256:93aaab0ee9bd2ed706d39f9e369b40a5193e92b2246d85867f4faf1b467c3345",
+            "credential_id": "crd_00000000000000000000000000000006",
+            "purpose": "dsn"
+          },
+          "destination": {
+            "database": "agent_state",
+            "host": "db.example.test",
+            "port": 5432,
+            "sslmode": "verify-full",
+            "username": "session_runtime"
+          },
+          "kind": "postgres_state"
+        }
+      },
+      "tools": {}
+    },
+    "runtime_contract_version": "worker-manifest-v1",
+    "schema_version": "v1",
+    "sources": {
+      "agent": {
+        "agent_id": "agent-1",
+        "digest": "sha256:5a176b0bfebca5a9122ebeca7acd12ffed4ea645867f9963fee47847e7a96c84",
+        "schema_version": "v1",
+        "version_id": "agent-version-1",
+        "version_number": 3
+      },
+      "profile": {
+        "digest": "sha256:e5e609d69ea2ee1a7709e1b3c53abcdcaa2a39988e4c5dc8ec728256a84278e3",
+        "profile_id": "profile-1",
+        "revision_id": "profile-revision-1",
+        "revision_number": 2,
+        "schema_version": "v1"
+      }
+    },
+    "storage_roles": {
+      "memory": "memory",
+      "session": "session"
+    },
+    "tenant_id": "tenant-1"
+  },
+  "content_digest": "sha256:b04db540fa9cd261eac322ff19980c462a4d88a3c7a6ffe527e367172f0ca550",
+  "published_at": "2026-09-09T00:00:00Z"
+}

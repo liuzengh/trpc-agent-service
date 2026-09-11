@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trpc-agent-service.local/events/control/v1/route-projected.schema.json",
+  "title": "RouteProjectionEvent",
+  "description": "Self-contained non-secret Control route projection. A generation replaces the account's entire route or is a disabled tombstone.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "schema_version", "route", "enabled"],
+  "properties": {
+    "event_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+    "schema_version": {"type": "integer", "const": 1, "x-go-type": "int"},
+    "route": {"$ref": "#/$defs/RouteSnapshot"},
+    "enabled": {"type": "boolean"}
+  },
+  "allOf": [{
+    "if": {"properties": {"enabled": {"const": true}}},
+    "then": {"properties": {"route": {"required": ["tenant_id", "binding_id", "deployment_revision_id", "manifest_ref", "manifest_digest"]}}},
+    "else": {"properties": {"route": {"not": {"anyOf": [
+      {"required": ["tenant_id"]}, {"required": ["binding_id"]},
+      {"required": ["deployment_revision_id"]}, {"required": ["manifest_ref"]},
+      {"required": ["manifest_digest"]}, {"required": ["traffic"]}
+    ]}}}}
+  }],
+  "$defs": {
+    "RouteSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "account_id", "generation"],
+      "properties": {
+        "provider": {"type": "string", "enum": ["telegram", "wecom"]},
+        "account_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+        "generation": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "x-go-type": "int64"},
+        "tenant_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+        "binding_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+        "deployment_revision_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+        "manifest_ref": {"type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "manifest_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "traffic": {"$ref": "#/$defs/TrafficRollout"}
+      }
+    },
+    "PublishedTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenant_id", "deployment_id", "revision_number", "deployment_revision_id", "manifest_ref", "manifest_digest"],
+      "properties": {
+        "tenant_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+        "deployment_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+        "revision_number": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "x-go-type": "int64"},
+        "deployment_revision_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+        "manifest_ref": {"type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "manifest_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "TrafficRollout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rollout_id", "target", "percentage_basis_points", "canary_subjects"],
+      "properties": {
+        "rollout_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+        "target": {"$ref": "#/$defs/PublishedTarget"},
+        "percentage_basis_points": {"type": "integer", "minimum": 0, "maximum": 10000, "x-go-type": "int64"},
+        "canary_subjects": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "preflight-grant.schema.json",
+  "valid": true,
+  "document": {
+    "schema_version": 1,
+    "server_time": "2026-09-06T04:00:02Z",
+    "preflight_id": "cpf_example",
+    "scope_id": "pool",
+    "source_epoch": "11111111-1111-4111-8111-111111111111",
+    "tenant_id": "tnt_example",
+    "account_id": "cha_example",
+    "provider": "telegram",
+    "provider_account_id": "123456789",
+    "account_revision": 7,
+    "connection_revision": 3,
+    "webhook_path": "/v1/telegram/cha_example",
+    "credentials": {
+      "purpose": "telegram.bot_token",
+      "credential_id": "ccr_example",
+      "credential_version": 2,
+      "configured": true
+    },
+    "webhook_secret_configured": false,
+    "lease_epoch": 1,
+    "lease_expires_at": "2026-09-06T04:00:32Z",
+    "job_deadline_at": "2026-09-06T04:02:00Z",
+    "gateway_config_digest": "sha256:03f2b058b89dcf96f3b74459cf4851902e480cb112593a2e253c2d7527b03ed4",
+    "receive_mode": "long_polling",
+    "diagnostic_policy": "telegram-receive-modes-v1",
+    "effective_config_digest": "sha256:ff0c679e5f1f8f6220d308fc33f5bb250ccf2b2b5a145c518d1ae7f0da489c1c"
+  }
+}

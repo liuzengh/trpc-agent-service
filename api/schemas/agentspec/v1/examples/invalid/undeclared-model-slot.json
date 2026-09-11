@@ -1,0 +1,14 @@
+{
+  "schema_version": "v1",
+  "root": "assistant",
+  "requirements": {"models": {}, "tools": {}, "knowledge": {}},
+  "nodes": {
+    "assistant": {
+      "kind": "llm",
+      "instruction": "回答问题。",
+      "model_slot": "primary",
+      "tool_slots": [],
+      "knowledge_slots": []
+    }
+  }
+}

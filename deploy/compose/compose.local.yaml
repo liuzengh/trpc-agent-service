@@ -1,0 +1,23 @@
+services:
+  control-api:
+    build:
+      context: ../..
+      dockerfile: services/control-api/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    ports:
+      - 127.0.0.1:${CONTROL_API_HTTP_PORT:-8080}:8080
+    environment:
+      CONTROL_SESSION_COOKIE_SECURE: "false"
+
+  channel-gateway:
+    build:
+      context: ../..
+      dockerfile: services/channel-gateway/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    ports:
+      - 127.0.0.1:${GATEWAY_HTTP_PORT:-8090}:8090
+      - 127.0.0.1:${GATEWAY_ADMIN_PORT:-8091}:8091
+  nats-reconcile:
+    pull_policy: never

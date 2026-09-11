@@ -1,0 +1,8 @@
+{
+  "schema_version": "v1",
+  "root": "missing",
+  "requirements": {"models": {}, "tools": {}, "knowledge": {}},
+  "nodes": {
+    "main": {"kind": "sequence", "children": ["child"]}
+  }
+}

@@ -1,0 +1,67 @@
+WeCom P0 local protocol verification
+Scope: synthetic loopback HTTP/WebSocket peers; no real WeCom account, PG, or NATS.
+
+RED (executed before implementation; preserved literal output):
+Command: GOCACHE=/private/tmp/gateway-wecom-cache go test ./platform/im/wecom
+Input: TestFinalFromHandler, no non-test implementation files.
+Output:
+github.com/liuzengh/trpc-agent-service/platform/im/wecom: no non-test Go files in /private/tmp/gateway-routing-wecom-20260905/modified/platform/im/wecom
+FAIL github.com/liuzengh/trpc-agent-service/platform/im/wecom [build failed]
+FAIL
+Exit status: 1
+
+GREEN first vertical slice:
+Command: GOCACHE=/private/tmp/gateway-wecom-cache go test -race -count=1 -v ./platform/im/wecom
+Input: subscribe/auth -> callback -> Reply inside handler -> exact ACK -> Close.
+Output:
+=== RUN   TestFinalFromHandler
+--- PASS: TestFinalFromHandler (0.00s)
+PASS
+ok  github.com/liuzengh/trpc-agent-service/platform/im/wecom 1.329s
+Exit status: 0
+
+RED lifecycle regressions before fixes (preserved literal failure lines):
+Command: GOCACHE=/private/tmp/gateway-wecom-cache go test -race -count=1 -v ./platform/im/wecom -run 'TestOldCanceled|TestCloseReports|TestAuthRequiresExplicitIntegerCodeAndExactID/cmd_type'
+Input: old canceled handler across reconnect; non-cooperative Close; non-string ACK cmd.
+Output:
+fault_test.go:212: timed out waiting for protocol result
+fault_test.go:546: timed out waiting for protocol result
+fault_test.go:571: completed Run incorrectly reported successful drain: <nil>
+FAIL github.com/liuzengh/trpc-agent-service/platform/im/wecom 7.875s
+FAIL
+Exit status: 1
+
+RED heartbeat reservation regression before fix (preserved literal failure lines):
+Command: GOCACHE=/private/tmp/gateway-wecom-cache go test -race -count=1 -v ./platform/im/wecom -run TestHeartbeatHasReservedCapacityWhileFinalAwaitsAck
+Input: MaxPending=1; HeartbeatInterval=10ms; AckTimeout=1s; healthy provider Final ACK after 50ms.
+Output:
+=== RUN   TestHeartbeatHasReservedCapacityWhileFinalAwaitsAck
+protocol_test.go:286: healthy delayed Final lost to local heartbeat capacity: wecom: UNKNOWN: disconnected
+--- FAIL: TestHeartbeatHasReservedCapacityWhileFinalAwaitsAck (0.02s)
+FAIL github.com/liuzengh/trpc-agent-service/platform/im/wecom 1.688s
+FAIL
+Exit status: 1
+
+Final verified implementation:
+- Single Run; fixed errors; exact req_id + generation correlation.
+- Business pending bounded by MaxPending; one independent auth/ping slot; total <= MaxPending+1.
+- Old canceled handlers do not retire a new generation dispatcher.
+- Non-cooperative handler drain failure remains sticky across Close.
+- Replaced notice is control-first and no automatic reconnect follows it.
+- Final attempted/poisoned identities stay bounded and never auto-advance after late ACK.
+
+COMMAND: GOCACHE=/private/tmp/gateway-wecom-cache go test -race -count=10 -cover ./platform/im/wecom
+INPUT: current P0 package with 24 top-level tests and table-driven subtests
+LITERAL OUTPUT:
+ok  	github.com/liuzengh/trpc-agent-service/platform/im/wecom	6.169s	coverage: 88.9% of statements
+EXIT STATUS: 0
+
+COMMAND: GOCACHE=/private/tmp/gateway-wecom-cache go vet ./platform/im/wecom
+INPUT: current P0 package with 24 top-level tests and table-driven subtests
+LITERAL OUTPUT:
+EXIT STATUS: 0
+
+COMMAND: gofmt -l platform/im/wecom/*.go
+INPUT: current P0 package with 24 top-level tests and table-driven subtests
+LITERAL OUTPUT:
+EXIT STATUS: 0

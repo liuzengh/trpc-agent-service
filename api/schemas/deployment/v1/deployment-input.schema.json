@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/deployment/v1/deployment-input.schema.json",
+  "title": "DeploymentInput V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "agent", "profile"],
+  "properties": {
+    "schema_version": {"const": "v1"},
+    "agent": {"$ref": "#/$defs/agent_source"},
+    "profile": {"$ref": "#/$defs/profile_source"}
+  },
+  "$defs": {
+    "source_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "positive_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "agent_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "version_number"],
+      "properties": {
+        "agent_id": {"$ref": "#/$defs/source_id"},
+        "version_number": {"$ref": "#/$defs/positive_number"}
+      }
+    },
+    "profile_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "revision_number"],
+      "properties": {
+        "profile_id": {"$ref": "#/$defs/source_id"},
+        "revision_number": {"$ref": "#/$defs/positive_number"}
+      }
+    }
+  }
+}

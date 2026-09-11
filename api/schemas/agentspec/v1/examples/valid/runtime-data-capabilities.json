@@ -1,0 +1,51 @@
+{
+  "schema_version": "v1",
+  "root": "assistant",
+  "requirements": {
+    "models": {
+      "primary": {
+        "capabilities": [
+          "chat"
+        ]
+      },
+      "summary": {
+        "capabilities": [
+          "chat"
+        ]
+      }
+    },
+    "tools": {},
+    "knowledge": {}
+  },
+  "nodes": {
+    "assistant": {
+      "kind": "llm",
+      "instruction": "Answer",
+      "model_slot": "primary",
+      "tool_slots": [],
+      "knowledge_slots": [],
+      "memory": {
+        "tools": [
+          "memory_add",
+          "memory_update",
+          "memory_delete",
+          "memory_clear",
+          "memory_search",
+          "memory_load"
+        ],
+        "preload_limit": -1
+      },
+      "artifact": {
+        "enabled": true
+      },
+      "add_session_summary": true
+    }
+  },
+  "runtime": {
+    "summary": {
+      "enabled": true,
+      "model_slot": "summary",
+      "event_threshold": 4
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/account-enabled.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "expected_account_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "enabled": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "expected_account_revision",
+    "enabled"
+  ]
+}

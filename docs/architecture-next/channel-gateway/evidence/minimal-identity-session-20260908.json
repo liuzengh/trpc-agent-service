@@ -1,0 +1,107 @@
+{
+  "tested_commit": "7e957578af9bc4769b9b936e5c77b6b489a318a9",
+  "result": "PASS_AUTOMATED_ONLY",
+  "external_fixtures": [
+    "model HTTP/SSE",
+    "Telegram Bot API"
+  ],
+  "publication": {
+    "account_id": "cha_34cR7goHmDcjphOi7ezpzgPQ",
+    "binding_id": "chb_hPidk3qqav3n4RdXx6lmsvPX",
+    "route_event_id": "evt_NRm8Sk5HF1iv7wev6JgZA0c8",
+    "target": {
+      "tenant_id": "tnt_Tyxzt20h9sGJY8Hv4s3DaKez",
+      "deployment_id": "dpl_jQLtJbQqa_Nr9_ZENJuCeTNy",
+      "revision_number": 1,
+      "deployment_revision_id": "dpr_6rnehg5Snu5EVqrPbIm0q8U8",
+      "manifest_ref": "rmf_tgS4MYIrQvygCu9K6fUmMbwh",
+      "manifest_digest": "sha256:a4cf0533e4a996fba4575a6e1a9eb0068d18fa49b7735e354d0a1340e7295c6c"
+    }
+  },
+  "run_columns": [
+    "run_id",
+    "session_id",
+    "session_sequence",
+    "status",
+    "identity_id"
+  ],
+  "runs": [
+    [
+      "657d92d0a797704f7d81a3c0832eb3c5",
+      "ses_f9dfa4af0ab6de788e4828b72cb09a54b86e9142ec6826feb9d50aa06055aaff",
+      "1",
+      "SUCCEEDED",
+      "soc_092c7155550a8a15bccefca3f4732626583cfc54dae0179ae20c8773356854a9"
+    ],
+    [
+      "280338118dd67b53590740e24e3451e9",
+      "ses_e74eaa2b71e21f51560a9e74d822a1bfd2b960e61404f6c379158a280743b387",
+      "1",
+      "SUCCEEDED",
+      "soc_416ab859f3ce47a4142eef56396d5f359d1ebf856af2021d5d238fd2804fa32d"
+    ],
+    [
+      "560ea906cff1d7dbe99fd485a7c2806e",
+      "ses_f9dfa4af0ab6de788e4828b72cb09a54b86e9142ec6826feb9d50aa06055aaff",
+      "2",
+      "SUCCEEDED",
+      "soc_092c7155550a8a15bccefca3f4732626583cfc54dae0179ae20c8773356854a9"
+    ],
+    [
+      "9dae30b57898361cb15de1255a97bd30",
+      "ses_e74eaa2b71e21f51560a9e74d822a1bfd2b960e61404f6c379158a280743b387",
+      "2",
+      "SUCCEEDED",
+      "soc_416ab859f3ce47a4142eef56396d5f359d1ebf856af2021d5d238fd2804fa32d"
+    ]
+  ],
+  "identities": [
+    [
+      "telegram",
+      "100",
+      "1"
+    ],
+    [
+      "telegram",
+      "101",
+      "1"
+    ]
+  ],
+  "replay": {
+    "wrong_secret_status": 401,
+    "duplicate_status": 200,
+    "admission_count": 1
+  },
+  "reply_messages": [
+    {
+      "bot_id": 987654,
+      "chat_id": "100",
+      "source_message_id": "878806638",
+      "text": "joint answer: alice-first",
+      "message_id": 1000
+    },
+    {
+      "bot_id": 987654,
+      "chat_id": "101",
+      "source_message_id": "878807696",
+      "text": "joint answer: bob-first",
+      "message_id": 1001
+    },
+    {
+      "bot_id": 987654,
+      "chat_id": "100",
+      "source_message_id": "878809524",
+      "text": "joint answer: alice-next",
+      "message_id": 1002
+    },
+    {
+      "bot_id": 987654,
+      "chat_id": "101",
+      "source_message_id": "878810704",
+      "text": "joint answer: bob-next",
+      "message_id": 1003
+    }
+  ],
+  "real_bot_chat_verified": false,
+  "real_model_recall_verified": false
+}

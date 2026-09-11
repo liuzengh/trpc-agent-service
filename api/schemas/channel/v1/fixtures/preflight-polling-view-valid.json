@@ -1,0 +1,99 @@
+{
+  "schema": "preflight-view.schema.json",
+  "valid": true,
+  "document": {
+    "preflight_id": "cpf_example",
+    "tenant_id": "tnt_example",
+    "account_id": "cha_example",
+    "provider": "telegram",
+    "provider_account_id": "123456789",
+    "requested_by": "usr_example",
+    "account_revision": 7,
+    "connection_revision": 3,
+    "bot_token_version": 2,
+    "state": "COMPLETED",
+    "outcome": "PASS",
+    "reason_code": "CHANNEL_PREFLIGHT_COMPLETED",
+    "freshness": "CURRENT",
+    "metadata_changed": false,
+    "requested_at": "2026-09-06T04:00:00Z",
+    "started_at": "2026-09-06T04:00:02Z",
+    "checked_at": "2026-09-06T04:00:06Z",
+    "job_deadline_at": "2026-09-06T04:02:00Z",
+    "expires_at": "2026-09-06T04:05:06Z",
+    "gateway_config_digest": "sha256:03f2b058b89dcf96f3b74459cf4851902e480cb112593a2e253c2d7527b03ed4",
+    "gateway_config_freshness": "UNCONFIRMED",
+    "expected_public_origin": null,
+    "checks": [
+      {
+        "id": "credential_configuration",
+        "status": "PASS",
+        "code": "CREDENTIALS_CONFIGURED",
+        "details": {
+          "bot_token_configured": true,
+          "webhook_secret_configured": false
+        }
+      },
+      {
+        "id": "bot_identity",
+        "status": "PASS",
+        "code": "BOT_IDENTITY_MATCH",
+        "details": {
+          "identity_match": true
+        }
+      },
+      {
+        "id": "public_origin",
+        "status": "NOT_APPLICABLE",
+        "code": "PUBLIC_ORIGIN_NOT_APPLICABLE",
+        "details": {
+          "applicability": "NOT_APPLICABLE"
+        }
+      },
+      {
+        "id": "webhook_registration",
+        "status": "PASS",
+        "code": "WEBHOOK_NONE",
+        "details": {
+          "presence": false,
+          "relation": "NONE"
+        }
+      },
+      {
+        "id": "pending_updates",
+        "status": "PASS",
+        "code": "PENDING_UPDATES_ZERO",
+        "details": {
+          "pending_update_count": 0
+        }
+      },
+      {
+        "id": "delivery_errors",
+        "status": "NOT_APPLICABLE",
+        "code": "DELIVERY_ERRORS_NOT_APPLICABLE",
+        "details": {
+          "applicability": "NOT_APPLICABLE"
+        }
+      },
+      {
+        "id": "recovery_materials",
+        "status": "NOT_APPLICABLE",
+        "code": "RECOVERY_MATERIALS_NOT_APPLICABLE",
+        "details": {
+          "applicability": "NOT_APPLICABLE"
+        }
+      },
+      {
+        "id": "delivery_verification",
+        "status": "UNKNOWN",
+        "code": "DELIVERY_NOT_TESTED",
+        "details": {
+          "verification": "NOT_TESTED"
+        }
+      }
+    ],
+    "receive_mode": "long_polling",
+    "diagnostic_policy": "telegram-receive-modes-v1",
+    "effective_config_digest": "sha256:ff0c679e5f1f8f6220d308fc33f5bb250ccf2b2b5a145c518d1ae7f0da489c1c"
+  }
+}

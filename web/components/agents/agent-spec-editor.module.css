@@ -1,0 +1,30 @@
+.shell {
+  container-type: inline-size;
+}
+
+.shell :global(.field) {
+  min-width: 0;
+}
+
+.shell :global(.field) input,
+.shell :global(.field) select,
+.shell :global(.field) textarea {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+}
+
+.grid {
+  align-items: start;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(270px, 330px);
+  padding: 12px;
+}
+
+@container (max-width: 840px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

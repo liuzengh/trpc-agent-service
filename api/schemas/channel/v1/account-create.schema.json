@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/account-create.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "provider": {
+      "enum": [
+        "telegram",
+        "wecom"
+      ]
+    },
+    "provider_account_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "description": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 4096
+    },
+    "credentials": {
+      "type": "object"
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receive_mode": {
+          "enum": [
+            "long_polling",
+            "webhook"
+          ]
+        },
+        "endpoint_profile": {
+          "type": "string",
+          "enum": [
+            "official",
+            "test"
+          ]
+        }
+      }
+    }
+  },
+  "required": [
+    "provider",
+    "provider_account_id",
+    "name",
+    "credentials"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "provider": {
+            "const": "telegram"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "provider_account_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "^[0-9]+$",
+            "not": {
+              "pattern": "[^0-9]"
+            }
+          },
+          "credentials": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "telegram.bot_token": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "replace"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16384
+                  }
+                },
+                "required": [
+                  "action",
+                  "value"
+                ]
+              },
+              "telegram.webhook_secret": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "replace"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9_-]{1,256}$",
+                    "not": {
+                      "pattern": "[^A-Za-z0-9_-]"
+                    }
+                  }
+                },
+                "required": [
+                  "action",
+                  "value"
+                ]
+              }
+            },
+            "required": [
+              "telegram.bot_token"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "config": {
+                  "properties": {
+                    "receive_mode": {
+                      "const": "webhook"
+                    },
+                    "endpoint_profile": {
+                      "type": "string",
+                      "enum": [
+                        "official",
+                        "test"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "receive_mode"
+                  ]
+                }
+              },
+              "required": [
+                "config"
+              ]
+            },
+            "then": {
+              "properties": {
+                "credentials": {
+                  "required": [
+                    "telegram.webhook_secret"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "else": {
+        "properties": {
+          "credentials": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "wecom.bot_secret": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "replace"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16384
+                  }
+                },
+                "required": [
+                  "action",
+                  "value"
+                ]
+              }
+            },
+            "required": [
+              "wecom.bot_secret"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "intent_id": "intent-1",
+  "admission_id": "admission-1",
+  "run_id": "run-1",
+  "execution": {
+    "attempt_id": "attempt-1",
+    "generation": 1,
+    "completion_id": "completion-1"
+  },
+  "sequence": 2,
+  "kind": "progress",
+  "content": {
+    "type": "text",
+    "text": "hello"
+  },
+  "deadline": "2026-09-05T01:30:00Z"
+}

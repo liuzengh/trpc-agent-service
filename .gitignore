@@ -13,5 +13,18 @@ coverage.html
 
 vendor/
 
-data/*
-!data/README.md
+# Local configuration and credentials.
+.env
+.env.*
+!.env.example
+
+# Generated verification and one-off output.
+artifacts/
+verification/
+
+# Python bytecode from the managed-local tooling.
+__pycache__/
+*.pyc
+
+# Local Codex worktrees created inside the repository root.
+/.codex-worktrees/

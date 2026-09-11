@@ -1,0 +1,14 @@
+{
+  "event_id": "evt-enabled-1",
+  "schema_version": 1,
+  "route": {
+    "provider": "telegram",
+    "account_id": "acct-1",
+    "generation": 1,
+    "tenant_id": "tenant-1",
+    "binding_id": "binding-1",
+    "deployment_revision_id": "drev-1",
+    "manifest_ref": "manifests/revisions/manifest-1",
+    "manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

@@ -1,0 +1,8 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        tls:
+          cert_file: /run/tracing-tls/server.pem
+          key_file: /run/tracing-tls/server-key.pem
+          min_version: "1.3"

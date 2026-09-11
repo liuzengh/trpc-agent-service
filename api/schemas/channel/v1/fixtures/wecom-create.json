@@ -1,0 +1,15 @@
+{
+  "schema": "account-create.schema.json",
+  "valid": true,
+  "document": {
+    "provider": "wecom",
+    "provider_account_id": "test-bot-id",
+    "name": "fixture",
+    "credentials": {
+      "wecom.bot_secret": {
+        "action": "replace",
+        "value": "TEST_ONLY_BOT_SECRET"
+      }
+    }
+  }
+}

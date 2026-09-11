@@ -1,0 +1,2944 @@
+openapi: 3.1.0
+info:
+  title: Control API
+  version: 1.0.0
+  description: V1 HTTP contract for Identity, platform administration, Tenant membership, Agent authoring, Runtime Profile authoring, and Deployment publication.
+servers:
+  - url: /
+tags:
+  - name: Health
+  - name: Identity
+  - name: Admin
+  - name: Tenant
+  - name: Agent
+  - name: Runtime Profile
+    description: >-
+      Tenant-scoped concrete resource authoring with write-only credentials and
+      redacted read views. Deployment matches exact resource category and name;
+      no Environment or user resource mapping table is required. Draft credential
+      actions and published-association updates require Idempotency-Key. Internal
+      Canonical Spec and Credential IDs are never part of the public HTTP contract.
+  - name: Channel
+    description: Tenant ChannelAccount and exact ChannelBinding; enabled by explicit platform Channel configuration.
+  - name: Deployment
+    description: >-
+      Tenant-scoped immutable publication of one exact Agent Version with one
+      exact Runtime Profile Revision. Deployment V1 has no Draft, Environment,
+      latest selector, user binding map, automatic activation, or credential
+      value transport. Public manifest_view is an explicit projection without
+      Credential IDs, purposes, audiences, values, or dynamic credential state.
+  - name: Operations
+    description: Tenant-authorized Run history and business audit projections.
+paths:
+  /v1/tenants/{tenant_id}/runs:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    get:
+      operationId: listRuns
+      tags: [Operations]
+      summary: List tenant Run records
+      description: Reads the Worker-owned execution ledger through Control; never returns message bodies, credentials, or Session content.
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Run page
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {description: Runtime observation source unavailable}
+  /v1/tenants/{tenant_id}/runs/{run_id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - name: run_id
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      operationId: getRun
+      tags: [Operations]
+      summary: Get a Run execution timeline
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Run detail
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RunDetail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: Run not found in this tenant}
+        '503': {description: Runtime observation source unavailable}
+  /v1/tenants/{tenant_id}/audit-events:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    get:
+      operationId: listAuditEvents
+      tags: [Operations]
+      summary: List tenant business audit events
+      description: Merges Control-owned configuration facts and Worker-owned execution facts after tenant authorization.
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Audit page
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {description: An audit source is unavailable}
+  /v1/tenants/{tenant_id}/usage-policy:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    get:
+      operationId: getTenantUsagePolicy
+      tags: [Operations]
+      summary: Read the current tenant usage policy
+      description: Active members may read the current policy. Absence is represented as a disabled revision-zero policy.
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Current policy
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UsagePolicy'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+    put:
+      operationId: replaceTenantUsagePolicy
+      tags: [Operations]
+      summary: Replace the current tenant usage policy
+      description: Owner-only, CAS-protected replacement. Revision is concurrency control; V1 does not expose policy history.
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/UsagePolicyIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReplaceUsagePolicyRequest'}
+      responses:
+        '200':
+          description: Replaced policy
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UsagePolicy'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /v1/tenants/{tenant_id}/usage-summary:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    get:
+      operationId: getTenantUsageSummary
+      tags: [Operations]
+      summary: Read Worker-owned usage accounting for the latest period
+      description: Unknown Provider usage retains its reservation and is never reported as zero. Estimated cost is not a Provider invoice.
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Current usage projection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UsageSummary'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /v1/tenants/{tenant_id}/tool-approvals:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    get:
+      operationId: listToolApprovals
+      tags: [Operations]
+      summary: List exact side-effecting tool operations awaiting or carrying a decision
+      description: Active tenant members may read redacted operation summaries. Raw arguments and provider results are not returned.
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Tool approval page
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ToolApprovalPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {description: Worker approval source unavailable}
+  /v1/tenants/{tenant_id}/tool-approvals/{operation_id}/decision:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - name: operation_id
+        in: path
+        required: true
+        schema: {type: string, pattern: '^tap_[0-9a-f]{64}$'}
+    post:
+      operationId: decideToolApproval
+      tags: [Operations]
+      summary: Approve or reject one exact test-ticket status operation
+      description: OWNER-only. expected_arguments_digest prevents a stale page or changed parameters from consuming an approval. Replaying the same decision is idempotent.
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ToolApprovalDecisionRequest'}
+      responses:
+        '200':
+          description: Durable decision or identical replay
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ToolApprovalDecisionResponse'}
+        '400': {description: Invalid decision}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: Approval not found in this tenant}
+        '409': {description: "Stale digest, opposite decision, expiry, or execution already started"}
+        '503': {description: Worker approval source unavailable}
+  /v1/tenants/{tenant_id}/runtime-backends:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    get:
+      operationId: listRuntimeBackends
+      summary: List platform backends available to the current tenant
+      description: Requires active membership; returns metadata only, never physical targets or credentials.
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Authorized backend metadata, including disabled selections
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [id, revision, label, kind, roles, available]
+                      properties:
+                        id: {type: string}
+                        revision: {type: integer, minimum: 1, maximum: 9007199254740991}
+                        label: {type: string}
+                        kind: {type: string, enum: [postgresql, redis, qdrant, s3]}
+                        roles:
+                          type: array
+                          items: {type: string, enum: [session, memory, knowledge, artifact]}
+                        available: {type: boolean}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503':
+          description: Current membership or directory dependency unavailable
+  /v1/tenants/{tenant_id}/channel-accounts/{account_id}/preflights:
+    $ref: "./preflight-public.yaml#/paths/~1v1~1tenants~1{tenant_id}~1channel-accounts~1{account_id}~1preflights"
+  /v1/tenants/{tenant_id}/channel-accounts/{account_id}/preflights/{preflight_id}:
+    $ref: "./preflight-public.yaml#/paths/~1v1~1tenants~1{tenant_id}~1channel-accounts~1{account_id}~1preflights~1{preflight_id}"
+  /v1/tenants/{tenant_id}/channel-accounts:
+    $ref: "./channel-public.yaml#/paths/~1v1~1tenants~1{tenant_id}~1channel-accounts"
+  /v1/tenants/{tenant_id}/channel-accounts/{account_id}:
+    $ref: "./channel-public.yaml#/paths/~1v1~1tenants~1{tenant_id}~1channel-accounts~1{account_id}"
+  /v1/tenants/{tenant_id}/channel-accounts/{account_id}/credentials/{purpose}/update:
+    $ref: "./channel-public.yaml#/paths/~1v1~1tenants~1{tenant_id}~1channel-accounts~1{account_id}~1credentials~1{purpose}~1update"
+  /v1/tenants/{tenant_id}/channel-accounts/{account_id}/enabled:
+    $ref: "./channel-public.yaml#/paths/~1v1~1tenants~1{tenant_id}~1channel-accounts~1{account_id}~1enabled"
+  /v1/tenants/{tenant_id}/channel-bindings:
+    $ref: "./channel-public.yaml#/paths/~1v1~1tenants~1{tenant_id}~1channel-bindings"
+  /v1/tenants/{tenant_id}/channel-bindings/{binding_id}:
+    $ref: "./channel-public.yaml#/paths/~1v1~1tenants~1{tenant_id}~1channel-bindings~1{binding_id}"
+  /v1/tenants/{tenant_id}/channel-bindings/{binding_id}/target:
+    $ref: "./channel-public.yaml#/paths/~1v1~1tenants~1{tenant_id}~1channel-bindings~1{binding_id}~1target"
+  /v1/tenants/{tenant_id}/channel-bindings/{binding_id}/traffic:
+    $ref: "./channel-public.yaml#/paths/~1v1~1tenants~1{tenant_id}~1channel-bindings~1{binding_id}~1traffic"
+  /v1/tenants/{tenant_id}/channel-bindings/{binding_id}/enabled:
+    $ref: "./channel-public.yaml#/paths/~1v1~1tenants~1{tenant_id}~1channel-bindings~1{binding_id}~1enabled"
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Check process health
+      tags: [Health]
+      responses:
+        '204':
+          description: The process is serving requests.
+  /v1/auth/login:
+    post:
+      operationId: loginWithPassword
+      summary: Log in with a local username and password
+      tags: [Identity]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authentication succeeded and a server-side session was created.
+          headers:
+            Set-Cookie:
+              description: HttpOnly opaque session cookie. The token is never returned in JSON.
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LoginResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429':
+          description: The per-process, per-peer login attempt limit was exceeded.
+          headers:
+            Retry-After:
+              description: Seconds until the current fixed window expires.
+              schema: {type: integer}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke the current session
+      tags: [Identity]
+      security: [{cookieAuth: []}]
+      responses:
+        '204':
+          description: Session revoked and cookie cleared.
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/me:
+    get:
+      operationId: getCurrentUser
+      summary: Get the current authenticated user
+      tags: [Identity]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Current identity and password rotation state.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LoginResponse'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/me/change-password:
+    post:
+      operationId: changeCurrentPassword
+      summary: Replace the current password and unlock a restricted session
+      tags: [Identity]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ChangePasswordRequest'}
+      responses:
+        '204':
+          description: Password changed; other sessions were revoked.
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/me/tenants:
+    get:
+      operationId: listMyTenants
+      summary: List Tenant memberships for the current user
+      tags: [Tenant]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Tenant memberships.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenants]
+                properties:
+                  tenants:
+                    type: array
+                    items: {$ref: '#/components/schemas/TenantMembership'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    get:
+      operationId: getTenant
+      summary: Get a Tenant visible to the current member
+      tags: [Tenant]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Tenant and caller role.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TenantMembership'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/member-candidates:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    get:
+      operationId: searchTenantMemberCandidates
+      summary: Search active non-members that the Tenant Owner may add
+      tags: [Tenant]
+      security: [{cookieAuth: []}]
+      parameters:
+        - name: query
+          in: query
+          required: true
+          description: Case-insensitive username or display-name search text; surrounding whitespace is trimmed before enforcing the 1–256 character limit.
+          schema: {type: string, minLength: 1, maxLength: 256}
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page of ACTIVE platform users who are not already Tenant members.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MemberCandidatePage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/members:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    get:
+      operationId: listTenantMembers
+      summary: List members of a Tenant as its Owner
+      tags: [Tenant]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Tenant members.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [members]
+                properties:
+                  members:
+                    type: array
+                    items: {$ref: '#/components/schemas/Membership'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      operationId: addTenantMember
+      summary: Add an existing active user as a Tenant member as its Owner
+      tags: [Tenant]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AddMemberRequest'}
+      responses:
+        '201':
+          description: Membership created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Membership'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/members/{user_id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/UserID'
+    delete:
+      operationId: removeTenantMember
+      summary: Remove a non-owner member from a Tenant as its Owner
+      tags: [Tenant]
+      security: [{cookieAuth: []}]
+      responses:
+        '204':
+          description: Membership removed.
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/agents:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    post:
+      operationId: createAgent
+      summary: Create an Agent and its initial Draft atomically
+      tags: [Agent]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateAgentRequest'}
+      responses:
+        '201':
+          description: Agent and initial Draft created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreateAgentResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    get:
+      operationId: listAgents
+      summary: List Agents in the Tenant
+      tags: [Agent]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page of Agents.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/agents/{agent_id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/AgentID'
+    get:
+      operationId: getAgent
+      summary: Get an Agent
+      tags: [Agent]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Agent metadata.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Agent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    patch:
+      operationId: updateAgent
+      summary: Update mutable Agent metadata
+      tags: [Agent]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateAgentRequest'}
+      responses:
+        '200':
+          description: Updated Agent metadata.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Agent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/agents/{agent_id}/draft:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/AgentID'
+    get:
+      operationId: getAgentDraft
+      summary: Get the current mutable Agent Draft
+      tags: [Agent]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Current Agent Draft.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentDraft'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    put:
+      operationId: saveAgentDraft
+      summary: Compare-and-swap the current Agent Draft
+      tags: [Agent]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SaveAgentDraftRequest'}
+      responses:
+        '200':
+          description: Draft saved at the next revision.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentDraft'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/AgentSpecInvalid'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/agents/{agent_id}/draft/validate:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/AgentID'
+    post:
+      operationId: validateAgentDraft
+      summary: Validate one exact Draft revision for publication
+      tags: [Agent]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DraftRevisionRequest'}
+      responses:
+        '200':
+          description: Validation completed; valid may be false.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ValidationReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/agents/{agent_id}/versions:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/AgentID'
+    post:
+      operationId: publishAgentVersion
+      summary: Publish an immutable version from one exact Draft revision
+      tags: [Agent]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DraftRevisionRequest'}
+      responses:
+        '200':
+          description: The same Draft revision was already published; its Version is returned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublishAgentVersionResponse'}
+        '201':
+          description: A new immutable Agent Version was published.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublishAgentVersionResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/AgentSpecInvalid'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    get:
+      operationId: listAgentVersions
+      summary: List immutable versions of an Agent
+      tags: [Agent]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page of immutable Agent Versions.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentVersionPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/agents/{agent_id}/versions/{version_number}:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/AgentID'
+      - $ref: '#/components/parameters/VersionNumber'
+    get:
+      operationId: getAgentVersion
+      summary: Get one immutable Agent Version including Canonical AgentSpec
+      tags: [Agent]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Immutable Agent Version.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentVersion'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/runtime-profiles:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    post:
+      operationId: createRuntimeProfile
+      summary: Create a Runtime Profile and its initial Draft atomically
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateRuntimeProfileRequest'}
+      responses:
+        '201':
+          description: Runtime Profile and revision 1 empty Draft created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreateRuntimeProfileResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    get:
+      operationId: listRuntimeProfiles
+      summary: List Runtime Profiles in the Tenant
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page of Runtime Profiles.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeProfilePage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/runtime-profiles/{profile_id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/RuntimeProfileID'
+    get:
+      operationId: getRuntimeProfile
+      summary: Get a Runtime Profile
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Runtime Profile metadata.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeProfile'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    patch:
+      operationId: updateRuntimeProfile
+      summary: Update mutable Runtime Profile metadata
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateRuntimeProfileRequest'}
+      responses:
+        '200':
+          description: Updated Runtime Profile metadata.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeProfile'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/runtime-profiles/{profile_id}/draft:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/RuntimeProfileID'
+    get:
+      operationId: getRuntimeProfileDraft
+      summary: Get the current mutable Runtime Profile Draft
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Current redacted Runtime Profile Draft with credential states.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeProfileDraft'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    put:
+      operationId: saveRuntimeProfileDraft
+      summary: Compare-and-swap the current Runtime Profile Draft
+      description: Save non-secret typed config and write-only credential actions atomically. Requires Idempotency-Key; only Tenant Owners can change credentials. Legacy spec and internal Credential IDs are rejected.
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RuntimeProfileWrite'}
+      responses:
+        '200':
+          description: Stable idempotent receipt for the saved Draft revision.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeProfileDraftWriteResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/runtime-profiles/{profile_id}/draft/validate:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/RuntimeProfileID'
+    post:
+      operationId: validateRuntimeProfileDraft
+      summary: Validate one exact Runtime Profile Draft revision for publication
+      description: >-
+        Runs static document validation, including credential protocol and association ID shape, without exposing values or contacting providers.
+        No AgentVersion or Environment is required.
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RuntimeProfileDraftRevisionRequest'}
+      responses:
+        '200':
+          description: Validation completed; valid may be false.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeProfileValidationReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/runtime-profiles/{profile_id}/revisions:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/RuntimeProfileID'
+    post:
+      operationId: publishRuntimeProfileRevision
+      summary: Publish an immutable Runtime Profile Revision from one exact Draft revision
+      description: >-
+        Publishes concrete resource configuration independently of any AgentVersion.
+        Credential protocol and association ID shape are statically validated; active state
+        is checked later by runtime usability and resolution, not by publication.
+        Publication freezes internal associations and destination, not rotating secret
+        values. The response is redacted and excludes dynamic credential states.
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RuntimeProfileDraftRevisionRequest'}
+      responses:
+        '200':
+          description: The source Draft revision was already published; the same immutable Profile Revision is returned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublishRuntimeProfileRevisionResponse'}
+        '201':
+          description: A new immutable Runtime Profile Revision was published.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublishRuntimeProfileRevisionResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/RuntimeProfileSpecInvalid'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    get:
+      operationId: listRuntimeProfileRevisions
+      summary: List immutable Revisions of a Runtime Profile
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page of immutable Runtime Profile Revision metadata summaries; redacted configuration is available from the single-revision endpoint.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeProfileRevisionPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/runtime-profiles/{profile_id}/revisions/{revision_number}:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/RuntimeProfileID'
+      - $ref: '#/components/parameters/ProfileRevisionNumber'
+    get:
+      operationId: getRuntimeProfileRevision
+      summary: Get one redacted Runtime Profile Revision and current credential state
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Integrity-checked immutable configuration projected to a redacted read view.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeProfileRevision'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/runtime-profiles/{profile_id}/credentials/update:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/RuntimeProfileID'
+    post:
+      operationId: updateUsedRuntimeProfileCredential
+      summary: Replace or clear one credential used by a published Profile Revision
+      description: Owner-only and idempotent. Expected credential revision and association token prevent stale or mismatched updates. Secret values never appear in responses.
+      tags: [Runtime Profile]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/ProfileIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RuntimeProfileCredentialUpdate'}
+      responses:
+        '200':
+          description: Stable credential update receipt.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeProfileCredentialUpdateResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/deployments:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    post:
+      operationId: createDeployment
+      summary: Create a stable Deployment identity
+      description: >-
+        Creates metadata with revision 1 and no published revision. The
+        Idempotency-Key is scoped to this Tenant; an identical replay returns
+        the original creation snapshot rather than current mutable metadata.
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/DeploymentIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateDeploymentRequest'}
+      responses:
+        '200':
+          description: The same create command was already committed; its original snapshot is returned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreateDeploymentResponse'}
+        '201':
+          description: A new Deployment identity was created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreateDeploymentResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    get:
+      operationId: listDeployments
+      summary: List Deployments in the Tenant
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page of Deployment metadata.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeploymentPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/deployments/{deployment_id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/DeploymentID'
+    get:
+      operationId: getDeployment
+      summary: Get Deployment metadata
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Deployment metadata and latest publication number.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Deployment'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    patch:
+      operationId: updateDeployment
+      summary: Compare-and-swap mutable Deployment metadata
+      description: >-
+        Updates name and/or description against expected_metadata_revision.
+        A semantic no-op returns the current object without advancing its CAS.
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateDeploymentRequest'}
+      responses:
+        '200':
+          description: Current Deployment metadata after applying the command.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Deployment'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/deployments/{deployment_id}/validate:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/DeploymentID'
+    post:
+      operationId: validateDeploymentRevision
+      summary: Validate an exact Agent Version and Profile Revision pairing
+      description: >-
+        Performs the same closed-input, source-integrity, exact-name,
+        compatibility, platform-contract, and credential-metadata checks used
+        by publication. It reserves no revision and stores no receipt.
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DeploymentInput'}
+      responses:
+        '200':
+          description: Validation completed; valid may be false.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeploymentValidationReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/deployments/{deployment_id}/revisions:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/DeploymentID'
+    post:
+      operationId: publishDeploymentRevision
+      summary: Publish an immutable Deployment Revision and RuntimeManifest
+      description: >-
+        Owner-only, receipt-first publication. A new command atomically writes
+        the immutable Revision, closed internal Manifest, pending Outbox event,
+        stable receipt, and latest revision CAS. It does not activate traffic.
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/DeploymentIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PublishDeploymentRevisionRequest'}
+      responses:
+        '200':
+          description: The same publish command was already committed; its immutable result is returned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublishDeploymentRevisionResponse'}
+        '201':
+          description: A new Deployment Revision and RuntimeManifest were published.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublishDeploymentRevisionResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/DeploymentRevisionInvalid'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    get:
+      operationId: listDeploymentRevisions
+      summary: List immutable Deployment Revision metadata
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Metadata-only page; canonical input and manifest content are not loaded into this projection.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeploymentRevisionPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/deployments/{deployment_id}/backend-migrations:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/DeploymentID'
+    post:
+      operationId: migrateDeploymentBackendAndPublish
+      summary: Migrate current Memory snapshots and publish a new Deployment Revision
+      description: >-
+        Owner-only synchronous V1 operation. Control compiles the target input,
+        asks the mTLS Worker migration endpoint to copy and verify current Memory
+        snapshots, and only then commits the existing immutable publication and
+        Outbox transaction. ChannelBinding traffic is switched separately with
+        its own CAS after this call succeeds.
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/DeploymentIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BackendMigrationRequest'}
+      responses:
+        '200':
+          description: Migration and publication were already completed and the publication receipt was replayed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BackendMigrationResponse'}
+        '201':
+          description: Memory was verified and a new Deployment Revision was published.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BackendMigrationResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/DeploymentRevisionInvalid'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/deployments/{deployment_id}/revisions/{revision_number}:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/DeploymentID'
+      - $ref: '#/components/parameters/DeploymentRevisionNumber'
+    get:
+      operationId: getDeploymentRevision
+      summary: Get one immutable Deployment Revision and public manifest view
+      description: >-
+        Verifies stored canonical input, complete internal Manifest content,
+        digests, and cross-record identities before projecting manifest_view.
+        Internal Credential IDs and dynamic credential state are not returned.
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Integrity-checked immutable publication with a fixed redacted Manifest projection.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeploymentRevision'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/admin/capabilities:
+    get:
+      operationId: getAdminCapabilities
+      summary: Get fixed V1 platform administration capabilities
+      tags: [Admin]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Active operator capabilities.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [capabilities]
+                properties:
+                  capabilities:
+                    type: array
+                    items: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/admin/operators:
+    get:
+      operationId: listPlatformOperators
+      summary: List active Platform Operators
+      tags: [Admin]
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: Active Platform Operators.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operators]
+                properties:
+                  operators:
+                    type: array
+                    items: {$ref: '#/components/schemas/Operator'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      operationId: grantPlatformOperator
+      summary: Grant platform administration to an existing active user
+      tags: [Admin]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/GrantOperatorRequest'}
+      responses:
+        '201':
+          description: Operator grant is active.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Operator'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/admin/operators/{user_id}:
+    parameters:
+      - $ref: '#/components/parameters/UserID'
+    delete:
+      operationId: revokePlatformOperator
+      summary: Revoke a Platform Operator while preserving at least one operator
+      tags: [Admin]
+      security: [{cookieAuth: []}]
+      responses:
+        '204':
+          description: Operator grant revoked.
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/admin/users:
+    get:
+      operationId: listPlatformUsers
+      summary: List global platform users
+      tags: [Admin]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page of global users.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      operationId: createPlatformUser
+      summary: Create an active user with a temporary password
+      tags: [Admin]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateUserRequest'}
+      responses:
+        '201':
+          description: Global user created; password change is required on first login.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/admin/tenants:
+    get:
+      operationId: listTenantsForOperations
+      summary: List Tenants for platform operations
+      tags: [Admin]
+      security: [{cookieAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page of Tenants.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TenantPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+    post:
+      operationId: provisionTenant
+      summary: Create a Tenant and an initial owner membership
+      tags: [Admin]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProvisionTenantRequest'}
+      responses:
+        '201':
+          description: Tenant and initial owner membership created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Tenant'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /v1/tenants/{tenant_id}/deployments/{deployment_id}/revisions/{revision_number}/artifacts/{filename}:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/DeploymentID'
+      - $ref: '#/components/parameters/DeploymentRevisionNumber'
+      - name: filename
+        in: path
+        required: true
+        description: Single basename; slash, backslash, dot and dot-dot are rejected.
+        schema: {type: string, minLength: 1, maxLength: 255}
+      - name: run_id
+        in: query
+        required: true
+        schema: {type: string, minLength: 1, maxLength: 256}
+    get:
+      operationId: loadDeploymentArtifact
+      summary: Download one Artifact through the fixed Run and Deployment Revision
+      description: Owner-only. Worker independently verifies Run tenant and Manifest identity and derives Session scope. No caller-selected backend or credentials are accepted.
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      parameters:
+        - name: version
+          in: query
+          required: false
+          schema: {type: integer, minimum: 0}
+      responses:
+        '200':
+          description: Raw file bytes, no-store and attachment disposition. Version starts at zero.
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '400': {description: Invalid filename or closed query.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: Owner or Run/Manifest authorization failed.}
+        '404': {description: Artifact or Deployment Revision not found.}
+        '413': {description: Artifact exceeds fixed backend or transport limit.}
+        '503': {description: "Worker, credentials or backend unavailable."}
+    put:
+      operationId: saveDeploymentArtifact
+      summary: Upload a new Artifact version through the fixed Run and Deployment Revision
+      description: Owner-only. Raw bytes are capped at 16 MiB and fixed backend MaxBytes. Version is allocated by Worker; version query is rejected. No automatic retries or implicit idempotency are provided.
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+          text/plain:
+            schema: {type: string}
+      responses:
+        '200':
+          description: Saved Artifact metadata without content or credentials.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [name, version, ref, mime_type, size_bytes, sha256]
+                properties:
+                  name: {type: string}
+                  version: {type: integer, minimum: 0}
+                  ref: {type: string}
+                  mime_type: {type: string}
+                  size_bytes: {type: integer, minimum: 0}
+                  sha256: {type: string}
+        '400': {description: Invalid filename or closed query.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: Owner or Run/Manifest authorization failed.}
+        '404': {description: Deployment Revision not found.}
+        '413': {description: Artifact exceeds fixed backend or transport limit.}
+        '503': {description: "Worker, credentials or backend unavailable."}
+  /v1/tenants/{tenant_id}/deployments/{deployment_id}/revisions/{revision_number}/knowledge/{resource}/import:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/DeploymentID'
+      - $ref: '#/components/parameters/DeploymentRevisionNumber'
+      - name: resource
+        in: path
+        required: true
+        schema: {type: string, minLength: 1, maxLength: 64}
+    post:
+      operationId: importDeploymentKnowledgeText
+      summary: Import plain text into one fixed published Knowledge resource
+      description: Owner-only synchronous import. Uses fixed Manifest and Profile credentials. No scope, backend, Run, chunk configuration or credential fields are accepted. Same fixed Knowledge configuration may be reused across Deployment Revisions.
+      tags: [Deployment]
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, text]
+              properties:
+                name: {type: string, minLength: 1, maxLength: 255}
+                text: {type: string, minLength: 1, description: UTF-8 plain text capped at 1 MiB and fixed backend MaxBytes.}
+      responses:
+        '200':
+          description: Import completed synchronously; document count is reported by Worker.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [documents]
+                properties:
+                  documents: {type: integer, minimum: 0}
+        '400': {description: Invalid closed request.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: Owner or fixed resource authorization failed.}
+        '404': {description: Deployment Revision not found.}
+        '413': {description: Text exceeds transport or backend limit.}
+        '503': {description: "Worker, credentials or backend unavailable."}
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: control_session
+  parameters:
+    TenantID:
+      name: tenant_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+    AgentID:
+      name: agent_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1}
+    DeploymentID:
+      name: deployment_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+    DeploymentRevisionNumber:
+      name: revision_number
+      in: path
+      required: true
+      schema: {type: integer, minimum: 1}
+    DeploymentIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Stable key for one logical Deployment create or publish command. Reuse
+        with an identical payload returns the original fixed result; reuse with
+        another payload returns 409. The plaintext key is not persisted.
+      schema: {type: string, minLength: 1, maxLength: 128, pattern: '^[!-~]+$'}
+    ProfileIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Stable key for one logical credential mutation; reuse with an identical payload on retry. Reusing with another payload returns 409.
+      schema: {type: string, minLength: 1, maxLength: 128, pattern: '^[!-~]+$'}
+    UsagePolicyIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Stable key for one logical policy replacement; identical retries return the original result and changed payloads return 409.
+      schema: {type: string, minLength: 8, maxLength: 128, pattern: '^[!-~]+$'}
+    RuntimeProfileID:
+      name: profile_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1}
+    VersionNumber:
+      name: version_number
+      in: path
+      required: true
+      schema: {type: integer, minimum: 1}
+    ProfileRevisionNumber:
+      name: revision_number
+      in: path
+      required: true
+      schema: {type: integer, minimum: 1}
+    UserID:
+      name: user_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1}
+    Offset:
+      name: offset
+      in: query
+      schema: {type: integer, minimum: 0, default: 0}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+  responses:
+    BadRequest:
+      description: Request input is invalid.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Unauthorized:
+      description: A valid session is required.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Forbidden:
+      description: The authenticated user is not authorized or must change a temporary password.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    NotFound:
+      description: The requested resource was not found.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Conflict:
+      description: The requested state change conflicts with current state.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    AgentSpecInvalid:
+      description: The AgentSpec cannot be stored safely or published.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AgentValidationErrorResponse'}
+    RuntimeProfileSpecInvalid:
+      description: The internal RuntimeProfileSpec failed publication validation; diagnostics contain no credential values.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/RuntimeProfileValidationErrorResponse'}
+    DeploymentRevisionInvalid:
+      description: The selected Agent Version and Runtime Profile Revision cannot be published together.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/DeploymentValidationErrorResponse'}
+    PayloadTooLarge:
+      description: The request body exceeds the fixed endpoint limit.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    ServiceUnavailable:
+      description: A required owner service or credential-metadata dependency is temporarily unavailable.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    InternalError:
+      description: The request could not be completed.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+  schemas:
+    UsagePolicy:
+      type: object
+      additionalProperties: false
+      required: [schema_version, tenant_id, revision, enabled, im, requests, execution, tokens]
+      properties:
+        schema_version: {type: integer, const: 1}
+        tenant_id: {type: string, minLength: 1, maxLength: 128}
+        revision: {type: integer, minimum: 0, maximum: 9007199254740991}
+        enabled: {type: boolean}
+        im:
+          type: object
+          additionalProperties: false
+          required: [allow_all, rules]
+          properties:
+            allow_all: {type: boolean}
+            rules:
+              type: array
+              maxItems: 256
+              items:
+                type: object
+                additionalProperties: false
+                required: [account_id, user_ids, group_ids]
+                properties:
+                  account_id: {type: string, minLength: 1, maxLength: 128}
+                  binding_id: {type: string, minLength: 1, maxLength: 128}
+                  user_ids: {type: array, maxItems: 2048, items: {type: string, minLength: 1, maxLength: 256}}
+                  group_ids: {type: array, maxItems: 2048, items: {type: string, minLength: 1, maxLength: 256}}
+        requests:
+          type: object
+          additionalProperties: false
+          required: [tenant_per_minute, user_per_minute]
+          properties:
+            tenant_per_minute: {type: integer, minimum: 0, maximum: 1000000}
+            user_per_minute: {type: integer, minimum: 0, maximum: 1000000}
+        execution:
+          type: object
+          additionalProperties: false
+          required: [max_concurrent_runs]
+          properties:
+            max_concurrent_runs: {type: integer, minimum: 0, maximum: 100000}
+        tokens:
+          type: object
+          additionalProperties: false
+          required: [period_seconds, limit, reservation_per_run, input_micros_per_million_tokens, output_micros_per_million_tokens]
+          properties:
+            period_seconds: {type: integer, minimum: 0, maximum: 31536000}
+            limit: {type: integer, minimum: 0, maximum: 9007199254740991}
+            reservation_per_run: {type: integer, minimum: 0, maximum: 9007199254740991}
+            input_micros_per_million_tokens: {type: integer, minimum: 0, maximum: 1000000000}
+            output_micros_per_million_tokens: {type: integer, minimum: 0, maximum: 1000000000}
+    ReplaceUsagePolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, policy]
+      properties:
+        expected_revision: {type: integer, minimum: 0, maximum: 9007199254740991}
+        policy: {$ref: '#/components/schemas/UsagePolicy'}
+    UsageSummary:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, policy_revision, period_seconds, token_limit, used_tokens, reserved_tokens, unknown_usage_count, pending_usage_count, estimated_cost_micros]
+      properties:
+        tenant_id: {type: string, minLength: 1, maxLength: 128}
+        policy_revision: {type: integer, minimum: 0, maximum: 9007199254740991}
+        period_start: {type: string, format: date-time}
+        period_seconds: {type: integer, minimum: 0, maximum: 31536000}
+        token_limit: {type: integer, minimum: 0, maximum: 9007199254740991}
+        used_tokens: {type: integer, minimum: 0, maximum: 9007199254740991}
+        reserved_tokens: {type: integer, minimum: 0, maximum: 9007199254740991}
+        unknown_usage_count: {type: integer, minimum: 0, maximum: 9007199254740991}
+        pending_usage_count: {type: integer, minimum: 0, maximum: 9007199254740991}
+        estimated_cost_micros: {type: integer, minimum: 0, maximum: 9007199254740991}
+    CreateDeploymentRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        description: {type: string, maxLength: 4096}
+    UpdateDeploymentRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 2
+      required: [expected_metadata_revision]
+      properties:
+        expected_metadata_revision: {type: integer, minimum: 1}
+        name: {type: string, minLength: 1, maxLength: 128}
+        description: {type: string, maxLength: 4096}
+    Deployment:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, name, description, metadata_revision, latest_revision_number, created_by, created_at, updated_at]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 128}
+        tenant_id: {type: string, minLength: 1, maxLength: 128}
+        name: {type: string, minLength: 1, maxLength: 128}
+        description: {type: string, maxLength: 4096}
+        metadata_revision: {type: integer, minimum: 1}
+        latest_revision_number: {type: integer, minimum: 1, nullable: true}
+        created_by: {type: string, minLength: 1, maxLength: 128}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CreateDeploymentResponse:
+      type: object
+      additionalProperties: false
+      required: [deployment]
+      properties:
+        deployment: {$ref: '#/components/schemas/Deployment'}
+    DeploymentPage:
+      type: object
+      additionalProperties: false
+      required: [deployments, offset, limit, total]
+      properties:
+        deployments:
+          type: array
+          items: {$ref: '#/components/schemas/Deployment'}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    DeploymentInput:
+      $ref: '../../../schemas/deployment/v1/deployment-input.schema.json'
+    PublishDeploymentRevisionRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_latest_revision_number, input]
+      properties:
+        expected_latest_revision_number:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: null for the first publication; otherwise the exact current latest revision number.
+        input: {$ref: '#/components/schemas/DeploymentInput'}
+    BackendMigrationRequest:
+      type: object
+      additionalProperties: false
+      required: [source_revision_number, expected_latest_revision_number, input]
+      properties:
+        source_revision_number:
+          type: integer
+          minimum: 1
+        expected_latest_revision_number:
+          type: integer
+          minimum: 1
+          nullable: true
+        input: {$ref: '#/components/schemas/DeploymentInput'}
+    DeploymentValidationDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [code, severity, source, path, category, name, node_id, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - DEPLOYMENT_INPUT_INVALID
+            - DEPLOYMENT_SOURCE_SCHEMA_UNSUPPORTED
+            - DEPLOYMENT_RESOURCE_MISSING
+            - DEPLOYMENT_CAPABILITY_MISMATCH
+            - DEPLOYMENT_UNUSED_REQUIREMENT
+            - DEPLOYMENT_STORAGE_ROLE_MISSING
+            - DEPLOYMENT_STORAGE_ROLE_UNSUPPORTED
+            - DEPLOYMENT_ADAPTER_UNSUPPORTED
+            - DEPLOYMENT_ENTRYPOINT_UNSUPPORTED
+            - DEPLOYMENT_EXECUTION_RANGE_DENIED
+            - DEPLOYMENT_LIMIT_EXCEEDED
+            - DEPLOYMENT_CREDENTIAL_UNAVAILABLE
+            - DEPLOYMENT_MANIFEST_TOO_LARGE
+        severity: {type: string, enum: [error, warning]}
+        source: {type: string, enum: [input, agent, profile, platform]}
+        path: {type: string}
+        category: {type: string, enum: [models, tools, knowledge, storage, nodes], nullable: true}
+        name: {type: string, nullable: true}
+        node_id: {type: string, nullable: true}
+        message: {type: string}
+    DeploymentValidationReport:
+      type: object
+      additionalProperties: false
+      required: [valid, compiler_version, platform_contract_digest, diagnostics]
+      properties:
+        valid: {type: boolean}
+        compiler_version: {type: string, enum: [deployment-compiler-v1]}
+        platform_contract_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        diagnostics:
+          type: array
+          items: {$ref: '#/components/schemas/DeploymentValidationDiagnostic'}
+    DeploymentRevisionSummary:
+      type: object
+      additionalProperties: false
+      description: Metadata-only immutable publication projection; it never loads canonical input or manifest content JSONB.
+      required: [id, tenant_id, deployment_id, revision_number, schema_version, agent_id, agent_version_number, profile_id, profile_revision_number, input_digest, manifest_id, manifest_digest, published_by, published_at]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 128}
+        tenant_id: {type: string, minLength: 1, maxLength: 128}
+        deployment_id: {type: string, minLength: 1, maxLength: 128}
+        revision_number: {type: integer, minimum: 1}
+        schema_version: {type: string, enum: [v1]}
+        agent_id: {type: string, minLength: 1, maxLength: 128}
+        agent_version_number: {type: integer, minimum: 1}
+        profile_id: {type: string, minLength: 1, maxLength: 128}
+        profile_revision_number: {type: integer, minimum: 1}
+        input_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        manifest_id: {type: string, minLength: 1, maxLength: 128}
+        manifest_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        published_by: {type: string, minLength: 1, maxLength: 128}
+        published_at: {type: string, format: date-time}
+    RuntimeManifestView:
+      $ref: '../../../schemas/deployment/v1/runtime-manifest-view.schema.json'
+    DeploymentRevision:
+      type: object
+      additionalProperties: false
+      description: >-
+        Full immutable publication read. input is canonical source selection;
+        manifest_view is derived only after integrity checking the complete
+        internal RuntimeManifest. Neither exposes internal Credential IDs.
+      required: [id, tenant_id, deployment_id, revision_number, schema_version, agent_id, agent_version_number, profile_id, profile_revision_number, input, input_digest, manifest_id, manifest_digest, manifest_view, published_by, published_at]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 128}
+        tenant_id: {type: string, minLength: 1, maxLength: 128}
+        deployment_id: {type: string, minLength: 1, maxLength: 128}
+        revision_number: {type: integer, minimum: 1}
+        schema_version: {type: string, enum: [v1]}
+        agent_id: {type: string, minLength: 1, maxLength: 128}
+        agent_version_number: {type: integer, minimum: 1}
+        profile_id: {type: string, minLength: 1, maxLength: 128}
+        profile_revision_number: {type: integer, minimum: 1}
+        input: {$ref: '#/components/schemas/DeploymentInput'}
+        input_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        manifest_id: {type: string, minLength: 1, maxLength: 128}
+        manifest_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+          description: Digest of complete internal canonical manifest content, not of manifest_view.
+        manifest_view: {$ref: '#/components/schemas/RuntimeManifestView'}
+        published_by: {type: string, minLength: 1, maxLength: 128}
+        published_at: {type: string, format: date-time}
+    DeploymentRevisionPage:
+      type: object
+      additionalProperties: false
+      required: [revisions, offset, limit, total]
+      properties:
+        revisions:
+          type: array
+          items: {$ref: '#/components/schemas/DeploymentRevisionSummary'}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    PublishDeploymentRevisionResponse:
+      type: object
+      additionalProperties: false
+      required: [revision, validation]
+      properties:
+        revision: {$ref: '#/components/schemas/DeploymentRevision'}
+        validation: {$ref: '#/components/schemas/DeploymentValidationReport'}
+    BackendMigrationResponse:
+      type: object
+      additionalProperties: false
+      required: [memory_scopes_copied, publication]
+      properties:
+        memory_scopes_copied: {type: integer, minimum: 0}
+        publication: {$ref: '#/components/schemas/PublishDeploymentRevisionResponse'}
+    DeploymentValidationErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error, validation]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: {type: string, enum: [DEPLOYMENT_REVISION_INVALID]}
+            message: {type: string}
+        validation: {$ref: '#/components/schemas/DeploymentValidationReport'}
+    CreateAgentRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        description: {type: string, maxLength: 4096}
+    UpdateAgentRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        description: {type: string, maxLength: 4096}
+    Agent:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, name, description, latest_version_number, created_by, created_at, updated_at]
+      properties:
+        id: {type: string}
+        tenant_id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        latest_version_number: {type: integer, minimum: 1, nullable: true}
+        created_by: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    AgentDraft:
+      type: object
+      additionalProperties: false
+      required: [agent_id, tenant_id, revision, spec, updated_by, updated_at]
+      properties:
+        agent_id: {type: string}
+        tenant_id: {type: string}
+        revision: {type: integer, minimum: 1}
+        spec:
+          type: object
+        updated_by: {type: string}
+        updated_at: {type: string, format: date-time}
+    AgentVersion:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, agent_id, version_number, source_draft_revision, schema_version, spec, spec_digest, published_by, published_at]
+      properties:
+        id: {type: string}
+        tenant_id: {type: string}
+        agent_id: {type: string}
+        version_number: {type: integer, minimum: 1}
+        source_draft_revision: {type: integer, minimum: 1}
+        schema_version: {type: string, enum: [v1]}
+        spec:
+          $ref: '../../../schemas/agentspec/v1/agent-spec.schema.json'
+        spec_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        published_by: {type: string}
+        published_at: {type: string, format: date-time}
+    CreateAgentResponse:
+      type: object
+      additionalProperties: false
+      required: [agent, draft]
+      properties:
+        agent: {$ref: '#/components/schemas/Agent'}
+        draft: {$ref: '#/components/schemas/AgentDraft'}
+    SaveAgentDraftRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, spec]
+      properties:
+        expected_revision: {type: integer, minimum: 1}
+        spec: {type: object}
+    DraftRevisionRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision]
+      properties:
+        expected_revision: {type: integer, minimum: 1}
+    ValidationDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [code, severity, pointer, node_id, message]
+      properties:
+        code: {type: string}
+        severity: {type: string, enum: [error, warning]}
+        pointer: {type: string}
+        node_id: {type: string, nullable: true}
+        message: {type: string}
+    ValidationReport:
+      type: object
+      additionalProperties: false
+      required: [valid, schema_version, draft_revision, diagnostics]
+      properties:
+        valid: {type: boolean}
+        schema_version: {type: string}
+        draft_revision: {type: integer, minimum: 1}
+        diagnostics:
+          type: array
+          items: {$ref: '#/components/schemas/ValidationDiagnostic'}
+    PublishAgentVersionResponse:
+      type: object
+      additionalProperties: false
+      required: [version, validation]
+      properties:
+        version: {$ref: '#/components/schemas/AgentVersion'}
+        validation: {$ref: '#/components/schemas/ValidationReport'}
+    AgentPage:
+      type: object
+      additionalProperties: false
+      required: [agents, offset, limit, total]
+      properties:
+        agents:
+          type: array
+          items: {$ref: '#/components/schemas/Agent'}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    AgentVersionPage:
+      type: object
+      additionalProperties: false
+      required: [versions, offset, limit, total]
+      properties:
+        versions:
+          type: array
+          items: {$ref: '#/components/schemas/AgentVersion'}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    AgentValidationErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error, validation]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: {type: string, enum: [AGENT_SPEC_INVALID]}
+            message: {type: string}
+        validation: {$ref: '#/components/schemas/ValidationReport'}
+    CreateRuntimeProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        description: {type: string, maxLength: 4096}
+    UpdateRuntimeProfileRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        description: {type: string, maxLength: 4096}
+    RuntimeProfile:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, name, description, latest_revision_number, created_by, created_at, updated_at]
+      properties:
+        id: {type: string, minLength: 1}
+        tenant_id: {type: string, minLength: 1}
+        name: {type: string, minLength: 1, maxLength: 128}
+        description: {type: string, maxLength: 4096}
+        latest_revision_number: {type: integer, minimum: 1, nullable: true}
+        created_by: {type: string, minLength: 1}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    RuntimeProfileModelConfig:
+      type: "object"
+      additionalProperties: false
+      description: "Non-secret model fields; incomplete values may be saved as Draft."
+      properties:
+        kind:
+          type: "string"
+          description: "Publication accepts openai_compatible only."
+        model:
+          type: "string"
+        base_url:
+          type: "string"
+        capabilities:
+          type: "array"
+          items:
+            type: "string"
+    RuntimeProfileToolAuthConfig:
+      type: "object"
+      additionalProperties: false
+      properties:
+        kind:
+          type: "string"
+          description: "Publication accepts none or bearer only."
+    RuntimeProfileToolConfig:
+      type: "object"
+      additionalProperties: false
+      properties:
+        kind:
+          type: "string"
+          description: "Publication accepts mcp_streamable_http only."
+        server_url:
+          type: "string"
+        toolset_name:
+          type: "string"
+        tool_name:
+          type: "string"
+        auth:
+          $ref: "#/components/schemas/RuntimeProfileToolAuthConfig"
+        capability:
+          type: "string"
+          description: "Publication requires the AgentSpec capability grammar ^[a-z][a-z0-9_.-]{0,127}$ and exact requirement matching; this declaration does not attest server behavior."
+    RuntimeProfileEmbeddingConfig:
+      type: "object"
+      additionalProperties: false
+      properties:
+        model:
+          type: "string"
+        base_url:
+          type: "string"
+        dimensions:
+          type: "integer"
+    RuntimeProfileKnowledgeConfig:
+      type: "object"
+      additionalProperties: false
+      properties:
+        kind:
+          type: "string"
+          description: "Publication accepts qdrant_openai only."
+        host:
+          type: "string"
+        port:
+          type: "integer"
+        tls:
+          type: "boolean"
+        collection:
+          type: "string"
+        embedding:
+          $ref: "#/components/schemas/RuntimeProfileEmbeddingConfig"
+    RuntimeProfileStorageDestination:
+      type: object
+      additionalProperties: false
+      description: Non-secret fixed PostgreSQL destination. Draft fields may be incomplete; publication requires all five fields, port 1..65535 and sslmode disable/require/verify-full. Password and arbitrary driver options are never fields here.
+      properties:
+        host: {type: string}
+        port: {type: integer}
+        database: {type: string}
+        username: {type: string}
+        sslmode: {type: string}
+    RuntimeProfileStorageConfig:
+      type: "object"
+      additionalProperties: false
+      properties:
+        kind:
+          type: "string"
+          description: "Publication accepts postgres_state only."
+        destination:
+          $ref: "#/components/schemas/RuntimeProfileStorageDestination"
+    RuntimeProfileExecutorConfig:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [sdk_sandbox]
+    RuntimeProfileConfig:
+      type: "object"
+      additionalProperties: false
+      description: "Non-secret typed editor configuration. Draft resource fields may be incomplete or fail publication validation. Credential values and internal IDs are never accepted here. Canonical publication retains the closed V1 kind/capability rules."
+      required: ["models", "tools", "knowledge", "storage"]
+      properties:
+        executors:
+          type: object
+          maxProperties: 16
+          propertyNames:
+            pattern: '^[a-z][a-z0-9_-]{0,63}$'
+          additionalProperties:
+            $ref: '#/components/schemas/RuntimeProfileExecutorConfig'
+        models:
+          type: "object"
+          additionalProperties:
+            $ref: "#/components/schemas/RuntimeProfileModelConfig"
+          maxProperties: 16
+        tools:
+          type: "object"
+          additionalProperties:
+            $ref: "#/components/schemas/RuntimeProfileToolConfig"
+          maxProperties: 64
+        knowledge:
+          type: "object"
+          additionalProperties:
+            $ref: "#/components/schemas/RuntimeProfileKnowledgeConfig"
+          maxProperties: 32
+        storage:
+          type: "object"
+          additionalProperties:
+            $ref: "#/components/schemas/RuntimeProfileStorageConfig"
+          maxProperties: 16
+    RuntimeProfileCredentialAction:
+      oneOf:
+        - type: "object"
+          additionalProperties: false
+          required: ["action"]
+          properties:
+            action:
+              type: "string"
+              enum: ["keep", "clear"]
+            expected_credential_revision:
+              type: "integer"
+              minimum: 0
+              maximum: 0
+        - type: "object"
+          additionalProperties: false
+          required: ["action", "value"]
+          properties:
+            action:
+              type: "string"
+              enum: ["replace"]
+            value:
+              type: "string"
+              minLength: 1
+              maxLength: 65536
+              writeOnly: true
+              description: "Write-only credential value. Empty values, masks, placeholders, NUL and line breaks are rejected. Managed PostgreSQL/Redis Memory and Redis Session use dsn_password as a raw password, never a DSN; its fixed target comes from the platform catalog. Storage dsn requires a single-host PostgreSQL URI with password and explicit sslmode=disable/require/verify-full; only its password is encrypted while destination is fixed separately."
+            expected_credential_revision:
+              type: "integer"
+              minimum: 0
+              maximum: 0
+      description: "Omitted actions keep existing associations. Draft actions use expected_draft_revision for CAS; expected_credential_revision may only be zero. Draft replace creates a fresh internal association; keep/clear never include a value. Value is write-only."
+    RuntimeProfileCredentialActions:
+      type: "object"
+      additionalProperties: false
+      properties:
+        models:
+          type: "object"
+          additionalProperties:
+            type: "object"
+            additionalProperties: false
+            properties:
+              api_key:
+                $ref: "#/components/schemas/RuntimeProfileCredentialAction"
+        tools:
+          type: "object"
+          additionalProperties:
+            type: "object"
+            additionalProperties: false
+            properties:
+              bearer_token:
+                $ref: "#/components/schemas/RuntimeProfileCredentialAction"
+        knowledge:
+          type: "object"
+          additionalProperties:
+            type: "object"
+            additionalProperties: false
+            properties:
+              qdrant_api_key:
+                $ref: "#/components/schemas/RuntimeProfileCredentialAction"
+              embedding_api_key:
+                $ref: "#/components/schemas/RuntimeProfileCredentialAction"
+        storage:
+          type: "object"
+          additionalProperties:
+            type: "object"
+            additionalProperties: false
+            properties:
+              dsn:
+                $ref: "#/components/schemas/RuntimeProfileCredentialAction"
+              dsn_password:
+                $ref: "#/components/schemas/RuntimeProfileCredentialAction"
+              access_key_id:
+                $ref: "#/components/schemas/RuntimeProfileCredentialAction"
+              secret_access_key:
+                $ref: "#/components/schemas/RuntimeProfileCredentialAction"
+    RuntimeProfileWrite:
+      type: "object"
+      additionalProperties: false
+      description: "Write-only Draft command. Exact field names and object shapes are enforced; duplicate keys and null are rejected. Values never enter the response or Canonical Spec. Internal Credential IDs and legacy *_ref/spec fields are not public inputs."
+      required: ["expected_draft_revision", "credential_protocol_version", "config"]
+      properties:
+        expected_draft_revision:
+          type: "integer"
+          minimum: 1
+        credential_protocol_version:
+          type: "string"
+          enum: ["v1"]
+        config:
+          $ref: "#/components/schemas/RuntimeProfileConfig"
+        credentials:
+          $ref: "#/components/schemas/RuntimeProfileCredentialActions"
+    RuntimeProfileDraftWriteResult:
+      type: "object"
+      additionalProperties: false
+      description: "Stable idempotent receipt; use GET Draft for the current redacted view."
+      required: ["profile_id", "draft_revision", "updated_at"]
+      properties:
+        profile_id:
+          type: "string"
+          minLength: 1
+        draft_revision:
+          type: "integer"
+          minimum: 1
+        updated_at:
+          type: "string"
+          format: "date-time"
+    RuntimeProfileCredentialState:
+      type: "object"
+      additionalProperties: false
+      description: "Non-secret current state. The opaque association token targets a revision association; it is not an internal Credential ID."
+      required: ["configured", "status", "credential_revision"]
+      properties:
+        configured:
+          type: "boolean"
+        status:
+          type: "string"
+          enum: ["unconfigured", "active", "cleared"]
+        credential_revision:
+          type: "integer"
+          minimum: 0
+        association_token:
+          type: "string"
+          minLength: 64
+          maxLength: 64
+          pattern: "^[0-9a-f]{64}$"
+    RuntimeProfileCredentialStates:
+      type: "object"
+      additionalProperties: false
+      properties:
+        models:
+          type: "object"
+          additionalProperties:
+            type: "object"
+            additionalProperties: false
+            properties:
+              api_key:
+                $ref: "#/components/schemas/RuntimeProfileCredentialState"
+        tools:
+          type: "object"
+          additionalProperties:
+            type: "object"
+            additionalProperties: false
+            properties:
+              bearer_token:
+                $ref: "#/components/schemas/RuntimeProfileCredentialState"
+        knowledge:
+          type: "object"
+          additionalProperties:
+            type: "object"
+            additionalProperties: false
+            properties:
+              qdrant_api_key:
+                $ref: "#/components/schemas/RuntimeProfileCredentialState"
+              embedding_api_key:
+                $ref: "#/components/schemas/RuntimeProfileCredentialState"
+        storage:
+          type: "object"
+          additionalProperties:
+            type: "object"
+            additionalProperties: false
+            properties:
+              dsn:
+                $ref: "#/components/schemas/RuntimeProfileCredentialState"
+              dsn_password:
+                $ref: "#/components/schemas/RuntimeProfileCredentialState"
+              access_key_id:
+                $ref: "#/components/schemas/RuntimeProfileCredentialState"
+              secret_access_key:
+                $ref: "#/components/schemas/RuntimeProfileCredentialState"
+    RuntimeProfileDraft:
+      type: "object"
+      additionalProperties: false
+      description: "Redacted Draft view. No canonical spec, plaintext, ciphertext or internal credential IDs are returned."
+      required: ["tenant_id", "profile_id", "schema_version", "credential_protocol_version", "config", "draft_revision", "updated_at"]
+      properties:
+        tenant_id:
+          type: "string"
+          minLength: 1
+        profile_id:
+          type: "string"
+          minLength: 1
+        schema_version:
+          type: "string"
+          enum: ["v1"]
+        credential_protocol_version:
+          type: "string"
+          enum: ["v1"]
+        config:
+          $ref: "#/components/schemas/RuntimeProfileConfig"
+        draft_revision:
+          type: "integer"
+          minimum: 1
+        credential_states:
+          $ref: "#/components/schemas/RuntimeProfileCredentialStates"
+        updated_by:
+          type: "string"
+        updated_at:
+          type: "string"
+          format: "date-time"
+    RuntimeProfilePublishedRevision:
+      type: "object"
+      additionalProperties: false
+      description: "Static redacted publication result. spec_digest identifies internal Canonical Spec, not the redacted config; dynamic credential state is deliberately absent for immutable publication retry results."
+      required: ["tenant_id", "profile_id", "schema_version", "credential_protocol_version", "config", "id", "revision_number", "source_draft_revision", "spec_digest", "published_by", "published_at"]
+      properties:
+        tenant_id:
+          type: "string"
+          minLength: 1
+        profile_id:
+          type: "string"
+          minLength: 1
+        schema_version:
+          type: "string"
+          enum: ["v1"]
+        credential_protocol_version:
+          type: "string"
+          enum: ["v1"]
+        config:
+          $ref: "#/components/schemas/RuntimeProfileConfig"
+        id:
+          type: "string"
+          minLength: 1
+        revision_number:
+          type: "integer"
+          minimum: 1
+        source_draft_revision:
+          type: "integer"
+          minimum: 1
+        spec_digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        published_by:
+          type: "string"
+        published_at:
+          type: "string"
+          format: "date-time"
+    RuntimeProfileRevision:
+      type: "object"
+      additionalProperties: false
+      description: "Redacted immutable configuration plus current credential state. Complete internal Canonical Spec is integrity-checked before projection, but is never returned."
+      required: ["tenant_id", "profile_id", "schema_version", "credential_protocol_version", "config", "id", "revision_number", "source_draft_revision", "spec_digest", "published_by", "published_at"]
+      properties:
+        tenant_id:
+          type: "string"
+          minLength: 1
+        profile_id:
+          type: "string"
+          minLength: 1
+        schema_version:
+          type: "string"
+          enum: ["v1"]
+        credential_protocol_version:
+          type: "string"
+          enum: ["v1"]
+        config:
+          $ref: "#/components/schemas/RuntimeProfileConfig"
+        id:
+          type: "string"
+          minLength: 1
+        revision_number:
+          type: "integer"
+          minimum: 1
+        source_draft_revision:
+          type: "integer"
+          minimum: 1
+        spec_digest:
+          type: "string"
+          pattern: "^sha256:[0-9a-f]{64}$"
+        published_by:
+          type: "string"
+        published_at:
+          type: "string"
+          format: "date-time"
+        credential_states:
+          $ref: "#/components/schemas/RuntimeProfileCredentialStates"
+    CreateRuntimeProfileResponse:
+      type: "object"
+      additionalProperties: false
+      required: ["profile", "draft"]
+      properties:
+        profile:
+          $ref: "#/components/schemas/RuntimeProfile"
+        draft:
+          $ref: "#/components/schemas/RuntimeProfileDraft"
+    RuntimeProfileDraftRevisionRequest:
+      type: "object"
+      additionalProperties: false
+      required: ["expected_revision"]
+      properties:
+        expected_revision:
+          type: "integer"
+          minimum: 1
+    RuntimeProfilePublishedCredentialTarget:
+      type: "object"
+      additionalProperties: false
+      required: ["profile_revision_number", "category", "resource_name", "purpose_field", "association_token"]
+      oneOf:
+        - properties:
+            category: {type: string, enum: [models]}
+            purpose_field: {type: string, enum: [api_key]}
+        - properties:
+            category: {type: string, enum: [tools]}
+            purpose_field: {type: string, enum: [bearer_token]}
+        - properties:
+            category: {type: string, enum: [knowledge]}
+            purpose_field: {type: string, enum: [qdrant_api_key, embedding_api_key]}
+        - properties:
+            category: {type: string, enum: [storage]}
+            purpose_field: {type: string, enum: [dsn, dsn_password, access_key_id, secret_access_key]}
+      properties:
+        profile_revision_number:
+          type: "integer"
+          minimum: 1
+        category:
+          type: "string"
+          enum: ["models", "tools", "knowledge", "storage"]
+        resource_name:
+          type: "string"
+          pattern: "^[a-z][a-z0-9_-]{0,63}$"
+        purpose_field:
+          type: "string"
+          enum: ["api_key", "bearer_token", "qdrant_api_key", "embedding_api_key", "dsn", "dsn_password", "access_key_id", "secret_access_key"]
+        association_token:
+          type: "string"
+          minLength: 64
+          maxLength: 64
+          pattern: "^[0-9a-f]{64}$"
+    RuntimeProfileCredentialUpdate:
+      oneOf:
+        - type: "object"
+          additionalProperties: false
+          required: ["target", "action", "expected_credential_revision", "value"]
+          properties:
+            target:
+              $ref: "#/components/schemas/RuntimeProfilePublishedCredentialTarget"
+            action:
+              type: "string"
+              enum: ["replace"]
+            expected_credential_revision:
+              type: "integer"
+              minimum: 1
+            value:
+              type: "string"
+              minLength: 1
+              maxLength: 65536
+              writeOnly: true
+              description: "Write-only credential value. Empty values, masks, placeholders, NUL and line breaks are rejected. Managed PostgreSQL/Redis Memory and Redis Session use dsn_password as a raw password, never a DSN; its fixed target comes from the platform catalog. Storage dsn requires a single-host PostgreSQL URI with password and explicit sslmode=disable/require/verify-full; only its password is encrypted while destination is fixed separately."
+        - type: "object"
+          additionalProperties: false
+          required: ["target", "action", "expected_credential_revision"]
+          properties:
+            target:
+              $ref: "#/components/schemas/RuntimeProfilePublishedCredentialTarget"
+            action:
+              type: "string"
+              enum: ["clear"]
+            expected_credential_revision:
+              type: "integer"
+              minimum: 1
+      description: "Owner-only update of a credential association used by a published Revision. Rotation does not modify ProfileRevision or its digest; changing destination requires a new Draft association."
+    RuntimeProfileCredentialUpdateResult:
+      type: "object"
+      additionalProperties: false
+      required: ["credential_revision", "status"]
+      properties:
+        credential_revision:
+          type: "integer"
+          minimum: 1
+        status:
+          type: "string"
+          enum: ["active", "cleared"]
+    RuntimeProfileRevisionSummary:
+      type: object
+      description: Metadata-only list projection of an immutable Runtime Profile Revision; it never contains spec.
+      additionalProperties: false
+      required: [id, tenant_id, profile_id, revision_number, source_draft_revision, schema_version, spec_digest, published_by, published_at]
+      properties:
+        id: {type: string, minLength: 1}
+        tenant_id: {type: string, minLength: 1}
+        profile_id: {type: string, minLength: 1}
+        revision_number: {type: integer, minimum: 1}
+        source_draft_revision: {type: integer, minimum: 1}
+        schema_version: {type: string, enum: [v1]}
+        spec_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        published_by: {type: string, minLength: 1}
+        published_at: {type: string, format: date-time}
+    RuntimeProfileValidationDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [code, severity, pointer, resource_kind, resource_key, message]
+      properties:
+        code: {type: string, minLength: 1}
+        severity: {type: string, enum: [error, warning]}
+        pointer: {type: string}
+        resource_kind: {type: string, enum: [model, tool, knowledge, storage], nullable: true}
+        resource_key: {type: string, nullable: true}
+        message: {type: string}
+    RuntimeProfileValidationReport:
+      type: object
+      additionalProperties: false
+      required: [valid, schema_version, draft_revision, diagnostics]
+      properties:
+        valid: {type: boolean}
+        schema_version:
+          type: string
+          description: The declared schema version string exactly as supplied; empty when the field is missing or is not a string. Unsupported string values are preserved.
+        draft_revision: {type: integer, minimum: 1}
+        diagnostics:
+          type: array
+          items: {$ref: '#/components/schemas/RuntimeProfileValidationDiagnostic'}
+    PublishRuntimeProfileRevisionResponse:
+      type: object
+      additionalProperties: false
+      required: [revision]
+      properties:
+        revision: {$ref: '#/components/schemas/RuntimeProfilePublishedRevision'}
+    RuntimeProfilePage:
+      type: object
+      additionalProperties: false
+      required: [runtime_profiles, offset, limit, total]
+      properties:
+        runtime_profiles:
+          type: array
+          items: {$ref: '#/components/schemas/RuntimeProfile'}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    RuntimeProfileRevisionPage:
+      type: object
+      additionalProperties: false
+      required: [revisions, offset, limit, total]
+      properties:
+        revisions:
+          type: array
+          items: {$ref: '#/components/schemas/RuntimeProfileRevisionSummary'}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    RuntimeProfileValidationErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error, validation]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: {type: string, enum: [RUNTIME_PROFILE_SPEC_INVALID]}
+            message: {type: string}
+        validation: {$ref: '#/components/schemas/RuntimeProfileValidationReport'}
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: {type: string, minLength: 1, maxLength: 256}
+        password: {type: string, minLength: 1, maxLength: 1024, format: password}
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [user, password_change_required]
+      properties:
+        user: {$ref: '#/components/schemas/CurrentUser'}
+        password_change_required: {type: boolean}
+    CurrentUser:
+      type: object
+      additionalProperties: false
+      required: [id, username, display_name]
+      properties:
+        id: {type: string}
+        username: {type: string}
+        display_name: {type: string}
+    ChangePasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [current_password, new_password]
+      properties:
+        current_password: {type: string, format: password}
+        new_password: {type: string, minLength: 12, maxLength: 128, format: password}
+    CreateUserRequest:
+      type: object
+      additionalProperties: false
+      required: [username, temporary_password]
+      properties:
+        username: {type: string, minLength: 3, maxLength: 32}
+        display_name: {type: string, maxLength: 256}
+        temporary_password: {type: string, minLength: 12, maxLength: 128, format: password}
+    GrantOperatorRequest:
+      type: object
+      additionalProperties: false
+      required: [user_id]
+      properties:
+        user_id: {type: string, minLength: 1}
+    ProvisionTenantRequest:
+      type: object
+      additionalProperties: false
+      required: [slug, name, owner_user_id]
+      properties:
+        slug: {type: string, pattern: '^[a-z0-9][a-z0-9-]{2,31}$'}
+        name: {type: string, minLength: 1, maxLength: 100}
+        owner_user_id: {type: string, minLength: 1}
+    AddMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [user_id]
+      properties:
+        user_id: {type: string, minLength: 1}
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, username, display_name, status, created_at, updated_at]
+      properties:
+        id: {type: string}
+        username: {type: string}
+        display_name: {type: string}
+        status: {type: string, enum: [ACTIVE, DISABLED]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    Operator:
+      type: object
+      additionalProperties: false
+      required: [user_id, granted_at]
+      properties:
+        user_id: {type: string}
+        username: {type: string}
+        display_name: {type: string}
+        granted_by: {type: string}
+        granted_at: {type: string, format: date-time}
+    Tenant:
+      type: object
+      additionalProperties: false
+      required: [id, slug, name, status, created_at, updated_at]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        name: {type: string}
+        status: {type: string, enum: [ACTIVE]}
+        owner_user_id: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    TenantMembership:
+      type: object
+      additionalProperties: false
+      required: [id, slug, name, status, role, created_at, updated_at]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        name: {type: string}
+        status: {type: string, enum: [ACTIVE]}
+        role: {type: string, enum: [OWNER, MEMBER]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    Membership:
+      type: object
+      additionalProperties: false
+      required: [id, user_id, role, created_by, created_at]
+      properties:
+        id: {type: string}
+        user_id: {type: string}
+        role: {type: string, enum: [OWNER, MEMBER]}
+        created_by: {type: string}
+        created_at: {type: string, format: date-time}
+    MemberCandidate:
+      type: object
+      additionalProperties: false
+      required: [user_id, username, display_name]
+      properties:
+        user_id: {type: string}
+        username: {type: string}
+        display_name: {type: string}
+    MemberCandidatePage:
+      type: object
+      additionalProperties: false
+      required: [candidates, offset, limit, total]
+      properties:
+        candidates:
+          type: array
+          items: {$ref: '#/components/schemas/MemberCandidate'}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    UserPage:
+      type: object
+      additionalProperties: false
+      required: [users, offset, limit, total]
+      properties:
+        users:
+          type: array
+          items: {$ref: '#/components/schemas/User'}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    TenantPage:
+      type: object
+      additionalProperties: false
+      required: [tenants, offset, limit, total]
+      properties:
+        tenants:
+          type: array
+          items: {$ref: '#/components/schemas/Tenant'}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    RunSummary:
+      type: object
+      required: [run_id, session_id, status, stage, attempts, usage_status, input_tokens, output_tokens, total_tokens, reply_status, accepted_at]
+      properties:
+        run_id: {type: string}
+        session_id: {type: string}
+        status: {type: string, enum: [QUEUED, RUNNING, RETRY_WAIT, SUCCEEDED, FAILED]}
+        stage: {type: string, enum: [QUEUED, EXECUTION, MEMORY, REPLY_PUBLISH, REPLY_HANDOFF, COMPLETED, FAILED]}
+        wait_reason: {type: string}
+        failure_reason: {type: string}
+        attempts: {type: integer, minimum: 0}
+        usage_status: {type: string, enum: [UNAVAILABLE, PARTIAL, COMPLETE]}
+        input_tokens: {type: integer, minimum: 0}
+        output_tokens: {type: integer, minimum: 0}
+        total_tokens: {type: integer, minimum: 0}
+        memory_status: {type: string}
+        reply_status: {type: string, enum: [NOT_CREATED, PENDING, HANDED_OFF]}
+        accepted_at: {type: string, format: date-time}
+        execution_deadline: {type: string, format: date-time}
+    RunAttempt:
+      type: object
+      additionalProperties: false
+      required: [attempt_id, worker_id, generation, status, created_at]
+      properties:
+        attempt_id: {type: string}
+        worker_id: {type: string}
+        generation: {type: integer, minimum: 1}
+        status: {type: string}
+        reason: {type: string}
+        created_at: {type: string, format: date-time}
+        started_at: {type: string, format: date-time}
+        ended_at: {type: string, format: date-time}
+    TimelineEvent:
+      type: object
+      additionalProperties: false
+      required: [source, category, status, occurred_at]
+      properties:
+        source: {type: string, enum: [worker, gateway, control]}
+        category: {type: string}
+        status: {type: string}
+        reason: {type: string}
+        occurred_at: {type: string, format: date-time}
+        attributes: {type: object, additionalProperties: true}
+    RunPage:
+      type: object
+      additionalProperties: false
+      required: [runs, offset, limit, total]
+      properties:
+        runs: {type: array, items: {$ref: '#/components/schemas/RunSummary'}}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    RunDetail:
+      allOf:
+        - $ref: '#/components/schemas/RunSummary'
+        - type: object
+          required: [admission_id, attempt_log, timeline, coverage]
+          properties:
+            admission_id: {type: string}
+            manifest_ref: {type: string}
+            manifest_digest: {type: string}
+            session_head: {type: string}
+            attempt_log: {type: array, items: {$ref: '#/components/schemas/RunAttempt'}}
+            timeline: {type: array, items: {$ref: '#/components/schemas/TimelineEvent'}}
+            coverage: {type: array, items: {type: string}}
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required: [event_id, source, category, action, outcome, resource_type, resource_id, occurred_at]
+      properties:
+        event_id: {type: string}
+        source: {type: string, enum: [control, worker, gateway]}
+        category: {type: string}
+        action: {type: string}
+        outcome: {type: string}
+        actor_id: {type: string}
+        resource_type: {type: string}
+        resource_id: {type: string}
+        reason: {type: string}
+        occurred_at: {type: string, format: date-time}
+        attributes: {type: object, additionalProperties: true}
+    AuditPage:
+      type: object
+      additionalProperties: false
+      required: [events, offset, limit, total]
+      properties:
+        events: {type: array, items: {$ref: '#/components/schemas/AuditEvent'}}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    ToolApproval:
+      type: object
+      additionalProperties: false
+      required: [operation_id, tenant_id, run_id, attempt_id, node_id, tool_name, tool_resource, capability, target, parameter_summary, arguments_digest, status, requested_at, expires_at]
+      properties:
+        operation_id: {type: string, pattern: '^tap_[0-9a-f]{64}$'}
+        tenant_id: {type: string, minLength: 1}
+        run_id: {type: string, minLength: 1}
+        attempt_id: {type: string, minLength: 1}
+        node_id: {type: string, minLength: 1}
+        tool_name: {type: string, minLength: 1}
+        tool_resource: {type: string, minLength: 1}
+        capability: {type: string, enum: [test.ticket.status.update]}
+        target: {type: string, minLength: 1}
+        parameter_summary: {type: string, minLength: 1}
+        arguments_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        status: {type: string, enum: [PENDING, APPROVED, REJECTED, EXPIRED, EXECUTING, SUCCEEDED, UNKNOWN]}
+        requested_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        decided_by: {type: string}
+        decided_at: {type: string, format: date-time}
+        decision_reason: {type: string}
+        execution_started_at: {type: string, format: date-time}
+        execution_finished_at: {type: string, format: date-time}
+        result_summary: {type: string}
+        result_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+    ToolApprovalPage:
+      type: object
+      additionalProperties: false
+      required: [operations, offset, limit, total]
+      properties:
+        operations: {type: array, items: {$ref: '#/components/schemas/ToolApproval'}}
+        offset: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    ToolApprovalDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [action, expected_arguments_digest]
+      properties:
+        action: {type: string, enum: [approve, reject]}
+        reason: {type: string, maxLength: 500}
+        expected_arguments_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+    ToolApprovalDecisionResponse:
+      type: object
+      additionalProperties: false
+      required: [operation, outcome]
+      properties:
+        operation: {$ref: '#/components/schemas/ToolApproval'}
+        outcome: {type: string, enum: [DECIDED, REPLAY]}
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: {type: string}
+            message: {type: string}

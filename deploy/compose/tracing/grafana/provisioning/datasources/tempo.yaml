@@ -1,0 +1,14 @@
+apiVersion: 1
+prune: true
+datasources:
+  - name: IM Runtime Traces
+    uid: im-runtime-tempo
+    type: tempo
+    access: proxy
+    url: http://trace-tempo:3200
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: GET
+      nodeGraph:
+        enabled: true

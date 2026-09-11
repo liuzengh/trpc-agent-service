@@ -1,0 +1,17 @@
+# Opt-in only for a newly managed Worker after the Linux isolation gate passes.
+# Not consumed by `just managed-up` or applied to existing shared Workers.
+services:
+  agent-worker:
+    image: ${WORKSPACE_WORKER_IMAGE:?set verified workspace Worker image}
+    build: !reset null
+    user: "${MANAGED_RUNTIME_UID:?}:${MANAGED_RUNTIME_GID:?}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - seccomp:${WORKSPACE_SECCOMP_FILE:?set absolute verified seccomp path}
+      - systempaths=unconfined
+    tmpfs:
+      - /workspace:rw,uid=${MANAGED_RUNTIME_UID},gid=${MANAGED_RUNTIME_GID},mode=0700
+      - /tmp:rw,mode=1777
+    healthcheck:
+      test: ["CMD", "/service", "probe", "http://127.0.0.1:8083/readyz"]

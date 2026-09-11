@@ -1,0 +1,21 @@
+{
+  "schema_version": "v1",
+  "root": "assistant",
+  "requirements": {
+    "models": {"primary": {"capabilities": ["chat"]}},
+    "tools": {},
+    "knowledge": {}
+  },
+  "nodes": {
+    "assistant": {
+      "kind": "llm",
+      "instruction": "Answer accurately.",
+      "model_slot": "primary",
+      "tool_slots": [],
+      "knowledge_slots": []
+    }
+  },
+  "editor_state": {
+    "nodes": {"assistant": {"x": 120, "y": 80}}
+  }
+}

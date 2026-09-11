@@ -1,0 +1,6 @@
+{
+  "url": "tls://nats:4222",
+  "user": "worker",
+  "password": "replace-with-worker-publisher-consumer-password",
+  "ca_file": "/run/nats-tls/ca.pem"
+}

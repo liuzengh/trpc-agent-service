@@ -1,0 +1,8 @@
+{
+  "schema": "binding-enabled.schema.json",
+  "valid": true,
+  "document": {
+    "expected_binding_revision": 1,
+    "enabled": true
+  }
+}

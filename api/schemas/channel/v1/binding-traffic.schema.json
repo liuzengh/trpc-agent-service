@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/binding-traffic.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "expected_binding_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "target": {
+      "$ref": "common.schema.json#/$defs/target"
+    },
+    "percentage_basis_points": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "canary_subjects": {
+      "type": "array",
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "common.schema.json#/$defs/id"
+      }
+    }
+  },
+  "required": [
+    "expected_binding_revision",
+    "target",
+    "percentage_basis_points",
+    "canary_subjects"
+  ]
+}

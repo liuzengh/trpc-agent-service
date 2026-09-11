@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/deployment/v1/data-capabilities.schema.json",
+  "$defs": {
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "tools": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 6,
+          "items": {
+            "enum": [
+              "memory_add",
+              "memory_update",
+              "memory_delete",
+              "memory_clear",
+              "memory_search",
+              "memory_load"
+            ]
+          }
+        },
+        "preload_limit": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "resource",
+        "tools"
+      ],
+      "anyOf": [
+        {
+          "properties": {
+            "tools": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "preload_limit"
+          ],
+          "properties": {
+            "preload_limit": {
+              "anyOf": [
+                {
+                  "const": -1
+                },
+                {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "const": true
+        },
+        "resource": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        }
+      },
+      "required": [
+        "enabled",
+        "resource"
+      ]
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "const": true
+        },
+        "model_resource": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "event_threshold": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "enabled",
+        "model_resource",
+        "event_threshold"
+      ]
+    }
+  }
+}

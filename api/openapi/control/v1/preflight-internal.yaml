@@ -1,0 +1,664 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Control Channel preflight private workload API",
+    "version": "1.0.0",
+    "description": "Separate mTLS preflight listener. Claim diagnostic_policy selects exactly one provider and its consumer: telegram_preflight for legacy/telegram-receive-modes-v1; wecom_preflight for wecom_long_connection_v1. Resolve and Complete recheck the persisted task provider and claim. WeCom resolves only the exact wecom.bot_secret after explicit owner consent; Telegram resolves only telegram.bot_token. No normal enabled-account runtime authority is granted. Credentials appear only in the no-store mTLS resolve response."
+  },
+  "paths": {
+    "/internal/v1/channel-preflights:claim": {
+      "post": {
+        "operationId": "claimChannelPreflight",
+        "tags": [
+          "Channel Preflight"
+        ],
+        "security": [
+          {
+            "workloadMTLS": []
+          }
+        ],
+        "description": "Body <= 4 KiB. limit=1. Scope/source epoch must match authenticated workload. Claim token is 32 CSPRNG bytes encoded unpadded base64url; only its hash persists. Idempotency scope is principal+instance+boot epoch+claim_request_id; same request replays grant/204 for 5 minutes without extending its 30-second lease or 120-second job deadline. server_time is refreshed on every response. At most two claims per job; no renew. Rate <=2 claim/s per instance. Configuration origin is statically checked and digest recomputed, never fetched; first claim pins it. Recheck requested_by ACTIVE OWNER before issuing any grant.",
+        "responses": {
+          "400": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success; no-store. 200 response is application/json; 204 has no body.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../../../schemas/channel/v1/preflight-grant.schema.json"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success; no-store. 200 response is application/json; 204 has no body.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../../../schemas/channel/v1/preflight-claim.schema.json"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/channel-preflights/{preflight_id}/credentials:resolve": {
+      "post": {
+        "operationId": "resolveChannelPreflightCredentials",
+        "tags": [
+          "Channel Preflight"
+        ],
+        "security": [
+          {
+            "workloadMTLS": []
+          }
+        ],
+        "description": "Body <= 4 KiB; response <=20 KiB. Exact authenticated principal/instance, boot epoch, scope/source, task, lease epoch, claim hash and server-time deadlines are required. Recheck requested_by ACTIVE OWNER, Tenant ACTIVE, account disabled and frozen connection/credential identity under owner locks. Resolve only telegram.bot_token; request has no purpose, uses, credential ID, arbitrary account or URL selector. Missing Token returns CHANNEL_CREDENTIAL_REQUIRED. No normal runtime permit is issued; no registration side effect.",
+        "responses": {
+          "400": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Success; no-store. 200 response is application/json; 204 has no body.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../../../schemas/channel/v1/preflight-resolved.schema.json"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../../../schemas/channel/v1/preflight-resolve.schema.json"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "preflight_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          }
+        }
+      ]
+    },
+    "/internal/v1/channel-preflights/{preflight_id}:complete": {
+      "post": {
+        "operationId": "completeChannelPreflight",
+        "tags": [
+          "Channel Preflight"
+        ],
+        "security": [
+          {
+            "workloadMTLS": []
+          }
+        ],
+        "description": "Body <=16 KiB. Exact claim owner/fence is required. Same original claim and same canonical completion payload replays 204 even after expiry; checked_at and receipt never move. Authenticate/match receipt before first-completion authorization/expiry checks. Changed payload -> RESULT_CONFLICT, stale lease/identity ->409; first completion rechecks ACTIVE OWNER and current frozen connection plus pinned Gateway config. Exactly 8 ordered redacted checks with strict status/code/details; Control aggregates only first 6 (FAIL > UNKNOWN/SKIPPED > WARN > PASS). Control server acceptance time determines checked_at and five-minute expiry, not observed_at. Raw Telegram URL/error, Token and webhook secret are forbidden. Completion never emits RunRequested or updates connection READY.",
+        "responses": {
+          "400": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Success; no-store. 200 response is application/json; 204 has no body.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../../../schemas/channel/v1/preflight-complete.schema.json"
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "preflight_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          }
+        }
+      ]
+    }
+  },
+  "components": {
+    "schemas": {
+      "ChannelError": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "field": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "workloadMTLS": {
+        "type": "mutualTLS",
+        "description": "Verified URI SAN maps principal/instance/scope and control-channel-v1 audience; explicit provider-specific telegram_preflight or wecom_preflight consumer is required."
+      }
+    }
+  }
+}

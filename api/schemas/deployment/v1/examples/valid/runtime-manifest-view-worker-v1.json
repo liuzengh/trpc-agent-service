@@ -1,0 +1,90 @@
+{
+  "schema_version": "v1",
+  "compiler_version": "deployment-compiler-v1",
+  "runtime_contract_version": "worker-manifest-v1",
+  "platform_contract": {
+    "version": "worker-v1",
+    "digest": "sha256:a514f0579368a62026c183918549fe498792e7c34003eed0a7b66b7c7639c9a2"
+  },
+  "tenant_id": "tenant-1",
+  "sources": {
+    "agent": {
+      "agent_id": "agent-1",
+      "version_number": 3,
+      "version_id": "agent-version-1",
+      "schema_version": "v1",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "profile": {
+      "profile_id": "profile-1",
+      "revision_number": 2,
+      "revision_id": "profile-revision-1",
+      "schema_version": "v1",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "agent_plan": {
+    "root": "assistant",
+    "nodes": {
+      "assistant": {
+        "kind": "llm",
+        "instruction": "Answer.",
+        "model_resource": "primary",
+        "tool_resources": [],
+        "knowledge_resources": [],
+        "callable_entries": []
+      }
+    }
+  },
+  "resources": {
+    "models": {
+      "primary": {
+        "adapter_version": "openai-compatible-v1",
+        "kind": "openai_compatible",
+        "model": "chat-model",
+        "base_url": "https://models.example.test/v1",
+        "credential_present": true,
+        "capabilities": [
+          "chat",
+          "tool_call"
+        ]
+      }
+    },
+    "tools": {},
+    "knowledge": {},
+    "storage": {
+      "session": {
+        "adapter_version": "postgres-state-v1",
+        "kind": "postgres_state",
+        "destination": {
+          "host": "db.example.test",
+          "port": 5432,
+          "database": "agent_state",
+          "username": "session_runtime",
+          "sslmode": "verify-full"
+        },
+        "credential_present": true
+      }
+    }
+  },
+  "resolved_requirements": {
+    "models": {
+      "primary": "primary"
+    },
+    "tools": {},
+    "knowledge": {}
+  },
+  "storage_roles": {
+    "session": "session"
+  },
+  "execution": {
+    "backend": "worker-process-v1",
+    "allowed_endpoint_hosts": [
+      "db.example.test",
+      "models.example.test"
+    ],
+    "max_run_seconds": 120,
+    "max_tool_calls": 16,
+    "max_output_tokens": 4096
+  }
+}

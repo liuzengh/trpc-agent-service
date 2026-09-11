@@ -1,0 +1,38 @@
+{
+  "schema_version": "v1",
+  "root": "main",
+  "requirements": {
+    "models": {
+      "primary": {"capabilities": ["tool_call", "chat"]}
+    },
+    "tools": {
+      "search": {"capability": "web.search"}
+    },
+    "knowledge": {}
+  },
+  "nodes": {
+    "main": {"kind": "sequence", "children": ["reviews", "summary"]},
+    "reviews": {"kind": "parallel", "children": ["security", "quality"]},
+    "security": {
+      "kind": "llm",
+      "instruction": "检查安全问题。",
+      "model_slot": "primary",
+      "tool_slots": ["search"],
+      "knowledge_slots": []
+    },
+    "quality": {
+      "kind": "llm",
+      "instruction": "检查结果质量。",
+      "model_slot": "primary",
+      "tool_slots": [],
+      "knowledge_slots": []
+    },
+    "summary": {
+      "kind": "llm",
+      "instruction": "汇总已有检查结果。",
+      "model_slot": "primary",
+      "tool_slots": [],
+      "knowledge_slots": []
+    }
+  }
+}

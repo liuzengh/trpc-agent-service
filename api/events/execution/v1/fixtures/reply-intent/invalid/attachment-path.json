@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "intent_id": "intent-1",
+  "admission_id": "admission-1",
+  "run_id": "run-1",
+  "execution": {
+    "attempt_id": "attempt-1",
+    "generation": 1,
+    "completion_id": "completion-1"
+  },
+  "sequence": 2,
+  "kind": "final",
+  "content": {
+    "type": "text",
+    "text": "hello",
+    "attachments": [
+      {
+        "name": "../report.txt",
+        "version": 0,
+        "mime_type": "text/plain",
+        "size_bytes": 3,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  },
+  "deadline": "2026-09-05T01:30:00Z"
+}

@@ -1,0 +1,59 @@
+{
+  "version": "v1",
+  "backends": [
+    {
+      "id": "sessions-pg",
+      "revision": 1,
+      "kind": "postgresql",
+      "roles": [
+        "session",
+        "memory"
+      ],
+      "label": "Shared SQL",
+      "enabled": true,
+      "tenant_ids": [
+        "tenant-example"
+      ]
+    },
+    {
+      "id": "sessions-redis",
+      "revision": 1,
+      "kind": "redis",
+      "roles": [
+        "session",
+        "memory"
+      ],
+      "label": "Shared Redis",
+      "enabled": true,
+      "tenant_ids": [
+        "tenant-example"
+      ]
+    },
+    {
+      "id": "knowledge",
+      "revision": 1,
+      "kind": "qdrant",
+      "roles": [
+        "knowledge"
+      ],
+      "label": "Shared Knowledge",
+      "enabled": true,
+      "tenant_ids": [
+        "tenant-example"
+      ]
+    },
+    {
+      "id": "artifacts",
+      "revision": 1,
+      "kind": "s3",
+      "roles": [
+        "artifact"
+      ],
+      "label": "Shared Artifacts",
+      "enabled": true,
+      "tenant_ids": [
+        "tenant-example"
+      ]
+    }
+  ]
+}

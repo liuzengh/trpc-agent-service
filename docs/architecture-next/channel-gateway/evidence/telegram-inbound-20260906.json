@@ -1,0 +1,62 @@
+{
+  "account_id": "cha_ZHZwYc0n54Tc0ZW3KlxBaemO",
+  "admission_id": "c00f77d6b3a94dcd98b77ccf071b047b",
+  "boundary": "Real Telegram inbound through Control-owned binding to durable RunRequested; no Worker execution, model/storage readiness or bot reply asserted.",
+  "checked_at": "2026-09-05T22:59:05.578425Z",
+  "connection_revision": 2,
+  "counts": {
+    "admission": 1,
+    "delivery_intents": 0,
+    "inbox": 1,
+    "outbox": 1,
+    "published_outbox": 1
+  },
+  "event_id": "c00f77d6b3a94dcd98b77ccf071b047b",
+  "message_id": "6",
+  "nats": {
+    "inspection": "StreamInfo and GetMsg only; no consumer, ACK, publish, purge or reset",
+    "matching_message_count": 1,
+    "nats_msg_id": "c00f77d6b3a94dcd98b77ccf071b047b",
+    "payload_matches_outbox": true,
+    "retention": "WorkQueuePolicy",
+    "schema_valid": true,
+    "storage": "FileStorage",
+    "stored_at": "2026-09-05T22:55:45.666731296Z",
+    "stream": "RUN_REQUESTS_V1",
+    "stream_message_count": 1,
+    "stream_sequence": 1,
+    "subject": "execution.run-requested.v1"
+  },
+  "outbox": {
+    "attempts": 1,
+    "canonical_payload_sha256": "7519bf75c468a5f1223f470fa3dfa202a1c9e1236991aec0e240ec5e7a19d0fe",
+    "created_at": "2026-09-06T06:55:45.575068+08:00",
+    "published_at": "2026-09-06T06:55:45.681012+08:00",
+    "subject": "execution.run-requested.v1"
+  },
+  "privacy": "Raw sender_id/chat_id, tokens, credential values, DSNs and full message text omitted.",
+  "provider": "telegram",
+  "puback_evidence": "Gateway code persists published_at only after JetStream Publish returns a PubAck for RUN_REQUESTS_V1. published_at is present and the exact matching event is retrievable from FileStorage. The original PubAck response frame is not separately persisted.",
+  "receipt": {
+    "admission_id": "c00f77d6b3a94dcd98b77ccf071b047b",
+    "decision": "admit-run",
+    "run_id": "45ccc1ec2d4b600a656ed0b489497e5c"
+  },
+  "received_at": "2026-09-06T06:55:45.562692+08:00",
+  "result": "PASS",
+  "route": {
+    "account_id": "cha_ZHZwYc0n54Tc0ZW3KlxBaemO",
+    "binding_id": "chb_m6ZeGHUmZzf_zfSNV-cd4020",
+    "deployment_revision_id": "dpr_TN-yxwXsqO0LyR9G3gfPlbpt",
+    "generation": 2,
+    "manifest_digest": "sha256:e10102a9f63cabe35c465f9ddc19c8396c62b4ebce4085767e70602732c3c5bf",
+    "manifest_ref": "rmf_CK7i4jR0iI5NBpJJmkNP02H5",
+    "provider": "telegram",
+    "tenant_id": "tnt_o4hb8SN9Hjfrmtlj4fdfN9dm"
+  },
+  "run_id": "45ccc1ec2d4b600a656ed0b489497e5c",
+  "test_marker": "gateway-v1-real-20260906-0637",
+  "test_text_sha256": "7fd0b8599566bad764c8bb1de655961da5e67ff2bf4d0f87d56d9c29660a1b49",
+  "text_matches": true,
+  "update_id": "309271229"
+}

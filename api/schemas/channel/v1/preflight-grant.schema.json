@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/preflight-grant.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "server_time": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "maxLength": 35
+    },
+    "preflight_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "scope_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "source_epoch": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "tenant_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "account_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "provider": {
+      "enum": [
+        "telegram",
+        "wecom"
+      ]
+    },
+    "provider_account_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^\\s]+$"
+    },
+    "account_revision": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "connection_revision": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "webhook_path": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "credentials": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "purpose": {
+          "enum": [
+            "telegram.bot_token",
+            "wecom.bot_secret"
+          ]
+        },
+        "credential_id": {
+          "$ref": "common.schema.json#/$defs/id"
+        },
+        "credential_version": {
+          "$ref": "common.schema.json#/$defs/version"
+        },
+        "configured": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "purpose",
+        "credential_id",
+        "credential_version",
+        "configured"
+      ]
+    },
+    "webhook_secret_configured": {
+      "type": "boolean"
+    },
+    "lease_epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2
+    },
+    "lease_expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "maxLength": 35
+    },
+    "job_deadline_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "maxLength": 35
+    },
+    "gateway_config_digest": {
+      "$ref": "common.schema.json#/$defs/digest"
+    },
+    "diagnostic_policy": {
+      "enum": [
+        "telegram-receive-modes-v1",
+        "wecom_long_connection_v1"
+      ]
+    },
+    "receive_mode": {
+      "enum": [
+        "long_polling",
+        "webhook",
+        "long_connection"
+      ]
+    },
+    "effective_config_digest": {
+      "$ref": "common.schema.json#/$defs/digest"
+    },
+    "allow_connection_probe": {
+      "const": true
+    },
+    "endpoint_profile": {
+      "type": "string",
+      "enum": [
+        "official",
+        "test"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "server_time",
+    "preflight_id",
+    "scope_id",
+    "source_epoch",
+    "tenant_id",
+    "account_id",
+    "provider",
+    "provider_account_id",
+    "account_revision",
+    "connection_revision",
+    "webhook_path",
+    "credentials",
+    "webhook_secret_configured",
+    "lease_epoch",
+    "lease_expires_at",
+    "job_deadline_at",
+    "gateway_config_digest"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "diagnostic_policy"
+        ]
+      },
+      "then": {
+        "required": [
+          "diagnostic_policy",
+          "receive_mode",
+          "effective_config_digest"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "diagnostic_policy"
+              ]
+            },
+            {
+              "required": [
+                "receive_mode"
+              ]
+            },
+            {
+              "required": [
+                "effective_config_digest"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "diagnostic_policy": {
+            "const": "wecom_long_connection_v1"
+          }
+        },
+        "required": [
+          "diagnostic_policy"
+        ]
+      },
+      "then": {
+        "properties": {
+          "receive_mode": {
+            "const": "long_connection"
+          },
+          "expected_public_origin": {
+            "const": null
+          },
+          "origin_status": {
+            "const": "PUBLIC_ORIGIN_NOT_APPLICABLE"
+          },
+          "endpoint_profile": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "receive_mode": {
+            "enum": [
+              "long_polling",
+              "webhook"
+            ]
+          },
+          "origin_status": {
+            "enum": [
+              "PUBLIC_ORIGIN_STATIC_VALID",
+              "PUBLIC_ORIGIN_INVALID",
+              "PUBLIC_ORIGIN_NOT_PUBLIC"
+            ]
+          },
+          "endpoint_profile": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": {
+            "const": "wecom"
+          }
+        },
+        "required": [
+          "provider"
+        ]
+      },
+      "then": {
+        "properties": {
+          "diagnostic_policy": {
+            "const": "wecom_long_connection_v1"
+          },
+          "receive_mode": {
+            "const": "long_connection"
+          },
+          "allow_connection_probe": {
+            "const": true
+          },
+          "webhook_path": {
+            "const": ""
+          },
+          "webhook_secret_configured": {
+            "const": false
+          },
+          "credentials": {
+            "properties": {
+              "purpose": {
+                "const": "wecom.bot_secret"
+              }
+            }
+          },
+          "endpoint_profile": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test"
+            ]
+          }
+        },
+        "required": [
+          "diagnostic_policy",
+          "receive_mode",
+          "allow_connection_probe"
+        ]
+      },
+      "else": {
+        "properties": {
+          "provider_account_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "^[1-9][0-9]*$",
+            "not": {
+              "pattern": "[^0-9]"
+            }
+          },
+          "diagnostic_policy": {
+            "const": "telegram-receive-modes-v1"
+          },
+          "receive_mode": {
+            "enum": [
+              "long_polling",
+              "webhook"
+            ]
+          },
+          "webhook_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^/v1/telegram/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "credentials": {
+            "properties": {
+              "purpose": {
+                "const": "telegram.bot_token"
+              }
+            }
+          },
+          "endpoint_profile": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test"
+            ]
+          }
+        },
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "allow_connection_probe"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

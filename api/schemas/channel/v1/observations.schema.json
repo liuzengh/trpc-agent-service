@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/observations.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scope_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "not": {
+              "pattern": "[^A-Za-z0-9._:-]"
+            }
+          },
+          "source_epoch": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "minLength": 36,
+            "maxLength": 36
+          },
+          "tenant_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "not": {
+              "pattern": "[^A-Za-z0-9._:-]"
+            }
+          },
+          "account_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "not": {
+              "pattern": "[^A-Za-z0-9._:-]"
+            }
+          },
+          "provider": {
+            "enum": [
+              "telegram",
+              "wecom"
+            ]
+          },
+          "connection_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "not": {
+              "pattern": "[^A-Za-z0-9._:-]"
+            }
+          },
+          "instance_epoch": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "minLength": 36,
+            "maxLength": 36
+          },
+          "report_sequence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "state": {
+            "enum": [
+              "CONFIG_APPLIED",
+              "CONNECTING",
+              "READY",
+              "DISABLED",
+              "ERROR"
+            ]
+          },
+          "reason_code": {
+            "enum": [
+              "NONE",
+              "AUTHENTICATION_FAILED",
+              "PROVIDER_UNAVAILABLE",
+              "REMOTE_IDENTITY_MISMATCH",
+              "CONFIG_INVALID",
+              "SOURCE_UNAVAILABLE",
+              "CREDENTIAL_UNAVAILABLE",
+              "OWNERSHIP_LOST",
+              "REGISTRATION_PENDING",
+              "REGISTRATION_UNKNOWN",
+              "SHUTDOWN",
+              "WAITING_FOR_OWNER",
+              "RECEIVER_DRAINING",
+              "WEBHOOK_CONFLICT",
+              "POLLING_CONFLICT"
+            ]
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "owner_epoch": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "receive_mode": {
+            "enum": [
+              "long_polling",
+              "webhook"
+            ]
+          }
+        },
+        "required": [
+          "scope_id",
+          "source_epoch",
+          "tenant_id",
+          "account_id",
+          "provider",
+          "connection_revision",
+          "instance_id",
+          "instance_epoch",
+          "report_sequence",
+          "state",
+          "reason_code",
+          "observed_at"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "provider": {
+                  "const": "wecom"
+                }
+              }
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "receive_mode"
+                ]
+              }
+            },
+            "else": {
+              "if": {
+                "not": {
+                  "required": [
+                    "receive_mode"
+                  ]
+                }
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "owner_epoch"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "receive_mode": {
+                  "const": "long_polling"
+                },
+                "state": {
+                  "const": "READY"
+                }
+              },
+              "required": [
+                "receive_mode"
+              ]
+            },
+            "then": {
+              "required": [
+                "owner_epoch"
+              ]
+            }
+          }
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 100
+    }
+  },
+  "required": [
+    "schema_version",
+    "observations"
+  ]
+}

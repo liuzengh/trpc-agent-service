@@ -1,0 +1,58 @@
+{
+  "schema": "preflight-view.schema.json",
+  "valid": true,
+  "document": {
+    "preflight_id": "cpf_example",
+    "tenant_id": "tnt_example",
+    "account_id": "cha_example",
+    "provider": "wecom",
+    "provider_account_id": "wecom-bot-example",
+    "requested_by": "usr_example",
+    "account_revision": 7,
+    "connection_revision": 4,
+    "state": "COMPLETED",
+    "outcome": "PASS",
+    "reason_code": "CHANNEL_PREFLIGHT_COMPLETED",
+    "freshness": "CURRENT",
+    "metadata_changed": false,
+    "requested_at": "2026-09-06T04:00:00Z",
+    "started_at": "2026-09-06T04:00:02Z",
+    "checked_at": "2026-09-06T04:00:06Z",
+    "job_deadline_at": "2026-09-06T04:02:00Z",
+    "expires_at": "2026-09-06T04:05:06Z",
+    "gateway_config_digest": "sha256:edd5294550c8338b62c0d71ea79e9710acdc26926ddd128c1dcfa14bfb418857",
+    "gateway_config_freshness": "UNCONFIRMED",
+    "expected_public_origin": null,
+    "checks": [
+      {
+        "id": "credential_configuration",
+        "status": "PASS",
+        "code": "CREDENTIALS_CONFIGURED",
+        "details": {
+          "bot_secret_configured": true
+        }
+      },
+      {
+        "id": "connection_authentication",
+        "status": "PASS",
+        "code": "WECOM_AUTHENTICATED",
+        "details": {
+          "authenticated": true
+        }
+      },
+      {
+        "id": "delivery_verification",
+        "status": "UNKNOWN",
+        "code": "DELIVERY_NOT_TESTED",
+        "details": {
+          "verification": "NOT_TESTED"
+        }
+      }
+    ],
+    "diagnostic_policy": "wecom_long_connection_v1",
+    "receive_mode": "long_connection",
+    "effective_config_digest": "sha256:c77f063e8408b890b22ce121b0d7456711f705cc7926c66dac7e2ecfe679713f",
+    "allow_connection_probe": true,
+    "bot_secret_version": 2
+  }
+}

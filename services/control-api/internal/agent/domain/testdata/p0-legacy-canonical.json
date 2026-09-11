@@ -1,0 +1,14 @@
+{
+  "loop.json": {
+    "canonical": "{\"nodes\":{\"review\":{\"instruction\":\"审查并改进当前结果。\",\"kind\":\"llm\",\"knowledge_slots\":[],\"model_slot\":\"primary\",\"tool_slots\":[]},\"review_loop\":{\"body\":\"review\",\"kind\":\"loop\",\"max_iterations\":3}},\"requirements\":{\"knowledge\":{},\"models\":{\"primary\":{\"capabilities\":[\"chat\"]}},\"tools\":{}},\"root\":\"review_loop\",\"schema_version\":\"v1\"}",
+    "digest": "sha256:60f31257b30bc9edcec01ece26820d1b96244be8f6781ef0b866d698f68600ef"
+  },
+  "sequence-parallel.json": {
+    "canonical": "{\"nodes\":{\"main\":{\"children\":[\"reviews\",\"summary\"],\"kind\":\"sequence\"},\"quality\":{\"instruction\":\"检查结果质量。\",\"kind\":\"llm\",\"knowledge_slots\":[],\"model_slot\":\"primary\",\"tool_slots\":[]},\"reviews\":{\"children\":[\"security\",\"quality\"],\"kind\":\"parallel\"},\"security\":{\"instruction\":\"检查安全问题。\",\"kind\":\"llm\",\"knowledge_slots\":[],\"model_slot\":\"primary\",\"tool_slots\":[\"search\"]},\"summary\":{\"instruction\":\"汇总已有检查结果。\",\"kind\":\"llm\",\"knowledge_slots\":[],\"model_slot\":\"primary\",\"tool_slots\":[]}},\"requirements\":{\"knowledge\":{},\"models\":{\"primary\":{\"capabilities\":[\"chat\",\"tool_call\"]}},\"tools\":{\"search\":{\"capability\":\"web.search\"}}},\"root\":\"main\",\"schema_version\":\"v1\"}",
+    "digest": "sha256:29b0c474fa8e78f6be25ab03cceef4e56596e2a529ff1641ec47b8fff4df6d2a"
+  },
+  "single-llm.json": {
+    "canonical": "{\"nodes\":{\"assistant\":{\"instruction\":\"准确回答用户问题。\",\"kind\":\"llm\",\"knowledge_slots\":[],\"model_slot\":\"primary\",\"name\":\"通用助手\",\"tool_slots\":[]}},\"requirements\":{\"knowledge\":{},\"models\":{\"primary\":{\"capabilities\":[\"chat\"]}},\"tools\":{}},\"root\":\"assistant\",\"schema_version\":\"v1\"}",
+    "digest": "sha256:d0848afe3fee57f16f913b957fcb76c124efc5c20280f1f7ff665b8dec8e53d3"
+  }
+}

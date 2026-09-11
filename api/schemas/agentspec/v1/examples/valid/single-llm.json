@@ -1,0 +1,21 @@
+{
+  "schema_version": "v1",
+  "root": "assistant",
+  "requirements": {
+    "models": {
+      "primary": {"capabilities": ["chat"]}
+    },
+    "tools": {},
+    "knowledge": {}
+  },
+  "nodes": {
+    "assistant": {
+      "kind": "llm",
+      "name": "通用助手",
+      "instruction": "准确回答用户问题。",
+      "model_slot": "primary",
+      "tool_slots": [],
+      "knowledge_slots": []
+    }
+  }
+}

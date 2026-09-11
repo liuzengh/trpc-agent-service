@@ -1,0 +1,17 @@
+{
+  "schema": "preflight-claim.schema.json",
+  "valid": true,
+  "document": {
+    "schema_version": 1,
+    "scope_id": "pool",
+    "source_epoch": "11111111-1111-4111-8111-111111111111",
+    "instance_epoch": "22222222-2222-4222-8222-222222222222",
+    "claim_request_id": "33333333-3333-4333-8333-333333333333",
+    "claim_token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "gateway_config_digest": "sha256:03f2b058b89dcf96f3b74459cf4851902e480cb112593a2e253c2d7527b03ed4",
+    "expected_public_origin": null,
+    "origin_status": "PUBLIC_ORIGIN_INVALID",
+    "limit": 1,
+    "diagnostic_policy": "telegram-receive-modes-v1"
+  }
+}

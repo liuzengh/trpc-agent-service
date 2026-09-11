@@ -1,0 +1,13 @@
+# Explicit development-only account source. Never combine with real Control
+# account configuration or treat static secrets as the production source.
+services:
+  channel-gateway:
+    environment:
+      GATEWAY_ACCOUNT_SOURCE: fixture
+      GATEWAY_WECOM_ACCOUNTS_FILE: /etc/gateway/wecom/accounts.json
+      GATEWAY_WECOM_BOT_SECRET: ${GATEWAY_WECOM_BOT_SECRET:-}
+      GATEWAY_TELEGRAM_ACCOUNTS_FILE: /etc/gateway/accounts.json
+      GATEWAY_TELEGRAM_WEBHOOK_SECRET: ${GATEWAY_TELEGRAM_WEBHOOK_SECRET:-}
+    volumes:
+      - ${GATEWAY_TELEGRAM_ACCOUNTS_FILE:-./gateway-accounts.empty.json}:/etc/gateway/accounts.json:ro
+      - ${GATEWAY_WECOM_ACCOUNTS_DIR:-./wecom}:/etc/gateway/wecom:ro

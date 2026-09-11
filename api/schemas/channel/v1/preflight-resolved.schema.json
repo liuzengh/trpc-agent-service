@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/preflight-resolved.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "preflight_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "connection_revision": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "purpose": {
+      "enum": [
+        "telegram.bot_token",
+        "wecom.bot_secret"
+      ]
+    },
+    "credential_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "credential_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "value": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "lease_expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "maxLength": 35
+    }
+  },
+  "required": [
+    "schema_version",
+    "preflight_id",
+    "connection_revision",
+    "purpose",
+    "credential_id",
+    "credential_version",
+    "value",
+    "lease_expires_at"
+  ]
+}

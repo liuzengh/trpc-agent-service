@@ -1,0 +1,80 @@
+# Independent opt-in local observation stack: no business DB, queue, or receiver.
+# Host applications may use explicit loopback HTTP; container applications use
+# compose.tracing.tls.yaml and a trusted certificate. Never publish wildcard ports.
+name: trpc-agent-tracing
+services:
+  trace-collector:
+    image: otel/opentelemetry-collector-contrib:0.133.0@sha256:98274b756324abdb2473fa0c898247a246091e861e61d1548f9be483198eecea
+    profiles: [tracing]
+    command: ["--config=/etc/otelcol/collector.yaml"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 192m
+    cpus: 0.5
+    stop_grace_period: 15s
+    volumes:
+      - ./tracing/collector.yaml:/etc/otelcol/collector.yaml:ro
+    ports:
+      - "127.0.0.1:${TRACING_OTLP_PORT:-14318}:4318"
+      - "127.0.0.1:${TRACING_HEALTH_PORT:-13133}:13133"
+      - "127.0.0.1:${TRACING_METRICS_PORT:-18888}:8888"
+    depends_on: [trace-tempo]
+    networks: [tracing]
+
+  trace-tempo:
+    image: grafana/tempo:2.9.0@sha256:65a5789759435f1ef696f1953258b9bbdb18eb571d5ce711ff812d2e128288a4
+    profiles: [tracing]
+    command: ["-config.file=/etc/tempo.yaml"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1
+    stop_grace_period: 30s
+    volumes:
+      - ./tracing/tempo.yaml:/etc/tempo.yaml:ro
+      - tracing-tempo-data:/var/tempo
+    ports:
+      - "127.0.0.1:${TRACING_TEMPO_PORT:-13200}:3200"
+    networks: [tracing]
+
+  trace-grafana:
+    image: grafana/grafana:12.1.1@sha256:a1701c2180249361737a99a01bc770db39381640e4d631825d38ff4535efa47d
+    profiles: [tracing]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 0.5
+    stop_grace_period: 15s
+    environment:
+      GF_SECURITY_ADMIN_USER: trace-admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana-admin-password
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: "true"
+      GF_LOG_MODE: console
+    volumes:
+      - ./tracing/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ${TRACING_GRAFANA_ADMIN_PASSWORD_FILE:?set absolute password-file path}:/run/secrets/grafana-admin-password:ro
+      - tracing-grafana-data:/var/lib/grafana
+    tmpfs: [/tmp]
+    ports:
+      - "127.0.0.1:${TRACING_GRAFANA_PORT:-13000}:3000"
+    depends_on: [trace-tempo]
+    networks: [tracing]
+
+networks:
+  tracing:
+    driver: bridge
+volumes:
+  tracing-tempo-data:
+  tracing-grafana-data:

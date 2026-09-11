@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/preflight-complete.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "scope_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "source_epoch": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "instance_epoch": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "lease_epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2
+    },
+    "claim_token": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 43,
+      "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$"
+    },
+    "gateway_config_digest": {
+      "$ref": "common.schema.json#/$defs/digest"
+    },
+    "expected_public_origin": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https://[^/?#@\\\\ ]+$"
+        },
+        {
+          "const": null
+        }
+      ]
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "maxLength": 35
+    },
+    "checks": {
+      "type": "array",
+      "items": {},
+      "minItems": 3,
+      "maxItems": 8
+    },
+    "diagnostic_policy": {
+      "enum": [
+        "telegram-receive-modes-v1",
+        "wecom_long_connection_v1"
+      ]
+    },
+    "receive_mode": {
+      "enum": [
+        "long_polling",
+        "webhook",
+        "long_connection"
+      ]
+    },
+    "effective_config_digest": {
+      "$ref": "common.schema.json#/$defs/digest"
+    },
+    "connection_revision": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "origin_status": {
+      "enum": [
+        "PUBLIC_ORIGIN_STATIC_VALID",
+        "PUBLIC_ORIGIN_INVALID",
+        "PUBLIC_ORIGIN_NOT_PUBLIC",
+        "PUBLIC_ORIGIN_NOT_APPLICABLE"
+      ]
+    },
+    "endpoint_profile": {
+      "type": "string",
+      "enum": [
+        "official",
+        "test"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "scope_id",
+    "source_epoch",
+    "instance_epoch",
+    "lease_epoch",
+    "claim_token",
+    "gateway_config_digest",
+    "expected_public_origin",
+    "observed_at",
+    "checks"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "diagnostic_policy"
+        ]
+      },
+      "then": {
+        "required": [
+          "diagnostic_policy",
+          "receive_mode",
+          "effective_config_digest",
+          "connection_revision",
+          "origin_status"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "diagnostic_policy"
+              ]
+            },
+            {
+              "required": [
+                "receive_mode"
+              ]
+            },
+            {
+              "required": [
+                "effective_config_digest"
+              ]
+            },
+            {
+              "required": [
+                "connection_revision"
+              ]
+            },
+            {
+              "required": [
+                "origin_status"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "diagnostic_policy": {
+            "const": "wecom_long_connection_v1"
+          }
+        },
+        "required": [
+          "diagnostic_policy"
+        ]
+      },
+      "then": {
+        "properties": {
+          "checks": {
+            "$ref": "preflight-checks.schema.json#/$defs/long_connection"
+          }
+        }
+      },
+      "else": {
+        "if": {
+          "properties": {
+            "receive_mode": {
+              "const": "long_polling"
+            },
+            "endpoint_profile": {
+              "type": "string",
+              "enum": [
+                "official",
+                "test"
+              ]
+            }
+          },
+          "required": [
+            "receive_mode"
+          ]
+        },
+        "then": {
+          "properties": {
+            "checks": {
+              "$ref": "preflight-checks.schema.json#/$defs/long_polling"
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "checks": {
+              "$ref": "preflight-checks.schema.json#/$defs/webhook"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "diagnostic_policy": {
+            "const": "wecom_long_connection_v1"
+          }
+        },
+        "required": [
+          "diagnostic_policy"
+        ]
+      },
+      "then": {
+        "properties": {
+          "receive_mode": {
+            "const": "long_connection"
+          },
+          "expected_public_origin": {
+            "const": null
+          },
+          "origin_status": {
+            "const": "PUBLIC_ORIGIN_NOT_APPLICABLE"
+          },
+          "endpoint_profile": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "receive_mode": {
+            "enum": [
+              "long_polling",
+              "webhook"
+            ]
+          },
+          "origin_status": {
+            "enum": [
+              "PUBLIC_ORIGIN_STATIC_VALID",
+              "PUBLIC_ORIGIN_INVALID",
+              "PUBLIC_ORIGIN_NOT_PUBLIC"
+            ]
+          },
+          "endpoint_profile": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,595 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/preflight-view.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "preflight_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "tenant_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "account_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "provider": {
+      "enum": [
+        "telegram",
+        "wecom"
+      ]
+    },
+    "provider_account_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^\\s]+$"
+    },
+    "requested_by": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "account_revision": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "connection_revision": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "bot_token_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "state": {
+      "enum": [
+        "QUEUED",
+        "RUNNING",
+        "COMPLETED",
+        "TIMED_OUT",
+        "STALE"
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "PASS",
+        "WARN",
+        "FAIL",
+        "UNKNOWN"
+      ]
+    },
+    "reason_code": {
+      "enum": [
+        "CHANNEL_PREFLIGHT_QUEUED",
+        "CHANNEL_PREFLIGHT_RUNNING",
+        "CHANNEL_PREFLIGHT_COMPLETED",
+        "CHANNEL_PREFLIGHT_NO_EXECUTOR",
+        "CHANNEL_PREFLIGHT_EXECUTION_TIMEOUT",
+        "CHANNEL_PREFLIGHT_ACCOUNT_CHANGED",
+        "CHANNEL_PREFLIGHT_TENANT_INACTIVE",
+        "CHANNEL_PREFLIGHT_REQUESTER_REVOKED",
+        "CHANNEL_PREFLIGHT_GATEWAY_CONFIG_CHANGED",
+        "CHANNEL_SOURCE_EPOCH_MISMATCH"
+      ]
+    },
+    "freshness": {
+      "enum": [
+        "NOT_CHECKED",
+        "CURRENT",
+        "STALE",
+        "EXPIRED"
+      ]
+    },
+    "metadata_changed": {
+      "type": "boolean"
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "maxLength": 35
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$",
+          "maxLength": 35
+        },
+        {
+          "const": null
+        }
+      ]
+    },
+    "checked_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$",
+          "maxLength": 35
+        },
+        {
+          "const": null
+        }
+      ]
+    },
+    "job_deadline_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "maxLength": 35
+    },
+    "expires_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$",
+          "maxLength": 35
+        },
+        {
+          "const": null
+        }
+      ]
+    },
+    "gateway_config_digest": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/digest"
+        },
+        {
+          "const": null
+        }
+      ]
+    },
+    "gateway_config_freshness": {
+      "anyOf": [
+        {
+          "const": "UNCONFIRMED"
+        },
+        {
+          "const": null
+        }
+      ]
+    },
+    "expected_public_origin": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https://[^/?#@\\\\ ]+$"
+        },
+        {
+          "const": null
+        }
+      ]
+    },
+    "checks": {
+      "anyOf": [
+        {
+          "$ref": "preflight-complete.schema.json#/properties/checks"
+        },
+        {
+          "type": "array",
+          "items": {},
+          "maxItems": 0
+        }
+      ]
+    },
+    "diagnostic_policy": {
+      "enum": [
+        "telegram-receive-modes-v1",
+        "wecom_long_connection_v1"
+      ]
+    },
+    "receive_mode": {
+      "enum": [
+        "long_polling",
+        "webhook",
+        "long_connection"
+      ]
+    },
+    "effective_config_digest": {
+      "$ref": "common.schema.json#/$defs/digest"
+    },
+    "allow_connection_probe": {
+      "const": true
+    },
+    "bot_secret_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "endpoint_profile": {
+      "type": "string",
+      "enum": [
+        "official",
+        "test"
+      ]
+    }
+  },
+  "required": [
+    "preflight_id",
+    "tenant_id",
+    "account_id",
+    "provider",
+    "provider_account_id",
+    "requested_by",
+    "account_revision",
+    "connection_revision",
+    "state",
+    "outcome",
+    "reason_code",
+    "freshness",
+    "metadata_changed",
+    "requested_at",
+    "started_at",
+    "checked_at",
+    "job_deadline_at",
+    "expires_at",
+    "gateway_config_digest",
+    "gateway_config_freshness",
+    "expected_public_origin",
+    "checks"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "COMPLETED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "checks": {
+            "$ref": "preflight-complete.schema.json#/properties/checks"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$",
+            "maxLength": 35
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$",
+            "maxLength": 35
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$",
+            "maxLength": 35
+          },
+          "gateway_config_digest": {
+            "$ref": "common.schema.json#/$defs/digest"
+          },
+          "gateway_config_freshness": {
+            "const": "UNCONFIRMED"
+          },
+          "reason_code": {
+            "const": "CHANNEL_PREFLIGHT_COMPLETED"
+          },
+          "freshness": {
+            "enum": [
+              "CURRENT",
+              "STALE",
+              "EXPIRED"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {},
+            "maxItems": 0
+          },
+          "checked_at": {
+            "const": null
+          },
+          "expires_at": {
+            "const": null
+          },
+          "outcome": {
+            "const": "UNKNOWN"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "gateway_config_digest": {
+            "const": null
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "gateway_config_freshness": {
+            "const": null
+          },
+          "expected_public_origin": {
+            "const": null
+          },
+          "started_at": {
+            "const": null
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "gateway_config_freshness": {
+            "const": "UNCONFIRMED"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$",
+            "maxLength": 35
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "QUEUED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "started_at": {
+            "const": null
+          },
+          "gateway_config_digest": {
+            "const": null
+          },
+          "freshness": {
+            "const": "NOT_CHECKED"
+          },
+          "reason_code": {
+            "const": "CHANNEL_PREFLIGHT_QUEUED"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "RUNNING"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$",
+            "maxLength": 35
+          },
+          "gateway_config_digest": {
+            "$ref": "common.schema.json#/$defs/digest"
+          },
+          "freshness": {
+            "const": "NOT_CHECKED"
+          },
+          "reason_code": {
+            "const": "CHANNEL_PREFLIGHT_RUNNING"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "diagnostic_policy"
+        ]
+      },
+      "then": {
+        "required": [
+          "diagnostic_policy",
+          "receive_mode"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "gateway_config_digest": {
+                  "type": "string"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "effective_config_digest"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "effective_config_digest"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "diagnostic_policy"
+              ]
+            },
+            {
+              "required": [
+                "receive_mode"
+              ]
+            },
+            {
+              "required": [
+                "effective_config_digest"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "diagnostic_policy": {
+            "const": "wecom_long_connection_v1"
+          }
+        },
+        "required": [
+          "diagnostic_policy"
+        ]
+      },
+      "then": {
+        "properties": {
+          "receive_mode": {
+            "const": "long_connection"
+          },
+          "expected_public_origin": {
+            "const": null
+          },
+          "origin_status": {
+            "const": "PUBLIC_ORIGIN_NOT_APPLICABLE"
+          },
+          "endpoint_profile": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "receive_mode": {
+            "enum": [
+              "long_polling",
+              "webhook"
+            ]
+          },
+          "origin_status": {
+            "enum": [
+              "PUBLIC_ORIGIN_STATIC_VALID",
+              "PUBLIC_ORIGIN_INVALID",
+              "PUBLIC_ORIGIN_NOT_PUBLIC"
+            ]
+          },
+          "endpoint_profile": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": {
+            "const": "wecom"
+          }
+        },
+        "required": [
+          "provider"
+        ]
+      },
+      "then": {
+        "properties": {
+          "diagnostic_policy": {
+            "const": "wecom_long_connection_v1"
+          },
+          "receive_mode": {
+            "const": "long_connection"
+          },
+          "allow_connection_probe": {
+            "const": true
+          },
+          "endpoint_profile": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test"
+            ]
+          }
+        },
+        "required": [
+          "diagnostic_policy",
+          "receive_mode",
+          "allow_connection_probe",
+          "bot_secret_version"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "bot_token_version"
+              ]
+            }
+          ]
+        }
+      },
+      "else": {
+        "properties": {
+          "provider_account_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "^[1-9][0-9]*$",
+            "not": {
+              "pattern": "[^0-9]"
+            }
+          },
+          "diagnostic_policy": {
+            "const": "telegram-receive-modes-v1"
+          },
+          "receive_mode": {
+            "enum": [
+              "long_polling",
+              "webhook"
+            ]
+          },
+          "endpoint_profile": {
+            "type": "string",
+            "enum": [
+              "official",
+              "test"
+            ]
+          }
+        },
+        "required": [
+          "bot_token_version"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "bot_secret_version"
+              ]
+            },
+            {
+              "required": [
+                "allow_connection_probe"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

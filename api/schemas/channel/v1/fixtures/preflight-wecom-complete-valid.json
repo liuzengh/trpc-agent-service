@@ -1,0 +1,46 @@
+{
+  "schema": "preflight-complete.schema.json",
+  "valid": true,
+  "document": {
+    "schema_version": 1,
+    "scope_id": "pool",
+    "source_epoch": "11111111-1111-4111-8111-111111111111",
+    "instance_epoch": "22222222-2222-4222-8222-222222222222",
+    "lease_epoch": 1,
+    "claim_token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "gateway_config_digest": "sha256:edd5294550c8338b62c0d71ea79e9710acdc26926ddd128c1dcfa14bfb418857",
+    "expected_public_origin": null,
+    "observed_at": "2026-09-06T04:00:05Z",
+    "checks": [
+      {
+        "id": "credential_configuration",
+        "status": "PASS",
+        "code": "CREDENTIALS_CONFIGURED",
+        "details": {
+          "bot_secret_configured": true
+        }
+      },
+      {
+        "id": "connection_authentication",
+        "status": "PASS",
+        "code": "WECOM_AUTHENTICATED",
+        "details": {
+          "authenticated": true
+        }
+      },
+      {
+        "id": "delivery_verification",
+        "status": "UNKNOWN",
+        "code": "DELIVERY_NOT_TESTED",
+        "details": {
+          "verification": "NOT_TESTED"
+        }
+      }
+    ],
+    "diagnostic_policy": "wecom_long_connection_v1",
+    "receive_mode": "long_connection",
+    "effective_config_digest": "sha256:c77f063e8408b890b22ce121b0d7456711f705cc7926c66dac7e2ecfe679713f",
+    "origin_status": "PUBLIC_ORIGIN_NOT_APPLICABLE",
+    "connection_revision": 4
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "worker_id": "worker-one",
+  "platform_contract_digest": "sha256:673228c95c17162ba50ccaf631a0514c5ef173cf48a4466f75c9caf6e559d8c2",
+  "health_address": ":8083",
+  "internal_address": ":8082",
+  "control_url": "https://control-api:8082",
+  "control_tls": {
+    "cert_file": "/run/worker-runtime/worker-client.crt",
+    "key_file": "/run/worker-runtime/worker-client.key",
+    "ca_file": "/run/worker-runtime/control-ca.crt"
+  },
+  "proof_tls": {
+    "cert_file": "/run/worker-runtime/worker-server.crt",
+    "key_file": "/run/worker-runtime/worker-server.key",
+    "client_ca_file": "/run/worker-runtime/proof-client-ca.crt"
+  },
+  "control_principals": [
+    "spiffe://agent-platform/control-api"
+  ],
+  "gateway_principals": [
+    "spiffe://agent-platform/channel-gateway"
+  ],
+  "nats_file": "/run/worker-runtime/nats.json",
+  "policy": {
+    "version": "worker-v1",
+    "max_run_age": "10m",
+    "max_reply_age": "10m",
+    "max_future_skew": "30s",
+    "lease_ttl": "30s",
+    "renewal_interval": "10s",
+    "retry_backoff": "2s",
+    "max_attempts": 3
+  },
+  "limits": {
+    "max_active_attempts": 4,
+    "max_queued_runs": 10000,
+    "max_retained_runs": 100000,
+    "max_manifests": 10000,
+    "max_snapshot_bytes": 4194304,
+    "max_credential_response_bytes": 65536,
+    "max_tracked_attempts": 256,
+    "scan_batch": 64,
+    "reply_batch": 32,
+    "max_proof_queries": 64,
+    "max_database_connections": 32
+  },
+  "timing": {
+    "startup_timeout": "2m",
+    "operation_timeout": "5s",
+    "poll_interval": "250ms",
+    "health_interval": "2s",
+    "request_timeout": "10s",
+    "sdk_drain_timeout": "5s",
+    "shutdown_drain_timeout": "30s",
+    "shutdown_cancel_timeout": "10s",
+    "proof_timeout": "5s",
+    "http_shutdown_timeout": "5s"
+  }
+}

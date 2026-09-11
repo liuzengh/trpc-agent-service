@@ -1,0 +1,19 @@
+{
+  "schema_version": "v1",
+  "models": {},
+  "tools": {
+    "search": {
+      "kind": "mcp_streamable_http",
+      "server_url": "https://tools.example.com/mcp?token=forbidden",
+      "toolset_name": "internet",
+      "tool_name": "search_web",
+      "auth": {
+        "kind": "none"
+      },
+      "capability": "web.search"
+    }
+  },
+  "knowledge": {},
+  "storage": {},
+  "credential_protocol_version": "v1"
+}

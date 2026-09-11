@@ -1,0 +1,19 @@
+# Standalone: docker compose -f deploy/compose/compose.channel-lab.yaml --profile testing up -d --build
+# Add as an override to the product Compose to share its default network.
+services:
+  channel-lab:
+    profiles: [testing]
+    build:
+      context: ../../tools/channel-lab
+    ports:
+      - "127.0.0.1:18090:8080"
+    command: ["--webhook-origin", "${CHANNEL_LAB_GATEWAY_ORIGIN:-http://channel-gateway:8090}"]
+    volumes:
+      - channel-lab-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+volumes:
+  channel-lab-data:

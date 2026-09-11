@@ -1,0 +1,36 @@
+{
+  "schema_version": "v1",
+  "credential_protocol_version": "v1",
+  "models": {},
+  "tools": {},
+  "knowledge": {
+    "docs": {
+      "kind": "managed_knowledge",
+      "backend_id": "vectors",
+      "backend_revision": 1,
+      "embedding": {
+        "model": "embed",
+        "base_url": "https://embed.example",
+        "api_key_credential_id": "crd_00000000000000000000000000000001",
+        "dimensions": 3
+      }
+    }
+  },
+  "storage": {
+    "session": {
+      "kind": "managed_session",
+      "backend_id": "redis",
+      "backend_revision": 2
+    },
+    "memory": {
+      "kind": "managed_memory",
+      "backend_id": "pg",
+      "backend_revision": 1
+    },
+    "artifact": {
+      "kind": "managed_artifact",
+      "backend_id": "s3",
+      "backend_revision": 1
+    }
+  }
+}

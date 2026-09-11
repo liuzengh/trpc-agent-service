@@ -1,0 +1,14 @@
+{
+  "schema": "preflight-resolved.schema.json",
+  "valid": true,
+  "document": {
+    "schema_version": 1,
+    "preflight_id": "cpf_example",
+    "connection_revision": 4,
+    "purpose": "wecom.bot_secret",
+    "credential_id": "ccr_example",
+    "credential_version": 2,
+    "value": "synthetic_wecom_secret",
+    "lease_expires_at": "2026-09-06T04:00:32Z"
+  }
+}

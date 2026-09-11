@@ -1,0 +1,71 @@
+/* Scheme F: shared by the management console, not the independently built docs site.
+ * Brand, resource categories and operational status are deliberately separate roles.
+ */
+:root {
+  color-scheme: light;
+  --bg: #f6f3ec;
+  --surface: #fffefa;
+  --surface-subtle: #f2f2eb;
+  --surface-translucent: rgba(255, 254, 250, .95);
+  --sidebar-bg: #eef0e8;
+  --ink: #273c34;
+  --ink-soft: #495a50;
+  --muted: #657267;
+  --placeholder: #69776c;
+  --line: #dedfd5;
+  --line-strong: #bcc5b9;
+  --canvas-dot: #c9d1c5;
+
+  --primary: #245c4f;
+  --primary-hover: #19483d;
+  --primary-soft: #e5eee5;
+  --primary-border: #8cae9a;
+  --on-primary: #fffefa;
+  --focus-ring: #245c4f;
+  --focus-halo: #dce8dc;
+
+  --secondary: #ad674b;
+  --secondary-ink: #8b4e37;
+  --secondary-soft: #f5e6dd;
+  --secondary-border: #e8c9b8;
+  --accent: #537f98;
+  --info-ink: #365e74;
+  --info-soft: #e7eff3;
+  --info-border: #bdcfda;
+
+  --success: #286440;
+  --success-soft: #e8f2e8;
+  --success-border: #bed6c2;
+  --warning: #85530b;
+  --warning-soft: #fff4d9;
+  --warning-border: #e7ca85;
+  --danger: #ad3443;
+  --danger-soft: #fceced;
+  --danger-border: #e5b6bd;
+
+  --code-bg: #21332d;
+  --code-ink: #e3ede4;
+  --code-border: #3c5147;
+  --overlay: rgba(29, 44, 35, .36);
+  --shadow-color: rgba(37, 61, 47, .08);
+  --shadow: 0 18px 50px var(--shadow-color);
+}
+
+/* Labels/icons accompany category colors; none imply connection or execution status. */
+[data-resource-category="models"] {
+  --resource-color: var(--primary);
+  --resource-soft: var(--primary-soft);
+}
+[data-resource-category="tools"],
+[data-resource-category="executors"] {
+  --resource-color: var(--secondary-ink);
+  --resource-soft: var(--secondary-soft);
+}
+[data-resource-category="knowledge"] {
+  --resource-color: var(--info-ink);
+  --resource-soft: var(--info-soft);
+}
+[data-resource-category="storage"] {
+  --resource-color: var(--ink-soft);
+  --resource-soft: var(--surface-subtle);
+}

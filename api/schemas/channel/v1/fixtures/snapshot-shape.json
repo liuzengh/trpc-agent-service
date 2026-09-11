@@ -1,0 +1,41 @@
+{
+  "schema": "account-snapshot.schema.json",
+  "valid": true,
+  "document": {
+    "schema_version": 1,
+    "scope_id": "gateway_pool",
+    "source_epoch": "00000000-0000-4000-8000-000000000001",
+    "snapshot_revision": 3,
+    "snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "complete": true,
+    "accounts": [
+      {
+        "tenant_id": "tnt_a",
+        "account_id": "cha_a",
+        "provider": "telegram",
+        "provider_account_id": "123",
+        "account_revision": 2,
+        "connection_revision": 2,
+        "enabled": true,
+        "min_route_generation": 0,
+        "config": {
+          "webhook_path": "/v1/telegram/cha_a"
+        },
+        "credentials": [
+          {
+            "purpose": "telegram.bot_token",
+            "credential_id": "ccr_a",
+            "credential_version": 1,
+            "configured": true
+          },
+          {
+            "purpose": "telegram.webhook_secret",
+            "credential_id": "ccr_b",
+            "credential_version": 1,
+            "configured": true
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,48 @@
+name: Public documentation
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', 'docs/site/**', 'docs/user-guide/**', '.github/workflows/docs-pages.yml']
+  pull_request:
+    paths: ['site/**', 'docs/site/**', 'docs/user-guide/**', '.github/workflows/docs-pages.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: docs-pages-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SITE_BASE_PATH: /${{ github.event.repository.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci --prefix site
+      - run: npm --prefix site test
+      - run: npm --prefix site run build
+      - run: npm --prefix site run lint
+      - run: npm --prefix site run verify
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site/out
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,25 @@
+{
+  "schema": "credentials-resolve-response.schema.json",
+  "valid": true,
+  "document": {
+    "scope_id": "gateway_pool",
+    "source_epoch": "00000000-0000-4000-8000-000000000001",
+    "tenant_id": "tnt_a",
+    "account_id": "cha_a",
+    "connection_revision": 2,
+    "values": [
+      {
+        "purpose": "telegram.bot_token",
+        "credential_id": "ccr_a",
+        "credential_version": 1,
+        "value": "TEST_ONLY_VALUE"
+      },
+      {
+        "purpose": "telegram.webhook_secret",
+        "credential_id": "ccr_b",
+        "credential_version": 1,
+        "value": "TEST_ONLY_VALUE"
+      }
+    ]
+  }
+}

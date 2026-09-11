@@ -1,0 +1,15 @@
+{
+  "schema": "preflight-resolved.schema.json",
+  "valid": false,
+  "document": {
+    "schema_version": 1,
+    "preflight_id": "cpf_example",
+    "connection_revision": 4,
+    "purpose": "telegram.bot_token",
+    "credential_id": "ccr_example",
+    "credential_version": 2,
+    "value": "fixture-only-not-a-real-token",
+    "lease_expires_at": "2026-09-06T04:00:32Z",
+    "unexpected_canary": "fixture-only"
+  }
+}

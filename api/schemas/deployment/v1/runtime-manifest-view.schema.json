@@ -1,0 +1,1179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/deployment/v1/runtime-manifest-view.schema.json",
+  "title": "RuntimeManifest Public View V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "compiler_version",
+    "runtime_contract_version",
+    "platform_contract",
+    "tenant_id",
+    "sources",
+    "agent_plan",
+    "resources",
+    "resolved_requirements",
+    "storage_roles",
+    "execution"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "v1"
+    },
+    "compiler_version": {
+      "const": "deployment-compiler-v1"
+    },
+    "runtime_contract_version": {
+      "const": "worker-manifest-v1"
+    },
+    "platform_contract": {
+      "$ref": "#/$defs/platform_contract"
+    },
+    "tenant_id": {
+      "$ref": "#/$defs/opaque_id"
+    },
+    "sources": {
+      "$ref": "#/$defs/sources"
+    },
+    "agent_plan": {
+      "$ref": "#/$defs/agent_plan"
+    },
+    "resources": {
+      "$ref": "#/$defs/resources"
+    },
+    "resolved_requirements": {
+      "$ref": "#/$defs/resolved_requirements"
+    },
+    "storage_roles": {
+      "$ref": "#/$defs/storage_roles"
+    },
+    "execution": {
+      "$ref": "#/$defs/execution"
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary"
+      ],
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/data_summary"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "opaque_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "resource_key": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "platform_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "digest"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "platform-v1",
+            "worker-v1"
+          ]
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent",
+        "profile"
+      ],
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/agent_source"
+        },
+        "profile": {
+          "$ref": "#/$defs/profile_source"
+        }
+      }
+    },
+    "agent_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_id",
+        "version_number",
+        "version_id",
+        "schema_version",
+        "digest"
+      ],
+      "properties": {
+        "agent_id": {
+          "$ref": "#/$defs/opaque_id"
+        },
+        "version_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "version_id": {
+          "$ref": "#/$defs/opaque_id"
+        },
+        "schema_version": {
+          "const": "v1"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "profile_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_id",
+        "revision_number",
+        "revision_id",
+        "schema_version",
+        "digest"
+      ],
+      "properties": {
+        "profile_id": {
+          "$ref": "#/$defs/opaque_id"
+        },
+        "revision_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "revision_id": {
+          "$ref": "#/$defs/opaque_id"
+        },
+        "schema_version": {
+          "const": "v1"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "agent_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "nodes"
+      ],
+      "properties": {
+        "root": {
+          "$ref": "#/$defs/resource_key"
+        },
+        "nodes": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 128,
+          "propertyNames": {
+            "$ref": "#/$defs/resource_key"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/node"
+          }
+        }
+      }
+    },
+    "node": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/llm_node"
+        },
+        {
+          "$ref": "#/$defs/sequence_node"
+        },
+        {
+          "$ref": "#/$defs/parallel_node"
+        },
+        {
+          "$ref": "#/$defs/loop_node"
+        }
+      ]
+    },
+    "llm_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "instruction",
+        "model_resource",
+        "tool_resources",
+        "knowledge_resources",
+        "callable_entries"
+      ],
+      "properties": {
+        "kind": {
+          "const": "llm"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "model_resource": {
+          "$ref": "#/$defs/resource_key"
+        },
+        "tool_resources": {
+          "$ref": "#/$defs/resource_key_set"
+        },
+        "knowledge_resources": {
+          "$ref": "#/$defs/resource_key_set"
+        },
+        "callable_entries": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "memory": {
+          "$ref": "#/$defs/data_memory"
+        },
+        "artifact": {
+          "$ref": "#/$defs/data_artifact"
+        },
+        "add_session_summary": {
+          "const": true
+        },
+        "workspace": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "executor_resource",
+            "tools"
+          ],
+          "properties": {
+            "executor_resource": {
+              "$ref": "#/$defs/resource_key"
+            },
+            "tools": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "workspace_exec",
+                  "workspace_save_artifact"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "sequence_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "children"
+      ],
+      "properties": {
+        "kind": {
+          "const": "sequence"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "children": {
+          "$ref": "#/$defs/children"
+        }
+      }
+    },
+    "parallel_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "children"
+      ],
+      "properties": {
+        "kind": {
+          "const": "parallel"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "children": {
+          "$ref": "#/$defs/children"
+        }
+      }
+    },
+    "loop_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "body",
+        "max_iterations"
+      ],
+      "properties": {
+        "kind": {
+          "const": "loop"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "body": {
+          "$ref": "#/$defs/resource_key"
+        },
+        "max_iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        }
+      }
+    },
+    "children": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/resource_key"
+      }
+    },
+    "resource_key_set": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/resource_key"
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "models",
+        "tools",
+        "knowledge",
+        "storage"
+      ],
+      "properties": {
+        "models": {
+          "$ref": "#/$defs/model_resources"
+        },
+        "tools": {
+          "$ref": "#/$defs/tool_resources"
+        },
+        "knowledge": {
+          "$ref": "#/$defs/knowledge_resources"
+        },
+        "storage": {
+          "$ref": "#/$defs/storage_resources"
+        },
+        "executors": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": {
+            "$ref": "#/$defs/resource_key"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "adapter_version"
+            ],
+            "properties": {
+              "kind": {
+                "const": "sdk_sandbox"
+              },
+              "adapter_version": {
+                "const": "sdk-sandbox-v1"
+              }
+            }
+          }
+        }
+      }
+    },
+    "model_resources": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": {
+        "$ref": "#/$defs/resource_key"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/model_resource"
+      }
+    },
+    "tool_resources": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "$ref": "#/$defs/resource_key"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/tool_resource"
+      }
+    },
+    "knowledge_resources": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "$ref": "#/$defs/resource_key"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/knowledge_resource"
+      }
+    },
+    "storage_resources": {
+      "type": "object",
+      "required": [
+        "session"
+      ],
+      "maxProperties": 3,
+      "propertyNames": {
+        "enum": [
+          "session",
+          "memory",
+          "artifact"
+        ]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/storage_resource"
+      }
+    },
+    "model_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_version",
+        "kind",
+        "model",
+        "base_url",
+        "credential_present",
+        "capabilities"
+      ],
+      "properties": {
+        "adapter_version": {
+          "const": "openai-compatible-v1"
+        },
+        "kind": {
+          "const": "openai_compatible"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "base_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "credential_present": {
+          "const": true
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "chat",
+              "tool_call"
+            ]
+          }
+        }
+      }
+    },
+    "tool_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_version",
+        "kind",
+        "server_url",
+        "toolset_name",
+        "tool_name",
+        "auth",
+        "capability"
+      ],
+      "properties": {
+        "adapter_version": {
+          "const": "mcp-web-search-v1"
+        },
+        "kind": {
+          "const": "mcp_streamable_http"
+        },
+        "server_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "toolset_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "tool_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "auth": {
+          "$ref": "#/$defs/tool_auth"
+        },
+        "capability": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+        }
+      }
+    },
+    "tool_auth": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "none"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "credential_present"
+          ],
+          "properties": {
+            "kind": {
+              "const": "bearer"
+            },
+            "credential_present": {
+              "const": true
+            }
+          }
+        }
+      ]
+    },
+    "knowledge_resource": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/unmanaged_knowledge_resource"
+        },
+        {
+          "$ref": "#/$defs/managed_knowledge_resource"
+        }
+      ]
+    },
+    "embedding_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "base_url",
+        "dimensions",
+        "credential_present"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "base_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "dimensions": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "credential_present": {
+          "const": true
+        }
+      }
+    },
+    "storage_resource": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/unmanaged_storage_resource"
+        },
+        {
+          "$ref": "#/$defs/managed_session_resource"
+        },
+        {
+          "$ref": "#/$defs/managed_memory_resource"
+        },
+        {
+          "$ref": "#/$defs/managed_artifact_resource"
+        }
+      ]
+    },
+    "storage_destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "port",
+        "database",
+        "username",
+        "sslmode"
+      ],
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "database": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sslmode": {
+          "enum": [
+            "disable",
+            "require",
+            "verify-full"
+          ]
+        }
+      }
+    },
+    "resolved_requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "models",
+        "tools",
+        "knowledge"
+      ],
+      "properties": {
+        "models": {
+          "$ref": "#/$defs/resolved_map"
+        },
+        "tools": {
+          "$ref": "#/$defs/resolved_map"
+        },
+        "knowledge": {
+          "$ref": "#/$defs/resolved_map"
+        },
+        "executors": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": {
+            "$ref": "#/$defs/resource_key"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/resource_key"
+          }
+        }
+      }
+    },
+    "resolved_map": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/resource_key"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/resource_key"
+      }
+    },
+    "storage_roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session"
+      ],
+      "properties": {
+        "session": {
+          "const": "session"
+        },
+        "memory": {
+          "const": "memory"
+        },
+        "artifact": {
+          "const": "artifact"
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "allowed_endpoint_hosts",
+        "max_run_seconds",
+        "max_tool_calls",
+        "max_output_tokens"
+      ],
+      "properties": {
+        "backend": {
+          "const": "worker-process-v1"
+        },
+        "allowed_endpoint_hosts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          }
+        },
+        "max_run_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_tool_calls": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "managed_backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend_id",
+        "backend_revision",
+        "kind"
+      ],
+      "properties": {
+        "backend_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "enum": [
+            "postgresql",
+            "redis",
+            "qdrant",
+            "s3"
+          ]
+        }
+      }
+    },
+    "unmanaged_storage_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_version",
+        "kind",
+        "destination",
+        "credential_present"
+      ],
+      "properties": {
+        "adapter_version": {
+          "const": "postgres-state-v1"
+        },
+        "kind": {
+          "const": "postgres_state"
+        },
+        "destination": {
+          "$ref": "#/$defs/storage_destination"
+        },
+        "credential_present": {
+          "const": true
+        }
+      }
+    },
+    "unmanaged_knowledge_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_version",
+        "kind",
+        "host",
+        "port",
+        "tls",
+        "collection",
+        "credential_present",
+        "embedding",
+        "capability"
+      ],
+      "properties": {
+        "adapter_version": {
+          "const": "qdrant-openai-v1"
+        },
+        "kind": {
+          "const": "qdrant_openai"
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "tls": {
+          "type": "boolean"
+        },
+        "collection": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "credential_present": {
+          "type": "boolean"
+        },
+        "embedding": {
+          "$ref": "#/$defs/embedding_resource"
+        },
+        "capability": {
+          "const": "knowledge.search"
+        }
+      }
+    },
+    "managed_session_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_version",
+        "kind",
+        "backend"
+      ],
+      "properties": {
+        "adapter_version": {
+          "const": "managed-session-v1"
+        },
+        "kind": {
+          "const": "managed_session"
+        },
+        "backend": {
+          "$ref": "#/$defs/managed_backend"
+        },
+        "credential_present": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "backend": {
+                "properties": {
+                  "kind": {
+                    "const": "redis"
+                  }
+                }
+              }
+            }
+          },
+          "then": {},
+          "else": {
+            "not": {
+              "required": [
+                "credential_present"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "managed_memory_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_version",
+        "kind",
+        "backend"
+      ],
+      "properties": {
+        "adapter_version": {
+          "const": "managed-memory-v1"
+        },
+        "kind": {
+          "const": "managed_memory"
+        },
+        "backend": {
+          "$ref": "#/$defs/managed_backend"
+        },
+        "credential_present": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "backend": {
+                "properties": {
+                  "kind": {
+                    "const": "postgresql"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "credential_present"
+            ]
+          },
+          "else": {
+            "if": {
+              "properties": {
+                "backend": {
+                  "properties": {
+                    "kind": {
+                      "const": "redis"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {},
+            "else": {
+              "not": {
+                "required": [
+                  "credential_present"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "managed_knowledge_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_version",
+        "kind",
+        "backend",
+        "embedding",
+        "capability"
+      ],
+      "properties": {
+        "adapter_version": {
+          "const": "managed-knowledge-v1"
+        },
+        "kind": {
+          "const": "managed_knowledge"
+        },
+        "backend": {
+          "$ref": "#/$defs/managed_backend"
+        },
+        "embedding": {
+          "$ref": "#/$defs/embedding_resource"
+        },
+        "capability": {
+          "const": "knowledge.search"
+        },
+        "credential_present": {
+          "type": "boolean"
+        }
+      }
+    },
+    "managed_artifact_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_version",
+        "kind",
+        "backend",
+        "metadata_contract"
+      ],
+      "properties": {
+        "adapter_version": {
+          "const": "managed-artifact-v1"
+        },
+        "kind": {
+          "const": "managed_artifact"
+        },
+        "backend": {
+          "$ref": "#/$defs/managed_backend"
+        },
+        "metadata_contract": {
+          "const": "worker-artifact-metadata-v1"
+        },
+        "credential_present": {
+          "type": "boolean"
+        }
+      }
+    },
+    "data_memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "tools": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 6,
+          "items": {
+            "enum": [
+              "memory_add",
+              "memory_update",
+              "memory_delete",
+              "memory_clear",
+              "memory_search",
+              "memory_load"
+            ]
+          }
+        },
+        "preload_limit": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "resource",
+        "tools"
+      ],
+      "anyOf": [
+        {
+          "properties": {
+            "tools": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "preload_limit"
+          ],
+          "properties": {
+            "preload_limit": {
+              "anyOf": [
+                {
+                  "const": -1
+                },
+                {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "data_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "const": true
+        },
+        "resource": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        }
+      },
+      "required": [
+        "enabled",
+        "resource"
+      ]
+    },
+    "data_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "const": true
+        },
+        "model_resource": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "event_threshold": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "enabled",
+        "model_resource",
+        "event_threshold"
+      ]
+    }
+  }
+}

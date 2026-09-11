@@ -1,0 +1,440 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/runtime/data/v1/backend-snapshot.schema.json",
+  "title": "Internal managed backend snapshot V1",
+  "description": "Closed non-secret wire shape. Consumers must also run semantic validation and current tenant authorization. Not a public DTO.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "tenant_id",
+        "backend_id",
+        "backend_revision",
+        "kind",
+        "adapter",
+        "isolation",
+        "limits",
+        "postgresql"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "v1"
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "const": "postgresql"
+        },
+        "adapter": {
+          "const": "managed-postgres-v1"
+        },
+        "isolation": {
+          "enum": ["tenant-session-v1", "tenant-subject-agent-v1"]
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "timeout_ms",
+            "max_concurrency",
+            "max_bytes"
+          ],
+          "properties": {
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60000
+            },
+            "max_concurrency": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627776
+            }
+          }
+        },
+        "postgresql": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "host",
+            "port",
+            "database",
+            "username",
+            "sslmode"
+          ],
+          "properties": {
+            "host": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "database": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+            },
+            "username": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+            },
+            "sslmode": {
+              "enum": [
+                "disable",
+                "require",
+                "verify-full"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "tenant_id",
+        "backend_id",
+        "backend_revision",
+        "kind",
+        "adapter",
+        "isolation",
+        "limits",
+        "redis"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "v1"
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "const": "redis"
+        },
+        "adapter": {
+          "const": "managed-redis-v1"
+        },
+        "isolation": {
+          "enum": ["tenant-session-v1", "tenant-subject-agent-v1"]
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "timeout_ms",
+            "max_concurrency",
+            "max_bytes"
+          ],
+          "properties": {
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60000
+            },
+            "max_concurrency": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627776
+            }
+          }
+        },
+        "redis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "host",
+            "port",
+            "database",
+            "username",
+            "tls"
+          ],
+          "properties": {
+            "host": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "database": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 15
+            },
+            "username": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+            },
+            "tls": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "tenant_id",
+        "backend_id",
+        "backend_revision",
+        "kind",
+        "adapter",
+        "isolation",
+        "limits",
+        "qdrant"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "v1"
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "const": "qdrant"
+        },
+        "adapter": {
+          "const": "managed-qdrant-v1"
+        },
+        "isolation": {
+          "const": "tenant-profile-resource-v1"
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "timeout_ms",
+            "max_concurrency",
+            "max_bytes"
+          ],
+          "properties": {
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60000
+            },
+            "max_concurrency": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627776
+            }
+          }
+        },
+        "qdrant": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "endpoint",
+            "collection",
+            "vector_name",
+            "dimensions",
+            "distance"
+          ],
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^https?://[^/?#@]+$",
+              "maxLength": 2048
+            },
+            "collection": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+            },
+            "vector_name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+            },
+            "dimensions": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "distance": {
+              "enum": [
+                "cosine",
+                "dot",
+                "euclid"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "tenant_id",
+        "backend_id",
+        "backend_revision",
+        "kind",
+        "adapter",
+        "isolation",
+        "limits",
+        "s3"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "v1"
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "const": "s3"
+        },
+        "adapter": {
+          "const": "managed-s3-v1"
+        },
+        "isolation": {
+          "const": "tenant-artifact-v1"
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "timeout_ms",
+            "max_concurrency",
+            "max_bytes"
+          ],
+          "properties": {
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60000
+            },
+            "max_concurrency": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1099511627776
+            }
+          }
+        },
+        "s3": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "endpoint",
+            "bucket",
+            "region",
+            "path_style",
+            "versioning"
+          ],
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^https?://[^/?#@]+$",
+              "maxLength": 2048
+            },
+            "bucket": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+            },
+            "region": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+            },
+            "path_style": {
+              "type": "boolean"
+            },
+            "versioning": {
+              "const": "disabled"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

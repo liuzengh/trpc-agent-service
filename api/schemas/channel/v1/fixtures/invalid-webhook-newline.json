@@ -1,0 +1,19 @@
+{
+  "schema": "account-create.schema.json",
+  "valid": false,
+  "document": {
+    "provider": "telegram",
+    "provider_account_id": "00123",
+    "name": "测试机器人",
+    "credentials": {
+      "telegram.bot_token": {
+        "action": "replace",
+        "value": "TEST_ONLY_NOT_A_REAL_BOT_TOKEN"
+      },
+      "telegram.webhook_secret": {
+        "action": "replace",
+        "value": "bad\n"
+      }
+    }
+  }
+}

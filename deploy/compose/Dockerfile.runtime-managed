@@ -1,0 +1,4 @@
+# Build context is a disposable directory containing only a cross-built binary.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY binary /service
+ENTRYPOINT ["/service"]

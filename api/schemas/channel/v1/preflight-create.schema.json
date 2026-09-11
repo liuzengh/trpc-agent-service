@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/preflight-create.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "expected_account_revision": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "expected_connection_revision": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "expected_bot_token_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "expected_bot_secret_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "allow_connection_probe": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "expected_account_revision",
+    "expected_connection_revision"
+  ],
+  "oneOf": [
+    {
+      "required": [
+        "expected_bot_token_version"
+      ],
+      "not": {
+        "required": [
+          "expected_bot_secret_version"
+        ]
+      }
+    },
+    {
+      "required": [
+        "expected_bot_secret_version"
+      ],
+      "not": {
+        "required": [
+          "expected_bot_token_version"
+        ]
+      }
+    }
+  ]
+}

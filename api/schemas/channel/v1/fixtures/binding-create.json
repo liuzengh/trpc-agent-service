@@ -1,0 +1,11 @@
+{
+  "schema": "binding-create.schema.json",
+  "valid": true,
+  "document": {
+    "account_id": "cha_a",
+    "target": {
+      "deployment_id": "dpl_a",
+      "revision_number": 1
+    }
+  }
+}

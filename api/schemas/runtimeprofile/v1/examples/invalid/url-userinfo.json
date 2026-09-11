@@ -1,0 +1,18 @@
+{
+  "schema_version": "v1",
+  "models": {
+    "primary": {
+      "kind": "openai_compatible",
+      "model": "gpt-5.4-mini",
+      "base_url": "https://user:password@model.example.com/v1",
+      "api_key_credential_id": "crd_632e5bf2a90562eaf739e7c3c63e64c5",
+      "capabilities": [
+        "chat"
+      ]
+    }
+  },
+  "tools": {},
+  "knowledge": {},
+  "storage": {},
+  "credential_protocol_version": "v1"
+}

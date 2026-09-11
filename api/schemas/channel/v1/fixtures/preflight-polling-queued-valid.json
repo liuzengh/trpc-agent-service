@@ -1,0 +1,31 @@
+{
+  "schema": "preflight-view.schema.json",
+  "valid": true,
+  "document": {
+    "preflight_id": "cpf_example",
+    "tenant_id": "tnt_example",
+    "account_id": "cha_example",
+    "provider": "telegram",
+    "provider_account_id": "123456789",
+    "requested_by": "usr_example",
+    "account_revision": 7,
+    "connection_revision": 3,
+    "bot_token_version": 2,
+    "state": "QUEUED",
+    "outcome": "UNKNOWN",
+    "reason_code": "CHANNEL_PREFLIGHT_QUEUED",
+    "freshness": "NOT_CHECKED",
+    "metadata_changed": false,
+    "requested_at": "2026-09-06T04:00:00Z",
+    "started_at": null,
+    "checked_at": null,
+    "job_deadline_at": "2026-09-06T04:02:00Z",
+    "expires_at": null,
+    "gateway_config_digest": null,
+    "gateway_config_freshness": null,
+    "expected_public_origin": null,
+    "checks": [],
+    "receive_mode": "long_polling",
+    "diagnostic_policy": "telegram-receive-modes-v1"
+  }
+}

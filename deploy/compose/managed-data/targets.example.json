@@ -1,0 +1,81 @@
+{
+  "version": "v1",
+  "backends": [
+    {
+      "backend_id": "sessions-pg",
+      "backend_revision": 1,
+      "kind": "postgresql",
+      "adapter": "managed-postgres-v1",
+      "isolation": "tenant-session-v1",
+      "limits": {
+        "timeout_ms": 10000,
+        "max_concurrency": 8,
+        "max_bytes": 10485760
+      },
+      "postgresql": {
+        "host": "runtime-postgres",
+        "port": 5432,
+        "database": "runtime",
+        "username": "runtime_user",
+        "sslmode": "require"
+      }
+    },
+    {
+      "backend_id": "sessions-redis",
+      "backend_revision": 1,
+      "kind": "redis",
+      "adapter": "managed-redis-v1",
+      "isolation": "tenant-session-v1",
+      "limits": {
+        "timeout_ms": 10000,
+        "max_concurrency": 8,
+        "max_bytes": 10485760
+      },
+      "redis": {
+        "host": "runtime-redis",
+        "port": 6379,
+        "database": 0,
+        "username": "runtime_user",
+        "tls": true
+      }
+    },
+    {
+      "backend_id": "knowledge",
+      "backend_revision": 1,
+      "kind": "qdrant",
+      "adapter": "managed-qdrant-v1",
+      "isolation": "tenant-profile-resource-v1",
+      "limits": {
+        "timeout_ms": 10000,
+        "max_concurrency": 8,
+        "max_bytes": 10485760
+      },
+      "qdrant": {
+        "endpoint": "https://runtime-qdrant:6333",
+        "collection": "knowledge",
+        "vector_name": "content",
+        "dimensions": 1536,
+        "distance": "cosine"
+      }
+    },
+    {
+      "backend_id": "artifacts",
+      "backend_revision": 1,
+      "kind": "s3",
+      "adapter": "managed-s3-v1",
+      "isolation": "tenant-artifact-v1",
+      "limits": {
+        "timeout_ms": 10000,
+        "max_concurrency": 8,
+        "max_bytes": 10485760
+      },
+      "s3": {
+        "endpoint": "https://runtime-s3:9000",
+        "bucket": "runtime-artifacts",
+        "region": "us-east-1",
+        "path_style": true,
+        "versioning": "disabled"
+      }
+    }
+  ]
+}

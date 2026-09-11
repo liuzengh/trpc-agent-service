@@ -1,0 +1,562 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/runtimeprofile/v1/runtime-profile-spec.schema.json",
+  "title": "RuntimeProfileSpec V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "credential_protocol_version",
+    "models",
+    "tools",
+    "knowledge",
+    "storage"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "v1"
+    },
+    "credential_protocol_version": {
+      "const": "v1"
+    },
+    "models": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": {
+        "$ref": "#/$defs/resource_key"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/model_resource"
+      }
+    },
+    "tools": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {
+        "$ref": "#/$defs/resource_key"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/tool_resource"
+      }
+    },
+    "knowledge": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "$ref": "#/$defs/resource_key"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/knowledge_resource"
+      }
+    },
+    "storage": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": {
+        "$ref": "#/$defs/resource_key"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/storage_resource"
+      }
+    },
+    "executors": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": {
+        "$ref": "#/$defs/resource_key"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "const": "sdk_sandbox"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "resource_key": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "credential_id": {
+      "type": "string",
+      "pattern": "^crd_[0-9a-f]{32}$"
+    },
+    "tool_name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "model_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "uri": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "format": "uri"
+    },
+    "host": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253
+    },
+    "collection": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "model_resource": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/openai_compatible_model"
+        }
+      ]
+    },
+    "openai_compatible_model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "model",
+        "base_url",
+        "api_key_credential_id",
+        "capabilities"
+      ],
+      "properties": {
+        "kind": {
+          "const": "openai_compatible"
+        },
+        "model": {
+          "$ref": "#/$defs/model_name"
+        },
+        "base_url": {
+          "$ref": "#/$defs/uri"
+        },
+        "api_key_credential_id": {
+          "$ref": "#/$defs/credential_id"
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "chat",
+              "tool_call"
+            ]
+          }
+        }
+      }
+    },
+    "tool_resource": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/mcp_streamable_http_tool"
+        }
+      ]
+    },
+    "mcp_streamable_http_tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "server_url",
+        "toolset_name",
+        "tool_name",
+        "auth",
+        "capability"
+      ],
+      "properties": {
+        "kind": {
+          "const": "mcp_streamable_http"
+        },
+        "server_url": {
+          "$ref": "#/$defs/uri"
+        },
+        "toolset_name": {
+          "$ref": "#/$defs/tool_name"
+        },
+        "tool_name": {
+          "$ref": "#/$defs/tool_name"
+        },
+        "auth": {
+          "$ref": "#/$defs/tool_auth"
+        },
+        "capability": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+        }
+      }
+    },
+    "tool_auth": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/no_auth"
+        },
+        {
+          "$ref": "#/$defs/bearer_auth"
+        }
+      ]
+    },
+    "no_auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "none"
+        }
+      }
+    },
+    "bearer_auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "credential_id"
+      ],
+      "properties": {
+        "kind": {
+          "const": "bearer"
+        },
+        "credential_id": {
+          "$ref": "#/$defs/credential_id"
+        }
+      }
+    },
+    "knowledge_resource": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/qdrant_openai_knowledge"
+        },
+        {
+          "$ref": "#/$defs/managed_knowledge"
+        }
+      ]
+    },
+    "qdrant_openai_knowledge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "host",
+        "port",
+        "tls",
+        "collection",
+        "embedding"
+      ],
+      "properties": {
+        "kind": {
+          "const": "qdrant_openai"
+        },
+        "host": {
+          "$ref": "#/$defs/host"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "tls": {
+          "type": "boolean"
+        },
+        "collection": {
+          "$ref": "#/$defs/collection"
+        },
+        "qdrant_api_key_credential_id": {
+          "$ref": "#/$defs/credential_id"
+        },
+        "embedding": {
+          "$ref": "#/$defs/openai_embedding"
+        }
+      }
+    },
+    "openai_embedding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "base_url",
+        "api_key_credential_id",
+        "dimensions"
+      ],
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/model_name"
+        },
+        "base_url": {
+          "$ref": "#/$defs/uri"
+        },
+        "api_key_credential_id": {
+          "$ref": "#/$defs/credential_id"
+        },
+        "dimensions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        }
+      }
+    },
+    "storage_resource": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/postgres_state_storage"
+        },
+        {
+          "$ref": "#/$defs/managed_storage"
+        },
+        {
+          "$ref": "#/$defs/managed_artifact"
+        }
+      ]
+    },
+    "postgres_state_storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "dsn_credential_id",
+        "destination"
+      ],
+      "properties": {
+        "kind": {
+          "const": "postgres_state"
+        },
+        "dsn_credential_id": {
+          "$ref": "#/$defs/credential_id"
+        },
+        "destination": {
+          "$ref": "#/$defs/storage_destination"
+        }
+      }
+    },
+    "storage_destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "port",
+        "database",
+        "username",
+        "sslmode"
+      ],
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "database": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sslmode": {
+          "type": "string",
+          "enum": [
+            "disable",
+            "require",
+            "verify-full"
+          ]
+        }
+      }
+    },
+    "managed_storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "backend_id",
+        "backend_revision"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "managed_session",
+            "managed_memory"
+          ]
+        },
+        "backend_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "dsn_credential_id": {
+          "type": "string",
+          "pattern": "^crd_[0-9a-f]{32}$"
+        },
+        "credential_audience_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "dependentRequired": {
+        "dsn_credential_id": [
+          "credential_audience_digest"
+        ],
+        "credential_audience_digest": [
+          "dsn_credential_id"
+        ]
+      },
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "managed_memory",
+              "managed_session"
+            ]
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "dsn_credential_id"
+              ]
+            },
+            {
+              "required": [
+                "credential_audience_digest"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "managed_knowledge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "backend_id",
+        "backend_revision",
+        "embedding"
+      ],
+      "properties": {
+        "kind": {
+          "const": "managed_knowledge"
+        },
+        "backend_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "embedding": {
+          "$ref": "#/$defs/openai_embedding"
+        },
+        "qdrant_api_key_credential_id": {
+          "type": "string",
+          "pattern": "^crd_[0-9a-f]{32}$"
+        },
+        "credential_audience_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "dependentRequired": {
+        "qdrant_api_key_credential_id": [
+          "credential_audience_digest"
+        ],
+        "credential_audience_digest": [
+          "qdrant_api_key_credential_id"
+        ]
+      }
+    },
+    "managed_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "backend_id",
+        "backend_revision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "managed_artifact"
+        },
+        "backend_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$"
+        },
+        "backend_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "access_key_id_credential_id": {
+          "type": "string",
+          "pattern": "^crd_[0-9a-f]{32}$"
+        },
+        "secret_access_key_credential_id": {
+          "type": "string",
+          "pattern": "^crd_[0-9a-f]{32}$"
+        },
+        "credential_audience_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "dependentRequired": {
+        "access_key_id_credential_id": [
+          "credential_audience_digest"
+        ],
+        "secret_access_key_credential_id": [
+          "credential_audience_digest"
+        ]
+      },
+      "if": {
+        "required": [
+          "credential_audience_digest"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "required": [
+              "access_key_id_credential_id"
+            ]
+          },
+          {
+            "required": [
+              "secret_access_key_credential_id"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,88 @@
+# Explicit Worker V1 deployment overlay. Files contain release configuration and
+# provisioned TLS identities; no model/Profile credential is mounted in Worker.
+services:
+  nats:
+    command: ["-c", "/etc/nats/server-tls.conf"]
+    volumes:
+      - ../nats/server-tls.conf:/etc/nats/server-tls.conf:ro
+      - ${NATS_TLS_DIR:?set NATS server certificate directory}:/run/nats-tls:ro
+
+  nats-reconcile:
+    environment:
+      GATEWAY_NATS_URL: tls://nats:4222
+      GATEWAY_NATS_CA_FILE: /run/nats-tls/ca.pem
+    volumes:
+      - ${NATS_TLS_DIR:?set NATS certificate directory}/ca.pem:/run/nats-tls/ca.pem:ro
+
+  control-api:
+    depends_on:
+      nats-reconcile:
+        condition: service_completed_successfully
+    environment:
+      CONTROL_RUNTIME_CONFIG_FILE: /run/control-runtime/config.json
+      CONTROL_CHANNEL_CONFIG_FILE: /run/control-channel/config.json
+    volumes:
+      - ${CONTROL_RUNTIME_CONFIG_DIR:?set Control Worker runtime configuration directory}:/run/control-runtime:ro
+      - ${CONTROL_CHANNEL_CONFIG_DIR:?set Control Channel configuration directory}:/run/control-channel:ro
+      - ${NATS_TLS_DIR:?set NATS certificate directory}/ca.pem:/run/nats-tls/ca.pem:ro
+    expose: ["8081", "8082"]
+
+  session-prepare:
+    image: ${AGENT_WORKER_IMAGE:-trpc-agent-service/agent-worker:local}
+    build:
+      context: ../..
+      dockerfile: services/agent-worker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    restart: "no"
+    command: ["prepare-session"]
+    depends_on:
+      database-schemas:
+        condition: service_completed_successfully
+    environment:
+      SESSION_MIGRATION_DATABASE_URL: ${SESSION_MIGRATION_DATABASE_URL:?set session_migrator DSN}
+
+  agent-worker:
+    image: ${AGENT_WORKER_IMAGE:-trpc-agent-service/agent-worker:local}
+    build:
+      context: ../..
+      dockerfile: services/agent-worker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    restart: unless-stopped
+    depends_on:
+      database-schemas:
+        condition: service_completed_successfully
+      session-prepare:
+        condition: service_completed_successfully
+      nats-reconcile:
+        condition: service_completed_successfully
+      control-api:
+        condition: service_started
+    environment:
+      WORKER_DATABASE_URL: ${WORKER_DATABASE_URL:?set worker_runtime DSN}
+      WORKER_MIGRATION_DATABASE_URL: ${WORKER_MIGRATION_DATABASE_URL:?set worker_migrator DSN}
+      WORKER_CONFIG_FILE: /run/worker-runtime/config.json
+    volumes:
+      - ${WORKER_RUNTIME_CONFIG_DIR:?set Worker configuration directory}:/run/worker-runtime:ro
+      - ${NATS_TLS_DIR:?set NATS certificate directory}/ca.pem:/run/nats-tls/ca.pem:ro
+    expose: ["8082", "8083"]
+    healthcheck:
+      test: ["CMD", "/agent-worker", "probe", "http://127.0.0.1:8083/readyz"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: ${WORKER_STOP_GRACE_PERIOD:?set duration exceeding configured Worker drain and HTTP shutdown}
+
+  channel-gateway:
+    environment:
+      GATEWAY_CONTROL_URL: ${GATEWAY_CONTROL_URL:-https://control-api:8081}
+      GATEWAY_NATS_URL: tls://nats:4222
+      GATEWAY_NATS_CA_FILE: /run/nats-tls/ca.pem
+      GATEWAY_WORKER_URL: https://agent-worker:8082
+      GATEWAY_WORKER_CA_FILE: /run/gateway-worker/ca.pem
+      GATEWAY_WORKER_CERT_FILE: /run/gateway-worker/client.pem
+      GATEWAY_WORKER_KEY_FILE: /run/gateway-worker/client-key.pem
+    volumes:
+      - ${GATEWAY_WORKER_CERTS_DIR:?set Gateway Worker proof certificate directory}:/run/gateway-worker:ro
+      - ${NATS_TLS_DIR:?set NATS certificate directory}/ca.pem:/run/nats-tls/ca.pem:ro

@@ -1,0 +1,63 @@
+# Source filtering in platform/telemetrytrace remains authoritative for SDK
+# payloads and Link attributes; this processor repeats key/status/state filtering.
+# No debug exporter and no original Span Events, raw HTTP URLs or log pipeline.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        max_request_body_size: 4194304
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 128
+    spike_limit_mib: 32
+  filter/events:
+    error_mode: propagate
+    traces:
+      spanevent: ["true"]
+  transform/allowlist:
+    error_mode: propagate
+    trace_statements:
+      - keep_keys(resource.attributes, ["service.name", "service.version", "service.instance.id", "service.namespace", "deployment.environment.name"])
+      - keep_keys(span.attributes, ["app.run.id", "app.attempt.id", "app.session.id", "app.intent.id", "app.binding.id", "app.run.status", "app.outcome", "app.stage", "error.type", "app.retry.number", "app.part.index", "app.storage.records", "app.storage.bytes", "app.session.overlay.appends", "app.session.overlay.bytes", "messaging.system", "messaging.destination.name", "messaging.operation.name", "messaging.message.id", "gen_ai.request.model", "gen_ai.response.model", "gen_ai.agent.name", "gen_ai.tool.name", "gen_ai.tool.call.id", "gen_ai.conversation.id", "gen_ai.operation.name", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "gen_ai.usage.total_tokens", "gen_ai.response.finish_reasons", "gen_ai.client.time_to_first_token", "trpc_agent_go.client.time_to_first_token", "http.response.status_code"])
+      - set(span.status.message, "")
+      - set(span.trace_state, "")
+      - keep_keys(scope.attributes, [])
+  batch:
+    timeout: 1s
+    send_batch_size: 256
+    send_batch_max_size: 512
+exporters:
+  otlphttp/tempo:
+    endpoint: http://trace-tempo:4318
+    timeout: 3s
+    sending_queue:
+      enabled: true
+      queue_size: 128
+      num_consumers: 2
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 15s
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: error
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/events, transform/allowlist, batch]
+      exporters: [otlphttp/tempo]

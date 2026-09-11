@@ -1,0 +1,10 @@
+# Build context contains only a cross-built Worker binary. Workspace is an
+# explicit Linux V1 deployment, never the default shared Worker image.
+ARG WORKSPACE_BASE_IMAGE=alpine:3.22
+FROM ${WORKSPACE_BASE_IMAGE}
+USER root
+RUN (test -x /bin/bash && test -x /usr/bin/bwrap && test -f /etc/ssl/certs/ca-certificates.crt || apk add --no-cache bash bubblewrap ca-certificates) \
+ && mkdir -p /app /config /credentials /run /workspace /home /root
+COPY binary /service
+USER 65532:65532
+ENTRYPOINT ["/service"]

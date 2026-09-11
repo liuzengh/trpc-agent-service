@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/preflight-claim.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "scope_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "source_epoch": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "instance_epoch": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "claim_request_id": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "claim_token": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 43,
+      "pattern": "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$"
+    },
+    "gateway_config_digest": {
+      "$ref": "common.schema.json#/$defs/digest"
+    },
+    "expected_public_origin": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https://[^/?#@\\\\ ]+$"
+        },
+        {
+          "const": null
+        }
+      ]
+    },
+    "origin_status": {
+      "enum": [
+        "PUBLIC_ORIGIN_STATIC_VALID",
+        "PUBLIC_ORIGIN_INVALID",
+        "PUBLIC_ORIGIN_NOT_PUBLIC",
+        "PUBLIC_ORIGIN_NOT_APPLICABLE"
+      ]
+    },
+    "limit": {
+      "const": 1
+    },
+    "diagnostic_policy": {
+      "enum": [
+        "telegram-receive-modes-v1",
+        "wecom_long_connection_v1"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "scope_id",
+    "source_epoch",
+    "instance_epoch",
+    "claim_request_id",
+    "claim_token",
+    "gateway_config_digest",
+    "expected_public_origin",
+    "origin_status",
+    "limit"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "diagnostic_policy"
+        ]
+      },
+      "then": {
+        "required": [
+          "diagnostic_policy"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "diagnostic_policy"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "diagnostic_policy": {
+            "const": "wecom_long_connection_v1"
+          }
+        },
+        "required": [
+          "diagnostic_policy"
+        ]
+      },
+      "then": {
+        "properties": {
+          "origin_status": {
+            "const": "PUBLIC_ORIGIN_NOT_APPLICABLE"
+          },
+          "expected_public_origin": {
+            "const": null
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "origin_status": {
+            "enum": [
+              "PUBLIC_ORIGIN_STATIC_VALID",
+              "PUBLIC_ORIGIN_INVALID",
+              "PUBLIC_ORIGIN_NOT_PUBLIC"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

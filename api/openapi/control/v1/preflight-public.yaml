@@ -1,0 +1,493 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Control Channel preflight API",
+    "version": "1.0.0",
+    "description": "Saved disabled-account diagnostics. Telegram remains read-only; WeCom requires explicit allow_connection_probe consent for a real short-lived subscribe that may replace another client. No account enable, business messages, Run, Binding, Deployment or Worker prerequisite. Authentication is not delivery verification."
+  },
+  "paths": {
+    "/v1/tenants/{tenant_id}/channel-accounts/{account_id}/preflights": {
+      "parameters": [
+        {
+          "name": "tenant_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          }
+        },
+        {
+          "name": "account_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "createChannelPreflight",
+        "tags": [
+          "Channel Preflight"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "description": "OWNER and disabled account required. Telegram uses expected_bot_token_version; WeCom uses expected_bot_secret_version, and allow_connection_probe must be explicitly true. Account, connection and selected credential versions are checked atomically. Missing WeCom consent returns 422 CHANNEL_PREFLIGHT_CONNECTION_PROBE_CONFIRMATION_REQUIRED. Consent is part of idempotency input. A WeCom subscribe is an active connection probe, not a read-only API, and may replace another client of the same Bot. Gateway drops any diagnostic business frames and sends no messages.",
+        "responses": {
+          "400": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Provider unsupported or explicit WeCom connection-probe confirmation required.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted; same-key replay returns the identical creation receipt, not current task state.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Same-origin fixed relative status_url from the creation receipt."
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "2"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../../../schemas/channel/v1/preflight-created.schema.json"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../../../schemas/channel/v1/preflight-create.schema.json"
+              },
+              "examples": {
+                "wecom": {
+                  "value": {
+                    "expected_account_revision": 1,
+                    "expected_connection_revision": 1,
+                    "expected_bot_secret_version": 1,
+                    "allow_connection_probe": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[!-~]+$"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/tenants/{tenant_id}/channel-accounts/{account_id}/preflights/{preflight_id}": {
+      "parameters": [
+        {
+          "name": "tenant_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          }
+        },
+        {
+          "name": "account_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          }
+        },
+        {
+          "name": "preflight_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getChannelPreflight",
+        "tags": [
+          "Channel Preflight"
+        ],
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "description": "ACTIVE unrestricted Session and ACTIVE tenant MEMBER required. Cross-tenant/invisible accounts or results return 404. state, diagnostic outcome, account freshness and Gateway config freshness are independent. COMPLETED does not imply account enabled or delivery success. The final two checks always disclose unavailable restore materials and NOT_TESTED delivery. GET exposes effective terminal timeout after 120 seconds even without any Gateway. Metadata-only changes do not stale connection facts; results are valid for 5 minutes and retained 24 hours. Results never expose credential IDs/values, claim tokens, raw provider URLs/errors or actual mismatched bot identity.",
+        "responses": {
+          "400": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Stable sanitized diagnostic; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Current redacted task and historical facts with derived account freshness; no-store.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-store"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../../../schemas/channel/v1/preflight-view.schema.json"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ChannelError": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "field": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "control_session"
+      }
+    }
+  }
+}

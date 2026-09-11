@@ -1,0 +1,4 @@
+FROM minio/mc:RELEASE.2025-04-16T18-13-26Z AS mc
+FROM python:3.13-alpine
+COPY --from=mc /usr/bin/mc /usr/local/bin/mc
+CMD ["python", "-c", "import time; time.sleep(10**9)"]

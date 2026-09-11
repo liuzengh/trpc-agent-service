@@ -1,0 +1,35 @@
+{
+  "schema_version": "v1",
+  "models": {},
+  "tools": {},
+  "knowledge": {
+    "docs": {
+      "kind": "qdrant_openai",
+      "host": "qdrant.example.com",
+      "port": 6334,
+      "tls": true,
+      "collection": "product_docs_v1",
+      "qdrant_api_key_credential_id": "crd_d25d4eb73745d32e333b08d39349af32",
+      "embedding": {
+        "model": "text-embedding-3-small",
+        "base_url": "https://model.example.com/v1",
+        "api_key_credential_id": "crd_692da71e229665565aff3f9cbf6e4041",
+        "dimensions": 1536
+      }
+    }
+  },
+  "storage": {
+    "session": {
+      "kind": "postgres_state",
+      "dsn_credential_id": "crd_76b87277e6d38a7b643c51f177a5843a",
+      "destination": {
+        "host": "postgres.example.test",
+        "port": 5432,
+        "database": "agent",
+        "username": "agent",
+        "sslmode": "verify-full"
+      }
+    }
+  },
+  "credential_protocol_version": "v1"
+}

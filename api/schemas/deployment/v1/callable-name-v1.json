@@ -1,0 +1,42 @@
+{
+  "contract_version": "provider-callable-name-v1",
+  "kind": "static_consumer_contract",
+  "scope": "one_manifest_node",
+  "logical_entry_pattern": "^(tools|knowledge)/[a-z][a-z0-9_-]{0,63}$",
+  "mapping": {
+    "input": "exact_complete_logical_entry_id",
+    "encoding": "UTF-8",
+    "hash": "SHA-256",
+    "digest_encoding": "lowercase_hex",
+    "digest_prefix_characters": 60,
+    "name_prefix": "fn_",
+    "output_characters": 63,
+    "output_pattern": "^fn_[0-9a-f]{60}$"
+  },
+  "rules": {
+    "empty_set": "empty_mapping",
+    "input_order": "irrelevant",
+    "invalid_entry": "reject_complete_set",
+    "duplicate_entry": "reject_complete_set",
+    "same_node_name_collision": "reject_complete_set",
+    "collision_fallback": "none",
+    "input_normalization": "none",
+    "remote_tool_name": "not_used_for_mapping",
+    "node_authority": "manifest_callable_entries_only"
+  },
+  "golden": [
+    {"entry_id": "tools/search", "provider_name": "fn_0743b5beea9f08b8654a3b2ca47ac15dc41ca5a27f64de8e5350b326c465"},
+    {"entry_id": "knowledge/search", "provider_name": "fn_a7768ddaba77cfb30259c9da6435648555f97c3b5076986ec3f7add046c2"},
+    {"entry_id": "knowledge/docs", "provider_name": "fn_bf0861e4910faf57aabed6367d2225410370643eed80dc6fbdb5832850e0"},
+    {"entry_id": "tools/a", "provider_name": "fn_da443d268e0685ca1f76ad4d2ab4b7d2f071a373f075d92fbfe9133512d8"},
+    {"entry_id": "tools/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "provider_name": "fn_09f29817def9deb3de4e9acbc0623668a97870bc9f188469909beb3a5a26"},
+    {"entry_id": "tools/search-web_2", "provider_name": "fn_dd38b52b5fe8be38d10437eece4675e44625558006766a790f9576351a0f"}
+  ],
+  "invalid_entries": [
+    "", "tools", "tools/", "models/primary", "storage/session", "Tools/search",
+    "tools/Search", "tools/1search", "tools/_search", "tools/search.web",
+    "tools/search/extra", "knowledge/docs/search", "tools/搜索", " tools/search",
+    "tools/search ", "tools/search\n",
+    "tools/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "schema_version": "v1",
+  "agent": {"agent_id": "agt_fixture_agent", "version_number": 3},
+  "profile": {"profile_id": "rpf_fixture_profile", "revision_number": 2},
+  "environment_id": "default"
+}

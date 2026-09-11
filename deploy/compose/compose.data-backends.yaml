@@ -1,0 +1,174 @@
+# Default managed-local overlay, included by `just managed-up`.
+# Backends have no host ports; private files remain owner-readable only.
+services:
+  control-api:
+    # Go image is cross-built by the unified launcher, not the legacy build block.
+    build: !reset null
+    user: ${MANAGED_RUNTIME_UID:?}:${MANAGED_RUNTIME_GID:?}
+    environment:
+      CONTROL_PLATFORM_BACKEND_CATALOG_FILE: /run/managed/catalog.json
+      CONTROL_PLATFORM_BACKEND_CATALOG_SHA256: ${CONTROL_PLATFORM_BACKEND_CATALOG_SHA256:?}
+      CONTROL_PLATFORM_BACKEND_TARGETS_FILE: /run/managed/targets.json
+      CONTROL_PLATFORM_BACKEND_TARGETS_SHA256: ${CONTROL_PLATFORM_BACKEND_TARGETS_SHA256:?}
+    volumes:
+      - ${MANAGED_STATE_DIR:?}/managed:/run/managed:ro
+    depends_on:
+      backend-init:
+        condition: service_completed_successfully
+  agent-worker:
+    # Go image is cross-built by the unified launcher, not the legacy build block.
+    build: !reset null
+    healthcheck:
+      test: ["CMD", "/service", "probe", "http://127.0.0.1:8083/readyz"]
+    user: ${MANAGED_RUNTIME_UID:?}:${MANAGED_RUNTIME_GID:?}
+    ports:
+      - 127.0.0.1:${WORKER_ADMIN_PORT:-28083}:8083
+    depends_on:
+      memory-prepare:
+        condition: service_completed_successfully
+  channel-gateway:
+    # Go image is cross-built by the unified launcher, not the legacy build block.
+    build: !reset null
+    depends_on:
+      control-api:
+        condition: service_started
+      agent-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/service", "probe", "http://127.0.0.1:8091/readyz"]
+    user: ${MANAGED_RUNTIME_UID:?}:${MANAGED_RUNTIME_GID:?}
+  nats-reconcile:
+    user: ${MANAGED_RUNTIME_UID:?}:${MANAGED_RUNTIME_GID:?}
+  nats:
+    # Root reads private TLS key; NATS is isolated to this project network.
+    user: "0:0"
+    # NATS parses environment substitutions as config tokens: quote numeric-leading secrets.
+    environment:
+      NATS_GATEWAY_PASSWORD: '"${NATS_GATEWAY_PASSWORD:?}"'
+      NATS_CONTROL_PASSWORD: '"${NATS_CONTROL_PASSWORD:?}"'
+      NATS_WORKER_PASSWORD: '"${NATS_WORKER_PASSWORD:?}"'
+      NATS_RECONCILER_PASSWORD: '"${NATS_RECONCILER_PASSWORD:?}"'
+  memory-schema:
+    image: postgres:17.6-alpine
+    restart: "no"
+    depends_on:
+      database-schemas:
+        condition: service_completed_successfully
+    environment:
+      PGHOST: postgres
+      PGUSER: ${PLATFORM_POSTGRES_USER:-platform_admin}
+      PGDATABASE: ${PLATFORM_POSTGRES_DB:-agent_platform}
+      PGPASSWORD: ${PLATFORM_POSTGRES_PASSWORD:?}
+      MEMORY_MIGRATOR_PASSWORD: ${MEMORY_MIGRATOR_PASSWORD:?}
+      MEMORY_RUNTIME_PASSWORD: ${MEMORY_RUNTIME_PASSWORD:?}
+    volumes:
+      - ./provision-memory.sql:/provision-memory.sql:ro
+    entrypoint: ["psql", "--no-psqlrc", "--set=ON_ERROR_STOP=1", "--file=/provision-memory.sql"]
+  session-prepare:
+    build: !reset null
+  memory-prepare:
+    image: ${AGENT_WORKER_IMAGE:?}
+    command: ["prepare-memory"]
+    restart: "no"
+    environment:
+      MEMORY_MIGRATION_DATABASE_URL: ${MEMORY_MIGRATION_DATABASE_URL:?}
+    depends_on:
+      memory-schema:
+        condition: service_completed_successfully
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    volumes:
+      - managed-redis-data:/data
+      - ${MANAGED_STATE_DIR:?}/redis:/run/redis-private:ro
+      - ./data-backends/redis-start.sh:/redis-start.sh:ro
+    entrypoint: ["/bin/sh", "/redis-start.sh"]
+  qdrant:
+    image: qdrant/qdrant:v1.15.4
+    restart: unless-stopped
+    volumes:
+      - managed-qdrant-data:/qdrant/storage
+      - ${MANAGED_STATE_DIR:?}/secrets/qdrant_api_key:/run/secrets/qdrant_api_key:ro
+      - ./data-backends/qdrant-start.sh:/qdrant-start.sh:ro
+    entrypoint: ["/bin/sh", "/qdrant-start.sh"]
+  minio:
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_password
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    volumes:
+      - managed-minio-data:/data
+      - ${MANAGED_STATE_DIR:?}/secrets/minio_user:/run/secrets/minio_user:ro
+      - ${MANAGED_STATE_DIR:?}/secrets/minio_password:/run/secrets/minio_password:ro
+      - ./data-backends/minio-start.sh:/minio-start.sh:ro
+    entrypoint: ["/bin/sh", "/minio-start.sh"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+  backend-tools:
+    image: ${BACKEND_TOOLS_IMAGE:-trpc-agent-service/backend-tools:managed-local}
+    build:
+      context: .
+      dockerfile: Dockerfile.backend-tools
+    restart: unless-stopped
+    user: ${MANAGED_RUNTIME_UID:?}:${MANAGED_RUNTIME_GID:?}
+    volumes:
+      - ./data-backends:/tooling:ro
+      - ${MANAGED_STATE_DIR:?}/secrets:/run/secrets:ro
+    environment:
+      HOME: /tmp
+    depends_on: [redis, qdrant, minio]
+    healthcheck:
+      test: ["CMD", "sh", "/tooling/health-all.sh"]
+      # Each probe starts three Python processes, so a 5s steady-state interval
+      # burned most of a core while the stack idled. Probe quickly only while
+      # the fixture is starting, then back off.
+      interval: 30s
+      start_interval: 5s
+      start_period: 60s
+      timeout: 70s
+      retries: 30
+  backend-init:
+    image: ${BACKEND_TOOLS_IMAGE:-trpc-agent-service/backend-tools:managed-local}
+    restart: "no"
+    user: ${MANAGED_RUNTIME_UID:?}:${MANAGED_RUNTIME_GID:?}
+    volumes:
+      - ./data-backends:/tooling:ro
+      - ${MANAGED_STATE_DIR:?}/secrets:/run/secrets:ro
+    environment:
+      HOME: /tmp
+      MANAGED_S3_BUCKET: ${MANAGED_S3_BUCKET:-agent-artifacts}
+      MANAGED_QDRANT_COLLECTION: ${KNOWLEDGE_COLLECTION:-agent-knowledge}
+      MANAGED_QDRANT_VECTOR: ${KNOWLEDGE_VECTOR_NAME:-embedding}
+      MANAGED_QDRANT_DISTANCE: ${KNOWLEDGE_DISTANCE:-Cosine}
+      MANAGED_QDRANT_DIMENSIONS: ${KNOWLEDGE_DIMENSIONS:-}
+    entrypoint: ["sh", "/tooling/init-all.sh"]
+    depends_on:
+      backend-tools:
+        condition: service_healthy
+  web:
+    image: ${WEB_IMAGE:-trpc-agent-service/web:managed-local}
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.web-managed
+      args:
+        RUNTIME_API_BASE: http://channel-gateway:8090
+    restart: unless-stopped
+    environment:
+      CONTROL_API_BASE: http://control-api:8080
+      RUNTIME_API_BASE: http://channel-gateway:8090
+    ports:
+      - 127.0.0.1:${WEB_HTTP_PORT:-23000}:3000
+    depends_on: [control-api, channel-gateway, agent-worker]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+volumes:
+  managed-redis-data:
+  managed-qdrant-data:
+  managed-minio-data:

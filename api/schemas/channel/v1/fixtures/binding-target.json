@@ -1,0 +1,11 @@
+{
+  "schema": "binding-target.schema.json",
+  "valid": true,
+  "document": {
+    "expected_binding_revision": 1,
+    "target": {
+      "deployment_id": "dpl_b",
+      "revision_number": 2
+    }
+  }
+}

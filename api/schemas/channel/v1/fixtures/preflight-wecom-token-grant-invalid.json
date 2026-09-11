@@ -1,0 +1,33 @@
+{
+  "schema": "preflight-grant.schema.json",
+  "valid": false,
+  "document": {
+    "schema_version": 1,
+    "server_time": "2026-09-06T04:00:02Z",
+    "preflight_id": "cpf_example",
+    "scope_id": "pool",
+    "source_epoch": "11111111-1111-4111-8111-111111111111",
+    "tenant_id": "tnt_example",
+    "account_id": "cha_example",
+    "provider": "wecom",
+    "provider_account_id": "wecom-bot-example",
+    "account_revision": 7,
+    "connection_revision": 4,
+    "webhook_path": "",
+    "credentials": {
+      "purpose": "telegram.bot_token",
+      "credential_id": "ccr_example",
+      "credential_version": 2,
+      "configured": true
+    },
+    "webhook_secret_configured": false,
+    "lease_epoch": 1,
+    "lease_expires_at": "2026-09-06T04:00:32Z",
+    "job_deadline_at": "2026-09-06T04:02:00Z",
+    "gateway_config_digest": "sha256:edd5294550c8338b62c0d71ea79e9710acdc26926ddd128c1dcfa14bfb418857",
+    "diagnostic_policy": "wecom_long_connection_v1",
+    "receive_mode": "long_connection",
+    "effective_config_digest": "sha256:c77f063e8408b890b22ce121b0d7456711f705cc7926c66dac7e2ecfe679713f",
+    "allow_connection_probe": true
+  }
+}

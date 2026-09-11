@@ -1,0 +1,23 @@
+{
+  "schema": "observations.schema.json",
+  "valid": true,
+  "document": {
+    "schema_version": 1,
+    "observations": [
+      {
+        "scope_id": "gateway_pool",
+        "source_epoch": "00000000-0000-4000-8000-000000000001",
+        "tenant_id": "tnt_a",
+        "account_id": "cha_a",
+        "provider": "telegram",
+        "connection_revision": 2,
+        "instance_id": "gw_1",
+        "instance_epoch": "00000000-0000-4000-8000-000000000001",
+        "report_sequence": 1,
+        "state": "CONFIG_APPLIED",
+        "reason_code": "NONE",
+        "observed_at": "2026-09-06T00:00:00Z"
+      }
+    ]
+  }
+}

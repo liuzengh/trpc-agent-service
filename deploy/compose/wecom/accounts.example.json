@@ -1,0 +1,9 @@
+[
+  {
+    "account_id": "wecom-account",
+    "bot_id": "REPLACE_WITH_BOT_ID",
+    "revision": 1,
+    "enabled": true,
+    "secret_env": "GATEWAY_WECOM_BOT_SECRET"
+  }
+]

@@ -1,0 +1,60 @@
+.page { display: grid; gap: 22px; min-width: 0; }
+.card { min-width: 0; border: 1px solid var(--line); border-radius: 20px; background: var(--surface); padding: 24px; }
+.card h2 { margin: 0 0 8px; font-size: 20px; }
+.card p { line-height: 1.6; }
+.banner, .warning, .error, .success { min-width: 0; padding: 16px 18px; border-radius: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.banner { background: var(--info-soft); color: var(--info-ink); border: 1px solid var(--primary-border); }
+.warning { background: var(--warning-soft); color: var(--warning); border: 1px solid var(--warning-border); }
+.error { background: var(--danger-soft); color: var(--danger); border: 1px solid var(--danger-border); }
+.success { background: var(--success-soft); color: var(--success); border: 1px solid var(--success-border); }
+.small { color: var(--muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; }
+.actions > :global(.button), .page :global(.button) { min-height: 44px; white-space: normal; text-align: center; }
+.link { color: var(--primary); text-decoration: none; font-weight: 600; overflow-wrap: anywhere; }
+.link:hover { text-decoration: underline; }
+.grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+.field { display: flex; flex-direction: column; gap: 8px; min-width: 0; color: var(--ink-soft); font-size: 14px; font-weight: 600; }
+.field input, .field select, .field textarea { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; padding: 11px 13px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); color: var(--ink); font: inherit; font-weight: 400; }
+.field textarea { min-height: 110px; resize: vertical; }
+.field input:focus-visible, .field select:focus-visible, .field textarea:focus-visible { outline: 2px solid var(--focus-ring); border-color: var(--primary); outline-offset: 1px; }
+.field input:disabled, .field select:disabled, .field textarea:disabled { background: var(--surface-subtle); color: var(--muted); }
+.field small { font-weight: 400; color: var(--muted); line-height: 1.55; }
+.field [aria-invalid="true"] { border-color: var(--danger); }
+.fieldError { color: var(--danger) !important; }
+.full { grid-column: 1 / -1; }
+.form { display: grid; gap: 24px; }
+.secretRow { display: flex; gap: 10px; align-items: end; min-width: 0; }
+.secretRow > .field { flex: 1; }
+.secretRow > button { flex: 0 0 auto; }
+.summary { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 18px; margin: 16px 0; }
+.summary dt { color: var(--muted); }
+.summary dd { margin: 0; overflow-wrap: anywhere; }
+.check { display: flex; align-items: flex-start; gap: 10px; line-height: 1.6; padding: 12px 0; }
+.check input { width: 18px; height: 18px; flex: 0 0 18px; margin-top: 4px; }
+.scroll { overflow-x: auto; min-width: 0; }
+.table { width: 100%; min-width: 760px; border-collapse: collapse; text-align: left; }
+.table th { padding: 12px; color: var(--muted); background: var(--surface-subtle); font-size: 13px; font-weight: 600; }
+.table td { padding: 17px 12px; border-bottom: 1px solid var(--surface-subtle); vertical-align: top; font-size: 14px; }
+.table td:first-child { max-width: 260px; overflow-wrap: anywhere; }
+.table td p { margin: 5px 0 0; }
+.table code { display: inline-block; max-width: 220px; overflow-wrap: anywhere; }
+.pagination { padding-top: 18px; display: flex; gap: 16px; align-items: center; justify-content: space-between; }
+@media (max-width: 700px) {
+  .page { gap: 16px; }
+  .card { padding: 18px 16px; border-radius: 16px; }
+  .grid { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .secretRow { align-items: stretch; flex-direction: column; }
+  .actions > :global(.button) { flex: 1 1 auto; }
+  .summary { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .summary dd { margin-bottom: 10px; }
+}
+
+/* Keep the title and action legible alongside the compact mobile sidebar. */
+@media (max-width:700px) {
+  .page :global(.page-header) { flex-direction:column; align-items:stretch; gap:14px; margin-bottom:12px; }
+  .page :global(.page-header) > div { min-width:0; }
+  .page :global(.page-header) h1 { font-size:24px; overflow-wrap:anywhere; }
+  .page :global(.page-header) > :global(.button) { align-self:flex-start; flex-shrink:0; }
+}
+
+.banner{background:var(--info-soft);border-color:var(--info-border);color:var(--info-ink)}

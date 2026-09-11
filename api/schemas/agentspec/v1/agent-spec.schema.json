@@ -1,0 +1,306 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/agentspec/v1/agent-spec.schema.json",
+  "title": "AgentSpec V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "root", "requirements", "nodes"],
+  "properties": {
+    "schema_version": {"const": "v1"},
+    "root": {"$ref": "#/$defs/identifier"},
+    "requirements": {"$ref": "#/$defs/requirements"},
+    "runtime": {"$ref": "#/$defs/runtime"},
+    "nodes": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 128,
+      "propertyNames": {"$ref": "#/$defs/identifier"},
+      "additionalProperties": {"$ref": "#/$defs/node"}
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "capability": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+    },
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["models", "tools", "knowledge"],
+      "properties": {
+        "executors": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "capability"
+            ],
+            "properties": {
+              "capability": {
+                "const": "workspace"
+              }
+            }
+          }
+        },
+        "models": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/model_requirement"}
+        },
+        "tools": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/capability_requirement"}
+        },
+        "knowledge": {
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/capability_requirement"}
+        }
+      }
+    },
+    "model_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capabilities"],
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/capability"}
+        }
+      }
+    },
+    "capability_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability"],
+      "properties": {
+        "capability": {"$ref": "#/$defs/capability"}
+      }
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "identifier_array": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/identifier"}
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        }
+      }
+    },
+    "llm_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "instruction",
+        "model_slot",
+        "tool_slots",
+        "knowledge_slots"
+      ],
+      "properties": {
+        "workspace": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "executor_slot",
+            "tools"
+          ],
+          "properties": {
+            "executor_slot": {
+              "$ref": "#/$defs/identifier"
+            },
+            "tools": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "workspace_exec",
+                  "workspace_save_artifact"
+                ]
+              }
+            }
+          }
+        },
+        "kind": {"const": "llm"},
+        "name": {"$ref": "#/$defs/name"},
+        "instruction": {"type": "string", "minLength": 1, "maxLength": 65536},
+        "model_slot": {"$ref": "#/$defs/identifier"},
+        "tool_slots": {"$ref": "#/$defs/identifier_array"},
+        "knowledge_slots": {"$ref": "#/$defs/identifier_array"},
+        "generation": {"$ref": "#/$defs/generation"},
+        "memory": {"$ref": "#/$defs/memory"},
+        "artifact": {"$ref": "#/$defs/artifact"},
+        "add_session_summary": {"type": "boolean"}
+      }
+    },
+    "sequence_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "children"],
+      "properties": {
+        "kind": {"const": "sequence"},
+        "name": {"$ref": "#/$defs/name"},
+        "children": {
+          "allOf": [
+            {"$ref": "#/$defs/identifier_array"},
+            {"minItems": 1}
+          ]
+        }
+      }
+    },
+    "parallel_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "children"],
+      "properties": {
+        "kind": {"const": "parallel"},
+        "name": {"$ref": "#/$defs/name"},
+        "children": {
+          "allOf": [
+            {"$ref": "#/$defs/identifier_array"},
+            {"minItems": 1}
+          ]
+        }
+      }
+    },
+    "loop_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "body", "max_iterations"],
+      "properties": {
+        "kind": {"const": "loop"},
+        "name": {"$ref": "#/$defs/name"},
+        "body": {"$ref": "#/$defs/identifier"},
+        "max_iterations": {"type": "integer", "minimum": 1, "maximum": 32}
+      }
+    },
+    "node": {
+      "oneOf": [
+        {"$ref": "#/$defs/llm_node"},
+        {"$ref": "#/$defs/sequence_node"},
+        {"$ref": "#/$defs/parallel_node"},
+        {"$ref": "#/$defs/loop_node"}
+      ]
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "memory_add",
+              "memory_update",
+              "memory_delete",
+              "memory_clear",
+              "memory_search",
+              "memory_load"
+            ]
+          },
+          "uniqueItems": true,
+          "maxItems": 6
+        },
+        "preload_limit": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "tools"
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled"
+      ]
+    },
+    "summary": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "const": false
+            }
+          },
+          "required": [
+            "enabled"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "const": true
+            },
+            "model_slot": {
+              "$ref": "#/$defs/identifier"
+            },
+            "event_threshold": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "enabled",
+            "model_slot",
+            "event_threshold"
+          ]
+        }
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/summary"
+        }
+      },
+      "required": []
+    }
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/account-update.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "expected_account_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "description": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 4096
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "receive_mode": {
+          "enum": [
+            "long_polling",
+            "webhook"
+          ]
+        },
+        "endpoint_profile": {
+          "type": "string",
+          "enum": [
+            "official",
+            "test"
+          ]
+        }
+      },
+      "required": [
+        "receive_mode"
+      ]
+    }
+  },
+  "required": [
+    "expected_account_revision"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "name"
+      ]
+    },
+    {
+      "required": [
+        "description"
+      ]
+    },
+    {
+      "required": [
+        "config"
+      ]
+    }
+  ]
+}

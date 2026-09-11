@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/schemas/channel/v1/preflight-created.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "preflight_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "tenant_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "account_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "maxLength": 35
+    },
+    "job_deadline_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "maxLength": 35
+    },
+    "status_url": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^/v1/tenants/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/channel-accounts/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}/preflights/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    }
+  },
+  "required": [
+    "preflight_id",
+    "tenant_id",
+    "account_id",
+    "requested_at",
+    "job_deadline_at",
+    "status_url"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "event_id": "evt-disabled-2",
+  "schema_version": 1,
+  "enabled": false,
+  "route": {
+    "provider": "telegram",
+    "account_id": "acct-1",
+    "generation": 2
+  }
+}

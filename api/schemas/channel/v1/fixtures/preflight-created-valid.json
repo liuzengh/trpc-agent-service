@@ -1,0 +1,12 @@
+{
+  "schema": "preflight-created.schema.json",
+  "valid": true,
+  "document": {
+    "preflight_id": "cpf_example",
+    "tenant_id": "tnt_example",
+    "account_id": "cha_example",
+    "requested_at": "2026-09-06T04:00:00Z",
+    "job_deadline_at": "2026-09-06T04:02:00Z",
+    "status_url": "/v1/tenants/tnt_example/channel-accounts/cha_example/preflights/cpf_example"
+  }
+}

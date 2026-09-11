@@ -1,0 +1,99 @@
+{
+  "schema": "preflight-view.schema.json",
+  "valid": false,
+  "document": {
+    "preflight_id": "cpf_example",
+    "tenant_id": "tnt_example",
+    "account_id": "cha_example",
+    "provider": "telegram",
+    "provider_account_id": "123456789",
+    "requested_by": "usr_example",
+    "account_revision": 7,
+    "connection_revision": 4,
+    "bot_token_version": 2,
+    "state": "COMPLETED",
+    "outcome": "WARN",
+    "reason_code": "CHANNEL_PREFLIGHT_COMPLETED",
+    "freshness": "CURRENT",
+    "metadata_changed": false,
+    "requested_at": "2026-09-06T04:00:00Z",
+    "started_at": "2026-09-06T04:00:02Z",
+    "checked_at": "2026-09-06T04:00:06Z",
+    "job_deadline_at": "2026-09-06T04:02:00Z",
+    "expires_at": "2026-09-06T04:05:06Z",
+    "gateway_config_digest": "sha256:699f4ff6f77d9069bb632ac9e1f29b7a0f996780217aa18d127dfe135e7f314d",
+    "gateway_config_freshness": "UNCONFIRMED",
+    "expected_public_origin": "https://gateway.example.com",
+    "checks": [
+      {
+        "id": "credential_configuration",
+        "status": "PASS",
+        "code": "CREDENTIALS_CONFIGURED",
+        "details": {
+          "bot_token_configured": true,
+          "webhook_secret_configured": true
+        }
+      },
+      {
+        "id": "bot_identity",
+        "status": "PASS",
+        "code": "BOT_IDENTITY_MATCH",
+        "details": {
+          "identity_match": true
+        }
+      },
+      {
+        "id": "public_origin",
+        "status": "PASS",
+        "code": "PUBLIC_ORIGIN_STATIC_VALID",
+        "details": {
+          "validation": "STATIC_ONLY"
+        }
+      },
+      {
+        "id": "webhook_registration",
+        "status": "WARN",
+        "code": "WEBHOOK_NONE",
+        "details": {
+          "presence": false,
+          "relation": "NONE"
+        }
+      },
+      {
+        "id": "pending_updates",
+        "status": "PASS",
+        "code": "PENDING_UPDATES_ZERO",
+        "details": {
+          "pending_update_count": 0
+        }
+      },
+      {
+        "id": "delivery_errors",
+        "status": "PASS",
+        "code": "DELIVERY_ERROR_NOT_REPORTED",
+        "details": {
+          "has_last_error": false,
+          "last_error_at": null
+        }
+      },
+      {
+        "id": "recovery_materials",
+        "status": "UNKNOWN",
+        "code": "RECOVERY_MATERIALS_UNAVAILABLE",
+        "details": {
+          "secret_token_readable": false,
+          "restore_available": false
+        }
+      },
+      {
+        "id": "delivery_verification",
+        "status": "UNKNOWN",
+        "code": "DELIVERY_NOT_TESTED",
+        "details": {
+          "verification": "NOT_TESTED"
+        }
+      }
+    ],
+    "unexpected_canary": "fixture-only"
+  }
+}

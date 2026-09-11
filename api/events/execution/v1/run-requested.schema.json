@@ -1,0 +1,384 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trpc-agent-service.local/events/execution/v1/run-requested.schema.json",
+  "title": "RunRequested",
+  "description": "Gateway-owned immutable Run request; Worker materializes Run only after consuming this versioned event. No SDK DTOs or credentials. Relational route/input invariants are enforced by the codec.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "admission_id",
+    "run_id",
+    "route",
+    "input"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "admission_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "route": {
+      "$ref": "#/$defs/RouteSnapshot"
+    },
+    "input": {
+      "$ref": "#/$defs/Inbound"
+    },
+    "usage_policy": {
+      "$ref": "#/$defs/UsagePolicy"
+    }
+  },
+  "$defs": {
+    "RouteSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "account_id",
+        "generation",
+        "tenant_id",
+        "binding_id",
+        "deployment_revision_id",
+        "manifest_ref",
+        "manifest_digest"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "telegram",
+            "wecom"
+          ]
+        },
+        "account_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "deployment_revision_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "manifest_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "manifest_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "Inbound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "kind",
+        "conversation_id",
+        "sender_id",
+        "text",
+        "reply_context",
+        "source_digest",
+        "received_at"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/EventKey"
+        },
+        "kind": {
+          "type": "string",
+          "const": "text"
+        },
+        "conversation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\u0000- \u007f]+$"
+        },
+        "thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\u0000- \u007f]+$"
+        },
+        "sender_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\u0000- \u007f]+$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536,
+          "pattern": "^[^\u0000]*$"
+        },
+        "reply_context": {
+          "$ref": "#/$defs/ReplyContext",
+          "x-go-pointer": true
+        },
+        "source_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "received_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "key": {
+                "properties": {
+                  "provider": {
+                    "const": "telegram"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reply_context": {
+                "required": [
+                  "chat_id"
+                ],
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "chat_type"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "chatid_or_userid"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "callback_req_id"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "received_at"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reply_context": {
+                "required": [
+                  "chat_type",
+                  "chatid_or_userid",
+                  "received_at"
+                ],
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "chat_id"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "message_thread_id"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "source_message_id"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "EventKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "account_id",
+        "event_id"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "telegram",
+            "wecom"
+          ]
+        },
+        "account_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "event_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\u0000- \u007f]+$"
+        }
+      }
+    },
+    "ReplyContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "chat_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\u0000- \u007f]+$"
+        },
+        "message_thread_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\u0000- \u007f]+$"
+        },
+        "source_message_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\u0000- \u007f]+$"
+        },
+        "chat_type": {
+          "type": "string",
+          "enum": [
+            "single",
+            "group"
+          ]
+        },
+        "chatid_or_userid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\u0000- \u007f]+$"
+        },
+        "callback_req_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\u0000- \u007f]+$"
+        },
+        "received_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40
+        }
+      }
+    },
+    "UsagePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "enabled",
+        "max_concurrent_runs",
+        "token_period_seconds",
+        "token_limit",
+        "token_reservation_per_run",
+        "input_micros_per_million_tokens",
+        "output_micros_per_million_tokens"
+      ],
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "max_concurrent_runs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "token_period_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "token_limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "token_reservation_per_run": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "input_micros_per_million_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "output_micros_per_million_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  }
+}

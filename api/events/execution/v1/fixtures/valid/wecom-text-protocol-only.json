@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "event_id": "admission-1",
+  "admission_id": "admission-1",
+  "run_id": "run-1",
+  "route": {
+    "provider": "wecom",
+    "account_id": "bot-1",
+    "tenant_id": "tenant-1",
+    "binding_id": "binding-1",
+    "generation": 1,
+    "deployment_revision_id": "deployment-1",
+    "manifest_ref": "manifest:deployment-1:1",
+    "manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "input": {
+    "key": {
+      "provider": "wecom",
+      "account_id": "bot-1",
+      "event_id": "msg-callback-1"
+    },
+    "kind": "text",
+    "conversation_id": "chat-1",
+    "sender_id": "user-1",
+    "text": "你好\nKeep exact whitespace. ",
+    "reply_context": {
+      "chat_type": "group",
+      "chatid_or_userid": "chat-1",
+      "callback_req_id": "req-1",
+      "received_at": "2026-09-05T00:00:00.123456789Z"
+    },
+    "source_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "received_at": "2026-09-05T00:00:00.123456789Z"
+  }
+}

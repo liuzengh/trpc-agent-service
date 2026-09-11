@@ -1,0 +1,27 @@
+.git
+.idea
+.vscode
+artifacts
+bin
+dist
+verification
+coverage.out
+coverage.html
+*.log
+
+# Runtime environment files must never enter a build layer.
+**/.env
+**/.env.*
+!**/.env.example
+.codex-worktrees
+# Local dependency/build caches are not Go build inputs.
+**/node_modules
+**/.next
+**/.test-dist
+.gocache
+**/artifacts
+**/verification
+**/.git
+**/__pycache__
+**/*-key.pem
+**/*.key

@@ -1,0 +1,21 @@
+{
+  "schema_version": "v1",
+  "root": "review_loop",
+  "requirements": {
+    "models": {
+      "primary": {"capabilities": ["chat"]}
+    },
+    "tools": {},
+    "knowledge": {}
+  },
+  "nodes": {
+    "review_loop": {"kind": "loop", "body": "review", "max_iterations": 3},
+    "review": {
+      "kind": "llm",
+      "instruction": "审查并改进当前结果。",
+      "model_slot": "primary",
+      "tool_slots": [],
+      "knowledge_slots": []
+    }
+  }
+}

@@ -1,0 +1,49 @@
+# Reviewer demo overlay, included by `just demo`.
+# Adds the local Channel Lab so a reviewer gets a simulated IM surface and a
+# deterministic `lab-echo` model without any external credentials.
+services:
+  # Point the console Help link at the published documentation site. Override
+  # DOCS_SITE_URL to use a different deployment or a local preview.
+  web:
+    environment:
+      DOCS_SITE_URL: ${DOCS_SITE_URL:-https://jfsas.github.io/trpc-agent-service/docs/}
+
+  channel-gateway:
+    depends_on:
+      channel-lab:
+        condition: service_healthy
+
+  # Workspace-capable Worker. The isolation gate passed against this exact
+  # image and seccomp profile, so the review stack opts in explicitly.
+  agent-worker:
+    image: ${WORKSPACE_WORKER_IMAGE:-trpc-agent-service/agent-worker-workspace:managed-local}
+    build: !reset null
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - seccomp:${WORKSPACE_SECCOMP_FILE:?set absolute verified seccomp path}
+      - systempaths=unconfined
+    tmpfs:
+      - /workspace:rw,uid=${MANAGED_RUNTIME_UID},gid=${MANAGED_RUNTIME_GID},mode=0700
+      - /tmp:rw,mode=1777
+
+  channel-lab:
+    image: ${CHANNEL_LAB_IMAGE:-trpc-agent-service/channel-lab:managed-local}
+    build: !reset null
+    ports:
+      - 127.0.0.1:${CHANNEL_LAB_HTTP_PORT:-18090}:8080
+    command: ["--webhook-origin", "${CHANNEL_LAB_GATEWAY_ORIGIN:-http://channel-gateway:8090}"]
+    volumes:
+      - channel-lab-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=2)"]
+      # A Python probe every 5s cost more than the Lab's own work. Keep the
+      # startup probe fast and the steady state cheap.
+      interval: 30s
+      start_interval: 5s
+      start_period: 30s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  channel-lab-data:

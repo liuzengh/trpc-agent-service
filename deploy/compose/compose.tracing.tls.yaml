@@ -1,0 +1,8 @@
+# Explicit TLS overlay for application containers. Mount the issuing CA in the
+# application's system trust bundle; never set insecure_skip_verify.
+services:
+  trace-collector:
+    command: ["--config=/etc/otelcol/collector.yaml", "--config=/etc/otelcol/tls.yaml"]
+    volumes:
+      - ./tracing/collector-tls.yaml:/etc/otelcol/tls.yaml:ro
+      - ${TRACING_TLS_DIR:?set absolute directory containing server.pem and server-key.pem}:/run/tracing-tls:ro

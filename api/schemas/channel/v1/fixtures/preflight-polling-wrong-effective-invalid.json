@@ -1,0 +1,88 @@
+{
+  "schema": "preflight-complete.schema.json",
+  "valid": false,
+  "document": {
+    "schema_version": 1,
+    "scope_id": "pool",
+    "source_epoch": "11111111-1111-4111-8111-111111111111",
+    "instance_epoch": "22222222-2222-4222-8222-222222222222",
+    "lease_epoch": 1,
+    "claim_token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "gateway_config_digest": "sha256:03f2b058b89dcf96f3b74459cf4851902e480cb112593a2e253c2d7527b03ed4",
+    "expected_public_origin": null,
+    "observed_at": "2026-09-06T04:00:05Z",
+    "checks": [
+      {
+        "id": "credential_configuration",
+        "status": "PASS",
+        "code": "CREDENTIALS_CONFIGURED",
+        "details": {
+          "bot_token_configured": true,
+          "webhook_secret_configured": false
+        }
+      },
+      {
+        "id": "bot_identity",
+        "status": "PASS",
+        "code": "BOT_IDENTITY_MATCH",
+        "details": {
+          "identity_match": true
+        }
+      },
+      {
+        "id": "public_origin",
+        "status": "NOT_APPLICABLE",
+        "code": "PUBLIC_ORIGIN_NOT_APPLICABLE",
+        "details": {
+          "applicability": "NOT_APPLICABLE"
+        }
+      },
+      {
+        "id": "webhook_registration",
+        "status": "PASS",
+        "code": "WEBHOOK_NONE",
+        "details": {
+          "presence": false,
+          "relation": "NONE"
+        }
+      },
+      {
+        "id": "pending_updates",
+        "status": "PASS",
+        "code": "PENDING_UPDATES_ZERO",
+        "details": {
+          "pending_update_count": 0
+        }
+      },
+      {
+        "id": "delivery_errors",
+        "status": "NOT_APPLICABLE",
+        "code": "DELIVERY_ERRORS_NOT_APPLICABLE",
+        "details": {
+          "applicability": "NOT_APPLICABLE"
+        }
+      },
+      {
+        "id": "recovery_materials",
+        "status": "NOT_APPLICABLE",
+        "code": "RECOVERY_MATERIALS_NOT_APPLICABLE",
+        "details": {
+          "applicability": "NOT_APPLICABLE"
+        }
+      },
+      {
+        "id": "delivery_verification",
+        "status": "UNKNOWN",
+        "code": "DELIVERY_NOT_TESTED",
+        "details": {
+          "verification": "NOT_TESTED"
+        }
+      }
+    ],
+    "receive_mode": "long_polling",
+    "diagnostic_policy": "telegram-receive-modes-v1",
+    "effective_config_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "connection_revision": 3,
+    "origin_status": "PUBLIC_ORIGIN_INVALID"
+  }
+}

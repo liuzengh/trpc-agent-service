@@ -1,0 +1,17 @@
+{
+  "valid": true,
+  "compiler_version": "deployment-compiler-v1",
+  "platform_contract_digest": "sha256:6780067e652823ffd9d1e80993d85159a57f0789665cf71571ffd6270a0f31b8",
+  "diagnostics": [
+    {
+      "code": "DEPLOYMENT_UNUSED_REQUIREMENT",
+      "severity": "warning",
+      "source": "agent",
+      "path": "/requirements/tools/debug",
+      "category": "tools",
+      "name": "debug",
+      "node_id": null,
+      "message": "declared tool requirement is unused by every node"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": "v1",
+  "root": "main",
+  "requirements": {
+    "models": {"primary": {"capabilities": ["chat"]}},
+    "tools": {},
+    "knowledge": {}
+  },
+  "nodes": {
+    "main": {"kind": "sequence", "children": ["left", "right"]},
+    "left": {"kind": "sequence", "children": ["shared"]},
+    "right": {"kind": "sequence", "children": ["shared"]},
+    "shared": {
+      "kind": "llm",
+      "instruction": "执行共享步骤。",
+      "model_slot": "primary",
+      "tool_slots": [],
+      "knowledge_slots": []
+    }
+  }
+}

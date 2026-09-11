@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jfsas.dev/events/control/v1/runtime-manifest-published.schema.json",
+  "title": "RuntimeManifestPublished.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_type",
+    "event_id",
+    "tenant_id",
+    "deployment_id",
+    "deployment_revision_id",
+    "revision_number",
+    "occurred_at",
+    "manifest"
+  ],
+  "properties": {
+    "schema_version": {"const": "v1"},
+    "event_type": {"const": "RuntimeManifestPublished.v1"},
+    "event_id": {"$ref": "#/$defs/opaque_id"},
+    "tenant_id": {"$ref": "#/$defs/opaque_id"},
+    "deployment_id": {"$ref": "#/$defs/opaque_id"},
+    "deployment_revision_id": {"$ref": "#/$defs/opaque_id"},
+    "revision_number": {"type": "integer", "minimum": 1},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "manifest": {
+      "$ref": "https://jfsas.dev/schemas/deployment/v1/runtime-manifest.schema.json"
+    },
+    "trace_context": {"$ref": "#/$defs/trace_context"}
+  },
+  "$defs": {
+    "opaque_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "trace_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["traceparent"],
+      "properties": {
+        "traceparent": {
+          "type": "string",
+          "maxLength": 55,
+          "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        },
+        "tracestate": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    }
+  }
+}

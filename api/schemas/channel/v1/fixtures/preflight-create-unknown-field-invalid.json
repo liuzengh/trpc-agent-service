@@ -1,0 +1,10 @@
+{
+  "schema": "preflight-create.schema.json",
+  "valid": false,
+  "document": {
+    "expected_account_revision": 7,
+    "expected_connection_revision": 4,
+    "expected_bot_token_version": 2,
+    "unexpected_canary": "fixture-only"
+  }
+}
