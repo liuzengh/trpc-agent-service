@@ -3,6 +3,10 @@
 .DS_Store
 *.log
 *.swp
+.env
+.env.*
+!.env.example
+*.env
 
 bin/
 dist/
@@ -12,6 +16,8 @@ coverage.html
 *.exe
 
 vendor/
+node_modules/
+*.tsbuildinfo
 
 data/*
 !data/README.md

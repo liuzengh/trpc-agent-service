@@ -1,8 +1,29 @@
 # 文档目录
 
-在此放置架构设计、时序图、数据模型和运维方案。建议至少包含：
+[项目首页](../README.md)提供项目介绍和快速开始。
 
-- 系统架构图：Gateway、Worker、Channel Adapter、Storage Adapter、Plugin / Guardrail、Telemetry
-- 核心时序图：IM 消息 → Runner 执行 → Tool 调用 → Session / Memory 写入 → IM 回复
-- 数据模型与多后端适配说明
-- 风险清单
+## 架构设计
+
+建议从总体架构、核心消息时序和数据模型开始，再查阅数据一致性、后端适配及治理专题。
+
+| 文档 | 内容 |
+| --- | --- |
+| [系统架构](architecture.md) | 系统架构图、组件职责、租户隔离和框架复用 |
+| [消息时序](sequence.md) | 企业微信消息、Runner、工具、存储和回复的完整时序图，以及请求追踪 |
+| [数据模型](data-model.md) | 实体关系、表结构和索引 |
+| [数据同步与幂等](data-consistency.md) | 并发控制、事件顺序、恢复和迁移 |
+| [多后端适配](backend-adapters.md) | Redis、SQL、向量库与对象存储的选择和路由 |
+| [治理、安全与监控](governance-operations.md) | 鉴权、审批、密钥、预算、审计和观测 |
+| [生产风险](risks.md) | 风险、监控信号及缓解措施 |
+
+## 安装使用
+
+| 文档 | 内容 |
+| --- | --- |
+| [功能范围](capabilities.md) | 支持的功能、通道、后端与使用条件 |
+| [安装运行手册](operations-runbook.md) | 安装、模型配置、控制台使用、部署、备份和排障 |
+| [IM 接入](im-channels.md) | Telegram 和企业微信的接入、授权、消息处理与连接维护 |
+
+## 原始需求
+
+[项目原始需求](requirements.md)保留原始 README 全文，包括任务说明、具体要求、验收标准和 tRPC-Agent-Go 能力复用对照。该文档用于查阅项目要求；当前功能范围和安装步骤见上方文档。

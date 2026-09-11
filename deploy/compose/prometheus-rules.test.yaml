@@ -1,0 +1,68 @@
+rule_files: [prometheus-rules.yaml]
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'agent_model_settlements_total{tenant_id="tenant-a",settlement_status="failed"}'
+        values: '0+1x10'
+      - series: 'agent_audit_calls_total{tenant_id="tenant-a",operation_result="error"}'
+        values: '0+1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AgentModelSettlementFailure
+        exp_alerts:
+          - exp_labels: {severity: warning, tenant_id: tenant-a}
+            exp_annotations:
+              summary: Model usage could not be settled
+              description: Reserved tenant budget remains occupied; check quota backend before retrying.
+  - interval: 1m
+    input_series:
+      - series: 'agent_backlog_items{tenant_id="tenant-a",backlog_stage="delivery",backlog_state="unknown",instance="a"}'
+        values: '1x20'
+      - series: 'agent_backlog_items{tenant_id="tenant-a",backlog_stage="delivery",backlog_state="unknown",instance="b"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AgentDeadOrUnknownWork
+        exp_alerts:
+          - exp_labels: {severity: warning, tenant_id: tenant-a, backlog_stage: delivery, backlog_state: unknown}
+            exp_annotations:
+              summary: Agent work needs operator review
+              description: Dead or unknown work exists; do not blindly replay external side effects.
+  - interval: 1m
+    input_series:
+      - series: 'agent_backlog_oldest_age_seconds{tenant_id="tenant-a",backlog_stage="checkpoint",backlog_state="active"}'
+        values: '180x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AgentChannelCheckpointStalled
+        exp_alerts:
+          - exp_labels: {severity: warning, tenant_id: tenant-a}
+            exp_annotations:
+              summary: Channel checkpoint is falling behind
+              description: Active channel progress is more than two minutes behind; inspect poll failures before recovery.
+  - interval: 1m
+    input_series:
+      - series: 'agent_reply_deliveries_total{tenant_id="tenant-a",channel_type="wecom_mcp",delivery_status="unknown"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AgentReplyFailureRatioHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, tenant_id: tenant-a, channel_type: wecom_mcp}
+            exp_annotations:
+              summary: Agent reply failure ratio is above 5%
+              description: Tenant tenant-a channel wecom_mcp has sustained delivery failures.
+  - interval: 1m
+    input_series:
+      - series: 'agent_backlog_oldest_age_seconds{tenant_id="tenant-a",backlog_stage="outbound",backlog_state="pending"}'
+        values: '0x20'
+      - series: 'agent_backlog_items{tenant_id="tenant-a",backlog_stage="outbound",backlog_state="dead"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AgentBacklogOldestWaitHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AgentDeadOrUnknownWork
+        exp_alerts: []

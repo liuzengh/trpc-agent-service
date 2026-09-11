@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trpc-agent-migrate
+  namespace: trpc-agent
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: {app: trpc-agent-migrate}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: trpc-agent-service
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: migrate
+          image: ghcr.io/example/trpc-agent-service:replace-me
+          command: ["/usr/local/bin/trpc-migrate"]
+          envFrom:
+            - configMapRef: {name: trpc-agent-config}
+            - secretRef: {name: trpc-agent-migration-secrets}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}

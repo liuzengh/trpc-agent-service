@@ -1,0 +1,435 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trpc-agent
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trpc-agent-service
+  namespace: trpc-agent
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trpc-agent-config
+  namespace: trpc-agent
+data:
+  TRPC_AGENT_MODEL_PROVIDER: openai
+  TRPC_AGENT_MODEL_STREAM: "false"
+  TRPC_AGENT_SESSION_BACKEND: redis
+  TRPC_AGENT_SESSION_TTL: "720h"
+  TRPC_AGENT_COORDINATOR_BACKEND: redis
+  TRPC_AGENT_IDEMPOTENCY_BACKEND: redis
+  TRPC_AGENT_CONTROL_PLANE_BACKEND: postgres
+  TRPC_AGENT_POSTGRES_AUTO_MIGRATE: "false"
+  TRPC_AGENT_POSTGRES_BOOTSTRAP_TUTORIAL: "false"
+  TRPC_AGENT_QUEUE_BACKEND: redis
+  TRPC_AGENT_QUEUE_STREAM: agent-runs
+  TRPC_AGENT_QUEUE_GROUP: agent-workers
+  TRPC_AGENT_QUEUE_CLAIM_MIN_IDLE: "30s"
+  TRPC_AGENT_QUOTA_BACKEND: redis
+  TRPC_AGENT_ADMIN_ENABLED: "false"
+  TRPC_AGENT_HTTP_API_ENABLED: "false"
+  # Full reference grants (metadata only) are provisioned by platform operators.
+  TRPC_AGENT_SECRET_GRANTS_JSON: "[]"
+  # Explicit receiver targets; no hosted-MCP background access by default.
+  TRPC_AGENT_WECOM_MCP_TARGETS_JSON: "[]"
+  TRPC_AGENT_OTEL_ENABLED: "true"
+  TRPC_AGENT_OTEL_SERVICE_NAME: trpc-agent-service
+  TRPC_AGENT_OTEL_ENDPOINT: otel-collector.observability.svc.cluster.local:4317
+  TRPC_AGENT_OTEL_INSECURE: "true"
+  TRPC_AGENT_OTEL_SAMPLE_RATIO: "0.1"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-gateway
+  namespace: trpc-agent
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: trpc-agent-service, role: gateway}
+  template:
+    metadata:
+      labels: {app: trpc-agent-service, role: gateway}
+    spec:
+      serviceAccountName: trpc-agent-service
+      terminationGracePeriodSeconds: 30
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: service
+          image: ghcr.io/example/trpc-agent-service:replace-me
+          args: ["-role", "gateway", "-addr", ":8080"]
+          envFrom:
+            - configMapRef: {name: trpc-agent-config}
+            - secretRef: {name: trpc-agent-gateway-secrets}
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 5, timeoutSeconds: 2}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10, timeoutSeconds: 2}
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-gateway
+  namespace: trpc-agent
+spec:
+  selector: {app: trpc-agent-service, role: gateway}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-admin
+  namespace: trpc-agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: trpc-agent-service, role: admin}
+  template:
+    metadata:
+      labels: {app: trpc-agent-service, role: admin}
+    spec:
+      serviceAccountName: trpc-agent-service
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: service
+          image: ghcr.io/example/trpc-agent-service:replace-me
+          args: ["-role", "admin", "-addr", ":8080"]
+          env:
+            - {name: TRPC_AGENT_ADMIN_ENABLED, value: "true"}
+          envFrom:
+            - configMapRef: {name: trpc-agent-config}
+            - secretRef: {name: trpc-agent-admin-secrets}
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
+          resources:
+            requests: {cpu: 100m, memory: 192Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-admin
+  namespace: trpc-agent
+spec:
+  selector: {app: trpc-agent-service, role: admin}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-relay
+  namespace: trpc-agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: trpc-agent-service, role: relay}
+  template:
+    metadata:
+      labels: {app: trpc-agent-service, role: relay}
+    spec:
+      serviceAccountName: trpc-agent-service
+      terminationGracePeriodSeconds: 60
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: service
+          image: ghcr.io/example/trpc-agent-service:replace-me
+          args: ["-role", "relay"]
+          envFrom:
+            - configMapRef: {name: trpc-agent-config}
+            - secretRef: {name: trpc-agent-relay-secrets}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-worker
+  namespace: trpc-agent
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: trpc-agent-service, role: worker}
+  template:
+    metadata:
+      labels: {app: trpc-agent-service, role: worker}
+    spec:
+      serviceAccountName: trpc-agent-service
+      terminationGracePeriodSeconds: 90
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: service
+          image: ghcr.io/example/trpc-agent-service:replace-me
+          args: ["-role", "worker"]
+          envFrom:
+            - configMapRef: {name: trpc-agent-config}
+            - secretRef: {name: trpc-agent-worker-secrets}
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+            limits: {cpu: "4", memory: 2Gi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-sender
+  namespace: trpc-agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: trpc-agent-service, role: sender}
+  template:
+    metadata:
+      labels: {app: trpc-agent-service, role: sender}
+    spec:
+      serviceAccountName: trpc-agent-service
+      terminationGracePeriodSeconds: 60
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: service
+          image: ghcr.io/example/trpc-agent-service:replace-me
+          args: ["-role", "sender"]
+          envFrom:
+            - configMapRef: {name: trpc-agent-config}
+            - secretRef: {name: trpc-agent-sender-secrets}
+          resources:
+            requests: {cpu: 100m, memory: 192Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-jobs
+  namespace: trpc-agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: trpc-agent-service, role: jobs}
+  template:
+    metadata:
+      labels: {app: trpc-agent-service, role: jobs}
+    spec:
+      serviceAccountName: trpc-agent-service
+      terminationGracePeriodSeconds: 90
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: service
+          image: ghcr.io/example/trpc-agent-service:replace-me
+          args: ["-role", "jobs"]
+          envFrom:
+            - configMapRef: {name: trpc-agent-config}
+            - secretRef: {name: trpc-agent-jobs-secrets}
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: agent-gateway, namespace: trpc-agent}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: agent-gateway}
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 65}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: agent-worker, namespace: trpc-agent}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: agent-worker}
+  minReplicas: 3
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: agent-jobs, namespace: trpc-agent}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: agent-jobs}
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: agent-gateway, namespace: trpc-agent}
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: {app: trpc-agent-service, role: gateway}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: agent-worker, namespace: trpc-agent}
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: {app: trpc-agent-service, role: worker}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: trpc-agent}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: platform-dependency-egress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-service}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-dependency: telemetry}
+          podSelector:
+            matchLabels: {app: otel-collector}
+      ports:
+        - {protocol: TCP, port: 4317}
+    - to:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-dependency: data}
+          podSelector:
+            matchLabels: {app: postgres}
+      ports:
+        - {protocol: TCP, port: 5432}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: redis-egress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-service}
+    matchExpressions:
+      - {key: role, operator: In, values: [gateway, relay, worker, jobs]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-dependency: data}
+          podSelector:
+            matchLabels: {app: redis}
+      ports:
+        - {protocol: TCP, port: 6379}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: knowledge-artifact-egress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-service}
+    matchExpressions:
+      - {key: role, operator: In, values: [worker, jobs, admin]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-dependency: data}
+          podSelector:
+            matchExpressions:
+              - {key: app, operator: In, values: [qdrant, minio]}
+      ports:
+        - {protocol: TCP, port: 6334}
+        - {protocol: TCP, port: 9000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: provider-https-egress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-service}
+    matchExpressions:
+      - {key: role, operator: In, values: [gateway, worker, sender, jobs, admin]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16]
+      ports:
+        - {protocol: TCP, port: 443}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: gateway-ingress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-service, role: gateway}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # Label only the namespace hosting the trusted Ingress controller.
+        - namespaceSelector:
+            matchLabels: {trpc-agent-access: gateway}
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: admin-ingress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-service, role: admin}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-access: admin}
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: migration-egress, namespace: trpc-agent}
+spec:
+  podSelector:
+    matchLabels: {app: trpc-agent-migrate}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - namespaceSelector:
+            matchLabels: {trpc-agent-dependency: data}
+          podSelector:
+            matchLabels: {app: postgres}
+      ports:
+        - {protocol: TCP, port: 5432}

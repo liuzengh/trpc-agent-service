@@ -1,0 +1,545 @@
+package gateway
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/workqueue"
+)
+
+type memoryInbound struct {
+	result      AcceptResult
+	payloadHash string
+}
+
+type memoryConversation struct {
+	id         string
+	revisionID string
+	lastTurn   int64
+}
+
+type memoryQueueOutbox struct {
+	id          string
+	task        workqueue.AgentTask
+	status      string
+	lockedBy    string
+	lockedUntil time.Time
+	nextAttempt time.Time
+}
+
+type memoryRun struct {
+	generation          int64
+	deferredCount       int
+	nextAttempt         time.Time
+	conversationID      string
+	turnSeq             int64
+	lifetime            runtimecontext.MessageLifetime
+	createdAt           time.Time
+	startedAt           time.Time
+	completedAt         time.Time
+	bindingID           string
+	revisionID, channel string
+	tenantID            string
+	appID               string
+	status              string
+	workerID            string
+	result              RunResult
+	errType             string
+}
+
+type memoryOutbound struct {
+	item        OutboundItem
+	status      string
+	lockedBy    string
+	lockedUntil time.Time
+	nextAttempt time.Time
+}
+
+// MemoryJournal is a process-local transactional model for tests and the
+// dependency-free tutorial.
+type MemoryJournal struct {
+	dispositions  map[string]memoryDisposition
+	parts         map[string]OutboundPart
+	mu            sync.Mutex
+	closed        bool
+	inbound       map[string]memoryInbound
+	conversations map[string]*memoryConversation
+	outbox        map[string]*memoryQueueOutbox
+	runs          map[string]*memoryRun
+	outbound      map[string]*memoryOutbound
+}
+
+// NewMemoryJournal creates an empty journal.
+func NewMemoryJournal() *MemoryJournal {
+	return &MemoryJournal{
+		inbound:       make(map[string]memoryInbound),
+		conversations: make(map[string]*memoryConversation),
+		outbox:        make(map[string]*memoryQueueOutbox),
+		runs:          make(map[string]*memoryRun),
+		outbound:      make(map[string]*memoryOutbound),
+	}
+}
+
+func (j *MemoryJournal) Accept(
+	ctx context.Context,
+	request InboundRequest,
+) (AcceptResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return AcceptResult{}, context.Cause(ctx)
+	}
+	if err := validateInbound(&request); err != nil {
+		return AcceptResult{}, err
+	}
+	inboundKey := request.Scope.ChannelBindingID + "\x00" + request.ExternalMessageID
+	payloadHash := inboundPayloadHash(request)
+	conversationKey := request.Scope.StorageScope + "\x00" + request.UserID + "\x00" + request.SessionID
+
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return AcceptResult{}, ErrJournalClosed
+	}
+	if existing, ok := j.inbound[inboundKey]; ok {
+		if existing.payloadHash != payloadHash {
+			return AcceptResult{}, ErrMessageConflict
+		}
+		result := existing.result
+		result.Duplicate = true
+		return result, nil
+	}
+	if entry, ok := j.dispositions[inboundKey]; ok && entry.tenant == request.Scope.TenantID {
+		return AcceptResult{Ignored: true}, nil
+	}
+	conversation := j.conversations[conversationKey]
+	if conversation == nil {
+		conversation = &memoryConversation{
+			id: stableID(
+				"conv_",
+				request.Scope.StorageScope,
+				request.UserID,
+				request.SessionID,
+			),
+			revisionID: request.Scope.RevisionID,
+		}
+		j.conversations[conversationKey] = conversation
+	}
+	conversation.lastTurn++
+	result := AcceptResult{
+		InboundID: stableID(
+			"in_",
+			request.Scope.ChannelBindingID,
+			request.ExternalMessageID,
+		),
+		RequestID: stableID(
+			"req_",
+			request.Scope.ChannelBindingID,
+			request.ExternalMessageID,
+		),
+		ConversationID: conversation.id,
+		RevisionID:     conversation.revisionID,
+		TurnSeq:        conversation.lastTurn,
+	}
+	scope := request.Scope
+	scope.RevisionID = conversation.revisionID
+	traceParent, traceState := outboundTraceHeaders(ctx)
+	task := workqueue.AgentTask{
+		Lifetime:          request.Lifetime,
+		ChatType:          request.ChatType,
+		Media:             request.Media,
+		InboundID:         result.InboundID,
+		RequestID:         result.RequestID,
+		ConversationID:    result.ConversationID,
+		Scope:             scope,
+		MessageID:         request.ExternalMessageID,
+		UserID:            request.UserID,
+		SessionID:         request.SessionID,
+		Text:              request.Text,
+		ReplyTarget:       request.ReplyTarget,
+		TurnSeq:           result.TurnSeq,
+		TraceParent:       traceParent,
+		TraceState:        traceState,
+		ApprovedTools:     append([]string(nil), request.ApprovedTools...),
+		ApprovedToolCalls: append([]governance.ApprovedToolCall(nil), request.ApprovedToolCalls...),
+		ApprovalID:        request.ApprovalID,
+	}
+	if request.DirectReply != "" {
+		j.inbound[inboundKey] = memoryInbound{result: result, payloadHash: payloadHash}
+		now := time.Now().UTC()
+		j.runs[result.RequestID] = &memoryRun{createdAt: now, startedAt: now, completedAt: now, bindingID: scope.ChannelBindingID, revisionID: scope.RevisionID, channel: scope.ChannelType, tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "completed", result: RunResult{
+			Reply: request.DirectReply, AgentName: "platform-control", TraceParent: traceParent, TraceID: audit.TraceID(ctx),
+		}}
+		outboundID := stableID("out_", result.RequestID)
+		j.outbound[outboundID] = &memoryOutbound{
+			item: OutboundItem{ID: outboundID, RequestID: result.RequestID,
+				TenantID: scope.TenantID, ChannelBindingID: scope.ChannelBindingID,
+				Text: request.DirectReply, ReplyTarget: request.ReplyTarget, TraceParent: traceParent},
+			status: "pending", nextAttempt: time.Now(),
+		}
+		return result, nil
+	}
+	outboxID := stableID("qout_", result.RequestID)
+	j.outbox[outboxID] = &memoryQueueOutbox{
+		id:          outboxID,
+		task:        task,
+		status:      "pending",
+		nextAttempt: time.Now(),
+	}
+	j.inbound[inboundKey] = memoryInbound{result: result, payloadHash: payloadHash}
+	j.runs[result.RequestID] = &memoryRun{conversationID: result.ConversationID, turnSeq: result.TurnSeq, lifetime: request.Lifetime, createdAt: time.Now().UTC(), bindingID: scope.ChannelBindingID, revisionID: scope.RevisionID, channel: scope.ChannelType, tenantID: request.Scope.TenantID, appID: request.Scope.AppID, status: "queued"}
+	return result, nil
+}
+
+// Tasks returns a copy of durable tasks created by accepted messages.
+func (j *MemoryJournal) Tasks() []workqueue.AgentTask {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	result := make([]workqueue.AgentTask, 0, len(j.outbox))
+	for _, item := range j.outbox {
+		result = append(result, item.task)
+	}
+	return result
+}
+
+func (j *MemoryJournal) ClaimQueueOutbox(
+	ctx context.Context,
+	workerID string,
+	limit int,
+	lease time.Duration,
+) ([]QueueOutboxItem, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, context.Cause(ctx)
+	}
+	if workerID == "" || limit <= 0 || lease <= 0 {
+		return nil, fmt.Errorf("outbox worker, limit and lease are required")
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return nil, ErrJournalClosed
+	}
+	now := time.Now()
+	result := make([]QueueOutboxItem, 0, limit)
+	for _, item := range j.outbox {
+		if len(result) >= limit {
+			break
+		}
+		if item.status == "published" || item.nextAttempt.After(now) ||
+			(item.lockedBy != "" && item.lockedUntil.After(now)) {
+			continue
+		}
+		item.status = "publishing"
+		item.lockedBy = workerID
+		item.lockedUntil = now.Add(lease)
+		result = append(result, QueueOutboxItem{ID: item.id, Task: item.task})
+	}
+	return result, nil
+}
+
+func (j *MemoryJournal) MarkQueueOutboxPublished(
+	_ context.Context,
+	outboxID string,
+	workerID string,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	item := j.outbox[outboxID]
+	if item == nil || item.lockedBy != workerID {
+		return fmt.Errorf("queue outbox ownership mismatch")
+	}
+	item.status = "published"
+	item.lockedBy = ""
+	item.lockedUntil = time.Time{}
+	return nil
+}
+
+func (j *MemoryJournal) MarkQueueOutboxFailed(
+	_ context.Context,
+	outboxID string,
+	workerID string,
+	retryAt time.Time,
+	_ error,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	item := j.outbox[outboxID]
+	if item == nil || item.lockedBy != workerID {
+		return fmt.Errorf("queue outbox ownership mismatch")
+	}
+	item.status = "pending"
+	item.lockedBy = ""
+	item.lockedUntil = time.Time{}
+	item.nextAttempt = retryAt
+	return nil
+}
+
+func (j *MemoryJournal) MarkRunRunning(
+	_ context.Context,
+	requestID string,
+	workerID string,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	run := j.runs[requestID]
+	if run == nil {
+		return fmt.Errorf("agent run not found")
+	}
+	if run.status == "completed" {
+		return ErrRunCompleted
+	}
+	if run.status == "dead" || run.status == "expired" {
+		return ErrRunTerminal
+	}
+	run.status = "running"
+	if run.startedAt.IsZero() {
+		run.startedAt = time.Now().UTC()
+	}
+	run.completedAt = time.Time{}
+	run.workerID = workerID
+	return nil
+}
+
+func (j *MemoryJournal) CompleteRun(
+	_ context.Context,
+	task workqueue.AgentTask,
+	result RunResult,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	run := j.runs[task.RequestID]
+	if run == nil {
+		return fmt.Errorf("agent run not found")
+	}
+	if run.status == "dead" || run.status == "expired" {
+		return ErrRunTerminal
+	}
+	if result.WorkerID != "" && run.workerID != result.WorkerID && run.status != "completed" {
+		return ErrRunSuperseded
+	}
+	if run.generation != task.Generation {
+		return ErrRunSuperseded
+	}
+	j.cancelWaitingNotice(task.RequestID)
+	if run.status == "completed" {
+		return nil
+	}
+	result.Finalized = false
+	run.status = "completed"
+	run.completedAt = time.Now().UTC()
+	run.result = result
+	run.errType = result.ErrorType
+	outboundID := stableID("out_", task.RequestID)
+	if j.outbound[outboundID] == nil {
+		j.outbound[outboundID] = &memoryOutbound{
+			item: OutboundItem{
+				ID:               outboundID,
+				RequestID:        task.RequestID,
+				TenantID:         task.Scope.TenantID,
+				ChannelBindingID: task.Scope.ChannelBindingID,
+				Text:             result.Reply,
+				ReplyTarget:      task.ReplyTarget,
+				TraceParent:      result.TraceParent,
+			},
+			status:      "pending",
+			nextAttempt: time.Now(),
+		}
+	}
+	return nil
+}
+
+func (j *MemoryJournal) FailRun(
+	_ context.Context,
+	requestID string,
+	errorType string,
+	_ error,
+	expectedWorker ...string,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	run := j.runs[requestID]
+	if run == nil {
+		return fmt.Errorf("agent run not found")
+	}
+	if run.status != "completed" && run.status != "dead" && run.status != "expired" {
+		if len(expectedWorker) > 0 && run.workerID != expectedWorker[0] {
+			return ErrRunSuperseded
+		}
+		run.status = "failed"
+		run.completedAt = time.Now().UTC()
+		run.errType = errorType
+	}
+	return nil
+}
+
+func (j *MemoryJournal) TerminalFailRun(ctx context.Context, task workqueue.AgentTask, result RunResult) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := task.Scope.Validate(); err != nil {
+		return false, err
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return false, ErrJournalClosed
+	}
+	run := j.runs[task.RequestID]
+	if run == nil {
+		return false, fmt.Errorf("agent run not found")
+	}
+	if run.status == "completed" || run.status == "expired" || run.generation != task.Generation {
+		return false, nil
+	}
+	if run.tenantID != task.Scope.TenantID || run.appID != task.Scope.AppID {
+		return false, ErrRunSuperseded
+	}
+	if run.status == "running" && result.WorkerID != "" && run.workerID != result.WorkerID {
+		return false, ErrRunSuperseded
+	}
+	if result.ErrorType == "" {
+		result.ErrorType = "retry_exhausted"
+	}
+	run.status, run.errType = "dead", result.ErrorType
+	j.cancelWaitingNotice(task.RequestID)
+	run.completedAt = time.Now().UTC()
+	id := stableID("out_", task.RequestID)
+	if j.outbound[id] == nil {
+		j.outbound[id] = &memoryOutbound{item: OutboundItem{ID: id, RequestID: task.RequestID, TenantID: task.Scope.TenantID,
+			ChannelBindingID: task.Scope.ChannelBindingID, Text: result.Reply, ReplyTarget: task.ReplyTarget, TraceParent: result.TraceParent},
+			status: "pending", nextAttempt: time.Now()}
+	}
+	return true, nil
+}
+
+// RunStatus exposes the in-memory journal state to tests and local status APIs.
+func (j *MemoryJournal) RunStatus(requestID string) (string, RunResult, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	run := j.runs[requestID]
+	if run == nil {
+		return "", RunResult{}, false
+	}
+	return run.status, run.result, true
+}
+
+func (j *MemoryJournal) ClaimOutbound(
+	ctx context.Context,
+	workerID string,
+	limit int,
+	lease time.Duration,
+) ([]OutboundItem, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, context.Cause(ctx)
+	}
+	if workerID == "" || limit <= 0 || lease <= 0 {
+		return nil, fmt.Errorf("outbound worker, limit and lease are required")
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	now := time.Now()
+	result := make([]OutboundItem, 0, limit)
+	for _, outbound := range j.outbound {
+		if len(result) >= limit {
+			break
+		}
+		if (outbound.status != "pending" && outbound.status != "sending") ||
+			outbound.nextAttempt.After(now) ||
+			(outbound.lockedBy != "" && outbound.lockedUntil.After(now)) {
+			continue
+		}
+		outbound.status = "sending"
+		outbound.lockedBy = workerID
+		outbound.lockedUntil = now.Add(lease)
+		outbound.item.AttemptCount++
+		result = append(result, outbound.item)
+	}
+	return result, nil
+}
+
+func (j *MemoryJournal) MarkOutboundSent(
+	_ context.Context,
+	outboundID string,
+	workerID string,
+	_ string,
+	expectedAttempt ...int,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	outbound := j.outbound[outboundID]
+	if outbound == nil || outbound.lockedBy != workerID || outbound.status != "sending" || (len(expectedAttempt) > 0 && outbound.item.AttemptCount != expectedAttempt[0]) {
+		return fmt.Errorf("outbound ownership mismatch")
+	}
+	outbound.status = "sent"
+	outbound.lockedBy = ""
+	outbound.lockedUntil = time.Time{}
+	return nil
+}
+
+func (j *MemoryJournal) MarkOutboundFailed(
+	_ context.Context,
+	outboundID string,
+	workerID string,
+	retryAt time.Time,
+	terminal bool,
+	_ error,
+	expectedAttempt ...int,
+) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	outbound := j.outbound[outboundID]
+	if outbound == nil || outbound.lockedBy != workerID || outbound.status != "sending" || (len(expectedAttempt) > 0 && outbound.item.AttemptCount != expectedAttempt[0]) {
+		return fmt.Errorf("outbound ownership mismatch")
+	}
+	if terminal {
+		outbound.status = "dead"
+	} else {
+		outbound.status = "pending"
+		outbound.nextAttempt = retryAt
+	}
+	outbound.lockedBy = ""
+	outbound.lockedUntil = time.Time{}
+	return nil
+}
+
+func (j *MemoryJournal) OutboundStatus(outboundID string) (string, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	outbound := j.outbound[outboundID]
+	if outbound == nil {
+		return "", false
+	}
+	return outbound.status, true
+}
+
+func (j *MemoryJournal) Ready(ctx context.Context) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return ErrJournalClosed
+	}
+	return nil
+}
+
+func (j *MemoryJournal) Close() error {
+	if j == nil {
+		return nil
+	}
+	j.mu.Lock()
+	j.closed = true
+	j.mu.Unlock()
+	return nil
+}
+
+var _ Journal = (*MemoryJournal)(nil)

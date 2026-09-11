@@ -1,0 +1,141 @@
+groups:
+  - name: trpc-agent-platform
+    rules:
+      - alert: AgentModelSettlementFailure
+        expr: sum by (tenant_id) (increase(agent_model_settlements_total{settlement_status="failed"}[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Model usage could not be settled
+          description: Reserved tenant budget remains occupied; check quota backend before retrying.
+
+      - alert: OTelCollectorScrapeDown
+        expr: up{job="otel-collector"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: OpenTelemetry Collector metrics endpoint is unavailable
+          description: Prometheus has failed to scrape the Collector for more than two minutes.
+
+      - alert: AgentRunFailureRatioHigh
+        expr: |
+          sum by (tenant_id) (rate(agent_runs_total{run_status="failed"}[5m]))
+          /
+          clamp_min(sum by (tenant_id) (rate(agent_runs_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent run failure ratio is above 5%
+          description: Tenant {{ $labels.tenant_id }} has sustained Agent run failures for ten minutes.
+
+      - alert: AgentRunP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (tenant_id, le) (rate(agent_run_duration_seconds_bucket[5m]))
+          ) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent run p95 latency is above 30 seconds
+          description: Tenant {{ $labels.tenant_id }} has sustained high Agent execution latency.
+
+      - alert: AgentReplyFailureRatioHigh
+        expr: |
+          sum by (tenant_id, channel_type) (
+            rate(agent_reply_deliveries_total{delivery_status=~"failed|unknown"}[5m])
+          )
+          /
+          clamp_min(
+            sum by (tenant_id, channel_type) (rate(agent_reply_deliveries_total[5m])),
+            0.001
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent reply failure ratio is above 5%
+          description: Tenant {{ $labels.tenant_id }} channel {{ $labels.channel_type }} has sustained delivery failures.
+
+      - alert: AgentIdempotencyReplaySpike
+        expr: sum by (tenant_id, channel_type) (rate(agent_idempotency_replays_total[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Duplicate inbound message rate is elevated
+          description: Tenant {{ $labels.tenant_id }} channel {{ $labels.channel_type }} is replaying more than five messages per second.
+
+      - alert: AgentBacklogOldestWaitHigh
+        expr: max by (tenant_id, backlog_stage, backlog_state) (agent_backlog_oldest_age_seconds{backlog_stage=~"queue|run|outbound|background",backlog_state=~"pending|publishing|queued|running"}) > 120
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Agent backlog is not draining
+          description: Pending work has remained older than two minutes for five minutes.
+
+      - alert: AgentDeadOrUnknownWork
+        expr: max by (tenant_id, backlog_stage, backlog_state) (agent_backlog_items{backlog_state=~"dead|unknown"}) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: Agent work needs operator review
+          description: Dead or unknown work exists; do not blindly replay external side effects.
+
+      - alert: AgentDeliveryAttemptStuck
+        expr: max by (tenant_id) (agent_backlog_oldest_age_seconds{backlog_stage="delivery",backlog_state="attempting"}) > 60
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: A channel send attempt has no confirmed result
+          description: Inspect delivery evidence; an expired process does not prove the message was not sent.
+
+      - alert: AgentChannelCheckpointStalled
+        expr: max by (tenant_id) (agent_backlog_oldest_age_seconds{backlog_stage="checkpoint",backlog_state="active"}) > 120
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: Channel checkpoint is falling behind
+          description: Active channel progress is more than two minutes behind; inspect poll failures before recovery.
+
+      - alert: AgentChannelPollingErrors
+        expr: sum by (tenant_id, channel_type) (increase(agent_channel_polls_total{poll_status="failed"}[5m])) > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: Channel polling is failing
+          description: The receiver retained its checkpoint after a failed window.
+
+      - alert: AgentChannelRejectedMessages
+        expr: sum by (tenant_id, channel_type, rejection_reason) (increase(agent_channel_rejections_total[5m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: Channel messages were quarantined
+          description: Inspect metadata-only rejection records; messages were not passed to the Agent.
+
+      - alert: AgentBacklogSnapshotFailed
+        expr: min(agent_backlog_snapshot_up) == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: Backlog metrics cannot read their source
+          description: Missing measurements must not be interpreted as an empty queue.
+
+      - alert: AgentAuditPersistenceFailure
+        expr: sum by (tenant_id) (increase(agent_audit_calls_total{operation_result="error"}[5m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: Audit persistence or replay failed
+          description: Check the audit backend and private spool capacity; buffered mode never permits silent loss.
+
+      - alert: AgentBacklogSnapshotStale
+        expr: (time() - max(agent_backlog_snapshot_timestamp_seconds) > 180) or absent_over_time(agent_backlog_snapshot_timestamp_seconds[5m])
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: Backlog metrics are stale or absent
+          description: PostgreSQL deployments require an active Gateway or Admin backlog observer.

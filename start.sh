@@ -4,17 +4,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
+source "$ROOT/scripts/local-process.sh"
+local_agent_init "$ROOT"
+if local_agent_already_running; then exit 0; fi
+
 mkdir -p "$ROOT/bin" "$ROOT/data"
 if [[ ! -x "$ROOT/bin/trpc-service" ]]; then
-  "$ROOT/build.sh"
+  "$ROOT/scripts/build.sh"
 fi
 
-PID_FILE="$ROOT/data/trpc-service.pid"
-if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "already running: pid=$(cat "$PID_FILE")"
-  exit 0
-fi
-
-nohup "$ROOT/bin/trpc-service" >"$ROOT/data/trpc-service.log" 2>&1 &
-echo $! >"$PID_FILE"
-echo "started: pid=$(cat "$PID_FILE")"
+ENV_FILE="${TRPC_AGENT_ENV_FILE:-$ROOT/.env}"
+local_agent_wait_dependencies
+nohup "$ROOT/bin/trpc-service" -env-file "$ENV_FILE" >>"$ROOT/data/trpc-service.log" 2>&1 9>&- &
+local_agent_register "$!" "$ENV_FILE"

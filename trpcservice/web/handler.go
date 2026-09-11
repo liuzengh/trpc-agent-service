@@ -1,0 +1,498 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	agentservice "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/routing"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+)
+
+const (
+	defaultMaxBodyBytes = 32 << 10
+	maxMessageIDLength  = 256
+	maxBindingKeyLength = 128
+	maxUserIDLength     = 128
+	maxSessionIDLength  = 256
+	maxMessageLength    = 8 << 10
+)
+
+// ChatService is the small boundary between the HTTP layer and Agent runtime.
+type ChatService interface {
+	ChatWithScope(ctx context.Context, input agentservice.ChatInput) (agentservice.ChatResult, error)
+
+	Ready(ctx context.Context) error
+}
+
+// Handler serves the tutorial HTTP API.
+type Handler struct {
+	chatService       ChatService
+	maxBodySize       int64
+	readiness         []readinessCheck
+	routeResolver     routing.Resolver
+	intake            *gateway.Intake
+	callbackGateway   *gateway.CallbackGateway
+	adminHandler      http.Handler
+	quotaGuard        *tenant.Guard
+	modelUsageManaged bool
+	apiAccess         *APIAccess
+	synchronousChat   bool
+}
+
+type readinessCheck struct {
+	name  string
+	check func(context.Context) error
+}
+
+// Option customizes the HTTP handler.
+type Option func(*Handler)
+
+// WithReadinessCheck adds a platform dependency to /readyz.
+func WithReadinessCheck(name string, check func(context.Context) error) Option {
+	return func(handler *Handler) {
+		if check == nil {
+			return
+		}
+		handler.readiness = append(handler.readiness, readinessCheck{
+			name:  strings.TrimSpace(name),
+			check: check,
+		})
+	}
+}
+
+// WithRouteResolver resolves an untrusted binding key into trusted tenant and
+// application identity.
+func WithRouteResolver(resolver routing.Resolver) Option {
+	return func(handler *Handler) {
+		handler.routeResolver = resolver
+	}
+}
+
+// WithGatewayIntake enables the durable asynchronous /inbound endpoint.
+func WithGatewayIntake(intake *gateway.Intake) Option {
+	return func(handler *Handler) {
+		handler.intake = intake
+	}
+}
+
+// WithCallbackGateway enables provider callback routes.
+func WithCallbackGateway(callbackGateway *gateway.CallbackGateway) Option {
+	return func(handler *Handler) {
+		handler.callbackGateway = callbackGateway
+	}
+}
+
+// WithAdminHandler mounts an authenticated control-plane handler.
+func WithAdminHandler(adminHandler http.Handler) Option {
+	return func(handler *Handler) {
+		handler.adminHandler = adminHandler
+	}
+}
+
+func WithQuotaGuard(guard *tenant.Guard) Option {
+	return func(handler *Handler) { handler.quotaGuard = guard }
+}
+
+func WithManagedModelUsage() Option { return func(h *Handler) { h.modelUsageManaged = true } }
+
+// NewHandler exposes health checks; chat/intake, callbacks and Admin require
+// explicit options. In particular a missing APIAccess never means anonymous.
+func NewHandler(chatService ChatService, opts ...Option) http.Handler {
+	h := &Handler{
+		chatService:     chatService,
+		maxBodySize:     defaultMaxBodyBytes,
+		synchronousChat: true,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(h)
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", h.handleHealth)
+	mux.HandleFunc("/readyz", h.handleReady)
+	if h.apiAccess != nil && len(h.apiAccess.principals) > 0 {
+		if h.synchronousChat {
+			mux.HandleFunc("/chat", h.handleChat)
+		}
+		mux.HandleFunc("/inbound", h.handleInbound)
+	}
+	if h.callbackGateway != nil {
+		mux.HandleFunc("/callbacks/", h.handleCallback)
+	}
+	if h.adminHandler != nil {
+		mux.Handle("/admin/", h.adminHandler)
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/admin/ui/", http.StatusTemporaryRedirect)
+		})
+	}
+	return mux
+}
+
+func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
+	if h.callbackGateway == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "callback Gateway is unavailable"})
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/callbacks/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "callback route not found"})
+		return
+	}
+	result, err := h.callbackGateway.Handle(r.Context(), parts[0], parts[1], r)
+	if err != nil {
+		log.Printf("channel callback rejected: %v", err)
+		if errors.Is(err, tenant.ErrRateLimited) {
+			writeJSON(w, http.StatusTooManyRequests, errorResponse{Error: "tenant rate limit exceeded"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "callback rejected"})
+		return
+	}
+	if result.ContentType != "" {
+		w.Header().Set("Content-Type", result.ContentType)
+	}
+	w.WriteHeader(result.StatusCode)
+	if len(result.Body) > 0 {
+		if _, err := w.Write(result.Body); err != nil {
+			log.Printf("write callback response: %v", err)
+		}
+	}
+}
+
+func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if h.chatService == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "chat service is unavailable"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := h.chatService.Ready(ctx); err != nil {
+		log.Printf("readiness check failed: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "service is not ready"})
+		return
+	}
+	for _, dependency := range h.readiness {
+		if err := dependency.check(ctx); err != nil {
+			log.Printf("readiness check %q failed: %v", dependency.name, err)
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "service is not ready"})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+type chatRequest struct {
+	BindingKey string `json:"binding_key"`
+	MessageID  string `json:"message_id"`
+	UserID     string `json:"user_id"`
+	SessionID  string `json:"session_id"`
+	Message    string `json:"message"`
+}
+
+type chatResponse struct {
+	Reply        string `json:"reply"`
+	RequestID    string `json:"request_id,omitempty"`
+	MessageID    string `json:"message_id"`
+	UserID       string `json:"user_id"`
+	SessionID    string `json:"session_id"`
+	EventCount   int    `json:"event_count"`
+	Replayed     bool   `json:"replayed"`
+	TenantID     string `json:"tenant_id"`
+	AppID        string `json:"app_id"`
+	RevisionID   string `json:"revision_id"`
+	AgentName    string `json:"agent_name"`
+	FencingToken int64  `json:"fencing_token,omitempty"`
+}
+
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
+type inboundRequest struct {
+	BindingKey string `json:"binding_key"`
+	MessageID  string `json:"message_id"`
+	UserID     string `json:"user_id"`
+	SessionID  string `json:"session_id"`
+	ChatType   string `json:"chat_type"`
+	Message    string `json:"message"`
+}
+
+func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.authenticateAPI(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if h.intake == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "Gateway intake is unavailable"})
+		return
+	}
+	var request inboundRequest
+	if err := decodeJSON(w, r, h.maxBodySize, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	request.BindingKey = strings.TrimSpace(request.BindingKey)
+	request.UserID = strings.TrimSpace(request.UserID)
+	request.MessageID = strings.TrimSpace(request.MessageID)
+	request.SessionID = strings.TrimSpace(request.SessionID)
+	request.Message = strings.TrimSpace(request.Message)
+	request.ChatType = strings.TrimSpace(request.ChatType)
+	if request.ChatType == "" {
+		request.ChatType = "direct"
+	}
+	if err := validateChatRequest(chatRequest{
+		BindingKey: request.BindingKey, MessageID: request.MessageID,
+		UserID: request.UserID, SessionID: request.SessionID, Message: request.Message,
+	}); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	if request.ChatType != "direct" && request.ChatType != "group" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unsupported chat_type"})
+		return
+	}
+	if !principal.allows(request.BindingKey, request.UserID) {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+	result, err := h.intake.Accept(r.Context(), gateway.IntakeRequest{
+		AuthorizeScope:    principal.authorizeScope,
+		BindingKey:        request.BindingKey,
+		ExternalMessageID: request.MessageID,
+		UserID:            request.UserID,
+		SessionID:         request.SessionID,
+		ChatType:          request.ChatType,
+		Text:              request.Message,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, errAPIScopeForbidden):
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		case errors.Is(err, gateway.ErrMessageConflict), errors.Is(err, idempotency.ErrKeyConflict):
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "message ID payload conflict"})
+		case errors.Is(err, routing.ErrBindingNotFound):
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "channel binding not found"})
+		case errors.Is(err, routing.ErrRouteDisabled):
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "channel route is disabled"})
+		case errors.Is(err, tenant.ErrRateLimited):
+			writeJSON(w, http.StatusTooManyRequests, errorResponse{Error: "tenant rate limit exceeded"})
+		default:
+			log.Printf("accept inbound message failed: %v", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "inbound persistence failed"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.authenticateAPI(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+	if h.chatService == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "chat service is unavailable"})
+		return
+	}
+	if h.routeResolver == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "route resolver is unavailable"})
+		return
+	}
+
+	var request chatRequest
+	if err := decodeJSON(w, r, h.maxBodySize, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	request.BindingKey = strings.TrimSpace(request.BindingKey)
+	request.MessageID = strings.TrimSpace(request.MessageID)
+	request.UserID = strings.TrimSpace(request.UserID)
+	request.SessionID = strings.TrimSpace(request.SessionID)
+	request.Message = strings.TrimSpace(request.Message)
+	if err := validateChatRequest(request); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	if !principal.allows(request.BindingKey, request.UserID) {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+
+	var scope runtimecontext.Scope
+	var err error
+	if resolver, ok := h.routeResolver.(routing.RequestResolver); ok {
+		scope, err = resolver.ResolveFor(
+			r.Context(), request.BindingKey, request.UserID+"\x00"+request.SessionID,
+		)
+	} else {
+		scope, err = h.routeResolver.Resolve(r.Context(), request.BindingKey)
+	}
+	if err != nil {
+		if errors.Is(err, routing.ErrBindingNotFound) {
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "channel binding not found"})
+			return
+		}
+		if errors.Is(err, routing.ErrRouteDisabled) {
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "channel route is disabled"})
+			return
+		}
+		log.Printf("resolve chat route failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "route resolution failed"})
+		return
+	}
+	if principal.authorizeScope(scope) != nil {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+	if h.quotaGuard != nil {
+		if err := h.quotaGuard.AllowInbound(r.Context(), scope.TenantID, request.UserID); err != nil {
+			writeJSON(w, http.StatusTooManyRequests, errorResponse{Error: "tenant rate limit exceeded"})
+			return
+		}
+	}
+	releaseQuota := func() {}
+	runCtx := r.Context()
+	if h.quotaGuard != nil {
+		lease, err := h.quotaGuard.AcquireRunLease(r.Context(), scope.TenantID)
+		if err != nil {
+			writeJSON(w, http.StatusTooManyRequests, errorResponse{Error: "tenant quota exceeded"})
+			return
+		}
+		releaseQuota = lease.Release
+		runCtx = lease.Context()
+	}
+	defer releaseQuota()
+	result, err := h.chatService.ChatWithScope(runCtx, agentservice.ChatInput{
+		ChatType:  "direct", // authenticated synchronous HTTP chat is not an IM group
+		Scope:     scope,
+		MessageID: request.MessageID,
+		UserID:    request.UserID,
+		SessionID: request.SessionID,
+		Text:      request.Message,
+	})
+	if err != nil {
+		log.Printf("chat failed: %v", err)
+		if errors.Is(err, idempotency.ErrKeyConflict) {
+			writeJSON(w, http.StatusConflict, errorResponse{
+				Error: "message_id was already used for different content",
+			})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "agent execution failed"})
+		return
+	}
+	if h.quotaGuard != nil && !h.modelUsageManaged {
+		if err := h.quotaGuard.RecordUsage(
+			r.Context(), scope.TenantID, result.RequestID,
+			result.PromptTokens, result.CompletionTokens, result.Cost,
+		); err != nil {
+			log.Printf("record chat usage failed: %v", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "usage accounting failed"})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, chatResponse{
+		Reply:        result.Reply,
+		RequestID:    result.RequestID,
+		MessageID:    result.MessageID,
+		UserID:       request.UserID,
+		SessionID:    request.SessionID,
+		EventCount:   result.EventCount,
+		Replayed:     result.Replayed,
+		TenantID:     result.TenantID,
+		AppID:        result.AppID,
+		RevisionID:   result.RevisionID,
+		AgentName:    result.AgentName,
+		FencingToken: result.FencingToken,
+	})
+}
+
+func validateChatRequest(request chatRequest) error {
+	switch {
+	case request.BindingKey == "":
+		return errors.New("binding_key is required")
+	case len(request.BindingKey) > maxBindingKeyLength:
+		return errors.New("binding_key is too long")
+	case request.MessageID == "":
+		return errors.New("message_id is required")
+	case len(request.MessageID) > maxMessageIDLength:
+		return errors.New("message_id is too long")
+	case request.UserID == "":
+		return errors.New("user_id is required")
+	case len(request.UserID) > maxUserIDLength:
+		return errors.New("user_id is too long")
+	case request.SessionID == "":
+		return errors.New("session_id is required")
+	case len(request.SessionID) > maxSessionIDLength:
+		return errors.New("session_id is too long")
+	case request.Message == "":
+		return errors.New("message is required")
+	case len(request.Message) > maxMessageLength:
+		return errors.New("message is too long")
+	default:
+		return nil
+	}
+}
+
+func decodeJSON(
+	w http.ResponseWriter,
+	r *http.Request,
+	maxBytes int64,
+	target any,
+) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return errors.New("request body must be a valid JSON object")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("request body must contain one JSON object")
+	}
+	return nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		log.Printf("encode HTTP response: %v", err)
+	}
+}
