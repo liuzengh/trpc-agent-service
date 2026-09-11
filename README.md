@@ -13,7 +13,11 @@
 
 支持范围与使用条件见[功能说明](docs/capabilities.md)。
 
-## 快速开始
+## 快速开始（Docker）
+
+以下步骤使用 Docker Compose，平台和 PostgreSQL、Redis 均在容器内运行，不需要执行 `start.sh` 或 `stop.sh`。
+
+根目录的 `./start.sh`、`./stop.sh` 仅用于宿主机进程启停，不管理 Docker 容器。宿主机启动读取根目录 `.env` 或 `TRPC_AGENT_ENV_FILE` 指定的配置，需先配置依赖和凭据，步骤见[宿主机安装](docs/operations-runbook.md#5-宿主机安装)。
 
 需要 Git、Docker 和 Docker Compose v2。首次构建需能访问容器镜像、Go 和 npm 依赖源；宿主机不需要额外安装 Go、Node.js 或数据库。
 
@@ -32,7 +36,11 @@ cd trpc-agent-service
 docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml up -d --build --wait
 ```
 
-首次启动会生成管理员凭据和加密主密钥，启动 PostgreSQL、Redis，执行数据库迁移并启动平台。
+此流程无需预先创建根目录 `.env`。命令中的 `--env-file` 读取仓库自带的[公开部署配置](deploy/compose/demo.env.example)，用于端口、构建代理和模型地址策略。
+
+首次启动时，初始化容器自动生成数据库密码、管理员凭据和加密主密钥，保存到持久化的 `setup` 数据卷。迁移程序和平台均读取其中的 `/setup/platform.env`；Compose 等待数据库迁移完成后才启动平台。已有安装保留原凭据。
+
+请保留 `-f compose.demo.yaml`。默认的 `compose.yaml` 是依赖服务配置，单独执行 `docker compose up` 不会按上述流程启动完整平台。
 
 ### 3. 登录并创建 Agent
 
@@ -53,7 +61,7 @@ docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml e
 
 ### 停止与再次启动
 
-停止平台：
+Docker 安装使用以下命令停止；`./stop.sh` 不会停止这些容器：
 
 ```bash
 docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml stop

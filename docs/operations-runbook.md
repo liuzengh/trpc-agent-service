@@ -2,6 +2,8 @@
 
 所有命令在安装目录执行。首次安装与已有环境升级是不同流程：不要对已有数据库重新初始化，也不要覆盖已有凭据或删除安装数据卷。
 
+本文提供两种独立的安装方式：第 1、2 节通过 Docker Compose 管理容器；[第 5 节](#5-宿主机安装)通过根目录 `start.sh`、`stop.sh` 管理宿主机进程。启停时使用对应方式的命令，脚本不会管理 Compose 容器，Compose 也不会停止脚本启动的宿主机进程。
+
 ## 1. Docker 单机安装
 
 需要 Docker 和 Docker Compose v2。首次构建需能访问镜像、Go 和 npm 依赖源；宿主机不需要额外安装 Go、Node 或数据库。
@@ -11,6 +13,18 @@ docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml u
 ```
 
 平台会生成管理员凭据与加密主密钥，启动 PostgreSQL/Redis、执行数据库迁移并启动服务。默认地址为 `http://127.0.0.1:18080/admin/ui/`，仅监听本机回环地址。
+
+这套安装流程不要求手工创建根目录 `.env`，配置来源如下：
+
+| 配置 | 来源与用途 |
+| --- | --- |
+| `deploy/compose/demo.env.example` | 仓库自带的公开部署配置，由命令中的 `--env-file` 读取；设置端口、构建代理和模型地址策略，不存放密钥 |
+| `/setup/platform.env` | 初始化容器生成，保存在 `setup` 数据卷中；包含服务配置、数据库与 Redis 地址、管理员凭据和加密主密钥，供迁移程序与平台读取 |
+| `/setup/postgres-password` | 初始化容器生成的数据库密码文件，保存在同一数据卷中，供 PostgreSQL 读取 |
+
+初始化仅为新安装生成凭据，已有安装继续使用原数据卷。模型服务和 IM 账号不由安装程序提供，需在平台启动后配置。
+
+请完整保留命令中的 `--env-file` 和 `-f compose.demo.yaml`。默认 `compose.yaml` 只提供依赖服务，不能用裸的 `docker compose up` 替代本节的完整平台安装命令。
 
 查看管理员凭据并登录：
 
@@ -22,7 +36,7 @@ docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml e
 
 公开端口、构建代理和模型地址策略由 `deploy/compose/demo.env.example` 配置。构建代理可选择 `https://proxy.golang.org,direct` 或企业可信镜像，不在公开配置中填写带凭据的代理 URL。
 
-查看状态与停止：
+查看状态与停止使用同一组 Compose 参数，不使用根目录的 `./stop.sh`：
 
 ```bash
 docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml ps
@@ -216,6 +230,10 @@ Worker 需要 Docker CLI，指定 daemon 中需已有镜像，镜像提供 `/bin
 `json-digest` 计算输入 JSON 的字节数和 SHA-256。执行结果通过有界工具输出返回。新增 Skill 通过 `skills/catalog.json` 注册新的目录和版本，不覆盖已发布版本；页面不提供任意脚本上传。
 
 ## 5. 宿主机安装
+
+本节直接运行宿主机上的 `bin/trpc-service`，不使用初始化容器，也不读取 Docker 安装的 `/setup/platform.env`。启动前需自行准备 PostgreSQL、Redis、访问凭据和数据库迁移；`start.sh` 不会自动创建这些依赖或生成安装凭据。
+
+启动脚本默认读取仓库根目录 `.env`，可通过 `TRPC_AGENT_ENV_FILE` 指定其他文件。`start.sh`、`stop.sh` 仅启停本仓库登记的宿主机服务进程，不启停数据库或 Docker 容器。
 
 源码构建需要 [go.mod](../go.mod) 指定的 Go 版本、Node.js 22.12+ 和 npm。Linux 启停脚本还需要 flock 与支持 pidfd 的内核。
 
