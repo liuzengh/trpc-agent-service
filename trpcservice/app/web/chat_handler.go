@@ -176,9 +176,12 @@ func (a *ChatAPI) stream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 			return
 		}
-		if len(msgs) > 0 {
-			cursor = next
-		}
+		// Always advance: the returned cursor is also how a "$" start becomes a
+		// concrete position (see bus.ReadOutbound). Re-passing "$" would make
+		// XREAD resolve it to the tail of *that* moment and silently skip any
+		// reply that arrived between two polls — the browser then never sees an
+		// answer that was published correctly.
+		cursor = next
 		for _, m := range msgs {
 			if m == nil || m.Channel != "admin" || m.SessionID != sessionID || m.Content == nil {
 				continue

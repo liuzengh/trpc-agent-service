@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
 	"testing"
 	"time"
 
@@ -55,6 +56,15 @@ func (b *okBus) PublishOutbound(_ context.Context, m *Message) error {
 
 func newOutboxDB(t *testing.T) *sql.DB {
 	t.Helper()
+	return newOutboxDBInZone(t, "")
+}
+
+// newOutboxDBInZone opens the outbox test database with the connection's session
+// time zone pinned ("" keeps the container default). Pinning it is how a test
+// reproduces the production condition where the server's session zone differs
+// from the driver's UTC parsing of DATETIME.
+func newOutboxDBInZone(t *testing.T, zone string) *sql.DB {
+	t.Helper()
 	ctx := context.Background()
 	c, err := mysql.Run(ctx, "mysql:8.0",
 		mysql.WithUsername("test"), mysql.WithPassword("test"), mysql.WithDatabase("test"))
@@ -62,7 +72,12 @@ func newOutboxDB(t *testing.T) *sql.DB {
 		t.Fatalf("mysql run: %v", err)
 	}
 	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
-	dsn, err := c.ConnectionString(ctx, "parseTime=true", "multiStatements=true")
+	params := []string{"parseTime=true", "multiStatements=true"}
+	if zone != "" {
+		// Unknown DSN parameters are applied as session system variables.
+		params = append(params, "time_zone="+url.QueryEscape("'"+zone+"'"))
+	}
+	dsn, err := c.ConnectionString(ctx, params...)
 	if err != nil {
 		t.Fatalf("mysql dsn: %v", err)
 	}
@@ -190,6 +205,33 @@ func TestOutboxBackoffDefersRetry(t *testing.T) {
 	}
 	if retries != 2 {
 		t.Errorf("retries = %d after the schedule elapsed, want 2", retries)
+	}
+}
+
+// TestOutboxDeliversWhenServerZoneDiffersFromTheDriver is the regression for the
+// delivery outage this platform actually hit: created_at is written by the
+// server's CURRENT_TIMESTAMP, the driver parses DATETIME as UTC, and the
+// dispatcher compared that misread timestamp with its own clock. On a server
+// whose session zone is UTC+8 every freshly written event therefore looked eight
+// hours in the future, so the dispatcher deferred it for the whole offset — the
+// model answered, the ledger recorded the turn, and the reply was never
+// published. Measuring the age inside the database removes the second clock.
+func TestOutboxDeliversWhenServerZoneDiffersFromTheDriver(t *testing.T) {
+	ctx := context.Background()
+	db := newOutboxDBInZone(t, "+08:00")
+	o := NewOutbox(db)
+	appendOutboxMessage(t, o, "ev-tz", "t-tz")
+
+	good := &okBus{}
+	if err := o.Dispatch(ctx, good); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(good.published) != 1 {
+		var created time.Time
+		_ = db.QueryRowContext(ctx,
+			`SELECT created_at FROM outbox_events WHERE event_id = 'ev-tz'`).Scan(&created)
+		t.Fatalf("published = %d, want 1 (created_at=%v reads as %v in the process clock)",
+			len(good.published), created.Format("2006-01-02 15:04:05"), time.Now().UTC().Format("2006-01-02 15:04:05"))
 	}
 }
 

@@ -52,22 +52,29 @@ func outboxBackoff(retries int) time.Duration {
 	return d
 }
 
-// outboxNextAttemptAt returns the earliest moment the next attempt may run.
-// With retries = 0 the event is due immediately; afterwards each failed attempt
-// pushes the next one out by the exponential backoff. The caller compares this
-// against its own clock rather than tracking a per-event timer, so a restarted
-// dispatcher resumes the same schedule.
-func outboxNextAttemptAt(createdAt time.Time, retries int) time.Time {
-	at := createdAt
-	for i := 1; i <= retries; i++ {
-		at = at.Add(outboxBackoff(i))
+// outboxDue reports whether a pending event may be attempted now, given how old
+// the database says it is and how many attempts it already had.
+//
+// Two rules, for two different reasons:
+//
+//   - A never-attempted event is always due. The first attempt has nothing to
+//     back off from, so it must not be gated on a clock comparison at all. This
+//     is also what heals rows written before the MySQL session time zone was
+//     pinned to UTC: those carry a timestamp the current session reads as hours
+//     in the future, and without this rule they would sit pending forever.
+//   - Afterwards the age gates the retry. The age is measured by MySQL
+//     (TIMESTAMPDIFF against NOW()) instead of by comparing created_at with this
+//     process's clock, because the driver parses DATETIME as UTC while the
+//     server writes CURRENT_TIMESTAMP in its own session time zone: on a UTC+8
+//     server the two readings of the same row were eight hours apart, every
+//     fresh event looked like it was still in the future, and the dispatcher
+//     deferred every reply for the whole offset while the rest of the pipeline
+//     stayed healthy. One clock, one comparison: the database supplies both.
+func outboxDue(age time.Duration, retries int) bool {
+	if retries <= 0 {
+		return true
 	}
-	return at
-}
-
-// outboxDue reports whether a pending event may be attempted now.
-func outboxDue(now, createdAt time.Time, retries int) bool {
-	return !now.Before(outboxNextAttemptAt(createdAt, retries))
+	return age >= outboxBackoff(retries)
 }
 
 // outboxExhausted reports whether attempts publish tries have used up the
@@ -159,25 +166,30 @@ func (o *Outbox) Append(ctx context.Context, m *Message, msgKey string) error {
 // It returns the page size and how many of those events were still in backoff,
 // so the caller can tell "log drained" from "nothing was due yet".
 func (o *Outbox) dispatchBatch(ctx context.Context, b Bus) (int, int, error) {
+	// The age is computed by the database (see outboxDue) so both sides of the
+	// due-check come from one clock.
 	rows, err := o.db.QueryContext(ctx,
-		`SELECT event_id, payload, retries, created_at FROM outbox_events WHERE status = 'pending' ORDER BY retries, created_at LIMIT 100`)
+		`SELECT event_id, payload, retries, TIMESTAMPDIFF(SECOND, created_at, NOW())
+		   FROM outbox_events WHERE status = 'pending' ORDER BY retries, created_at LIMIT 100`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("bus: outbox select: %w", err)
 	}
 
 	type event struct {
-		id        string
-		payload   string
-		retries   int
-		createdAt time.Time
+		id      string
+		payload string
+		retries int
+		age     time.Duration
 	}
 	var batch []event
 	for rows.Next() {
 		var e event
-		if err := rows.Scan(&e.id, &e.payload, &e.retries, &e.createdAt); err != nil {
+		var ageSeconds int64
+		if err := rows.Scan(&e.id, &e.payload, &e.retries, &ageSeconds); err != nil {
 			_ = rows.Close()
 			return 0, 0, fmt.Errorf("bus: outbox scan: %w", err)
 		}
+		e.age = time.Duration(ageSeconds) * time.Second
 		batch = append(batch, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -186,10 +198,9 @@ func (o *Outbox) dispatchBatch(ctx context.Context, b Bus) (int, int, error) {
 	}
 	_ = rows.Close()
 
-	now := time.Now()
 	deferred := 0
 	for _, e := range batch {
-		if !outboxDue(now, e.createdAt, e.retries) {
+		if !outboxDue(e.age, e.retries) {
 			deferred++
 			continue
 		}

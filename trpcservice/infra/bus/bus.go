@@ -318,15 +318,33 @@ func (b *RedisBus) PublishOutbound(ctx context.Context, m *Message) error {
 // ReadOutbound reads outbound messages newer than fromID without touching a
 // consumer group, so admin SSE consumers can follow the stream independently
 // of IM adapters (reads never ack group-delivered messages). fromID accepts
-// "0" (from the beginning), "$" (only new messages), or an explicit stream id.
-// An empty fromID means "$" (only new messages). The returned cursor is the
-// last read stream position to pass back on the next call. Returns nil when
-// nothing is available within a short bounded wait.
+// "0" (from the beginning), "$" (the live tail) or an explicit stream id. An
+// empty fromID means "$". The returned cursor is the position to pass back on
+// the next call. Returns nil when nothing is available within a short bounded
+// wait.
+//
+// "$" is resolved to a concrete id here, before the read, and that id is what
+// the caller gets back. It has to be: XREAD re-resolves "$" on every call, so a
+// follower that polls — the chat SSE loop calls this about once a second —
+// would silently skip everything published between two calls. Every caller
+// therefore advances with the returned cursor rather than keeping "$".
 func (b *RedisBus) ReadOutbound(ctx context.Context, fromID string) ([]*Message, string, error) {
 	if fromID == "" {
 		fromID = "$"
 	}
 	cursor := fromID
+	if fromID == "$" {
+		last, err := b.client.XRevRangeN(ctx, StreamOutbound, "+", "-", 1).Result()
+		if err != nil {
+			return nil, cursor, fmt.Errorf("bus: resolve outbound tail: %w", err)
+		}
+		if len(last) > 0 {
+			cursor = last[0].ID
+		} else {
+			cursor = "0-0" // empty stream: follow it from the beginning
+		}
+		fromID = cursor
+	}
 	streams, err := b.client.XRead(ctx, &redis.XReadArgs{
 		Streams: []string{StreamOutbound, fromID},
 		Count:   32,

@@ -35,10 +35,20 @@ func applyPoolSettings(db *sql.DB) {
 // stores rely on:
 //   - parseTime=true: DATETIME columns scan into time.Time;
 //   - clientFoundRows=true: RowsAffected reports matched rows, so an UPDATE
-//     that writes identical values is not misread as "row missing".
+//     that writes identical values is not misread as "row missing";
+//   - time_zone='+00:00': server-generated timestamps are UTC, matching the
+//     driver, which parses and formats DATETIME in cfg.Loc (UTC by default).
 //
-// Extra params already present in the DSN win over these defaults. The
-// connection pool is bounded (see applyPoolSettings).
+// The time zone matters because every table mixes both sources: MySQL writes
+// CURRENT_TIMESTAMP defaults while Go writes time.Time values. Left alone, a
+// server whose session zone is the host's local time produces rows where the
+// same instant reads eight hours apart depending on which side wrote it — the
+// outbox dispatcher compared such a timestamp against its own clock and
+// deferred every reply for the whole offset. Extra params already present in
+// the DSN win over these defaults, and the zone is only pinned when the DSN
+// keeps the driver's default UTC location (a caller who asked for loc=Local
+// gets a session zone to match). The connection pool is bounded (see
+// applyPoolSettings).
 func OpenMySQL(dsn string) (*sql.DB, error) {
 	cfg, err := gosql.ParseDSN(dsn)
 	if err != nil {
@@ -52,6 +62,12 @@ func OpenMySQL(dsn string) (*sql.DB, error) {
 	}
 	if _, ok := cfg.Params["clientFoundRows"]; !ok {
 		cfg.Params["clientFoundRows"] = "true"
+	}
+	if cfg.Loc == time.UTC {
+		if _, ok := cfg.Params["time_zone"]; !ok {
+			// The quoted offset form needs no time-zone tables on the server.
+			cfg.Params["time_zone"] = "'+00:00'"
+		}
 	}
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	if err != nil {

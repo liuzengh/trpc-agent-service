@@ -434,6 +434,48 @@ func TestBusConsumeIsConcurrentWhileBlocked(t *testing.T) {
 	}
 }
 
+// TestReadOutboundDollarCursorIsResolvedOnce is the regression for a polling
+// follower. XREAD re-resolves "$" on every call, so a loop that keeps passing
+// "$" reads from *that moment's* tail and skips everything published between two
+// calls. The admin chat SSE loop polls about once a second, which is exactly how
+// a reply that had been published to stream:outbound never reached the browser.
+// "$" must therefore be resolved once and handed back as a concrete cursor.
+func TestReadOutboundDollarCursorIsResolvedOnce(t *testing.T) {
+	ctx := context.Background()
+	b := newBusForTest(t)
+	content := model.NewUserMessage("hi")
+	mk := func(id string) *Message {
+		return &Message{ID: id, TenantID: "t1", SessionID: "s1", Channel: "admin", Content: &content}
+	}
+	if err := b.PublishOutbound(ctx, mk("d0")); err != nil {
+		t.Fatal(err)
+	}
+
+	// First poll from "$": nothing new, but it must hand back a real position.
+	msgs, cursor, err := b.ReadOutbound(ctx, "$")
+	if err != nil {
+		t.Fatalf("first poll: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("first poll returned %d messages, want 0", len(msgs))
+	}
+	if cursor == "$" || cursor == "" {
+		t.Fatalf("cursor = %q, want a resolved stream id", cursor)
+	}
+
+	// Published between two polls: the next poll must see it.
+	if err := b.PublishOutbound(ctx, mk("d1")); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _, err = b.ReadOutbound(ctx, cursor)
+	if err != nil {
+		t.Fatalf("second poll: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "d1" {
+		t.Fatalf("second poll: msgs=%+v, want d1 (a reply published between polls must not be skipped)", msgs)
+	}
+}
+
 func TestBusReadOutboundCursor(t *testing.T) {
 	ctx := context.Background()
 	b := newBusForTest(t)

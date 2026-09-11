@@ -28,7 +28,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"flag"
 	"fmt"
 	"log"
@@ -137,7 +136,9 @@ func listUsers(ctx context.Context, o options, src spec) ([]string, error) {
 	if src.backend != storage.BackendMySQL {
 		return nil, fmt.Errorf("-auto enumerates users via the MySQL session schema; mysql source required")
 	}
-	db, err := sql.Open("mysql", src.dsn)
+	// OpenMySQL (not a bare sql.Open) so the migration reads timestamps with the
+	// same session time zone the platform writes them in.
+	db, err := storage.OpenMySQL(src.dsn)
 	if err != nil {
 		return nil, err
 	}

@@ -149,9 +149,10 @@ func (g *Gateway) Run(ctx context.Context) error {
 			}
 			return err
 		}
-		if len(msgs) > 0 {
-			cursor = next
-		}
+		// Always advance: the returned cursor is also how a "$" start becomes a
+		// concrete position (see bus.ReadOutbound), and keeping "$" would skip
+		// anything published between two polls.
+		cursor = next
 		for _, m := range msgs {
 			if m == nil || m.Channel == "" || m.Channel == "admin" || m.SessionID == "" || m.Content == nil {
 				continue

@@ -32,18 +32,13 @@ func TestOutboxBackoffIsExponentialAndCapped(t *testing.T) {
 	}
 }
 
-func TestOutboxNextAttemptGrowsWithRetries(t *testing.T) {
-	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-
-	if got := outboxNextAttemptAt(created, 0); !got.Equal(created) {
-		t.Errorf("retries=0 next attempt = %v, want the creation time (immediate)", got)
-	}
-	if got, want := outboxNextAttemptAt(created, 1), created.Add(2*time.Second); !got.Equal(want) {
-		t.Errorf("retries=1 next attempt = %v, want %v", got, want)
-	}
+func TestOutboxRetryWindowIsBounded(t *testing.T) {
 	// 2+4+8+16+32+60+60+60+60+60 seconds: minutes of coverage, not seconds, so
 	// a Redis restart or failover is absorbed instead of dead-lettered.
-	total := outboxNextAttemptAt(created, DefaultMaxOutboxRetries).Sub(created)
+	var total time.Duration
+	for i := 1; i <= DefaultMaxOutboxRetries; i++ {
+		total += outboxBackoff(i)
+	}
 	if total < 6*time.Minute {
 		t.Errorf("total retry window = %v, want at least 6 minutes", total)
 	}
@@ -52,17 +47,30 @@ func TestOutboxNextAttemptGrowsWithRetries(t *testing.T) {
 	}
 }
 
+// TestOutboxDueFollowsTheSchedule pins the due-check to the event's *age*, which
+// the database measures, plus the rule that a never-attempted event is always
+// due. Comparing a server-written timestamp against this process's clock is what
+// silently stopped reply delivery on a UTC+8 server: the two readings of the
+// same row were eight hours apart, so every fresh event looked like it was still
+// in the future.
 func TestOutboxDueFollowsTheSchedule(t *testing.T) {
-	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-
-	if !outboxDue(created, created, 0) {
+	// Never attempted: due whatever the clock says (a negative age is exactly
+	// what a row written under another session time zone looks like).
+	if !outboxDue(0, 0) {
 		t.Error("a never-attempted event must be due immediately")
 	}
-	if outboxDue(created.Add(time.Second), created, 1) {
+	if !outboxDue(-8*time.Hour, 0) {
+		t.Error("a never-attempted event written under a skewed clock must still be due")
+	}
+	// Retries respect the backoff.
+	if outboxDue(time.Second, 1) {
 		t.Error("event in backoff must not be due before its schedule")
 	}
-	if !outboxDue(created.Add(3*time.Second), created, 1) {
+	if !outboxDue(3*time.Second, 1) {
 		t.Error("event must be due once its backoff elapsed")
+	}
+	if !outboxDue(6*time.Minute, DefaultMaxOutboxRetries) {
+		t.Error("a long-pending event must become due again, not stay deferred forever")
 	}
 }
 
