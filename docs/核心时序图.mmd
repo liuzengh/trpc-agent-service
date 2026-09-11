@@ -1,51 +1,86 @@
+%% 核心时序图：一条企业微信消息的完整生命周期（含附件、审批暂停、Outbox 派发）
+%% 渲染：npx --yes @mermaid-js/mermaid-cli@11 -i docs/核心时序图.mmd -o docs/核心时序图.png -b white -s 2
 sequenceDiagram
     autonumber
-    participant User as 企业微信用户
-    participant WX as 企业微信平台
-    participant Adapter as WeCom Adapter
-    participant GW as Gateway
-    participant BUS as RedisBus
-    participant WRK as Worker
-    participant Router as storage.Router
-    participant Runner as runner.Runner
-    participant LLM as Model Endpoint
-    participant Tool as Tool
-    participant Session as Session DB
-    participant Memory as Memory DB
-    participant Audit as Audit DB
-    participant Outbox as Outbox DB
+    participant U as 企业微信用户
+    participant P as 企业微信平台
+    participant A as WeCom Adapter
+    participant C as Conn(WSS)
+    participant G as Gateway
+    participant B as RedisBus
+    participant W as Worker
+    participant O as Outbox(Mysql)
+    participant D as Outbox Dispatcher
+    participant R as runner.Runner
+    participant M as Model Endpoint
+    participant T as Tool/审批
+    participant S as Session/Memory 后端
+    participant AU as Audit/Usage(MySQL)
 
-    User->>WX: 发送消息
-    WX->>Adapter: WSS 回调
-    Adapter->>GW: InboundMessage
+    U->>P: 发送消息（文本 / 图片）
+    P-->>C: aibot_msg_callback (WSS)
+    C->>C: 立即回 ack（阻止平台重推）
+    C->>A: 归一化 XML → Message
+    A->>A: Seen(platformMsgID) 内存去重
+    A->>C: DownloadMedia（图片：HTTP + AES-256-CBC 解密，8MiB/15s 上限）
+    A->>G: InboundMessage{Media[].Data}
 
-    Note over GW: trace_id 生成<br/>幂等校验<br/>路由解析
-    GW->>BUS: PublishInbound
-    BUS->>WRK: XReadGroup
+    rect rgb(227, 242, 253)
+    Note over G: im.callback span 生成 trace_id
+    G->>G: buildUserContent：图片→AddImageData，文件→AddFileData<br/>文本追加[附件清单]；bus.Message.Media=清单
+    G->>G: 按 binding 解析 tenant/agent + 入站限流
+    G->>B: PublishInbound(id=channel:platformMsgID)
+    end
 
-    Note over WRK: 幂等校验<br/>租户策略<br/>LockSession
+    B->>W: XReadGroup（消费组 workers，有界并发 16）
+    rect rgb(232, 245, 233)
+    Note over W: handle()
+    W->>B: Idempotent(msgID) 两阶段租约 90s
+    W->>B: PendingApproval? 若是审批回复则直接 Resolve 并结束
+    W->>W: 租户一致性校验 + IM 白名单 + 附件失败回执（幂等）
+    W->>B: LockSession(tenant,session) 30s + 心跳续期
+    end
 
-    WRK->>Router: Sessions(tenantID)
-    Router-->>WRK: session.Service
+    W->>R: run() → runner.Run(RequestID=msgID)
+    R->>S: GetSession（装配历史；session.* span）
+    R->>S: memory preload（memory.read span）
+    R->>M: model.Call
+    M-->>R: tool_calls
+    alt 工具需要人工审批
+        R->>T: approval plugin BeforeTool
+        T->>W: humanReviewer.Review
+        W->>O: Append(审批通知卡片/文本, key=msgID:approval)
+        D->>B: stream:outbound
+        B->>G: ReadOutbound
+        G->>A: Send(交互卡片，飞书) / SendMarkdown(企微)
+        A->>U: 收到审批请求
+        U->>P: 点击按钮 / 回复“批准”
+        P->>A: 卡片回调 / 消息
+        A->>B: PublishInbound（与普通消息同链路）
+        B->>W: 并发消费槽位（会话锁被本回合持有，故审批回复在取锁前处理）
+        W->>B: ResolveApproval(approve)
+        T-->>R: Approved=true
+    end
+    R->>T: tool.Execute（沙箱/Docker、KB 检索…）
+    T-->>R: tool result
+    R->>M: model.Call（带工具结果）
+    M-->>R: final text
+    R->>S: AppendEvent（externalization：内联字节→MinIO，事件留 artifact:// 引用）
+    R-->>W: events 结束
 
-    WRK->>Runner: runner.Run
+    rect rgb(252, 228, 236)
+    W->>AU: Record(Decision=executed, tokens, tools)
+    W->>AU: RecordUsage(token/tool/sandbox/artifact/skill 幂等)
+    W->>O: Append(reply, key=msgID) 单事务：idempotency_keys + outbox_events
+    W->>B: CommitIdem(msgID) 24h
+    end
 
-    Runner->>LLM: model.Call
-    LLM-->>Runner: tool_calls
-    Runner->>Tool: tool.Execute
-    Tool-->>Runner: tool result
-    Runner->>LLM: model.Call
-    LLM-->>Runner: final text
-
-    Runner-->>WRK: events 完成
-
-    WRK->>Session: SaveSession
-    WRK->>Memory: AddMemory
-    WRK->>Audit: Record Entry
-    WRK->>Outbox: Append
-
-    Outbox->>BUS: stream:outbound
-    BUS->>GW: ReadOutbound
-    GW->>Adapter: OutboundMessage
-    Adapter->>WX: Send
-    WX->>User: 收到回复
+    D->>O: SELECT pending（按 TIMESTAMPDIFF 年龄判断是否到期）
+    D->>B: PublishOutbound(reply)
+    D->>O: status=sent（失败则退避重试，10 次后 dead + last_error）
+    B->>G: ReadOutbound(游标：$ 只解析一次)
+    G->>G: im.reply span；按通道上限截断
+    G->>A: OutboundMessage{chat_id}
+    A->>C: SendMarkdown / 原位替换流式占位
+    C->>P: aibot_send_msg
+    P->>U: 收到回复

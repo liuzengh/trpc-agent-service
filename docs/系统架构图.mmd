@@ -1,81 +1,116 @@
+%% 系统架构图：按仓库真实代码绘制（角色矩阵见 cmd/trpc-service/role.go planFor）
+%% 渲染：npx --yes @mermaid-js/mermaid-cli@11 -i docs/系统架构图.mmd -o docs/系统架构图.png -b white -s 2
 flowchart TB
-    subgraph 客户端["客户端层"]
-        WECOM["企业微信用户"]
-        FEISHU["飞书用户"]
-        ADMIN["管理员"]
+    subgraph CLIENT["客户端层"]
+        direction LR
+        WXUSER["企业微信用户"]
+        FSWUSER["飞书用户"]
+        CONSOLE["Vue3 管理后台<br/>front/ (Nginx + SPA)"]
+        CHATUI["Admin 对话页<br/>SSE 实时回复"]
     end
 
-    subgraph Gateway["Gateway 层"]
-        subgraph IM["IM 适配器"]
-            WC[WeCom Adapter]
-            FC[Feishu Adapter]
+    subgraph INGRESS["接入层"]
+        direction LR
+        subgraph IMADP["IM 适配器 channels.Adapter"]
+            WCADP["WeCom Adapter<br/>WSS 长连接"]
+            FSADP["Feishu Adapter<br/>ws.Client"]
         end
-        GW[Gateway<br/>pumpInbound/Run]
-        RL[RateLimiter<br/>限流]
+        WHAPI["Webhook 入口<br/>POST /webhooks/im/{binding_id}<br/>（可选，默认关）"]
+        RESTAPI["管理 REST API<br/>app/web（JWT + RBAC）"]
     end
 
-    subgraph Bus["消息总线<br/>Redis Streams"]
-        IN[stream:inbound]
-        OUT[stream:outbound]
-        DLQ[stream:inbound:dlq]
+    subgraph GWLAYER["Gateway 角色<br/>infra/channels"]
+        MGR["Manager<br/>绑定驱动启停适配器"]
+        GW["Gateway<br/>pumpInbound / Run"]
+        RL["RateLimiter<br/>入站限流（可选）"]
     end
 
-    subgraph Worker["Worker 层"]
-        WRK[Worker.Run]
-        HANDLE[handle<br/>幂等/审批/锁]
-        RUN[run<br/>Runner执行]
-        GOV[治理层<br/>Guardrail/Approval]
+    subgraph BUS["消息总线 infra/bus<br/>Redis Streams"]
+        IN[("stream:inbound<br/>Consumer Group: workers")]
+        OUT[("stream:outbound<br/>无消费组游标跟随")]
+        DLQ[("stream:inbound:dlq<br/>+ dead_letters 表")]
     end
 
-    subgraph Framework["tRPC-Agent-Go"]
-        RUNNER[runner.Runner]
-        SESS[session.Service]
-        MEM[memory.Service]
-        TOOL[tool.Registry]
+    subgraph WORKER["Worker 角色 app/worker"]
+        CONSUME["ConsumeInbound<br/>有界并发 16"]
+        HANDLE["handle<br/>幂等 → 租户策略 → 会话锁"]
+        POLICY["policy<br/>预算/白名单/审批并集/脱敏"]
+        RUN["run<br/>runner.Run + 超时 300s"]
+        USAGE["用量计量 usage_meter"]
+        AUDIT["审计审计 audit.Recorder"]
+        DISPATCH["Outbox Dispatcher<br/>pending → sent / dead"]
     end
 
-    subgraph Data["数据层<br/>Router 五域路由"]
-        ROUTER[storage.Router]
-        SESS_DB[(MySQL/Redis)]
-        MEM_DB[(MySQL/Redis)]
-        VEC_DB[(Milvus)]
-        ART_DB[(MinIO)]
-        AUD_DB[(MySQL)]
+    subgraph FRAMEWORK["tRPC-Agent-Go v1.11.2"]
+        RUNNER["runner.Runner"]
+        FWSESS["session.Service"]
+        FWMEM["memory.Service"]
+        FWTOOL["tool.Registry"]
+        FWAPPROVE["plugin/guardrail/approval"]
+        FWEXT["session/externalization"]
     end
 
-    subgraph Telemetry["可观测层"]
-        OTEL[OpenTelemetry]
-        JAEGER[(Jaeger)]
-        PROM[(Prometheus)]
+    subgraph DATA["数据层（逐租户路由）"]
+        ROUTER["storage.Router<br/>backends.backendTable"]
+        MYSQL[("MySQL 8.0<br/>管理面/审计/用量/Outbox<br/>Session/Memory")]
+        REDIS[("Redis 7<br/>总线/锁/幂等/路由<br/>Session/Memory")]
+        MILVUS[("Milvus v2.5.6<br/>知识库向量")]
+        MINIO[("MinIO<br/>制品 artifact")]
     end
 
-    WECOM -->|WSS| WC
-    FEISHU -->|WebSocket| FC
-    ADMIN -->|HTTP| GW
+    subgraph OBS["可观测层"]
+        OTEL["OpenTelemetry"]
+        JAEGER[("Jaeger")]
+        PROM[("Prometheus")]
+    end
 
-    WC --> RL --> GW
-    FC --> RL --> GW
+    WXUSER -->|消息/图片| WCADP
+    FSWUSER -->|消息/图片/按钮| FSADP
+    FSWUSER -.->|事件订阅| WHAPI
+    CONSOLE -->|Bearer JWT| RESTAPI
+    CHATUI -->|Bearer JWT<br/>POST /chat + SSE| RESTAPI
 
+    RESTAPI -->|POST /chat 发布入站| IN
+    RESTAPI -->|管理面 CRUD| MYSQL
+    WHAPI --> MGR
+    MGR -->|惰性构建 webhook 适配器| FSADP
+    WCADP --> RL
+    FSADP --> RL
+    RL --> GW
     GW -->|PublishInbound| IN
-    IN -->|XReadGroup| WRK
-    WRK --> HANDLE --> RUN
-    RUN --> GOV --> RUNNER
+    GW -->|ReadOutbound 分发回复| OUT
+    GW -.->|投递指标| OTEL
 
-    RUNNER --> SESS & MEM & TOOL
+    IN -->|XReadGroup / XAUTOCLAIM| CONSUME
+    CONSUME --> HANDLE
+    HANDLE --> POLICY --> RUN
+    RUN --> RUNNER
+    RUNNER --> FWSESS
+    RUNNER --> FWMEM
+    RUNNER --> FWTOOL
+    RUNNER --> FWAPPROVE
+    FWSESS --> FWEXT
+    FWEXT -->|内联附件归档| MINIO
     RUN --> ROUTER
-    ROUTER --> SESS_DB & MEM_DB & VEC_DB & ART_DB & AUD_DB
+    ROUTER --> MYSQL
+    ROUTER --> REDIS
+    ROUTER --> MILVUS
+    ROUTER --> MINIO
+    RUN --> USAGE --> MYSQL
+    RUN --> AUDIT --> MYSQL
+    RUN -->|Outbox.Append 事务：<br/>idempotency_keys + outbox_events| MYSQL
+    DISPATCH -->|扫描 pending| MYSQL
+    DISPATCH -->|PublishOutbound| OUT
+    IN -.->|超 5 次业务失败| DLQ
+    DLQ -.->|"POST /dlq/id/replay"| IN
 
-    RUN -->|Audit| AUD_DB
-    RUN -->|Metrics| OTEL
-    OTEL --> JAEGER & PROM
+    RUN -->|span agent.run| OTEL
+    GW -->|span im.callback / im.reply| OTEL
+    OTEL --> JAEGER
+    OTEL --> PROM
 
-    RUN -->|Outbox| OUT
-    OUT -->|ReadOutbound| GW
-    GW -->|Send| WC & FC
-
-    DLQ -.->|Replay| IN
-
-    style WECOM fill:#e1f5fe
-    style FEISHU fill:#f3e5f5
-    style ADMIN fill:#e8f5e9
+    style GW fill:#e3f2fd
+    style RUN fill:#e8f5e9
     style ROUTER fill:#fff3e0
+    style DISPATCH fill:#fce4ec
+    style DLQ fill:#ffebee

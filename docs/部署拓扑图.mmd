@@ -1,0 +1,50 @@
+%% 部署拓扑图：docker compose 全栈（deployments/docker-compose.yml）
+%% 渲染：npx --yes @mermaid-js/mermaid-cli@11 -i docs/部署拓扑图.mmd -o docs/部署拓扑图.png -b white -s 2
+%% 说明：端口均为宿主映射（compose 内部走服务名）；profile 决定可选服务是否启动
+flowchart TB
+    subgraph HOST["单机 / Docker Compose（本项目生产形态；K8s 清单已按决策移除）"]
+        direction TB
+
+        subgraph EDGE["接入"]
+            FE["frontend<br/>Nginx + Vue3 静态产物<br/>宿主 5173 → 80<br/>/api/* 反代 backend:8080"]
+            BE["backend<br/>trpc-service -role all<br/>宿主 8080 → 8080"]
+        end
+
+        subgraph COREP["核心依赖（默认 profile，始终启动）"]
+            MYSQL[("mysql:8.0<br/>宿主 3307 → 3306<br/>init/*.sql 首次建卷执行")]
+            REDIS[("redis:7-alpine<br/>宿主 6379")]
+        end
+
+        subgraph FULL["COMPOSE_PROFILES=full 追加"]
+            MILVUS[("milvus v2.5.6<br/>宿主 19530 / 9091")]
+            ETCD[("etcd v3.6.14<br/>Milvus 元数据")]
+            MMINIO[("minio（Milvus 用）<br/>宿主 9000/9001")]
+            AMINIO[("artifact-minio<br/>制品/附件归档<br/>宿主 9002/9003")]
+        end
+
+        subgraph OBS["COMPOSE_PROFILES=observability/full"]
+            OTEL["otel-collector<br/>4317(gRPC)/4318(HTTP)/8889"]
+            JAEGER["jaeger<br/>宿主 16686"]
+            PROM["prometheus<br/>宿主 9090"]
+        end
+    end
+
+    BROWSER["浏览器<br/>http://127.0.0.1:5173"] --> FE
+    FE -->|"/api/* → backend:8080"| BE
+    BE -->|"TRPC_MYSQL_DSN"| MYSQL
+    BE -->|"redis://redis:6379/0"| REDIS
+    BE -->|"milvus:19530"| MILVUS
+    BE -->|"artifact-minio:9000"| AMINIO
+    BE -->|"OTLP otel-collector:4317"| OTEL
+    MILVUS --- ETCD
+    MILVUS --- MMINIO
+    OTEL --> JAEGER
+    PROM -.->|"抓取 /metrics"| BE
+    PROM -->|"scrape 8889"| OTEL
+    IM["企业微信 / 飞书平台"] -->|"WSS 长连接（出站）"| BE
+    IMCB["飞书事件订阅（可选）"] -->|"HTTPS POST /webhooks/im/{binding_id}"| BE
+
+    style BE fill:#e3f2fd
+    style MYSQL fill:#fff3e0
+    style REDIS fill:#ffebee
+    style AMINIO fill:#e8f5e9

@@ -1,0 +1,38 @@
+%% 审批时序图：人工审批的「同步挂起 + 无锁识别回复」模型
+%% 渲染：npx --yes @mermaid-js/mermaid-cli@11 -i docs/审批时序图.mmd -o docs/审批时序图.png -b white -s 2
+sequenceDiagram
+    autonumber
+    participant U as 用户（IM / 控制台）
+    participant A as Adapter（卡片回调或文本）
+    participant B as RedisBus
+    participant W1 as Worker 回合A（已持有会话锁）
+    participant R as approval plugin
+    participant W2 as Worker 消费槽位（处理回复）
+    participant DB as MySQL(Outbox/Audit)
+
+    Note over W1: 工具三轨命中<br/>① agent approval_tool_ids<br/>② risk_level=high<br/>③ 租户 force_approval_tools
+    R->>W1: BeforeTool 需要人工决策
+    W1->>B: SetPendingApproval(tenant,session, payload, 5min+锁续期)
+    W1->>DB: Append(审批通知, key=msgID:approval) 幂等
+    DB-->>B: dispatcher → stream:outbound
+    B->>A: 通知（飞书=交互卡片，按钮 value 带 session_id/decision）
+    A->>U: 需您审批：工具 xxx
+    Note over W1: 会话锁由 worker 心跳持续续期<br/>回合A 阻塞轮询 approval:res（500ms）
+
+    U->>A: 点「批准」或回复「批准」
+    A->>B: PublishInbound（与普通消息同一条链路、同一幂等键）
+    B->>W2: XReadGroup 取出（有界并发：不会被阻塞的回合A 卡住）
+    rect rgb(255, 243, 224)
+    Note over W2: tryResolveApproval 在**取会话锁之前**执行<br/>否则本会话的回复会排在阻塞回合之后 → 死锁
+    W2->>B: PendingApproval 命中 + classifyApprovalReply="approve"
+    W2->>B: ResolveApproval(approve)
+    W2->>DB: Append(确认消息, key=msgID) 幂等
+    W2->>DB: Audit(Decision=approve)
+    W2->>B: CommitIdem(msgID)
+    end
+
+    B-->>W1: 轮询读到 decision=approve
+    W1->>B: ClearPendingApproval
+    R-->>W1: Decision{Approved:true}
+    W1->>W1: 原工具调用继续执行（携带原始参数）
+    Note over W1: 超时 5min → 自动拒绝 + Audit(Deny, "approval timed out")<br/>回合取消 → Audit(Deny, "approval cancelled")

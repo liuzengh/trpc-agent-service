@@ -1,0 +1,54 @@
+%% 幂等与故障重投时序图：重复投递 / 崩溃 / 中毒消息三条路径
+%% 渲染：npx --yes @mermaid-js/mermaid-cli@11 -i docs/幂等与重投时序图.mmd -o docs/幂等与重投时序图.png -b white -s 2
+sequenceDiagram
+    autonumber
+    participant P as IM 平台
+    participant A as Adapter
+    participant B as RedisBus
+    participant W as Worker
+    participant L as Session 事件日志
+    participant O as Outbox(MySQL)
+    participant D as Dispatcher
+    participant DLQ as DLQ(stream + dead_letters)
+
+    rect rgb(232, 245, 233)
+    Note over P,O: 路径一：平台重复投递同一条消息
+    P->>A: 同一 platformMsgID 第二次推送
+    A->>A: Seen(platformMsgID) 命中 → 丢弃（进程内第一道）
+    Note over A: 若跨进程/重启后仍到达
+    A->>B: PublishInbound(id=channel:platformMsgID)
+    B->>W: XReadGroup 投递
+    W->>B: Idempotent(msgID)=false（租约或已提交）→ 直接 ack，不执行
+    end
+
+    rect rgb(227, 242, 253)
+    Note over W,O: 路径二：回合执行到一半进程崩溃
+    W->>B: Idempotent(msgID)=true（租约 90s，心跳续期）
+    W->>L: runner 逐步写事件（RequestID=msgID）
+    W--xB: 进程崩溃（未 CommitIdem、未 Append 回复）
+    Note over B: 租约到期 → 消息仍 pending → XAUTOCLAIM 认领
+    B->>W: 重投给存活节点
+    W->>B: Idempotent(msgID)=true（租约已过期）
+    W->>L: resumeRecordedTurn：查本 RequestID 已产出的回复
+    alt 找到已产出的回复
+        L-->>W: 复用该回复，不再调用模型
+    else 没有
+        W->>W: 正常重跑回合
+    end
+    W->>O: Append(reply, key=msgID) —— 唯一键冲突即视为已处理
+    W->>B: CommitIdem(msgID) 24h
+    end
+
+    rect rgb(255, 235, 238)
+    Note over B,DLQ: 路径三：业务失败 / 中毒消息
+    W->>W: 处理失败（模型 5xx、工具报错等）
+    W->>B: ClearIdem(msgID) 释放租约，等待重投
+    B->>B: onFailed：retries++（锁竞争走 ErrRequeue，**不计数**）
+    alt 达到 DefaultMaxDeliveries(5)
+        B->>DLQ: 移出活跃流 + 落 dead_letters（含 payload/原因/次数）
+        Note over DLQ: 人工 GET /dlq → POST /dlq/{id}/replay 重投
+    else 未达阈值
+        B->>W: XAUTOCLAIM 再次投递
+    end
+    Note over W,O: 出站侧同样有状态机：pending →（退避重试）→ sent<br/>10 次发布失败 → dead + last_error（不再无限重试）
+    end
