@@ -108,7 +108,7 @@ Memory 与 Session 的生命周期不同。Session 记录完整对话，Memory �
 
 适合事实型 Memory、软删除、版本管理、合规查询和数据导出。框架 MySQL/PostgreSQL 实现通过稳定 memory ID 和 upsert 提供幂等写入。若需要语义检索，可以将 SQL 作为真相源，异步同步到 pgvector 或独立向量库。
 
-当前 PostgreSQL 包装器支持 `schema`、`table_name` 和 `skip_db_init`。先用迁移/运维身份初始化表，再配置 `skip_db_init=true` 和仅有表 DML 权限的 SecretRef，避免运行时要求建表权限。支持后端见[功能范围](acceptance.md)。
+当前 PostgreSQL 包装器支持 `schema`、`table_name` 和 `skip_db_init`。先用迁移/运维身份初始化表，再配置 `skip_db_init=true` 和仅有表 DML 权限的 SecretRef，避免运行时要求建表权限。支持后端见[功能范围](capabilities.md)。
 
 Memory 用户键不包含 Session ID。若不希望私聊事实被带入群聊，可设置 revision `memory_config.direct_only=true`，并保持 `preload_memory=0`、`auto_extract=false`；框架工具按可信请求受众过滤，群聊和未知受众无法调用 `memory_*`。该模式仅在用户明确操作时保存/读取，不等于自动长期记忆提取。
 

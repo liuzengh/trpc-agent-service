@@ -11,7 +11,7 @@
 - IM 消息去重、持久化任务、失败恢复、工具审批和投递状态查询。
 - 租户预算、日志脱敏、OpenTelemetry、监控告警和审计。
 
-支持范围与使用条件见[功能说明](docs/acceptance.md)。
+支持范围与使用条件见[功能说明](docs/capabilities.md)。
 
 ## 快速开始
 
@@ -69,15 +69,4 @@ docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml s
 
 ## 文档
 
-- [安装与运行](docs/operations-runbook.md)
-- [功能范围](docs/acceptance.md)
-- [IM 接入](docs/im-channels.md)
-- [系统架构](docs/architecture.md)
-- [消息时序](docs/sequence.md)
-- [数据模型](docs/data-model.md)
-- [数据同步与幂等](docs/data-consistency.md)
-- [多后端适配](docs/backend-adapters.md)
-- [治理、安全与监控](docs/governance-operations.md)
-- [生产风险与缓解措施](docs/risks.md)
-
-[项目原始需求](docs/requirements.md)完整保留最初的任务说明、具体要求和验收标准。当前功能范围及安装方式以本 README 和上述文档为准。
+完整文档见[文档目录](docs/README.md)，包括架构设计、安装使用和项目原始需求。

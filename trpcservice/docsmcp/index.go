@@ -24,7 +24,7 @@ const maxCorpusBytes = 2 << 20
 // A deployment-owned allowlist: no validation transcripts, uploads, .env,
 // data directory, executable source, recursive walk or caller-provided paths.
 func documentNames() []string {
-	return []string{"architecture.md", "backend-adapters.md", "data-consistency.md", "data-model.md", "acceptance.md", "im-channels.md", "operations-runbook.md", "governance-operations.md", "sequence.md"}
+	return []string{"architecture.md", "backend-adapters.md", "data-consistency.md", "data-model.md", "capabilities.md", "im-channels.md", "operations-runbook.md", "governance-operations.md", "sequence.md"}
 }
 
 type document struct {

@@ -8,7 +8,7 @@
 
 本方案以 tRPC-Agent-Go `v1.11.x` 为运行内核。框架负责 Agent 编排、Runner 事件流、Session、Memory、Artifact、Knowledge、Tool/MCP、Plugin/Guardrail 和 OpenTelemetry 埋点。平台层负责租户注册、配置发布、消息路由、分布式并发控制、后端选择、持久化任务、IM 账号绑定、审计与运维。
 
-图中标注“扩展”的后端、渠道和密钥服务是生产方案选项，不表示本版已接入。实际复用范围见第 9 节，支持能力见[功能范围](acceptance.md)。
+图中标注“扩展”的后端、渠道和密钥服务是生产方案选项，不表示本版已接入。实际复用范围见第 9 节，支持能力见[功能范围](capabilities.md)。
 
 设计遵循四条约束：
 
@@ -228,7 +228,7 @@ Session 普通读写按用户/会话加锁，Memory 按用户加锁；两者同�
 
 Console Worker 消费独立的 PostgreSQL 调试任务（单进程可用 InMemory），通过内部上下文和仓储适配复用同一个 Runtime/Runner。调试审批与 Journal 独立存储，原 IM 外键不变；调试内容只有发起者能查看，元数据按租户/RBAC 查询。状态流来自持久记录，浏览器断线不重跑 Agent，节点中断时保守标记未知结果。
 
-`skill` 使用 tRPC 的正文加载和渐进注入，执行由平台固定入口 `skill_run` 连接 `workspace` Docker 沙箱；明确关闭框架的宿主机执行器自动回退。每次调用使用独立 tmpfs，不挂载宿主目录、不继承宿主密钥；Local 临时目录仅存 Docker CLI 状态，不作为安全隔离或执行回退。功能边界见[功能范围](acceptance.md)。
+`skill` 使用 tRPC 的正文加载和渐进注入，执行由平台固定入口 `skill_run` 连接 `workspace` Docker 沙箱；明确关闭框架的宿主机执行器自动回退。每次调用使用独立 tmpfs，不挂载宿主目录、不继承宿主密钥；Local 临时目录仅存 Docker CLI 状态，不作为安全隔离或执行回退。功能边界见[功能范围](capabilities.md)。
 
 ## 10. 部署形态
 
