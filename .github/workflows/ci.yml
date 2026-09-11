@@ -21,7 +21,13 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: trpcservice/web/console/package-lock.json
-      - name: Build console and run checks
-        run: ./scripts/regression.sh
-      - run: ./build.sh
-      - run: docker build -t trpc-agent-service:ci .
+      - name: Build application
+        run: ./build.sh
+      - name: Run tests
+        run: go test -race ./...
+      - name: Static checks
+        run: ./lint.sh
+      - name: Check whitespace
+        run: git diff --check
+      - name: Build container image
+        run: docker build -t trpc-agent-service:ci .

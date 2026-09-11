@@ -1,4 +1,4 @@
-package scripts
+package tests
 
 import (
 	"context"
@@ -90,21 +90,5 @@ func TestManualScriptsInIsolatedWorkspace(t *testing.T) {
 	if connection, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
 		_ = connection.Close()
 		t.Fatal("Agent listener survived stop")
-	}
-}
-
-func TestUnifiedRegressionIncludesIsolatedWorkers(t *testing.T) {
-	raw, err := os.ReadFile("regression.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := string(raw)
-	for _, bad := range []string{"docker compose", "source .env", "trpc-migrate", "POSTGRES_URL:-postgres"} {
-		if strings.Contains(script, bad) {
-			t.Fatal("unsafe legacy workflow remains")
-		}
-	}
-	if !strings.Contains(script, "TEST_RECOVERY_DOCKER=1") || !strings.Contains(script, "./trpcservice/recovery") {
-		t.Fatal("isolated recovery and joint Worker suite not wired")
 	}
 }

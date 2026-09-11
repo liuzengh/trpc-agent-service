@@ -1,4 +1,4 @@
-package scripts
+package tests
 
 import (
 	"os"
@@ -28,17 +28,21 @@ func TestCIInitializesConsoleBeforeRunningTests(t *testing.T) {
 	}
 	workflow := string(raw)
 	node := strings.Index(workflow, "actions/setup-node@")
-	checks := strings.Index(workflow, "run: ./scripts/regression.sh")
-	if node < 0 || checks < node || !strings.Contains(workflow, "pull_request:") {
-		t.Fatal("PR checks must initialize Node before building the console and testing")
+	build := strings.Index(workflow, "run: ./build.sh")
+	tests := strings.Index(workflow, "run: go test -race ./...")
+	if node < 0 || build < node || tests < build || !strings.Contains(workflow, "pull_request:") {
+		t.Fatal("PR checks must initialize Node and build console assets before testing")
 	}
-	script, err := os.ReadFile("regression.sh")
+	if strings.Count(workflow, "run: ./build.sh") != 1 {
+		t.Fatal("PR checks must build the host application once")
+	}
+	script, err := os.ReadFile("../build.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	build := strings.Index(string(script), "npm --prefix trpcservice/web/console run build")
-	tests := strings.Index(string(script), "go test -race ./...")
-	if build < 0 || tests < build {
-		t.Fatal("console-dependent tests ran before assets were built")
+	console := strings.Index(string(script), "run build")
+	binary := strings.Index(string(script), "go build")
+	if console < 0 || binary < console {
+		t.Fatal("console assets must be built before embedding them in service binaries")
 	}
 }
