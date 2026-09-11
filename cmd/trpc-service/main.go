@@ -715,6 +715,8 @@ func run() error {
 		}
 		adminService.WithKnowledgeRouter(knowledgeRouter)
 		adminService.WithBackgroundJobs(backgroundJobs)
+		adminService.WithCredentialVault(credentialVault)
+		adminService.WithKnowledgeDocuments(adminservice.NewKnowledgeDocumentStore(controlPlaneRepository))
 		adminService.WithToolOperations(operations, toolExecutionJournal)
 		// Admin checks grants but cannot resolve model/IM values on an Admin-only node.
 		grantAuthorizer, _ := secret.NewEnvStore(secretGrants)

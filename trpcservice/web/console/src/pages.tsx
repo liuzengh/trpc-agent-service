@@ -31,6 +31,7 @@ import { channelLabels } from "./channel-types";
 import { JobTable } from "./ActivityPanel";
 import { BackendConnections } from "./BackendConnections";
 import { SkillManager } from "./SkillManager";
+import { KnowledgeManager } from "./KnowledgeManager";
 
 export function AgentList({
   tenant,
@@ -310,6 +311,12 @@ export function ResourcePage(props: {
           tenant={props.tenant}
           principal={props.principal}
         />
+      ) : kind === "knowledge" ? (
+        <KnowledgeManager
+          key={props.tenant}
+          tenant={props.tenant}
+          principal={props.principal}
+        />
       ) : (
         <LegacyResourcePage
           key={props.tenant + kind}
@@ -521,9 +528,7 @@ function LegacyResourcePage({
             ? "选择机器人类型，按字段说明填写配置；保存后继续完成回调注册或轮询登记。"
             : kind === "tenants"
               ? "管理租户范围、配额与审计策略。"
-              : kind === "knowledge"
-                ? "查看当前工作空间已绑定的知识库存储后端。"
-                : "为 Agent 选择已获授权的能力和数据资源。"
+              : "为 Agent 选择已获授权的能力和数据资源。"
         }
         action={
           canCreate && (
@@ -562,44 +567,6 @@ function LegacyResourcePage({
           }))}
         />
       )}
-      {kind === "knowledge" && (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-          title="知识库检索已实现，需手动配置"
-          description={
-            <>
-              <p>
-                后端支持文本入库、删除和租户隔离检索。本页仅展示存储绑定，尚不提供文档上传和编辑入口。
-              </p>
-              <ol>
-                <li>
-                  在“资源中心 → 数据后端”创建知识库连接，并绑定到当前工作空间或
-                  Agent。
-                </li>
-                <li>
-                  在部署配置中设置独立的 Embedding API Key 和当前工作空间的
-                  embedding 用途授权。Docker 安装读取
-                  /setup/platform.env，宿主机安装读取 .env。
-                </li>
-                <li>
-                  在 Agent 工作台开启知识库检索，设置 Embedding 模型、API
-                  地址和匹配的向量维度，保存并发布版本。
-                </li>
-                <li>
-                  通过 POST /admin/knowledge/documents 导入文本，使用
-                  /admin/jobs/get 确认入库完成后，再验证 Agent 检索结果。
-                </li>
-              </ol>
-              <p>
-                完整配置、重启和接口示例见项目文档 docs/operations-runbook.md
-                的“知识库：手动配置与资料导入”。修改环境变量不会自动导入资料或增加上传按钮。
-              </p>
-            </>
-          }
-        />
-      )}
       <div className="list-toolbar">
         <span className="muted">{rows.length} 条已加载记录</span>
         <Button
@@ -623,9 +590,7 @@ function LegacyResourcePage({
                 title={
                   kind === "skills"
                     ? "当前租户还没有获授权的 Skill"
-                    : kind === "knowledge"
-                      ? "尚未绑定知识库存储后端，请按上方步骤配置"
-                      : "当前范围暂无记录"
+                    : "当前范围暂无记录"
                 }
               />
             ),

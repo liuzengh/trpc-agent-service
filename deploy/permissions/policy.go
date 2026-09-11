@@ -82,6 +82,7 @@ func roleGrants(role string) map[string][]string {
 	if role == "admin" {
 		add("SELECT,INSERT", "backend_connection")
 		add("SELECT,INSERT,UPDATE", "skill_bundle")
+		add("SELECT,INSERT,UPDATE,DELETE", "knowledge_document")
 		add("INSERT", "channel_credential")
 		add("SELECT,INSERT,UPDATE", "channel_connection", "channel_connection_group", "channel_connection_setting")
 		add("DELETE", "channel_connection_group")

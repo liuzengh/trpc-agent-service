@@ -107,6 +107,7 @@ export function Workbench({
   });
   const [connectionsError, setConnectionsError] = useState("");
   const [connectionOpen, setConnectionOpen] = useState(false);
+  const [embeddingAPIKey, setEmbeddingAPIKey] = useState("");
   useEffect(() => {
     let live = true;
     api<ModelConnectionPage>("model-connections/list", { tenant_id: tenant })
@@ -137,6 +138,7 @@ export function Workbench({
   useEffect(() => {
     alive.current = true;
     setError("");
+    setEmbeddingAPIKey("");
     api<Workspace>("workspace", { tenant_id: tenant, app_id: appID })
       .then((data) => {
         if (alive.current) {
@@ -176,7 +178,8 @@ export function Workbench({
   const dirty =
     !!workspace &&
     !!cfg &&
-    canonical(cfg) !== canonical(workspace.draft.data.config);
+    (canonical(cfg) !== canonical(workspace.draft.data.config) ||
+      embeddingAPIKey !== "");
   const canWrite = writable(principal);
   useEffect(() => {
     if (!dirty) return;
@@ -219,11 +222,34 @@ export function Workbench({
     setBusy("save");
     setError("");
     try {
+      let nextConfig = cfg;
+      if (
+        cfg.knowledge_config.enabled &&
+        cfg.knowledge_config.embedding?.provider === "openai" &&
+        embeddingAPIKey.trim()
+      ) {
+        const credential = await api<{ reference: string }>(
+          "knowledge/embedding-credential",
+          { tenant_id: tenant, api_key: embeddingAPIKey },
+        );
+        nextConfig = {
+          ...cfg,
+          knowledge_config: {
+            ...cfg.knowledge_config,
+            embedding: {
+              ...cfg.knowledge_config.embedding,
+              secret_ref: credential.reference,
+            },
+          },
+        };
+        setCfg(nextConfig);
+        setEmbeddingAPIKey("");
+      }
       const draft = await api<Stored<Draft>>("drafts/save", {
         tenant_id: tenant,
         app_id: appID,
         expected_version: workspace.draft.version,
-        config: cfg,
+        config: nextConfig,
       });
       if (alive.current) {
         setWorkspace((old) => (old ? { ...old, draft } : old));
@@ -968,8 +994,8 @@ export function Workbench({
                   <>
                     <Alert
                       type="info"
-                      title="知识库检索已实现，需手动配置"
-                      description="先在资源中心绑定知识库存储，并在部署配置中设置 Embedding 密钥和授权；资料通过 Admin API 导入，网页暂不支持文档上传。完整步骤见安装运行手册的“知识库：手动配置与资料导入”。更换 Embedding 或向量维度需要重建或迁移索引。"
+                      title="先绑定存储，再保存 Embedding 配置"
+                      description="知识资料可在“资源中心 → 知识库”上传和管理。更换 Embedding 模型或向量维度需要重建或迁移索引。"
                     />
                     <Form.Item label="Embedding 供应商">
                       <Select
@@ -984,7 +1010,13 @@ export function Workbench({
                           },
                           { value: "hash", label: "本地 Hash（仅开发）" },
                         ]}
-                        onChange={(value) => embedding("provider", value)}
+                        onChange={(value) => {
+                          embedding("provider", value);
+                          if (value === "hash") {
+                            embedding("secret_ref", "");
+                            setEmbeddingAPIKey("");
+                          }
+                        }}
                       />
                     </Form.Item>
                     <div className="form-grid">
@@ -1029,18 +1061,24 @@ export function Workbench({
                           />
                         </Form.Item>
                         <Form.Item
-                          label="Embedding 凭据引用"
-                          help="必须拥有 embedding 用途授权；不要粘贴真实 API Key。"
+                          label="Embedding API Key"
+                          help={
+                            cfg.knowledge_config.embedding?.secret_ref
+                              ? "密钥已加密保存。留空保持不变，填写新值会替换当前草稿使用的密钥。"
+                              : "首次配置需要填写；保存草稿时加密存储，页面不会回显。"
+                          }
                         >
-                          <CredentialSelect
-                            tenant={tenant}
-                            purpose="embedding"
+                          <Input.Password
+                            autoComplete="new-password"
                             disabled={!canWrite}
-                            value={
-                              cfg.knowledge_config.embedding?.secret_ref || ""
+                            value={embeddingAPIKey}
+                            onChange={(event) =>
+                              setEmbeddingAPIKey(event.target.value)
                             }
-                            onChange={(reference) =>
-                              embedding("secret_ref", reference)
+                            placeholder={
+                              cfg.knowledge_config.embedding?.secret_ref
+                                ? "已保存，留空保持不变"
+                                : "仅本次提交，加密保存"
                             }
                           />
                         </Form.Item>

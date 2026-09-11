@@ -204,7 +204,7 @@ Session 普通读写按用户/会话加锁，Memory 按用户加锁；两者同�
 | 执行 | `runner.Runner`、Event 流、取消、恢复 | Worker 调度、session 租约、事件排空 |
 | Session | InMemory、Redis、PostgreSQL；其他后端可扩展 | Storage Router、幂等 journal、迁移 |
 | Memory | 内置接口、InMemory、Redis/PostgreSQL、Extractor | 租户路由、持久化提取任务和水位 |
-| Knowledge | Knowledge/Embedder/VectorStore 接口、OpenAI Embedding 和 Qdrant 适配 | 文本分块、检索编排、知识库控制面、强制租户过滤和迁移 |
+| Knowledge | Knowledge/Embedder/VectorStore 接口、OpenAI Embedding 和 Qdrant 适配 | 网页资料管理、加密 Embedding 凭据、文本分块、检索编排、强制租户过滤和迁移 |
 | Artifact | InMemory、S3-compatible | 版本锁与受控附件导入；完整扫描/生命周期待扩展 |
 | Tool/MCP | Function Tool、Tool 接口、运行时过滤；MCP 使用 trpc-mcp-go | MCP Tool 包装、工具目录、租户授权、密钥注入和审批 |
 | 治理 | Model/Tool Callbacks、ToolFilter、PermissionPolicy | Guardrail 规则、策略中心、预算、审计和 IM 身份校验；未直接注册原生 Plugin/Guardrail 模块 |

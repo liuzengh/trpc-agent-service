@@ -224,122 +224,17 @@ API Key 更新不等于加密主密钥轮换。不得直接替换 `TRPC_AGENT_MO
 
 <a id="knowledge-setup"></a>
 
-### 知识库：手动配置与资料导入
+### 知识库配置与资料管理
 
-**知识库后端已实现文本入库、删除、租户隔离检索和迁移。当前需要手动配置，资料通过 Admin API 导入；“资源中心 → 知识库”仅展示已绑定的存储后端，没有文档上传或编辑入口。** 修改环境变量不会自动创建绑定、导入资料或增加网页按钮。
+知识库支持网页配置、文本资料入库、删除、租户隔离检索和后端迁移。首次使用按以下顺序操作：
 
-以下流程面向首次接入。建议先使用尚未绑定机器人的 Agent 完成验证；已有业务应用应按发布和迁移流程变更，不直接替换其向量库或 Embedding 模型。
+1. 准备平台节点可访问的 Qdrant 和提供 `/embeddings` 接口的模型服务。Qdrant 连接使用 gRPC 端口，通常为 `6334`；向量维度必须与 Embedding 模型输出一致。
+2. 进入“资源中心 → 数据后端”，新建“知识库 / Qdrant”连接并绑定到 Agent，或设置为工作空间默认后端。保存连接只校验格式，不代表服务已经连通。
+3. 进入 Agent 工作台，在“知识与记忆”开启知识库检索，填写 Embedding 模型、API 地址、向量维度和 API Key。保存草稿时，API Key 使用安装主密钥加密保存，不写入 Agent 版本，也不会在页面回显。
+4. 校验并发布 Agent 版本。进入“资源中心 → 知识库”，选择已发布的 Agent，上传 UTF-8 文本、Markdown、JSON 或 CSV，也可以直接填写正文。单份资料最多 512 KiB；PDF、Word 等文件需先转换为文本。
+5. 列表会显示等待入库、正在入库、可检索、正在删除或处理失败。只有状态变为“可检索”后，才在工作台新建调试会话验证 `knowledge_search` 的结果。
 
-#### 1. 准备后端并记录标识
-
-- 准备平台容器可访问的 Qdrant 和提供 `/embeddings` 接口的模型服务。默认 Docker 安装不会启动 Qdrant，也不提供真实 Embedding 服务。Qdrant 连接使用 gRPC 端口，通常为 `6334`；不要误填 HTTP 管理端口 `6333`。
-- 向供应商确认 Embedding 模型 ID、API Base URL、API Key 和输出维度。聊天模型不一定支持 Embedding，不能直接照搬聊天模型配置。
-- 在“租户与策略 → 查看详情”记录工作空间的 `tenant_id`；Agent 工作台地址中的 `/agents/<app_id>` 是应用 ID。下文的 `YOUR_TENANT_ID`、`YOUR_APP_ID` 等占位值必须替换为这些真实标识，而不是显示名称。
-
-#### 2. 配置 Embedding 密钥与授权并重启
-
-在平台实际读取的私有配置文件中设置以下两项；不要写入 `.env.example` 或公开部署模板：
-
-```dotenv
-TRPC_AGENT_EMBEDDING_API_KEY='替换为真实的Embedding服务密钥'
-TRPC_AGENT_SECRET_GRANTS_JSON='[{"tenant_id":"YOUR_TENANT_ID","purpose":"embedding","reference":"env://TRPC_AGENT_EMBEDDING_API_KEY"}]'
-```
-
-如果已有 `TRPC_AGENT_SECRET_GRANTS_JSON`，将这个授权对象合并到原有 JSON 数组，保留其他租户和用途的授权；不要覆盖原数组，也不要在文件中重复定义同一变量。不同租户使用不同密钥时，为每个密钥设置独立环境变量，并在对应授权的 `reference` 中引用。
-
-**Docker 单机安装：** 服务读取 setup 卷中的 `/setup/platform.env`，不读取根目录 `.env`。下面借用初始化服务的可写挂载，先在同一私有卷中备份配置，再用编辑器修改；不会重新运行初始化程序。需要 Docker 操作权限，编辑时不要复制、截图或公开文件中的现有密码和主密钥。
-
-```bash
-docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml \
-  run --rm --no-deps --entrypoint /bin/sh init -c '
-    set -eu
-    knowledge_backup=$(mktemp /setup/platform.env.before-knowledge.XXXXXX)
-    cp -p /setup/platform.env "$knowledge_backup"
-    vi /setup/platform.env
-    chown 65534:65534 /setup/platform.env
-    chmod 600 /setup/platform.env
-  '
-
-docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml restart platform
-docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml \
-  exec -T platform wget -q -O - http://127.0.0.1:8080/readyz
-```
-
-`vi` 中按 `i` 编辑，按 Esc 后输入 `:wq` 保存退出。仅添加或修改 Embedding 密钥和授权；保留数据库地址、管理员 Token、加密主密钥及其他配置。最后的就绪检查应返回 `{"status":"ready"}`，启动中可稍后重试。不要执行 `down -v`。上面的配置副本只用于回退编辑，不代替独立备份。
-
-第 2 节的服务器安装须沿用自己的 `-p trpc-agent-server --env-file data/server/public.env -f compose.demo.yaml -f deploy/compose/server.yaml` 参数，避免修改到另一套安装。
-
-**宿主机安装：** 备份并编辑实际使用的 `.env`（或 `TRPC_AGENT_ENV_FILE` 指向的文件），然后执行 `./stop.sh` 和 `./start.sh`；自定义配置文件重启时仍须指定同一个 `TRPC_AGENT_ENV_FILE`。分角色部署需把 Embedding 密钥和精确授权提供给 Admin、Worker、Jobs，并重启这些角色。无需给 Gateway、Sender 分发该密钥。
-
-#### 3. 绑定存储并配置 Agent
-
-1. 在“资源中心 → 数据后端”新建连接，保存数据选择“知识库”，后端选择 Qdrant，填写主机、gRPC 端口、TLS、Collection、向量维度和所需 API Key。使用有权访问目标 Collection 的凭据；维度必须与 Embedding 输出一致。保存连接只校验配置格式，不代表连通性已验证。
-2. 点击“绑定到 Agent”，绑定到目标应用，或作为工作空间默认后端。返回“知识库”标签页应能看到绑定记录。
-3. 在 Agent 工作台“知识与记忆”开启知识库检索，选择 `OpenAI-compatible Embedding`，填写模型 ID、API 地址、向量维度及返回结果数；凭据选择 `env://TRPC_AGENT_EMBEDDING_API_KEY`。若下拉框为空，检查真实 `tenant_id`、`purpose=embedding` 和服务是否已重启。不要选“本地 Hash”代替真实语义检索。
-4. 保存并校验配置。首次接入的未绑定机器人应用可发布这个版本，再到“发布记录 → 查看配置”复制 `revision_id`，供入库接口使用。草稿 ID、版本序号和应用 ID 不能代替 `revision_id`。发布本身不会导入资料；已有业务应用不要未经验证直接切换稳定版本。
-
-#### 4. 通过 API 导入文本
-
-使用有该工作空间写权限的 Admin Token。默认单机安装的原登录 Token 即可；它与 Embedding API Key 不是同一个密钥。接口仅支持已提取的文本 `content`，不是文件上传地址；PDF/Word 需自行转换为文本。
-
-以下命令在本机 Bash 或 Zsh 终端执行。Token 通过隐藏输入读取并从标准输入传给 curl，不写进命令历史或 curl 参数；不要开启 shell 跟踪或 curl verbose。远程部署使用 SSH 转发到本机端口，或改成受保护的 HTTPS 管理地址。
-
-```bash
-printf 'Admin Token: '
-read -r -s KNOWLEDGE_ADMIN_TOKEN
-printf '\n'
-
-knowledge_api() {
-  printf 'Authorization: Bearer %s\n' "$KNOWLEDGE_ADMIN_TOKEN" |
-    curl --noproxy '127.0.0.1,localhost' --fail --silent --show-error --max-time 30 \
-      --header @- --header 'Content-Type: application/json' \
-      --data-binary "$2" "http://127.0.0.1:18080$1"
-}
-
-knowledge_api /admin/knowledge/documents '{
-  "tenant_id": "YOUR_TENANT_ID",
-  "app_id": "YOUR_APP_ID",
-  "revision_id": "YOUR_REVISION_ID",
-  "document_id": "handbook-001",
-  "operation_id": "handbook-import-001",
-  "name": "业务手册",
-  "content": "这里填写已提取的正文。平台会按版本配置分块并生成向量。",
-  "metadata": {}
-}'
-```
-
-默认 Docker 安装会返回 HTTP 202 和 `job_id`，表示任务已入队，不代表入库完成。将该 ID 填入下面的请求，重复查询直到 `Status` 为 `completed`；`pending`、`running` 表示尚未完成，`dead` 表示失败，应检查任务错误与后端配置。接口地址中的 `127.0.0.1:18080` 是宿主机访问地址，不要改成容器内 Qdrant 地址。
-
-```bash
-knowledge_api /admin/jobs/get '{"tenant_id":"YOUR_TENANT_ID","job_id":"YOUR_JOB_ID"}'
-```
-
-也可在 Agent 工作台的“后台任务”查看执行状态。不启用后台任务的部署可能直接返回 HTTP 200 和 `chunks`，这时没有任务需要轮询。
-
-同一应用中再次提交相同 `document_id` 会替换其内容。请求响应不确定时，重发同一请求沿用原 `operation_id`；新修改或删除后重新导入使用新的操作 ID。任务已是 `dead` 时，修复配置后调用 `POST /admin/jobs/retry`，请求体同上面的任务查询，不能仅重复提交入库请求。知识资料按租户和应用隔离，不是每个 Revision 的私有副本；回滚 Agent 配置不会回滚已导入的资料。
-
-删除资料使用相同鉴权方式：
-
-```bash
-knowledge_api /admin/knowledge/documents/delete '{
-  "tenant_id":"YOUR_TENANT_ID",
-  "app_id":"YOUR_APP_ID",
-  "revision_id":"YOUR_REVISION_ID",
-  "document_id":"handbook-001",
-  "operation_id":"handbook-delete-001"
-}'
-```
-
-仅在确实要删除时执行删除请求，并按相同方式确认其任务完成。完成所有操作和查询后，清理终端中的 Token 和函数：
-
-```bash
-unset KNOWLEDGE_ADMIN_TOKEN
-unset -f knowledge_api
-```
-
-#### 5. 验证检索
-
-入库完成后，在 Agent 工作台新建调试会话，询问资料中可核实的问题，并检查运行记录中 `knowledge_search` 的执行和返回内容。没有调用检索工具、没有检索结果或模型只是泛泛回答，都不能算验证通过。首次接入验证后再绑定机器人；变更 Embedding 模型或维度时走重建或迁移流程，不只改模型名称。
+同一 Agent 中再次使用相同资料标识会替换原内容。删除会提交后台任务，完成后从列表移除。知识资料按租户和 Agent 隔离，不是每个 Revision 的私有副本；回滚 Agent 配置不会回滚已经导入的资料。更换 Embedding 模型或向量维度时需要重建或迁移索引，不能只修改模型名称。
 
 ### 网页上传与授权 Skill
 
@@ -424,7 +319,7 @@ HTTP 接口默认关闭。启用 `/chat`、`/inbound` 时必须配置精确的�
 
 ## 7. 升级、备份与回退
 
-网页存储连接与 Skill 上传需要 schema 32，迁移增加资源表和不可变版本约束，不清空已有空间、模型、会话或凭据。分角色部署还需补齐 Admin 对新资源表的管理权限、Worker 对 Skill 表的读取权限及 Jobs 对存储凭据的读取权限；沿用已有主密钥，不重新初始化安装数据卷。
+网页存储连接与 Skill 上传需要 schema 32，网页知识资料目录需要 schema 33。迁移增加资源表、不可变版本约束和知识任务状态同步，不清空已有空间、模型、会话或凭据。分角色部署还需补齐 Admin 对新资源表的管理权限、Worker 对 Skill 表的读取权限及 Jobs 对存储凭据的读取权限；沿用已有主密钥，不重新初始化安装数据卷。
 
 1. 备份私有配置、加密主密钥、当前程序和数据库，核对未完成工具与 unknown/attempting 投递。
 2. 停止接收与相关执行角色，避免混跑不兼容的消息、权限或数据库协议。

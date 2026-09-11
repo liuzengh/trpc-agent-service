@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -89,6 +90,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleConnections(w, r)
 	case "/admin/model-connections/list", "/admin/model-connections/create", "/admin/model-connections/get", "/admin/model-connections/update", "/admin/model-connections/rotate-key":
 		h.handleModelConnections(w, r)
+	case "/admin/knowledge/documents/list", "/admin/knowledge/embedding-credential":
+		h.handleKnowledgeManagement(w, r)
 	case "/admin/releases/list":
 		h.handleReleases(w, r)
 	case "/admin/jobs/list":
@@ -364,7 +367,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !h.require(w, r, input.TenantID, PermissionWrite) {
 			return
 		}
-		result, err := h.service.SubmitKnowledgeDocument(r.Context(), input)
+		var result KnowledgeOperationResult
+		err := h.service.consoleStore.Transaction(r.Context(), func(ctx context.Context) error {
+			var err error
+			result, err = h.service.SubmitKnowledgeDocument(ctx, input)
+			if err != nil || h.service.knowledgeDocuments == nil {
+				return err
+			}
+			return h.service.knowledgeDocuments.SaveRequest(ctx, input, result.JobID, PrincipalName(ctx), result.Chunks)
+		})
 		status := http.StatusOK
 		if result.Queued {
 			status = http.StatusAccepted
@@ -384,10 +395,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !h.require(w, r, input.TenantID, PermissionWrite) {
 			return
 		}
-		result, err := h.service.SubmitKnowledgeDelete(
-			r.Context(), input.TenantID, input.AppID, input.RevisionID,
-			input.DocumentID, input.OperationID,
-		)
+		var result KnowledgeOperationResult
+		err := h.service.consoleStore.Transaction(r.Context(), func(ctx context.Context) error {
+			var err error
+			result, err = h.service.SubmitKnowledgeDelete(
+				ctx, input.TenantID, input.AppID, input.RevisionID,
+				input.DocumentID, input.OperationID,
+			)
+			if err != nil || h.service.knowledgeDocuments == nil {
+				return err
+			}
+			return h.service.knowledgeDocuments.SaveDelete(ctx, input.TenantID, input.AppID, input.RevisionID, input.DocumentID, result.JobID, PrincipalName(ctx))
+		})
 		status := http.StatusOK
 		if result.Queued {
 			status = http.StatusAccepted
@@ -562,7 +581,11 @@ func (h *Handler) writeResult(w http.ResponseWriter, success int, value any, err
 }
 
 func decodeAdmin(w http.ResponseWriter, r *http.Request, target any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	limit := int64(1 << 20)
+	if r.URL.Path == "/admin/knowledge/documents" {
+		limit = 4 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

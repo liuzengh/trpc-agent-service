@@ -7,9 +7,24 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/database"
 )
 
 type PostgresRepository struct{ db *sql.DB }
+
+type postgresExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (r *PostgresRepository) sql(ctx context.Context) postgresExecutor {
+	if tx := database.Transaction(ctx, r.db); tx != nil {
+		return tx
+	}
+	return r.db
+}
 
 func NewPostgresRepository(db *sql.DB) (*PostgresRepository, error) {
 	if db == nil {
@@ -26,7 +41,7 @@ func (r *PostgresRepository) Enqueue(
 		return EnqueueResult{}, err
 	}
 	id := StableJobID(request.TenantID, request.Type, request.DedupeKey)
-	result, err := r.db.ExecContext(ctx, `
+	result, err := r.sql(ctx).ExecContext(ctx, `
 INSERT INTO background_job(
     job_id, tenant_id, app_id, revision_id, job_type, dedupe_key,
     payload, max_attempts, trace_parent
@@ -51,7 +66,7 @@ func (r *PostgresRepository) Claim(
 	workerID string,
 	lease time.Duration,
 ) (Job, error) {
-	row := r.db.QueryRowContext(ctx, `
+	row := r.sql(ctx).QueryRowContext(ctx, `
 WITH candidate AS (
     SELECT job_id FROM background_job
     WHERE status IN ('pending','running')
@@ -82,7 +97,7 @@ RETURNING j.job_id,j.tenant_id,j.app_id,j.revision_id,j.job_type,j.dedupe_key,
 }
 
 func (r *PostgresRepository) Complete(ctx context.Context, jobID string, workerID string) error {
-	result, err := r.db.ExecContext(ctx, `
+	result, err := r.sql(ctx).ExecContext(ctx, `
 UPDATE background_job SET status='completed', completed_at=now(),
     locked_by=NULL,locked_until=NULL,last_error=NULL
 WHERE job_id=$1 AND locked_by=$2 AND status='running'`, jobID, workerID)
@@ -110,7 +125,7 @@ func (r *PostgresRepository) Fail(
 			errorText = errorText[:2048]
 		}
 	}
-	result, err := r.db.ExecContext(ctx, `
+	result, err := r.sql(ctx).ExecContext(ctx, `
 UPDATE background_job SET status=$3,next_attempt_at=$4,last_error=$5,
     locked_by=NULL,locked_until=NULL,completed_at=CASE WHEN $3='dead' THEN now() ELSE NULL END
 WHERE job_id=$1 AND locked_by=$2 AND status='running'`,
@@ -127,7 +142,7 @@ func (r *PostgresRepository) Get(
 	tenantID string,
 	jobID string,
 ) (Job, error) {
-	job, err := scanJob(r.db.QueryRowContext(ctx, `
+	job, err := scanJob(r.sql(ctx).QueryRowContext(ctx, `
 SELECT job_id,tenant_id,app_id,revision_id,job_type,dedupe_key,payload,status,
        attempt_count,max_attempts,COALESCE(trace_parent,''),created_at,
        COALESCE(last_error,''),completed_at
@@ -139,7 +154,7 @@ FROM background_job WHERE tenant_id=$1 AND job_id=$2`, tenantID, jobID))
 }
 
 func (r *PostgresRepository) Retry(ctx context.Context, tenantID string, jobID string) error {
-	result, err := r.db.ExecContext(ctx, `
+	result, err := r.sql(ctx).ExecContext(ctx, `
 UPDATE background_job
 SET status='pending',attempt_count=0,next_attempt_at=now(),last_error=NULL,
     completed_at=NULL,locked_by=NULL,locked_until=NULL
@@ -164,7 +179,7 @@ func (r *PostgresRepository) Ready(ctx context.Context) error { return r.db.Ping
 func (r *PostgresRepository) Close() error                    { return nil }
 
 func (r *PostgresRepository) get(ctx context.Context, id string) (Job, error) {
-	return scanJob(r.db.QueryRowContext(ctx, `
+	return scanJob(r.sql(ctx).QueryRowContext(ctx, `
 SELECT job_id,tenant_id,app_id,revision_id,job_type,dedupe_key,payload,status,
        attempt_count,max_attempts,COALESCE(trace_parent,''),created_at,
        COALESCE(last_error,''),completed_at

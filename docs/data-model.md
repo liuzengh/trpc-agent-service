@@ -19,6 +19,7 @@
 | 租户与应用 | `tenant`、`agent_app`、`agent_revision` | 租户拥有应用，应用发布不可变配置版本 |
 | 模型连接 | `model_connection` | 同租户连接 ID 固定模型与地址，凭据加密保存；配置版本与凭据版本分别管理 |
 | 存储配置 | `backend_connection`、`backend_binding`、`backend_migration` | 具名连接与凭据引用、租户或应用绑定、迁移状态和校验证明 |
+| 知识资料 | `knowledge_document` | Agent 资料摘要、处理任务和可检索状态；正文存入租户知识后端 |
 | Skill | `skill_bundle` | 租户所属的不可变文件版本、校验值、审核状态和乐观锁版本 |
 | 通道与会话 | `channel_binding`、`conversation` | 外部账号绑定应用，会话固定运行身份与发布版本 |
 | 消息执行 | `inbound_message`、`agent_run`、`queue_outbox`、`outbound_message` | 入站去重、顺序调度、执行恢复与回复投递 |
@@ -446,10 +447,12 @@ Session、Memory 和 Artifact 的保留期可以不同。Artifact 到期先删�
 
 实际 SQL 以 [031_connection_lifecycle.sql](../trpcservice/database/migrations/031_connection_lifecycle.sql) 为准。
 
-## 11. 存储连接与 Skill 版本
+## 11. 存储连接、Skill 与知识资料
 
-`backend_connection` 以 `(tenant_id, connection_id)` 标识连接，保存显示名称、资源与后端类型、非秘密配置和内部凭据引用。真实值复用 `channel_credential` 的 AES-GCM 加密存储，授权用途扩展到 Session、Memory、Knowledge 和 Artifact；连接接口不返回凭据引用或密文。绑定创建时校验凭据用途以及目标配置与已授权连接一致，不能把密钥改投到其他地址。
+`backend_connection` 以 `(tenant_id, connection_id)` 标识连接，保存显示名称、资源与后端类型、非秘密配置和内部凭据引用。真实值复用 `channel_credential` 的 AES-GCM 加密存储，授权用途扩展到 Session、Memory、Knowledge、Artifact 和 Embedding；连接接口不返回凭据引用或密文。绑定创建时校验凭据用途以及目标配置与已授权连接一致，不能把密钥改投到其他地址。
 
 `skill_bundle` 以 `(tenant_id, name, version)` 为主键，保存 Markdown、脚本、SHA-256、提交者和审核者。`status` 为 pending、approved 或 revoked，`revision` 用于审核状态的并发更新；数据库触发器禁止修改版本内容。发布的 Agent 继续保存 name/version/checksum 引用，审核不会改写 Agent 版本。
 
 表结构和约束见 [032_managed_resources.sql](../trpcservice/database/migrations/032_managed_resources.sql)。
+
+`knowledge_document` 以 `(tenant_id, app_id, document_id)` 标识当前资料，保存名称、内容摘要、大小、元数据、使用的 Revision、后台任务和处理状态，不保存正文。正文仅进入有界后台任务并写入租户隔离的向量后端；任务状态变化通过数据库触发器同步目录，删除完成后移除目录记录。表结构见 [033_knowledge_management.sql](../trpcservice/database/migrations/033_knowledge_management.sql)。

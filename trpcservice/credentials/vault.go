@@ -23,7 +23,7 @@ import (
 )
 
 var ErrUnavailable = errors.New("连接存储不可用，请联系管理员检查数据库和加密配置")
-var Purposes = []string{secret.TelegramBot, secret.TelegramWebhook, secret.TelegramMedia, secret.WeComMCPRead, secret.WeComMCPSend, secret.Session, secret.Memory, secret.Knowledge, secret.Artifact}
+var Purposes = []string{secret.TelegramBot, secret.TelegramWebhook, secret.TelegramMedia, secret.WeComMCPRead, secret.WeComMCPSend, secret.Session, secret.Memory, secret.Knowledge, secret.Artifact, secret.Embedding}
 
 type Vault struct {
 	db    *sql.DB

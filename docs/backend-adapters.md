@@ -147,7 +147,7 @@ summarizer model and revision
 
 Knowledge 包含原始文档与检索索引。生产建议原始文件放对象存储，元数据/处理状态放 SQL，chunk 与 embedding 放向量库。当前持久化 Job 管理入库/删除，Router 强制注入 tenant/app 过滤；它不等于任意文档格式都能自动解析。
 
-文本入库、删除和检索已实现；当前采用手动配置与 Admin API 导入，网页不提供文档上传或编辑。操作步骤见[安装运行手册](operations-runbook.md#knowledge-setup)。
+文本入库、删除和检索已实现；网页可保存独立 Embedding 凭据并管理文本资料。操作步骤见[安装运行手册](operations-runbook.md#knowledge-setup)。
 
 真实 Embedding 与聊天模型分开配置，在 Agent 的 `knowledge_config` 中明确模型、API 地址和向量维度，并引用已授权的独立密钥。运行时校验向量维度、有限数值和非零向量；这些检查不代表检索质量已经达标，发布前仍需使用业务样本验证。
 

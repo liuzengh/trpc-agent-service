@@ -1,5 +1,5 @@
 // Package embedding wraps the framework Embedder with a bounded, private HTTP
-// boundary shared by Knowledge runtime and the explicit embedding preflight.
+// boundary used by the Knowledge runtime.
 package embedding
 
 import (

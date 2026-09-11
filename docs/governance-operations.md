@@ -38,7 +38,7 @@ Admin 是独立入口和 Principal RBAC，支持 superadmin、租户管理及只
 
 真实值在对应环境变量或部署 Secret 中。用途还包括 session、memory、artifact、knowledge、embedding、wecom_callback/aes/app、wecom_mcp_read/send、mcp_server。知识库 Key 和 Embedding Key 分开授权，S3/Embedding 不隐式回退到进程默认凭据。
 
-`POST /admin/resources/list` 使用 `kind=credentials` 和精确 `purpose` 分页查询当前租户的授权引用。此接口不调用 Resolve、不检查变量存在性，也不返回其他租户或其他用途的引用。高级环境凭据模型与 Embedding 表单使用该清单；配置保存、发布和实际执行仍重复校验授权。
+`POST /admin/resources/list` 使用 `kind=credentials` 和精确 `purpose` 分页查询当前租户的部署授权引用。此接口不调用 Resolve、不检查变量存在性，也不返回其他租户或其他用途的引用。网页知识库可直接提交 Embedding API Key，由加密凭据库生成租户限定的内部引用；Agent 版本和页面均不保存或回显原始 Key。配置保存、发布和实际执行仍重复校验授权。
 
 Gateway 获得入站密钥，Sender 获得 IM 出站密钥，Worker/Jobs 获得执行模型与后端密钥；Relay 不解析模型或 IM 凭据。all 是本地组合权限，不代表进程级隔离。上游企业微信 MCP URL 可能同时具备读写权限，平台用途分离不等于上游签发了独立 Token。
 

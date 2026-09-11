@@ -23,6 +23,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/connections"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/console"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/credentials"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/modelregistry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtimecontext"
@@ -43,7 +44,9 @@ type Service struct {
 	debugMu                sync.Mutex
 	startupModelName       string
 	models                 *modelregistry.Store
+	credentialVault        *credentials.Vault
 	backends               *backendregistry.Store
+	knowledgeDocuments     *KnowledgeDocumentStore
 	connections            *connections.Store
 	consoleStore           *console.Store
 	dependencyObservations func() []DependencyCheck
@@ -79,6 +82,16 @@ func (s *Service) WithBackgroundJobs(repository background.Repository) *Service 
 	return s
 }
 
+func (s *Service) WithCredentialVault(vault *credentials.Vault) *Service {
+	s.credentialVault = vault
+	return s
+}
+
+func (s *Service) WithKnowledgeDocuments(store *KnowledgeDocumentStore) *Service {
+	s.knowledgeDocuments = store
+	return s
+}
+
 func (s *Service) WithKnowledgeRouter(router *platformstorage.KnowledgeRouter) *Service {
 	if s != nil {
 		s.knowledge = router
@@ -111,13 +124,18 @@ func (s *Service) UpsertKnowledgeDocument(
 	ctx context.Context,
 	input KnowledgeDocumentInput,
 ) (int, error) {
+	input.Name = strings.TrimSpace(input.Name)
+	if input.Name == "" {
+		input.Name = input.DocumentID
+	}
 	if s.knowledge == nil {
 		return 0, invalidf("knowledge router is unavailable")
 	}
 	if !identifierPattern.MatchString(input.TenantID) ||
 		!identifierPattern.MatchString(input.AppID) ||
 		!identifierPattern.MatchString(input.RevisionID) ||
-		!identifierPattern.MatchString(input.DocumentID) || strings.TrimSpace(input.Content) == "" {
+		!identifierPattern.MatchString(input.DocumentID) || strings.ContainsAny(input.Name, "\r\n\x00") || strings.TrimSpace(input.Content) == "" || strings.ContainsRune(input.Content, '\x00') ||
+		len(input.Name) > 255 || len([]byte(input.Content)) > 512<<10 {
 		return 0, invalidf("knowledge document identity and content are invalid")
 	}
 	revision, scope, err := s.knowledgeScope(ctx, input.TenantID, input.AppID, input.RevisionID)
@@ -144,16 +162,31 @@ func (s *Service) SubmitKnowledgeDocument(
 	ctx context.Context,
 	input KnowledgeDocumentInput,
 ) (KnowledgeOperationResult, error) {
+	input.Name = strings.TrimSpace(input.Name)
+	if input.Name == "" {
+		input.Name = input.DocumentID
+	}
 	if s.jobs == nil {
 		chunks, err := s.UpsertKnowledgeDocument(ctx, input)
 		return KnowledgeOperationResult{
 			DocumentID: input.DocumentID, Chunks: chunks,
 		}, err
 	}
-	if _, _, err := s.knowledgeScope(ctx, input.TenantID, input.AppID, input.RevisionID); err != nil {
+	if s.knowledge == nil {
+		return KnowledgeOperationResult{}, invalidf("knowledge router is unavailable")
+	}
+	revision, scope, err := s.knowledgeScope(ctx, input.TenantID, input.AppID, input.RevisionID)
+	if err != nil {
 		return KnowledgeOperationResult{}, err
 	}
-	if !identifierPattern.MatchString(input.DocumentID) || strings.TrimSpace(input.Content) == "" {
+	knowledgeCtx := runtimecontext.WithStorageScope(ctx, scope.StorageScope)
+	if _, enabled, err := s.knowledge.KnowledgeForRevision(knowledgeCtx, scope, revision); err != nil {
+		return KnowledgeOperationResult{}, err
+	} else if !enabled {
+		return KnowledgeOperationResult{}, invalidf("knowledge is disabled for this revision")
+	}
+	if !identifierPattern.MatchString(input.DocumentID) || strings.ContainsAny(input.Name, "\r\n\x00") || strings.TrimSpace(input.Content) == "" || strings.ContainsRune(input.Content, '\x00') ||
+		len(input.Name) > 255 || len([]byte(input.Content)) > 512<<10 {
 		return KnowledgeOperationResult{}, invalidf("knowledge document identity and content are invalid")
 	}
 	payload, err := json.Marshal(background.KnowledgeUpsertPayload{Document: platformstorage.KnowledgeDocument{
