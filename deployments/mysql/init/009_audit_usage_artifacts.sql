@@ -32,13 +32,15 @@ CREATE TABLE IF NOT EXISTS usage_records (
     record_id  VARCHAR(36)  NOT NULL,
     tenant_id  VARCHAR(36)  NOT NULL,
     agent_id   VARCHAR(36)  NULL,
+    member_id  VARCHAR(64)  NULL                   COMMENT 'member that triggered the usage (platform member id, or the IM user id); NULL = tenant-attributed',
     dimension  VARCHAR(32)  NOT NULL               COMMENT 'token | tool | sandbox | artifact | skill',
     amount     DECIMAL(20,6) NOT NULL,
     meta       JSON         NULL,
     created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uk_usage_record (record_id),
-    KEY idx_usage_tenant_dim (tenant_id, dimension, created_at)
+    KEY idx_usage_tenant_dim (tenant_id, dimension, created_at),
+    KEY idx_usage_member_dim (tenant_id, member_id, dimension, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='usage metering per tenant for cost attribution';
 

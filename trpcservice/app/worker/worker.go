@@ -30,6 +30,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	fwtool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -47,12 +48,16 @@ const Group = "workers"
 // user indefinitely. Default is generous enough for a deep reasoning model.
 const runTimeout = 300 * time.Second
 
-// Idempotency is the cross-node dedup contract: Idempotent atomically claims
-// msgKey (SetNX) — true = first claim, false = already processed. ClearIdem
-// releases the claim so a failed attempt can be retried on redelivery.
+// Idempotency is the cross-node dedup contract. Idempotent atomically claims
+// msgKey (SetNX) as a *lease* — true = first claim, false = another worker
+// holds or already committed it. CommitIdem makes the claim durable once the
+// work is recorded; ClearIdem releases it so a failed attempt can be retried on
+// redelivery; ExpireIdemLease keeps a long turn's claim alive.
 type Idempotency interface {
 	Idempotent(ctx context.Context, msgKey string) (bool, error)
+	CommitIdem(ctx context.Context, msgKey string) error
 	ClearIdem(ctx context.Context, msgKey string) error
+	ExpireIdemLease(ctx context.Context, msgKey string) (bool, error)
 }
 
 // SessionRouter binds sessions to agents so stateless workers resolve the
@@ -136,6 +141,82 @@ func (w *Worker) Run(ctx context.Context) error {
 	return w.bus.ConsumeInbound(ctx, Group, consumer, w.handle)
 }
 
+// startTurnHeartbeat keeps this worker's claims alive until the returned stop
+// function is called: the session lock (mutual exclusion) and the idempotency
+// lease (ownership of the message). A turn may run up to runTimeout and wait
+// approvalTimeout on top of that, while the lock TTL is 30s and the lease TTL
+// 90s, so without a heartbeat both would expire mid-turn — the lock allowing a
+// second message into the session, the lease letting a redelivery re-run a turn
+// that is still in flight.
+//
+// The heartbeat logs once when it loses the lock: that means the turn outlived
+// its lock (or Redis dropped the key), so concurrent execution is possible and
+// the operator should see it rather than discover it in the data.
+func (w *Worker) startTurnHeartbeat(ctx context.Context, m *bus.Message, token string) func() {
+	tenantID, sessionID, msgID := m.TenantID, m.SessionID, m.ID
+	// One ticker refreshes both claims, so it must run at the faster cadence.
+	interval := bus.SessionLockRefreshInterval()
+	if lease := bus.IdemLeaseRefreshInterval(); interval <= 0 || (lease > 0 && lease < interval) {
+		interval = lease
+	}
+	if interval <= 0 {
+		return func() {}
+	}
+	hbCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		lockLost, leaseLost := false, false
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				// Detached from the turn context on purpose: a cancelled turn
+				// still has to keep its claims until it releases them, otherwise
+				// they expire while the deferred releases have not run yet.
+				refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				if !lockLost {
+					held, err := w.bus.RefreshLock(refreshCtx, tenantID, sessionID, token)
+					switch {
+					case err != nil:
+						slog.Warn("worker: session lock refresh failed", "tenant", tenantID, "session", sessionID, "err", err)
+					case !held:
+						slog.Warn("worker: session lock lost, concurrent execution is possible",
+							"tenant", tenantID, "session", sessionID)
+						lockLost = true
+						// Mutual exclusion is gone: this is a governance event,
+						// not just an operational log line.
+						w.recordAudit(m, m.AgentID, audit.DecisionFailed, 0,
+							errLockLost, nil, 0)
+					}
+				}
+				if !leaseLost && msgID != "" {
+					held, err := w.bus.ExpireIdemLease(refreshCtx, msgID)
+					switch {
+					case err != nil:
+						slog.Warn("worker: idempotency lease refresh failed", "message", msgID, "err", err)
+					case !held:
+						slog.Warn("worker: idempotency lease lost", "message", msgID)
+						leaseLost = true
+					}
+				}
+				cancelRefresh()
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// errLockLost marks a turn that outlived its own session lock. The audit error
+// class for it is "lock_lost" so it is distinguishable from a model failure.
+var errLockLost = errors.New("session lock lost during turn")
+
 // handle processes one inbound message. An error leaves the message pending
 // for redelivery; nil acks it.
 func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
@@ -144,22 +225,33 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 	}
 	metrics.InboundMessage(ctx, m.TenantID, m.Channel)
 
-	// Atomic dedup (Redis SetNX): the first claim wins, so concurrent
-	// redeliveries of the same message are dropped before any work. The old
-	// SeenIdem-check + MarkIdem-commit left a window where redeliveries passed
-	// the check and each wrote an audit row.
+	// Atomic dedup: the first claim wins, so concurrent redeliveries of the
+	// same message are dropped before any work. The claim is a *lease*: it is
+	// only made durable (commit) once this attempt has produced a recorded
+	// outcome, so a worker that dies mid-turn does not swallow the message —
+	// the lease expires, the redelivery reprocesses the turn, and the durable
+	// MySQL marker keeps the reprocess from double-replying.
 	first, err := w.bus.Idempotent(ctx, m.ID)
 	if err != nil {
 		return err // transient Redis error: retry later
 	}
 	if !first {
-		return nil // duplicate redelivery
+		return nil // another worker holds or completed this message
 	}
-	// fail releases the idempotency claim so a transient failure is retried on
-	// redelivery, rather than being silently dropped.
+	// fail releases the claim so a transient failure is retried on redelivery,
+	// rather than being silently dropped.
 	fail := func(err error) error {
 		_ = w.bus.ClearIdem(ctx, m.ID)
 		return err
+	}
+	// done records the outcome durably: the message was handled (reply queued,
+	// or deliberately dropped) and must never be processed again. A commit
+	// failure is not fatal — the lease still holds the message for a while, and
+	// the worst case is one redundant reprocess blocked by the outbox marker.
+	done := func() {
+		if err := w.bus.CommitIdem(ctx, m.ID); err != nil {
+			slog.Warn("worker: idempotency commit failed", "message", m.ID, "err", err)
+		}
 	}
 
 	// A human approval reply resolves the pending approval of the session.
@@ -168,6 +260,7 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 	if handled, err := w.tryResolveApproval(ctx, m); err != nil {
 		return fail(err)
 	} else if handled {
+		done()
 		return nil // consumed as an approval decision, not an agent turn
 	}
 
@@ -182,9 +275,32 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 			// No agent bound for this session and none on the message: a
 			// configuration gap, not a transient failure. Drop.
 			slog.Warn("worker: no agent bound, dropping message", "tenant", m.TenantID, "session", m.SessionID)
+			done()
 			return nil
 		}
-	} else {
+	}
+
+	// Tenant guard, applied before the route is written: the agent must belong
+	// to the tenant that asked for it. The chat API and the IM gateway both
+	// carry the tenant on the message, so this is the chokepoint that stops a
+	// crafted agent_id from running (and writing a session under) another
+	// tenant's agent — and from poisoning the session route with it. A mismatch
+	// is a policy refusal, not a transient failure: drop instead of redelivering
+	// a message that can never succeed.
+	agDef, err := w.agents.Get(ctx, agentID)
+	if err != nil {
+		return fail(fmt.Errorf("worker: agent %s not found: %w", agentID, err))
+	}
+	if agDef.TenantID != m.TenantID {
+		slog.Error("worker: agent belongs to another tenant, dropping message",
+			"agent", agentID, "agent_tenant", agDef.TenantID, "message_tenant", m.TenantID)
+		w.recordAudit(m, agentID, audit.DecisionDeny, 0,
+			fmt.Errorf("tenant mismatch: agent %s", agentID), nil, 0)
+		done()
+		return nil
+	}
+
+	if m.AgentID != "" {
 		if err := w.bus.SetRoute(ctx, m.TenantID, m.SessionID, agentID); err != nil {
 			return fail(err)
 		}
@@ -202,6 +318,9 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 	// (admin) traffic is authenticated by the platform, not a tenant policy.
 	if !policy.imUserAllowed(m.Channel, m.UserID) {
 		slog.Warn("worker: IM user not allowed, dropping message", "tenant", m.TenantID, "user", m.UserID)
+		w.recordAudit(m, agentID, audit.DecisionDeny, 0,
+			fmt.Errorf("IM user %s not in the tenant allow-list", m.UserID), nil, 0)
+		done()
 		return nil
 	}
 
@@ -212,9 +331,18 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 		return fail(err)
 	}
 	if !ok {
-		return fail(fmt.Errorf("worker: session %s busy", m.SessionID)) // stays pending, retried
+		// A busy session is transient contention, not a bad message: requeue it
+		// without counting toward the dead-letter threshold, otherwise a burst on
+		// one session would dead-letter healthy messages. Releasing the
+		// idempotency claim lets the retry re-claim it.
+		slog.Debug("worker: session busy, will retry", "tenant", m.TenantID, "session", m.SessionID)
+		_ = w.bus.ClearIdem(ctx, m.ID)
+		return bus.ErrRequeue
 	}
+	// Keep both claims alive for the whole turn (see startTurnHeartbeat).
+	stopHeartbeat := w.startTurnHeartbeat(ctx, m, token)
 	defer func() {
+		stopHeartbeat()
 		_ = w.bus.UnlockSession(ctx, m.TenantID, m.SessionID, token)
 	}()
 
@@ -229,15 +357,19 @@ func (w *Worker) handle(ctx context.Context, m *bus.Message) error {
 	metrics.AgentRun(ctx, m.TenantID, agentID, dur)
 	w.recordAudit(m, agentID, audit.DecisionExecuted, dur, nil, toolNames, tokens)
 	if reply == nil {
+		done()
 		return nil // nothing to send back
 	}
 
 	if err := w.outbox.Append(ctx, reply, m.ID); err != nil {
 		if errors.Is(err, bus.ErrDuplicateIdem) {
+			done()
 			return nil // already processed before a crash: ack
 		}
 		return fail(err)
 	}
+	// The reply is durable now: only here may the claim become permanent.
+	done()
 	w.recordLedger(ctx, m, agentID, reply)
 	return nil
 }
@@ -301,6 +433,8 @@ func classifyRunError(err error) string {
 	switch {
 	case err == nil:
 		return ""
+	case errors.Is(err, errLockLost):
+		return "lock_lost"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
 	default:
@@ -328,11 +462,15 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 	defer span.End()
 
 	// Resolve the profile once: tools / KB tools / skill instruction all hang
-	// off it, so the worker avoids re-reading the store per concern.
-	profile, err := w.agents.Resolve(ctx, agentID)
+	// off it, so the worker avoids re-reading the store per concern. A canary
+	// release is applied here: the session id decides which version serves the
+	// whole conversation, and the chosen version is recorded on the span so a
+	// rollout can be told apart from the baseline in traces.
+	profile, agentVersion, err := w.agents.ResolveForSession(ctx, agentID, m.SessionID)
 	if err != nil {
 		return nil, nil, 0, err
 	}
+	span.SetAttributes(attribute.Int("agent_version", agentVersion))
 
 	// Tenant token budget: reject the turn before spending any model/tool
 	// cost. The quota comes from the tenant's governance snapshot; a meter
@@ -351,6 +489,13 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 		tools, approvalToolNames = w.toolRes.fromProfile(ctx, agentID, profile, policy)
 		tools = append(tools, w.toolRes.knowledgeTools(ctx, profile)...)
 	}
+	// Long-term memory (per tenant + user, framework-provided): the memory
+	// tools let the agent record what is worth remembering, and the preload
+	// budget on the built agent injects what it already knows. Both are off
+	// when the platform disables memory, so a disabled node pays no tool
+	// schema tokens and no memory lookups.
+	memSvc, memTools := w.memoryForTurn(ctx, m.TenantID)
+	tools = append(tools, memTools...)
 	// usedSkills lists which mounted skills were actually injected this turn
 	// (loaded with content); the usage meter counts only those as "used".
 	instruction, usedSkills := w.skillInstruction(ctx, profile)
@@ -362,6 +507,11 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 	// Assemble the per-turn runner configuration (approval plugin, model timer,
 	// redaction, artifact meter, session backend).
 	opts, timer, artMeter := w.buildRunnerOptions(ctx, m, policy, approvalToolNames, lockToken)
+	if memSvc != nil {
+		// The runner needs the memory service for the preload read path; the
+		// agent's tools already hold it for writes.
+		opts = append(opts, runner.WithMemoryService(memSvc))
+	}
 
 	r := runner.NewRunner(m.TenantID, ag, opts...)
 	defer func() { _ = r.Close() }()
@@ -402,6 +552,31 @@ func (w *Worker) run(ctx context.Context, agentID string, m *bus.Message, lockTo
 		Content:   &reply,
 		ReplyTo:   m.ID,
 	}, toolNames, tokens, nil
+}
+
+// memoryForTurn resolves the tenant's long-term memory service and the memory
+// tools the agent may call this turn.
+//
+// The service comes from the Router, so a tenant can be pinned to its own
+// memory backend (tenant.data_backend.memory) while the framework keys every
+// entry by <tenant, user> — memory never crosses a tenant boundary. Failures
+// degrade to "no memory this turn" instead of failing the user's message: a
+// missing Redis or MySQL must not silence the agent, and the session transcript
+// (short-term context) is unaffected.
+func (w *Worker) memoryForTurn(ctx context.Context, tenantID string) (memory.Service, []fwtool.Tool) {
+	if w.sessions == nil || w.agents == nil || w.agents.MemoryPreload() == 0 {
+		return nil, nil
+	}
+	start := time.Now()
+	m, err := w.sessions.Memories(ctx, tenantID)
+	metrics.SessionLatency(ctx, tenantID, time.Since(start))
+	if err != nil {
+		slog.Warn("worker: memory backend unavailable, turn runs without long-term memory",
+			"tenant", tenantID, "err", err)
+		return nil, nil
+	}
+	svc := m.Service()
+	return svc, svc.Tools()
 }
 
 // buildRunnerOptions assembles the per-turn runner configuration: the human

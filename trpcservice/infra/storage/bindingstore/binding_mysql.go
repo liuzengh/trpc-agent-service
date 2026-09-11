@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/asset"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/channels"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/sqlutil"
 )
@@ -25,13 +26,15 @@ func NewMySQLBindingStore(db *sql.DB) channels.BindingStore {
 	return &mysqlStore{db: db}
 }
 
-const bindingCols = `binding_id, tenant_id, agent_id, channel, account_id, credential_ref, verification_token_ref, created_at`
+const bindingCols = `binding_id, tenant_id, agent_id, channel, account_id, credential_ref, verification_token_ref, created_by, visibility, created_at`
 
 func (s *mysqlStore) Create(ctx context.Context, b channels.ChannelBinding) error {
+	b.Visibility = asset.VisibilityOrDefault(b.Visibility)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO channel_bindings (binding_id, tenant_id, agent_id, channel, account_id, credential_ref, verification_token_ref)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		b.BindingID, b.TenantID, b.AgentID, b.Channel, b.AccountID, b.CredentialRef, b.VerificationTokenRef)
+		`INSERT INTO channel_bindings (binding_id, tenant_id, agent_id, channel, account_id, credential_ref, verification_token_ref, created_by, visibility)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		b.BindingID, b.TenantID, b.AgentID, b.Channel, b.AccountID, b.CredentialRef, b.VerificationTokenRef,
+		sqlutil.Null(b.CreatedBy), b.Visibility)
 	if err != nil {
 		if sqlutil.IsDuplicate(err) {
 			return channels.ErrBindingDuplicate
@@ -95,11 +98,16 @@ func (s *mysqlStore) Delete(ctx context.Context, bindingID string) error {
 }
 
 func scanBinding(row sqlutil.RowScanner) (*channels.ChannelBinding, error) {
-	var b channels.ChannelBinding
+	var (
+		b         channels.ChannelBinding
+		createdBy sql.NullString
+	)
 	err := row.Scan(&b.BindingID, &b.TenantID, &b.AgentID, &b.Channel, &b.AccountID,
-		&b.CredentialRef, &b.VerificationTokenRef, &b.CreatedAt)
+		&b.CredentialRef, &b.VerificationTokenRef, &createdBy, &b.Visibility, &b.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
+	b.CreatedBy = createdBy.String
+	b.Visibility = asset.VisibilityOrDefault(b.Visibility)
 	return &b, nil
 }

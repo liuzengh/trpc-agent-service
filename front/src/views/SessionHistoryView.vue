@@ -1,8 +1,22 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { listMessages, listSessions, type LedgerMessage, type LedgerSession } from '../api/history'
+import { useAuthStore } from '../stores/auth'
 import { formatBeijingTime } from '../utils/time'
+
+const authStore = useAuthStore()
+// 会话历史按角色做行级隔离（后端强制，前端同步隐藏过滤框）：
+// owner 全部租户 / admin 本租户全部成员 / member 仅自己产生的会话。
+const isOwner = computed(() => authStore.userRole === 'owner')
+const isMember = computed(() => authStore.userRole === 'member')
+const scopeHint = computed(() =>
+  isOwner.value
+    ? ''
+    : isMember.value
+      ? `仅显示我参与过的会话（租户 ${authStore.tenantId}）`
+      : `本租户 ${authStore.tenantId} 的全部会话`,
+)
 
 const tenantId = ref('')
 const sessions = ref<LedgerSession[]>([])
@@ -18,7 +32,7 @@ onMounted(refresh)
 async function refresh() {
   sessionsLoading.value = true
   try {
-    sessions.value = await listSessions(tenantId.value.trim())
+    sessions.value = await listSessions(isOwner.value ? tenantId.value.trim() : '')
   } catch (e) {
     ElMessage.error(String(e))
   } finally {
@@ -61,7 +75,8 @@ function fmtTime(v?: string) {
     <h1>会话历史</h1>
     <p class="hint">业务对话账本（chat_messages）：每轮 USER + ASSISTANT，turn 分页；工具调用细节见框架 session_events 与审计日志。</p>
     <div class="toolbar">
-      <el-input v-model="tenantId" placeholder="租户 ID（留空全部）" class="filter" @keyup.enter="refresh" />
+      <el-input v-if="isOwner" v-model="tenantId" placeholder="租户 ID（留空全部）" class="filter" @keyup.enter="refresh" />
+      <el-tag v-else type="info">{{ scopeHint }}</el-tag>
       <el-button type="primary" @click="refresh">查询</el-button>
     </div>
 

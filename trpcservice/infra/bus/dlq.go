@@ -98,6 +98,13 @@ func (b *RedisBus) onFailed(ctx context.Context, group string, msg redis.XMessag
 	if err := b.client.Expire(ctx, retryKey(msg.ID), retryTTL).Err(); err != nil {
 		slog.Warn("bus: dlq retry ttl refresh failed", "entry", msg.ID, "err", err)
 	}
+	// Log the cause here, not only at the dead-letter threshold: the audit row
+	// deliberately carries a coarse error class, so without this line a failing
+	// turn is visible as "failed" with no readable reason anywhere until it is
+	// finally parked. The attempt counter also bounds the noise.
+	slog.Warn("bus: inbound handling failed",
+		"id", msg.ID, "tenant", m.TenantID, "session", m.SessionID,
+		"attempt", attempts, "max", maxAttempts, "err", cause)
 	if attempts < int64(maxAttempts) {
 		return // under the threshold: leave pending for the next retry
 	}

@@ -24,6 +24,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore"
 	inmemoryvs "trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/inmemory"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/asset"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/llm"
 
 	fwtool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -57,6 +58,10 @@ type KnowledgeBase struct {
 	EmbeddingEndpointID string `json:"embedding_endpoint_id"` // ModelEndpoint ref
 	CollectionName      string `json:"collection_name"`       // {tenant_id}_{kb_id}
 	Dimension           int    `json:"dimension,omitempty"`   // 0 = DefaultDimension
+	// CreatedBy is the member that authored the KB; Visibility decides whether
+	// the rest of the tenant may see it (see domain/asset).
+	CreatedBy  string `json:"created_by,omitempty"`
+	Visibility string `json:"visibility,omitempty"`
 }
 
 // Document tracks one ingestion into a KB. Text is inline content accepted at
@@ -92,6 +97,7 @@ type VectorStoreFactory func(ctx context.Context, kb *KnowledgeBase) (vectorstor
 // interface.
 type Store interface {
 	CreateKB(ctx context.Context, kb *KnowledgeBase) error
+	UpdateKB(ctx context.Context, kb *KnowledgeBase) error
 	GetKB(ctx context.Context, id string) (*KnowledgeBase, error)
 	ListKBs(ctx context.Context, tenantID string) ([]*KnowledgeBase, error)
 	DeleteKB(ctx context.Context, id string) error
@@ -135,6 +141,8 @@ func (m *Manager) Create(ctx context.Context, kb *KnowledgeBase) error {
 	if kb.Dimension <= 0 {
 		kb.Dimension = DefaultDimension
 	}
+	// A new KB is private to its author until the author shares it.
+	kb.Visibility = asset.VisibilityOrDefault(kb.Visibility)
 	// Milvus collection names allow only letters, digits and underscores, so
 	// UUID-style tenant/kb ids (with hyphens) are normalized to underscores.
 	kb.CollectionName = sanitizeName(kb.TenantID) + "_" + sanitizeName(kb.ID)
@@ -177,6 +185,18 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	delete(m.inst, id)
 	m.mu.Unlock()
 	return m.store.DeleteKB(ctx, id)
+}
+
+// UpdateKB mutates the fields an author controls: the display name and the
+// visibility (publish to the tenant / take back to private). The embedding
+// endpoint and collection are immutable — changing them would orphan the
+// already-ingested vectors.
+func (m *Manager) UpdateKB(ctx context.Context, kb *KnowledgeBase) error {
+	if kb.ID == "" || kb.Name == "" {
+		return errors.New("knowledge: id and name are required")
+	}
+	kb.Visibility = asset.VisibilityOrDefault(kb.Visibility)
+	return m.store.UpdateKB(ctx, kb)
 }
 
 // ------------------------------------------------------------- ingestion --
@@ -453,14 +473,31 @@ func (s *memStore) CreateKB(_ context.Context, kb *KnowledgeBase) error {
 	return nil
 }
 
-func (s *memStore) GetKB(_ context.Context, id string) (*KnowledgeBase, error) {
-	s.mu.RLock()
+func (s *memStore) UpdateKB(_ context.Context, kb *KnowledgeBase) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.kbs[kb.ID]
+	if !ok {
+		return ErrKBNotFound
+	}
+	// created_by, tenant and collection are fixed at creation: a write may
+	// rename and publish/unpublish, never move or re-target the KB.
+	cp := *cur
+	cp.Name = kb.Name
+	cp.Visibility = asset.VisibilityOrDefault(kb.Visibility)
+	s.kbs[kb.ID] = &cp
+	*kb = cp
+	return nil
+}
+
+func (s *memStore) GetKB(_ context.Context, id string) (*KnowledgeBase, error) {	s.mu.RLock()
 	defer s.mu.RUnlock()
 	kb, ok := s.kbs[id]
 	if !ok {
 		return nil, ErrKBNotFound
 	}
 	cp := *kb
+	cp.Visibility = asset.VisibilityOrDefault(cp.Visibility)
 	return &cp, nil
 }
 
@@ -471,6 +508,7 @@ func (s *memStore) ListKBs(_ context.Context, tenantID string) ([]*KnowledgeBase
 	for _, kb := range s.kbs {
 		if tenantID == "" || kb.TenantID == tenantID {
 			cp := *kb
+			cp.Visibility = asset.VisibilityOrDefault(cp.Visibility)
 			out = append(out, &cp)
 		}
 	}

@@ -48,6 +48,13 @@ func EnsureInitialOwner(ctx context.Context, tenants *tenant.Manager, members *m
 		Role:     member.RoleOwner,
 		Password: string(hash),
 	}); err != nil {
+		// Several nodes starting against one database race here: the loser's
+		// insert is rejected on the primary key. That is not a failure — the
+		// desired state (an owner exists) holds — and the winner's credentials
+		// must be left alone. Any other error leaves no member behind.
+		if _, getErr := members.GetByUserID(ctx, userID); getErr == nil {
+			return nil
+		}
 		return fmt.Errorf("bootstrap member: %w", err)
 	}
 	return nil

@@ -33,9 +33,10 @@ type Conn struct {
 	appID     string
 	appSecret string
 
-	events chan []byte
-	api    *lark.Client
-	client *larkws.Client
+	events  chan []byte
+	api     *lark.Client
+	client  *larkws.Client
+	handler *dispatcher.EventDispatcher
 
 	mu        sync.RWMutex
 	botOpenID string
@@ -82,17 +83,46 @@ func NewConn(appID, appSecret string) *Conn {
 			}
 			return nil
 		})
+	c.handler = handler
 	c.client = larkws.NewClient(appID, appSecret, larkws.WithEventHandler(handler))
-	go func() {
-		_ = c.client.Start(ctx)
-		close(c.done)
-	}()
+	go c.supervise(ctx)
 	// Resolve the bot's own open_id before returning so the adapter can gate
 	// group @-mentions from the first event. Bounded (see fetchBotOpenID);
 	// on failure the empty value makes mentioned() accept group messages
 	// rather than silently dropping them all.
 	c.fetchBotOpenID()
 	return c
+}
+
+// reconnectMaxBackoff caps the reconnect delay.
+const reconnectMaxBackoff = 30 * time.Second
+
+// supervise keeps the long connection alive. The SDK's Start returns when the
+// connection ends for good (network drop, credential rotation, server drain),
+// and a ws.Client is not restartable — so a new client is built and started
+// with exponential backoff until Close. Without this a single disconnect left
+// the adapter permanently deaf: Recv kept returning "long connection closed"
+// while the adapter's read loop had already given up.
+func (c *Conn) supervise(ctx context.Context) {
+	backoff := time.Second
+	for {
+		err := c.client.Start(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Warn("feishu: long connection ended, reconnecting", "err", err, "in", backoff)
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return
+		}
+		if backoff < reconnectMaxBackoff {
+			if backoff *= 2; backoff > reconnectMaxBackoff {
+				backoff = reconnectMaxBackoff
+			}
+		}
+		c.client = larkws.NewClient(c.appID, c.appSecret, larkws.WithEventHandler(c.handler))
+	}
 }
 
 // fetchBotOpenID resolves the bot's own open_id once, for group @-mention
@@ -124,7 +154,9 @@ func (c *Conn) BotOpenID() string {
 	return c.botOpenID
 }
 
-// Recv returns the next event's JSON, or the ctx/connection shutdown error.
+// Recv returns the next event's JSON, or the ctx/shutdown error. A dropped
+// long connection does not end this call: supervise reconnects, so the adapter
+// stays attached and waits for events instead of shutting itself down.
 func (c *Conn) Recv(ctx context.Context) ([]byte, error) {
 	select {
 	case b := <-c.events:
@@ -193,8 +225,13 @@ func escapeJSON(s string) string {
 	return string(b[1 : len(b)-1])
 }
 
-// Close stops the long connection.
+// Close stops the long connection and unblocks Recv.
 func (c *Conn) Close() error {
-	c.once.Do(func() { c.cancel() })
+	c.once.Do(func() {
+		c.cancel()
+		// Recv waits on done as well as ctx: closing it releases a reader that
+		// is not watching this connection's context.
+		close(c.done)
+	})
 	return nil
 }

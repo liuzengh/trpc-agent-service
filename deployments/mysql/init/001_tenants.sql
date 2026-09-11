@@ -20,10 +20,9 @@ CREATE TABLE IF NOT EXISTS tenants (
     tenant_id    VARCHAR(36)  NOT NULL                COMMENT 'tenant business key (UUID); also session AppName + Redis prefix',
     name         VARCHAR(128) NOT NULL                COMMENT 'tenant display name',
     status       ENUM('active','disabled') NOT NULL DEFAULT 'active',
-    model_config JSON         NULL                    COMMENT 'default model endpoint ref {endpoint_id, model_name}',
-    data_backend JSON         NULL                    COMMENT 'per-domain backend selection: session/memory/summary/artifact/vector/audit',
-    audit_policy JSON         NULL                    COMMENT 'audit policy: granularity / retention / masking rules',
-    quota        JSON         NULL                    COMMENT 'tenant quota: token / tool-call / storage caps',
+    data_backend JSON         NULL                    COMMENT 'per-domain backend selection; domains with a second implementation: session/memory/vector/artifact/audit (summary follows the session backend and has no entry of its own)',
+    audit_policy JSON         NULL                    COMMENT 'governance policy as read+written by domain/tenant: {"redact":bool,"im_allow_users":[],"tool_whitelist":[],"force_approval_tools":[]}',
+    quota        JSON         NULL                    COMMENT 'tenant quota as read+written by domain/tenant: {"token_quota":int}; absent or 0 = unlimited',
     created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     is_deleted   TINYINT      NOT NULL DEFAULT 0      COMMENT 'soft delete: 0=alive, 1=deleted',
@@ -46,27 +45,13 @@ CREATE TABLE IF NOT EXISTS tenant_members (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='tenant membership: one login member belongs to exactly one tenant';
 
-CREATE TABLE IF NOT EXISTS roles (
-    role_id    VARCHAR(36)  NOT NULL,
-    tenant_id  VARCHAR(36)  NOT NULL,
-    name       VARCHAR(64)  NOT NULL,
-    created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (role_id),
-    KEY idx_roles_tenant (tenant_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  COMMENT='tenant-scoped roles for RBAC';
-
-CREATE TABLE IF NOT EXISTS role_permissions (
-    role_id    VARCHAR(36)  NOT NULL,
-    permission VARCHAR(128) NOT NULL                COMMENT 'e.g. agent:create / tool:grant / kb:read',
-    PRIMARY KEY (role_id, permission)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  COMMENT='role -> permission grants';
-
-CREATE TABLE IF NOT EXISTS member_roles (
-    tenant_id VARCHAR(36) NOT NULL,
-    user_id   VARCHAR(64) NOT NULL,
-    role_id   VARCHAR(36) NOT NULL,
-    PRIMARY KEY (tenant_id, user_id, role_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  COMMENT='member -> role assignments within a tenant';
+-- roles / role_permissions / member_roles were removed: authorization is
+-- enforced in code (app/web/permission.go derives permissions from
+-- tenant_members.role + the row-level author rule), so these tables had no
+-- reader or writer. Re-add a dynamic-RBAC schema when roles become data.
+--
+-- tenants.model_config was removed for the same reason: no reader or writer.
+-- An agent version already names its endpoint (runtime_profile.endpoint_id), so
+-- a tenant-level default model would have been a second, unused source of truth.
+-- Existing volumes need:
+--   ALTER TABLE tenants DROP COLUMN model_config;

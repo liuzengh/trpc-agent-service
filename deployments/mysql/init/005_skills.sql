@@ -23,6 +23,9 @@ CREATE TABLE IF NOT EXISTS skills (
     description     VARCHAR(512) NULL,
     current_version INT          NOT NULL DEFAULT 0  COMMENT 'current effective version (0 = never published)',
     status          ENUM('draft','published','disabled') NOT NULL DEFAULT 'draft',
+    created_by      VARCHAR(64)  NULL                COMMENT 'authoring member id (weak ref); NULL = pre-authorship row, treated as tenant-shared',
+    visibility      ENUM('private','shared') NOT NULL DEFAULT 'private'
+                                                     COMMENT 'private = author + tenant managers only; shared = tenant-readable (others read-only)',
     created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     is_deleted      TINYINT      NOT NULL DEFAULT 0,

@@ -32,8 +32,14 @@ type usageResponse struct {
 
 func (a *UsageAPI) get(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	claims := GetClaims(r.Context())
 	query := audit.UsageQuery{
-		TenantID:  q.Get("tenant_id"),
+		// Usage is a tenant asset: only the platform owner may look across
+		// tenants; everyone else is pinned to their own.
+		TenantID: ScopeTenant(claims, q.Get("tenant_id")),
+		// A plain member reads its own consumption, not the tenant's aggregate:
+		// the member dimension is forced, so ?member_id= cannot widen the view.
+		MemberID:  ScopeMember(claims, q.Get("member_id")),
 		AgentID:   q.Get("agent_id"),
 		Dimension: q.Get("dimension"),
 	}

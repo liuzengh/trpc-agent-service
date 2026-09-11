@@ -58,12 +58,18 @@ func (s *memStore) List(_ context.Context, tenantID string) ([]*Member, error) {
 	defer s.mu.RUnlock()
 	var result []*Member
 	for _, m := range s.members {
-		if m.TenantID == tenantID {
+		// An empty tenant means "every tenant" (the platform owner's view).
+		if tenantID == "" || m.TenantID == tenantID {
 			cp := *m
 			result = append(result, &cp)
 		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].UserID < result[j].UserID })
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].TenantID != result[j].TenantID {
+			return result[i].TenantID < result[j].TenantID
+		}
+		return result[i].UserID < result[j].UserID
+	})
 	return result, nil
 }
 

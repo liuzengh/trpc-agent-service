@@ -1,8 +1,10 @@
 <template>
   <div class="user-management" style="padding: 20px;">
     <h2>用户管理</h2>
-    <el-button v-if="isAdmin" type="primary" @click="createVisible = true">新增成员</el-button>
-    <el-tag v-if="isAdmin" type="info" style="margin-left: 12px">当前租户：{{ authStore.tenantId }}</el-tag>
+    <el-button v-if="canManage" type="primary" @click="openCreate">新增成员</el-button>
+    <el-tag v-if="canManage" type="info" style="margin-left: 12px">
+      {{ isOwner ? '平台视角：可见全部租户成员' : `当前租户：${authStore.tenantId}` }}
+    </el-tag>
 
     <el-tabs v-model="activeTab">
       <el-tab-pane label="成员列表" name="members">
@@ -17,7 +19,7 @@
             </template>
           </el-table-column>
           <el-table-column prop="created_at" label="创建时间" width="180" />
-          <el-table-column label="操作" v-if="isAdmin">
+          <el-table-column label="操作" v-if="canManage">
             <template #default="scope">
               <el-select
                 v-model="scope.row.role"
@@ -41,16 +43,19 @@
         </el-table>
       </el-tab-pane>
 
-      <el-tab-pane label="权限说明" name="permissions" v-if="isAdmin">
+      <el-tab-pane label="权限说明" name="permissions" v-if="canManage">
         <el-descriptions title="角色权限说明" :column="1" border>
           <el-descriptions-item label="Owner">
-            拥有所有权限：租户管理、Agent 管理、工具管理、知识库管理、密钥管理、审计日志、DLQ 管理
+            平台最高权限（跨所有租户）：租户管理、成员管理、Agent / 工具 / 知识库 / Skill /
+            通道 / 密钥 / 审计 / DLQ，并可查看全部租户的对话、审计与用量。
           </el-descriptions-item>
           <el-descriptions-item label="Admin">
-            可管理：Agent、工具、知识库、Skill、通道、审计日志、DLQ；不可管理：租户配置、密钥
+            只管自己所属租户：成员管理、Agent、工具、知识库、Skill、通道、审计、DLQ，
+            并可查看本租户全部成员的对话历史；不可管理租户本身与平台密钥。
           </el-descriptions-item>
           <el-descriptions-item label="Member">
-            只读权限：查看 Agent、进行对话
+            租户员工：可读共享资产（Agent / 端点）并参与对话贡献；会话历史仅可见自己产生的，
+            不可见租户管理、用户管理、密钥管理、审计日志与用量。
           </el-descriptions-item>
         </el-descriptions>
       </el-tab-pane>
@@ -62,7 +67,17 @@
           <el-input v-model="newMember.user_id" autocomplete="off" />
         </el-form-item>
         <el-form-item label="绑定租户">
-          <el-input :model-value="authStore.tenantId" disabled />
+          <!-- owner 可自由选择成员所属租户；admin 只能把成员加到自己所属租户。 -->
+          <el-select
+            v-if="isOwner"
+            v-model="newMember.tenant_id"
+            filterable
+            placeholder="选择租户"
+            style="width: 100%"
+          >
+            <el-option v-for="t in tenantStore.tenants" :key="t.id" :label="t.name" :value="t.id" />
+          </el-select>
+          <el-input v-else :model-value="authStore.tenantId" disabled />
         </el-form-item>
         <el-form-item label="密码">
           <el-input v-model="newMember.password" type="password" show-password autocomplete="new-password" />
@@ -87,20 +102,33 @@
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
+import { useTenantStore } from '../stores/tenant'
 import * as memberApi from '../api/member'
 import type { Member, MemberRole } from '../api/member'
 
 const authStore = useAuthStore()
+const tenantStore = useTenantStore()
 const activeTab = ref('members')
 const loading = ref(false)
 const createVisible = ref(false)
-const newMember = ref({ user_id: '', password: '', role: 'member' })
+const newMember = ref({ user_id: '', password: '', role: 'member' as MemberRole, tenant_id: '' })
 
 const members = ref<Member[]>([])
 
-const isAdmin = computed(() => {
-  return authStore.userRole === 'owner' || authStore.userRole === 'admin'
+// 成员管理权（owner + admin）；owner 另外可以把成员放到任意租户。
+const isOwner = computed(() => authStore.userRole === 'owner')
+const canManage = computed(() => authStore.hasPermission('member:manage'))
+
+// owner 的成员列表是全平台的，先确保租户下拉有数据可选。
+onMounted(() => {
+  fetchMembers()
+  if (isOwner.value) void tenantStore.fetch()
 })
+
+function openCreate() {
+  newMember.value = { user_id: '', password: '', role: 'member', tenant_id: authStore.tenantId }
+  createVisible.value = true
+}
 
 function tagType(role: string) {
   if (role === 'owner') return 'danger'
@@ -120,16 +148,27 @@ async function fetchMembers() {
 }
 
 async function createMember() {
+  const payload = newMember.value
+  if (!payload.user_id || !payload.password) {
+    ElMessage.warning('请输入用户名和密码')
+    return
+  }
+  if (isOwner.value && !payload.tenant_id) {
+    ElMessage.warning('请选择成员所属租户')
+    return
+  }
   try {
-    if (!newMember.value.user_id || !newMember.value.password) {
-      ElMessage.warning('请输入用户名和密码')
-      return
-    }
-    await memberApi.createMember(newMember.value as { user_id: string; password: string; role: MemberRole })
+    // owner 指定 tenant_id；admin 不传（后端强制落到自己所属租户）。
+    const created = await memberApi.createMember({
+      user_id: payload.user_id,
+      password: payload.password,
+      role: payload.role,
+      tenant_id: isOwner.value ? payload.tenant_id : undefined,
+    })
     createVisible.value = false
-    newMember.value = { user_id: '', password: '', role: 'member' }
+    newMember.value = { user_id: '', password: '', role: 'member', tenant_id: '' }
     await fetchMembers()
-    ElMessage.success('成员已创建并绑定当前租户')
+    ElMessage.success(`成员已创建并绑定租户 ${created.tenant_id}`)
   } catch (error) {
     ElMessage.error('创建成员失败')
   }
@@ -165,7 +204,4 @@ async function deleteMember(userId: string) {
   }
 }
 
-onMounted(() => {
-  fetchMembers()
-})
 </script>

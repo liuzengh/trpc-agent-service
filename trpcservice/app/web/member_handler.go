@@ -1,10 +1,12 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/member"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/auth"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -26,18 +28,28 @@ func (a *MemberAPI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /members/{userID}", a.delete)
 }
 
-// list returns all members for the authenticated user's tenant.
+// memberTarget resolves the member a mutation applies to: the platform owner may
+// manage a member of any tenant, an admin only those of their own tenant.
+func (a *MemberAPI) memberTarget(ctx context.Context, claims *auth.Claims, userID string) (*member.Member, error) {
+	if claims.Role == member.RoleOwner {
+		return a.mgr.GetByUserID(ctx, userID)
+	}
+	return a.mgr.Get(ctx, claims.TenantID, userID)
+}
+
+// list returns the members the caller may see: the owner gets every tenant,
+// everyone else exactly their own.
 func (a *MemberAPI) list(w http.ResponseWriter, r *http.Request) {
 	claims := GetClaims(r.Context())
 	if claims == nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 		return
 	}
-	if !HasPermission(claims.Role, PermTenantManage) {
+	if !HasPermission(claims.Role, PermMemberManage) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "insufficient permissions"})
 		return
 	}
-	members, err := a.mgr.List(r.Context(), claims.TenantID)
+	members, err := a.mgr.List(r.Context(), ScopeTenant(claims, r.URL.Query().Get("tenant_id")))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -51,7 +63,7 @@ func (a *MemberAPI) create(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 		return
 	}
-	if !HasPermission(claims.Role, PermTenantManage) {
+	if !HasPermission(claims.Role, PermMemberManage) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "insufficient permissions"})
 		return
 	}
@@ -59,6 +71,9 @@ func (a *MemberAPI) create(w http.ResponseWriter, r *http.Request) {
 		UserID   string `json:"user_id"`
 		Password string `json:"password"`
 		Role     string `json:"role"`
+		// TenantID is honoured only for the platform owner, who may place a
+		// member in any tenant; an admin always adds to their own tenant.
+		TenantID string `json:"tenant_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -86,7 +101,11 @@ func (a *MemberAPI) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	m := &member.Member{TenantID: claims.TenantID, UserID: req.UserID, Role: req.Role, Password: string(hash)}
+	tenantID := claims.TenantID
+	if claims.Role == member.RoleOwner && req.TenantID != "" {
+		tenantID = req.TenantID
+	}
+	m := &member.Member{TenantID: tenantID, UserID: req.UserID, Role: req.Role, Password: string(hash)}
 	if err := a.mgr.Create(r.Context(), m); err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
@@ -112,7 +131,7 @@ func (a *MemberAPI) updateRole(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id is required"})
 		return
 	}
-	target, err := a.mgr.Get(r.Context(), claims.TenantID, userID)
+	target, err := a.memberTarget(r.Context(), claims, userID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -143,7 +162,7 @@ func (a *MemberAPI) updateRole(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cannot change your own role"})
 		return
 	}
-	if err := a.mgr.UpdateRole(r.Context(), claims.TenantID, userID, req.Role); err != nil {
+	if err := a.mgr.UpdateRole(r.Context(), target.TenantID, userID, req.Role); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -166,7 +185,7 @@ func (a *MemberAPI) delete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id is required"})
 		return
 	}
-	target, err := a.mgr.Get(r.Context(), claims.TenantID, userID)
+	target, err := a.memberTarget(r.Context(), claims, userID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -179,7 +198,7 @@ func (a *MemberAPI) delete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cannot delete yourself"})
 		return
 	}
-	if err := a.mgr.Delete(r.Context(), claims.TenantID, userID); err != nil {
+	if err := a.mgr.Delete(r.Context(), target.TenantID, userID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

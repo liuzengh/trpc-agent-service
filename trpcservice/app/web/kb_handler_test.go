@@ -1,7 +1,6 @@
 package web
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"hash/fnv"
@@ -47,19 +46,19 @@ func newKBServer(t *testing.T) *httptest.Server {
 			return &webHashEmbedder{dim: 64}, nil
 		})
 	NewKnowledgeAPI(mgr).Register(mux)
-	return httptest.NewServer(mux)
+	return httptest.NewServer(asClaims(mux))
 }
 
 func TestKnowledgeAPICRUDAndSearch(t *testing.T) {
 	srv := newKBServer(t)
 	defer srv.Close()
 
+	// A KB is a tenant asset managed by that tenant's admin.
+	t1 := clientAs(adminClaims("t-1"))
+
 	// create KB
-	resp, err := http.Post(srv.URL+"/kbs", "application/json",
-		bytes.NewBufferString(`{"id":"kb-1","tenant_id":"t-1","name":"docs","embedding_endpoint_id":"e-1"}`))
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
+	resp := postAs(t, t1, srv.URL+"/kbs",
+		`{"id":"kb-1","tenant_id":"t-1","name":"docs","embedding_endpoint_id":"e-1"}`)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create status = %d", resp.StatusCode)
 	}
@@ -73,11 +72,7 @@ func TestKnowledgeAPICRUDAndSearch(t *testing.T) {
 	}
 
 	// add document (inline text)
-	resp, err = http.Post(srv.URL+"/kbs/kb-1/documents", "application/json",
-		bytes.NewBufferString(`{"id":"d-1","title":"fruit","text":"apple banana cherry"}`))
-	if err != nil {
-		t.Fatalf("add document: %v", err)
-	}
+	resp = postAs(t, t1, srv.URL+"/kbs/kb-1/documents", `{"id":"d-1","title":"fruit","text":"apple banana cherry"}`)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("add document status = %d", resp.StatusCode)
 	}
@@ -89,11 +84,7 @@ func TestKnowledgeAPICRUDAndSearch(t *testing.T) {
 	}
 
 	// search
-	resp, err = http.Post(srv.URL+"/kbs/kb-1/search", "application/json",
-		bytes.NewBufferString(`{"query":"apple banana"}`))
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
+	resp = postAs(t, t1, srv.URL+"/kbs/kb-1/search", `{"query":"apple banana"}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("search status = %d", resp.StatusCode)
 	}
@@ -107,10 +98,7 @@ func TestKnowledgeAPICRUDAndSearch(t *testing.T) {
 	}
 
 	// list documents
-	resp, err = http.Get(srv.URL + "/kbs/kb-1/documents")
-	if err != nil {
-		t.Fatalf("list documents: %v", err)
-	}
+	resp = getAs(t, t1, srv.URL+"/kbs/kb-1/documents")
 	var docs []*knowledge.Document
 	_ = json.NewDecoder(resp.Body).Decode(&docs)
 	resp.Body.Close()
@@ -119,12 +107,73 @@ func TestKnowledgeAPICRUDAndSearch(t *testing.T) {
 	}
 
 	// missing KB -> 404
-	resp, err = http.Get(srv.URL + "/kbs/nope")
-	if err != nil {
-		t.Fatalf("get missing: %v", err)
-	}
+	resp = getAs(t, t1, srv.URL+"/kbs/nope")
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("missing kb status = %d, want 404", resp.StatusCode)
 	}
+}
+
+// TestKnowledgeAPIIsTenantScoped covers the KB boundary: a foreign tenant can
+// neither read a KB nor reach its documents/search endpoints by id, while the
+// create is pinned to the caller's own tenant.
+func TestKnowledgeAPIIsTenantScoped(t *testing.T) {
+	srv := newKBServer(t)
+	defer srv.Close()
+
+	t1 := clientAs(adminClaims("t-1"))
+	t2 := clientAs(adminClaims("t-2"))
+
+	// t-1 asks for t-2; the tenant is pinned back to t-1.
+	resp := postAs(t, t1, srv.URL+"/kbs",
+		`{"id":"kb-1","tenant_id":"t-2","name":"docs","embedding_endpoint_id":"e-1"}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", resp.StatusCode)
+	}
+	var kb knowledge.KnowledgeBase
+	_ = json.NewDecoder(resp.Body).Decode(&kb)
+	resp.Body.Close()
+	if kb.TenantID != "t-1" {
+		t.Fatalf("kb tenant = %q, want t-1 (pinned to the caller)", kb.TenantID)
+	}
+
+	resp = postAs(t, t2, srv.URL+"/kbs", `{"id":"kb-2","name":"d","embedding_endpoint_id":"e-2"}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("t-2 create status = %d", resp.StatusCode)
+	}
+
+	// t-2 sees only its own KB (whatever filter it asks for).
+	resp = getAs(t, t2, srv.URL+"/kbs?tenant_id=t-1")
+	var list []*knowledge.KnowledgeBase
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	resp.Body.Close()
+	if len(list) != 1 || list[0].ID != "kb-2" {
+		t.Errorf("t-2 list = %+v, want only kb-2", list)
+	}
+
+	// A foreign KB is missing on every route that names it.
+	for _, tc := range []struct {
+		method, suffix, body string
+	}{
+		{http.MethodGet, "", ""},
+		{http.MethodDelete, "", ""},
+		{http.MethodPost, "/documents", `{"title":"x","text":"y"}`},
+		{http.MethodGet, "/documents", ""},
+		{http.MethodPost, "/search", `{"query":"x"}`},
+	} {
+		resp = doAs(t, t2, tc.method, srv.URL+"/kbs/kb-1"+tc.suffix, tc.body)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s /kbs/kb-1%s = %d, want 404", tc.method, tc.suffix, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// The foreign KB is still usable by its own tenant.
+	resp = getAs(t, t1, srv.URL+"/kbs/kb-1")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("t-1 get own kb = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
 }

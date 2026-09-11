@@ -3,13 +3,32 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useKBStore } from '../stores/kb'
 import { useEndpointStore } from '../stores/endpoint'
+import { useAuthStore } from '../stores/auth'
 import type { Document, KBInput, SearchHit } from '../api/kb'
+import type { KnowledgeBase } from '../api/kb'
 
 const store = useKBStore()
 const endpoints = useEndpointStore()
+const authStore = useAuthStore()
 
 // Only embedding endpoints can back a knowledge base.
 const embeddingEndpoints = computed(() => endpoints.endpoints.filter((e) => e.type === 'embedding'))
+
+// 行级权限：admin/owner 管全租户；member 只能改自己创建的行。共享只是把可读
+// 范围放开到租户，不转移管理权。
+const canManage = (row: KnowledgeBase) =>
+  authStore.canManageAsset(row as { created_by?: string })
+
+async function toggleVisibility(row: KnowledgeBase) {
+  const next = row.visibility === 'shared' ? 'private' : 'shared'
+  try {
+    await store.setVisibility(row, next)
+    ElMessage.success(next === 'shared' ? '已共享给租户' : '已收回为私有')
+  } catch (e) {
+    ElMessage.error(String(e))
+    void store.fetch()
+  }
+}
 
 // ---- KB create dialog ----
 const dialogVisible = ref(false)
@@ -128,22 +147,44 @@ async function doSearch() {
 <template>
   <main class="kb-page">
     <h1>知识库管理</h1>
-    <p class="hint">知识库是租户级共享资产，可挂载到多个 Agent；向量存 Milvus/内存，检索由 Agent 运行时注入。</p>
+    <p class="hint">
+      租户资产，作者所有：新建默认<b>私有</b>（仅你与租户管理员可见），点「共享」后租户内成员可读；
+      向量存 Milvus/内存，检索由 Agent 运行时注入。
+    </p>
     <div class="toolbar">
       <el-button type="primary" @click="openCreate">新建知识库</el-button>
     </div>
 
     <el-table v-loading="store.loading" :data="store.kbs" border>
       <el-table-column prop="name" label="名称" width="160" />
-      <el-table-column prop="tenant_id" label="租户" width="160" />
-      <el-table-column prop="collection_name" label="向量集合" />
-      <el-table-column prop="embedding_endpoint_id" label="嵌入端点" width="200" show-overflow-tooltip />
-      <el-table-column prop="dimension" label="维度" width="90" />
-      <el-table-column label="操作" width="260">
+      <el-table-column prop="tenant_id" label="租户" width="140" />
+      <el-table-column label="可见性" width="130">
         <template #default="{ row }">
-          <el-button size="small" @click="openDocs(row)">文档</el-button>
+          <el-tag :type="row.visibility === 'shared' ? 'success' : 'info'">
+            {{ row.visibility === 'shared' ? '租户共享' : '私有' }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="作者" width="120">
+        <template #default="{ row }">
+          <span v-if="row.created_by">{{ row.created_by }}</span>
+          <span v-else class="muted">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column prop="collection_name" label="向量集合" />
+      <el-table-column prop="embedding_endpoint_id" label="嵌入端点" width="180" show-overflow-tooltip />
+      <el-table-column label="操作" width="300">
+        <template #default="{ row }">
+          <el-button size="small" @click="openDocs(row)">
+            {{ canManage(row) ? '文档' : '查看文档' }}
+          </el-button>
           <el-button size="small" type="primary" @click="openSearch(row)">检索</el-button>
-          <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
+          <template v-if="canManage(row)">
+            <el-button size="small" @click="toggleVisibility(row)">
+              {{ row.visibility === 'shared' ? '收回' : '共享' }}
+            </el-button>
+            <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
+          </template>
         </template>
       </el-table-column>
     </el-table>

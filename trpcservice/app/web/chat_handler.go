@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/member"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/bus"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -60,12 +61,21 @@ type chatSendResponse struct {
 }
 
 func (a *ChatAPI) send(w http.ResponseWriter, r *http.Request) {
+	claims := GetClaims(r.Context())
+	if claims == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+		return
+	}
 	var req chatSendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("bad chat request: %w", err))
 		return
 	}
-	if req.TenantID == "" {
+	// The token decides which tenant the conversation belongs to: a hand-written
+	// body cannot push a member's turn into another tenant. The owner, being
+	// platform-wide, may target any tenant explicitly.
+	tenantID := ScopeTenant(claims, req.TenantID)
+	if tenantID == "" {
 		writeError(w, http.StatusBadRequest, errors.New("tenant_id is required"))
 		return
 	}
@@ -80,7 +90,7 @@ func (a *ChatAPI) send(w http.ResponseWriter, r *http.Request) {
 	// otherwise an existing route is required.
 	agentID := req.AgentID
 	if agentID == "" {
-		got, err := a.bus.Route(r.Context(), req.TenantID, req.SessionID)
+		got, err := a.bus.Route(r.Context(), tenantID, req.SessionID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -93,20 +103,22 @@ func (a *ChatAPI) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.AgentID != "" {
-		if err := a.bus.SetRoute(r.Context(), req.TenantID, req.SessionID, agentID); err != nil {
+		if err := a.bus.SetRoute(r.Context(), tenantID, req.SessionID, agentID); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 	}
-	userID := req.UserID
-	if userID == "" {
-		userID = "admin"
+	// The ledger attributes the turn to the authenticated member (the owner may
+	// still speak as someone else on purpose).
+	userID := claims.UserID
+	if claims.Role == member.RoleOwner && req.UserID != "" {
+		userID = req.UserID
 	}
 	content := model.NewUserMessage(req.Text)
 	msg := &bus.Message{
 		ID:        uuid.NewString(),
 		TraceID:   uuid.NewString(),
-		TenantID:  req.TenantID,
+		TenantID:  tenantID,
 		AgentID:   agentID,
 		SessionID: req.SessionID,
 		Channel:   "admin",

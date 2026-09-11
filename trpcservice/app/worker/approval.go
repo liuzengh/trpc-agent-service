@@ -31,12 +31,12 @@ import (
 )
 
 // Approval timing. The wait budget bounds how long an agent turn stays
-// suspended; the session lock is refreshed meanwhile so no other worker can
-// take over the session.
+// suspended. The session lock is kept alive by the worker's lock heartbeat
+// (worker.startLockHeartbeat), which covers this wait, so no refresh timer is
+// needed here.
 const (
 	approvalTimeout      = 5 * time.Minute
 	approvalPollInterval = 500 * time.Millisecond
-	lockRefreshInterval  = 10 * time.Second
 )
 
 // pendingApproval is what the worker stores under approval:req for one
@@ -87,12 +87,12 @@ func (r *humanReviewer) Review(ctx context.Context, req *fwreview.Request) (*fwr
 	if err := r.w.outbox.Append(ctx, notice, m.ID+":approval"); err != nil && !errors.Is(err, bus.ErrDuplicateIdem) {
 		return nil, fmt.Errorf("worker: append approval notice: %w", err)
 	}
-	if err := r.w.bus.SetPendingApproval(ctx, m.TenantID, m.SessionID, string(payload), approvalTimeout+lockRefreshInterval); err != nil {
+	if err := r.w.bus.SetPendingApproval(ctx, m.TenantID, m.SessionID, string(payload),
+		approvalTimeout+bus.SessionLockRefreshInterval()); err != nil {
 		return nil, fmt.Errorf("worker: register pending approval: %w", err)
 	}
 
 	deadline := time.Now().Add(approvalTimeout)
-	lastRefresh := time.Now()
 	ticker := time.NewTicker(approvalPollInterval)
 	defer ticker.Stop()
 
@@ -100,6 +100,11 @@ func (r *humanReviewer) Review(ctx context.Context, req *fwreview.Request) (*fwr
 		select {
 		case <-ctx.Done():
 			_ = r.w.bus.ClearPendingApproval(ctx, m.TenantID, m.SessionID)
+			// A cancelled wait is a governance outcome too: the turn was
+			// abandoned before the human decided, which the audit trail has to
+			// show next to the approvals that did happen.
+			r.w.recordAudit(m, m.AgentID, audit.DecisionDeny, 0,
+				fmt.Errorf("approval cancelled for tool %s: %w", pending.Tool, ctx.Err()), nil, 0)
 			return &fwreview.Decision{Approved: false, RiskScore: 90, RiskLevel: "human", Reason: "审批流程已取消"}, nil
 		case <-ticker.C:
 		}
@@ -118,18 +123,15 @@ func (r *humanReviewer) Review(ctx context.Context, req *fwreview.Request) (*fwr
 		}
 		if time.Now().After(deadline) {
 			_ = r.w.bus.ClearPendingApproval(ctx, m.TenantID, m.SessionID)
+			// Auto-deny on timeout is a policy decision made by the platform,
+			// so it belongs in the audit trail as such (an operator asking "why
+			// was this tool blocked?" must find the answer).
+			r.w.recordAudit(m, m.AgentID, audit.DecisionDeny, 0,
+				fmt.Errorf("approval timed out for tool %s after %s", pending.Tool, approvalTimeout), nil, 0)
 			return &fwreview.Decision{Approved: false, RiskScore: 90, RiskLevel: "human", Reason: "审批超时未获批准"}, nil
 		}
-		// Keep the session lock alive so the suspended turn is not taken
-		// over by another worker while we wait.
-		if time.Since(lastRefresh) >= lockRefreshInterval {
-			lastRefresh = time.Now()
-			refreshed, err := r.w.bus.RefreshLock(ctx, m.TenantID, m.SessionID, r.lockTok)
-			if err != nil || !refreshed {
-				_ = r.w.bus.ClearPendingApproval(ctx, m.TenantID, m.SessionID)
-				return &fwreview.Decision{Approved: false, RiskScore: 90, RiskLevel: "human", Reason: "会话锁丢失，审批终止"}, nil
-			}
-		}
+		// The session lock is kept alive by the worker's lock heartbeat, which
+		// covers the whole turn including this wait; no refresh here.
 	}
 }
 

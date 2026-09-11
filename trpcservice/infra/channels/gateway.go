@@ -16,6 +16,7 @@ package channels
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"sync"
@@ -39,10 +40,34 @@ type Bus interface {
 	ReadOutbound(ctx context.Context, fromID string) ([]*bus.Message, string, error)
 }
 
+// Durable is the optional durability capability of the bus: the outbound read
+// position and the conversation routes survive a gateway restart. A bus that
+// does not implement it (tests, an in-memory bus) leaves the gateway following
+// the stream tail with in-memory routes only, which is exactly the pre-restart
+// behavior — the capability is additive, never required.
+type Durable interface {
+	LoadOutboundCursor(ctx context.Context) (string, error)
+	SaveOutboundCursor(ctx context.Context, id string) error
+	SaveIMRoute(ctx context.Context, sessionID, payload string) error
+	LoadIMRoute(ctx context.Context, sessionID string) (string, bool, error)
+}
+
+// Route is the persisted part of a conversation's reply path: which binding's
+// adapter answers and to which IM chat. The adapter itself is resolved through
+// AdapterLookup, because a restarted process holds new adapter instances.
+type Route struct {
+	BindingID string `json:"binding_id"`
+	Channel   string `json:"channel"`
+	ChatID    string `json:"chat_id"`
+}
+
 // Attach binds an adapter to the gateway. accountID/agentID are the defaults
 // used when an inbound message does not carry its own agent id (IM callbacks
-// usually omit it; the binding store then resolves the agent).
+// usually omit it; the binding store then resolves the agent). BindingID ties
+// the attach to a bindable account so replies can be routed again after a
+// restart.
 type Attach struct {
+	BindingID string
 	AccountID string
 	AgentID   string
 }
@@ -50,6 +75,7 @@ type Attach struct {
 type routeEntry struct {
 	adapter Adapter
 	chatID  string
+	route   Route
 }
 
 // Gateway routes IM traffic through the platform bus.
@@ -57,6 +83,11 @@ type Gateway struct {
 	bus      Bus
 	bindings BindingStore
 	rl       RateLimiter
+
+	// adapters resolves a binding id to its live adapter. Installed by the
+	// Manager, which owns the connections; nil if the gateway is used alone
+	// (then persisted routes cannot be rehydrated and are only used in-process).
+	adapters func(bindingID string) (Adapter, bool)
 
 	mu     sync.RWMutex
 	routes map[string]routeEntry // sessionID -> adapter + chatID
@@ -66,6 +97,18 @@ type Gateway struct {
 // then taken from the inbound message or the attach defaults).
 func NewGateway(b Bus, bindings BindingStore) *Gateway {
 	return &Gateway{bus: b, bindings: bindings, routes: make(map[string]routeEntry)}
+}
+
+// SetAdapterLookup installs the resolver used to rehydrate a persisted route
+// after a restart.
+func (g *Gateway) SetAdapterLookup(lookup func(bindingID string) (Adapter, bool)) {
+	g.adapters = lookup
+}
+
+// durable returns the bus's persistence capability, if it has one.
+func (g *Gateway) durable() Durable {
+	d, _ := g.bus.(Durable)
+	return d
 }
 
 // SetRateLimiter installs an inbound rate limiter (nil disables limiting).
@@ -80,9 +123,25 @@ func (g *Gateway) Attach(ctx context.Context, a Adapter, opt Attach) {
 }
 
 // Run follows stream:outbound and dispatches replies to the originating
-// adapter. It blocks until ctx is done.
+// adapter. It blocks until ctx is done. It resumes from the persisted cursor
+// when the bus supports it, so a reply published while this node was down is
+// delivered on the next start rather than skipped.
 func (g *Gateway) Run(ctx context.Context) error {
 	cursor := "$"
+	if d := g.durable(); d != nil {
+		stored, err := d.LoadOutboundCursor(ctx)
+		if err != nil {
+			// Not fatal: following the tail only risks the replies published
+			// during the outage, while failing here would stop IM delivery
+			// entirely.
+			slog.Warn("channels: outbound cursor unavailable, following the stream tail", "err", err)
+		} else {
+			cursor = stored
+			if stored != "$" {
+				slog.Info("channels: resuming outbound from the persisted cursor", "cursor", stored)
+			}
+		}
+	}
 	for {
 		msgs, next, err := g.bus.ReadOutbound(ctx, cursor)
 		if err != nil {
@@ -105,9 +164,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 			// Enforce the platform text ceiling before send so an over-limit
 			// reply can never fail the whole outbound stream.
 			text = truncateText(text, maxTextLen(m.Channel))
-			g.mu.RLock()
-			route, ok := g.routes[m.SessionID]
-			g.mu.RUnlock()
+			route, ok := g.route(ctx, m.SessionID)
 			if !ok {
 				slog.Warn("channels: no route for session", "session", m.SessionID, "channel", m.Channel)
 				continue
@@ -155,7 +212,60 @@ func (g *Gateway) Run(ctx context.Context) error {
 				slog.Warn("channels: adapter send failed", "channel", m.Channel, "err", sendErr)
 			}
 		}
+		// Persist the advanced position only after the batch was handled, so a
+		// crash mid-batch replays it instead of skipping it.
+		if len(msgs) > 0 {
+			if d := g.durable(); d != nil {
+				if err := d.SaveOutboundCursor(ctx, cursor); err != nil {
+					slog.Warn("channels: saving the outbound cursor failed", "cursor", cursor, "err", err)
+				}
+			}
+		}
 	}
+}
+
+// route resolves the reply path of a session: the in-memory table first, then
+// the persisted route, which is what lets a restarted gateway answer a reply
+// that was published while it was down. A rehydrated route is cached so the
+// lookup happens once per conversation.
+func (g *Gateway) route(ctx context.Context, sessionID string) (routeEntry, bool) {
+	g.mu.RLock()
+	entry, ok := g.routes[sessionID]
+	g.mu.RUnlock()
+	if ok {
+		return entry, true
+	}
+	d := g.durable()
+	if d == nil || g.adapters == nil {
+		return routeEntry{}, false
+	}
+	payload, found, err := d.LoadIMRoute(ctx, sessionID)
+	if err != nil {
+		slog.Warn("channels: loading the persisted route failed", "session", sessionID, "err", err)
+		return routeEntry{}, false
+	}
+	if !found {
+		return routeEntry{}, false
+	}
+	var r Route
+	if err := json.Unmarshal([]byte(payload), &r); err != nil {
+		slog.Warn("channels: persisted route is unreadable", "session", sessionID, "err", err)
+		return routeEntry{}, false
+	}
+	a, ok := g.adapters(r.BindingID)
+	if !ok {
+		// The binding was deleted (or its adapter failed to start): the reply
+		// has nowhere to go. Log loudly — this is the one case where an IM
+		// reply is dropped after being stored.
+		slog.Warn("channels: persisted route has no live adapter, dropping reply",
+			"session", sessionID, "binding", r.BindingID, "channel", r.Channel)
+		return routeEntry{}, false
+	}
+	entry = routeEntry{adapter: a, chatID: r.ChatID, route: r}
+	g.mu.Lock()
+	g.routes[sessionID] = entry
+	g.mu.Unlock()
+	return entry, true
 }
 
 // pumpInbound normalizes an adapter's inbound messages into bus messages and
@@ -225,8 +335,21 @@ func (g *Gateway) pumpInbound(ctx context.Context, a Adapter, opt Attach) {
 				continue
 			}
 			g.mu.Lock()
-			g.routes[in.SessionID] = routeEntry{adapter: a, chatID: in.ChatID}
+			g.routes[in.SessionID] = routeEntry{
+				adapter: a,
+				chatID:  in.ChatID,
+				route:   Route{BindingID: opt.BindingID, Channel: a.Name(), ChatID: in.ChatID},
+			}
 			g.mu.Unlock()
+			// Remember the route beyond this process: a restarted gateway must
+			// still know which chat to answer when it replays a missed reply.
+			if d := g.durable(); d != nil {
+				if payload, err := json.Marshal(Route{BindingID: opt.BindingID, Channel: a.Name(), ChatID: in.ChatID}); err != nil {
+					slog.Warn("channels: encoding the reply route failed", "session", in.SessionID, "err", err)
+				} else if err := d.SaveIMRoute(ctx, in.SessionID, string(payload)); err != nil {
+					slog.Warn("channels: persisting the reply route failed", "session", in.SessionID, "err", err)
+				}
+			}
 		}
 	}
 }

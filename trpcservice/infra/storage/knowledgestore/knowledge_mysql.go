@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/asset"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/knowledge"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/sqlutil"
 )
@@ -24,17 +25,31 @@ func NewMySQLManager(db *sql.DB, vsf knowledge.VectorStoreFactory, embf knowledg
 	return knowledge.NewManagerWithStore(&mysqlStore{db: db}, vsf, embf)
 }
 
-const kbCols = "kb_id, tenant_id, name, embedding_model, collection_name, dimension"
+const kbCols = "kb_id, tenant_id, name, embedding_model, collection_name, dimension, created_by, visibility"
 
 func (s *mysqlStore) CreateKB(ctx context.Context, kb *knowledge.KnowledgeBase) error {
+	kb.Visibility = asset.VisibilityOrDefault(kb.Visibility)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO knowledge_bases (kb_id, tenant_id, name, embedding_model, collection_name, dimension)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		kb.ID, kb.TenantID, kb.Name, kb.EmbeddingEndpointID, kb.CollectionName, kb.Dimension)
+		`INSERT INTO knowledge_bases (kb_id, tenant_id, name, embedding_model, collection_name, dimension, created_by, visibility)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		kb.ID, kb.TenantID, kb.Name, kb.EmbeddingEndpointID, kb.CollectionName, kb.Dimension,
+		sqlutil.Null(kb.CreatedBy), kb.Visibility)
 	if sqlutil.IsDuplicate(err) {
 		return fmt.Errorf("knowledge: kb %q already exists", kb.ID)
 	}
 	return err
+}
+
+func (s *mysqlStore) UpdateKB(ctx context.Context, kb *knowledge.KnowledgeBase) error {
+	// created_by, tenant and collection are fixed at creation: a write may
+	// rename and publish/unpublish, never move or re-target the KB.
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE knowledge_bases SET name = ?, visibility = ? WHERE kb_id = ? AND is_deleted = 0`,
+		kb.Name, asset.VisibilityOrDefault(kb.Visibility), kb.ID)
+	if err != nil {
+		return err
+	}
+	return sqlutil.RowsAffected(res, knowledge.ErrKBNotFound, kb.ID)
 }
 
 func (s *mysqlStore) GetKB(ctx context.Context, id string) (*knowledge.KnowledgeBase, error) {
@@ -136,10 +151,16 @@ func (s *mysqlStore) ListDocuments(ctx context.Context, kbID string) ([]*knowled
 }
 
 func scanKB(sc sqlutil.RowScanner) (*knowledge.KnowledgeBase, error) {
-	var kb knowledge.KnowledgeBase
-	if err := sc.Scan(&kb.ID, &kb.TenantID, &kb.Name, &kb.EmbeddingEndpointID, &kb.CollectionName, &kb.Dimension); err != nil {
+	var (
+		kb        knowledge.KnowledgeBase
+		createdBy sql.NullString
+	)
+	if err := sc.Scan(&kb.ID, &kb.TenantID, &kb.Name, &kb.EmbeddingEndpointID, &kb.CollectionName,
+		&kb.Dimension, &createdBy, &kb.Visibility); err != nil {
 		return nil, err
 	}
+	kb.CreatedBy = createdBy.String
+	kb.Visibility = asset.VisibilityOrDefault(kb.Visibility)
 	if kb.Dimension <= 0 {
 		kb.Dimension = knowledge.DefaultDimension
 	}

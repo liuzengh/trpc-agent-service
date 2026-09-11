@@ -22,6 +22,8 @@ const skillSchema = `CREATE TABLE IF NOT EXISTS skills (
     description     VARCHAR(512) NULL,
     current_version INT          NOT NULL DEFAULT 0,
     status          ENUM('draft','published','disabled') NOT NULL DEFAULT 'draft',
+    created_by      VARCHAR(64)  NULL,
+    visibility      ENUM('private','shared') NOT NULL DEFAULT 'private',
     created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     is_deleted      TINYINT      NOT NULL DEFAULT 0,

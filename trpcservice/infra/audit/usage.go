@@ -25,9 +25,13 @@ const (
 
 // UsageEntry is one metering record (the write side).
 type UsageEntry struct {
-	RecordID  string         // unique; derive as messageID + ":" + dimension
-	TenantID  string
-	AgentID   string
+	RecordID string // unique; derive as messageID + ":" + dimension
+	TenantID string
+	AgentID  string
+	// MemberID is the member whose turn produced the usage. Empty means the
+	// usage is tenant-attributed (e.g. an IM user with no platform member), and
+	// such a row is never returned to a plain member's "my usage" view.
+	MemberID  string
 	Dimension string
 	Amount    float64
 	Meta      map[string]any
@@ -35,8 +39,12 @@ type UsageEntry struct {
 
 // UsageQuery filters the read side.
 type UsageQuery struct {
-	TenantID  string
-	AgentID   string
+	TenantID string
+	AgentID  string
+	// MemberID narrows the query to the usage one member triggered. Setting it
+	// is how a plain member is shown its own consumption instead of the whole
+	// tenant's aggregate.
+	MemberID  string
 	Dimension string
 	From      time.Time // zero = no lower bound
 	To        time.Time // zero = no upper bound
@@ -48,6 +56,7 @@ type UsageRow struct {
 	RecordID  string          `json:"record_id"`
 	TenantID  string          `json:"tenant_id"`
 	AgentID   string          `json:"agent_id,omitempty"`
+	MemberID  string          `json:"member_id,omitempty"`
 	Dimension string          `json:"dimension"`
 	Amount    float64         `json:"amount"`
 	Meta      json.RawMessage `json:"meta,omitempty"`
@@ -77,9 +86,9 @@ func (r *MySQLRecorder) RecordUsage(ctx context.Context, e UsageEntry) error {
 		meta = string(b)
 	}
 	_, err := r.db.ExecContext(ctx,
-		`INSERT IGNORE INTO usage_records (record_id, tenant_id, agent_id, dimension, amount, meta)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		e.RecordID, e.TenantID, nullString(e.AgentID), e.Dimension, e.Amount, meta)
+		`INSERT IGNORE INTO usage_records (record_id, tenant_id, agent_id, member_id, dimension, amount, meta)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		e.RecordID, e.TenantID, nullString(e.AgentID), nullString(e.MemberID), e.Dimension, e.Amount, meta)
 	if err != nil {
 		return fmt.Errorf("audit: record usage: %w", err)
 	}
@@ -93,7 +102,7 @@ func (r *MySQLRecorder) UsageRows(ctx context.Context, q UsageQuery) ([]UsageRow
 	}
 	where, args := usageWhere(q)
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT record_id, tenant_id, COALESCE(agent_id,''), dimension, amount,
+		`SELECT record_id, tenant_id, COALESCE(agent_id,''), COALESCE(member_id,''), dimension, amount,
 		        COALESCE(meta,''), created_at
 		 FROM usage_records `+where+` ORDER BY id DESC LIMIT `+fmt.Sprint(q.Limit),
 		args...)
@@ -106,7 +115,7 @@ func (r *MySQLRecorder) UsageRows(ctx context.Context, q UsageQuery) ([]UsageRow
 	for rows.Next() {
 		var u UsageRow
 		var meta string
-		if err := rows.Scan(&u.RecordID, &u.TenantID, &u.AgentID, &u.Dimension,
+		if err := rows.Scan(&u.RecordID, &u.TenantID, &u.AgentID, &u.MemberID, &u.Dimension,
 			&u.Amount, &meta, &u.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -152,6 +161,10 @@ func usageWhere(q UsageQuery) (string, []any) {
 	if q.AgentID != "" {
 		clauses = append(clauses, "agent_id = ?")
 		args = append(args, q.AgentID)
+	}
+	if q.MemberID != "" {
+		clauses = append(clauses, "member_id = ?")
+		args = append(args, q.MemberID)
 	}
 	if q.Dimension != "" {
 		clauses = append(clauses, "dimension = ?")

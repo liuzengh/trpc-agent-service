@@ -36,9 +36,12 @@ const (
 )
 
 // Tenant is the first isolation boundary of the platform. DataBackend maps a
-// data domain (session/memory/...) to a backend id; unset domains fall back to
-// the platform default. Quota and AuditPolicy carry the tenant-level
-// governance strategies; nil means the safe default.
+// data domain to a backend id; domains with a second implementation today are
+// session, memory, vector, artifact and audit. Summary has no entry: summaries
+// live inside the session backend (framework session storage), so they follow
+// the tenant's session choice. An unset domain falls back to the platform
+// default. Quota and AuditPolicy carry the tenant-level governance strategies;
+// nil means the safe default.
 type Tenant struct {
 	ID          string            `json:"id"`
 	Name        string            `json:"name"`

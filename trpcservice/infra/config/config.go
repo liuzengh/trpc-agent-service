@@ -4,9 +4,15 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// DefaultReadHeaderTimeout bounds request-header reads when the config leaves
+// server.read_header_timeout unset. Slowloris-style clients hold a connection
+// (and a goroutine) open by dribbling headers, so a bound is always applied.
+const DefaultReadHeaderTimeout = 15 * time.Second
 
 // Config is the root configuration for the service.
 type Config struct {
@@ -19,12 +25,21 @@ type Config struct {
 	MinIO     MinIOConfig     `yaml:"minio"`
 	Secret    SecretConfig    `yaml:"secret"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
+	Memory    MemoryConfig    `yaml:"memory"`
 	Telemetry TelemetryConfig `yaml:"telemetry"`
 }
 
 // ServerConfig configures the HTTP server.
 type ServerConfig struct {
 	HTTPAddr string `yaml:"http_addr"`
+	// Production turns development conveniences into hard failures: a missing
+	// signing secret currently falls back to a built-in value, which would let
+	// anyone mint tokens. Set this on real deployments.
+	Production bool `yaml:"production"`
+	// ReadHeaderTimeout bounds how long a client may take to send its request
+	// headers. Zero uses DefaultReadHeaderTimeout; a slow-header client would
+	// otherwise hold a connection and a goroutine indefinitely.
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
 }
 
 // MySQLConfig configures the platform MySQL backend. An empty DSN keeps the
@@ -86,6 +101,31 @@ type RateLimitConfig struct {
 	PerMinute int64 `yaml:"per_minute"`
 }
 
+// MemoryConfig configures the platform's long-term memory feature. Memory is
+// stored in a per-tenant backend chosen through the tenant's data_backend
+// selection (storage.Router); this knobs controls whether the feature is
+// switched on at all.
+//
+// PreloadCount is the framework's adaptive preload budget - an operator-visible
+// cost/quality tradeoff, not a hard count:
+//
+//	0  long-term memory is off: no memory service, no memory tools. The agent
+//	   still has the session transcript (short-term context).
+//	-1 every stored memory is injected. Grows the prompt with the memory set,
+//	   so it is not recommended in production.
+//	N>0 when the user has at most N memories they are all injected; beyond that
+//	   the N most relevant to the current question are.
+type MemoryConfig struct {
+	PreloadCount int `yaml:"preload_count"`
+}
+
+// DefaultMemoryPreloadCount is the preload budget applied when the config file
+// does not mention memory at all. The framework default is 0 (memory off);
+// this platform turns long-term memory on by default because cross-session
+// recall is a product requirement and the budget is small enough to bound the
+// prompt growth (only users who actually stored memories are affected).
+const DefaultMemoryPreloadCount = 10
+
 // Default returns a Config populated with safe defaults.
 func Default() *Config {
 	return &Config{
@@ -93,6 +133,7 @@ func Default() *Config {
 		Log:       LogConfig{Level: "info"},
 		Role:      "all",
 		RateLimit: RateLimitConfig{Enable: false, PerMinute: 60},
+		Memory:    MemoryConfig{PreloadCount: DefaultMemoryPreloadCount},
 		Telemetry: TelemetryConfig{ServiceName: "trpc-agent-service"},
 	}
 }

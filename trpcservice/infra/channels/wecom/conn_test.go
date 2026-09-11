@@ -118,3 +118,31 @@ func TestConnRecvLifecycle(t *testing.T) {
 		t.Errorf("recv prefers pending message: got=%s err=%v", got, err)
 	}
 }
+
+// TestSlotLimiterBoundsPlaceholderSends guards the placeholder path: the SDK's
+// ReplyStream has no timeout, so an ack that never comes would otherwise park
+// one goroutine per inbound message. The limiter must refuse once every slot is
+// taken and must hand slots back.
+func TestSlotLimiterBoundsPlaceholderSends(t *testing.T) {
+	l := newSlotLimiter(2)
+	if !l.tryAcquire() || !l.tryAcquire() {
+		t.Fatal("the first two acquires must succeed")
+	}
+	if l.tryAcquire() {
+		t.Error("a third acquire must be refused while both slots are held")
+	}
+	l.release()
+	if !l.tryAcquire() {
+		t.Error("a released slot must be reusable")
+	}
+}
+
+// TestSlotLimiterIsNilSafe keeps the placeholder path safe when the limiter was
+// not constructed (a zero-value Conn in a test, or a future refactor).
+func TestSlotLimiterIsNilSafe(t *testing.T) {
+	var l *slotLimiter
+	if l.tryAcquire() {
+		t.Error("a nil limiter must refuse rather than block")
+	}
+	l.release() // must not panic
+}

@@ -66,6 +66,7 @@ func buildUsageEntries(m *bus.Message, agentID string, tokens int64, toolCalls m
 			RecordID:  usageRecordID(m.ID, dim),
 			TenantID:  m.TenantID,
 			AgentID:   agentID,
+			MemberID:  m.UserID,
 			Dimension: dim,
 			Amount:    amount,
 			Meta:      meta,

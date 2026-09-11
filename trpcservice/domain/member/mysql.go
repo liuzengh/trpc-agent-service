@@ -48,9 +48,15 @@ func (s *mysqlStore) GetByUserID(ctx context.Context, userID string) (*Member, e
 }
 
 func (s *mysqlStore) List(ctx context.Context, tenantID string) ([]*Member, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT tenant_id, user_id, role, password_hash, created_at FROM tenant_members WHERE tenant_id = ? ORDER BY user_id`,
-		tenantID)
+	query := `SELECT tenant_id, user_id, role, password_hash, created_at FROM tenant_members`
+	args := []any{}
+	// An empty tenant means "every tenant" (the platform owner's view).
+	if tenantID != "" {
+		query += ` WHERE tenant_id = ?`
+		args = append(args, tenantID)
+	}
+	query += ` ORDER BY tenant_id, user_id`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list members: %w", err)
 	}

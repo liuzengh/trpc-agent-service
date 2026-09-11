@@ -30,6 +30,12 @@ export const useKBStore = defineStore('kb', {
       await api.deleteKB(id)
       this.kbs = this.kbs.filter((x) => x.id !== id)
     },
+    /** 共享/收回：只有作者与租户管理员有权限（后端按行校验 created_by）。 */
+    async setVisibility(row: KnowledgeBase, visibility: 'private' | 'shared') {
+      const updated = await api.updateKB({ ...row, visibility })
+      const i = this.kbs.findIndex((x) => x.id === row.id)
+      if (i >= 0) this.kbs[i] = updated
+    },
     async addDocument(kbId: string, doc: Partial<Document>) {
       return api.addDocument(kbId, doc)
     },

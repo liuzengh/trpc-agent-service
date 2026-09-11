@@ -45,6 +45,12 @@ type Conn struct {
 	once   sync.Once
 	done   chan struct{}
 
+	// placeholders bounds the concurrent placeholder sends. The SDK call has
+	// no timeout, so an ack that never arrives would otherwise leave one
+	// goroutine parked per inbound message; with the bound, a stuck SDK costs
+	// a slot instead of unbounded memory (the real reply still goes out).
+	placeholders *slotLimiter
+
 	// mu guards pending: per reply-target, the FIFO of open stream
 	// placeholders awaiting their real reply. The worker processes one session
 	// serially and replies are appended in message order, so popping the queue
@@ -52,6 +58,42 @@ type Conn struct {
 	// user fires several messages before the first reply lands.
 	mu      sync.Mutex
 	pending map[string][]*pendingStream
+}
+
+// placeholderSlots is how many placeholder sends may be in flight at once.
+const placeholderSlots = 8
+
+// slotLimiter is a counting semaphore with a non-blocking acquire.
+type slotLimiter struct {
+	slots chan struct{}
+}
+
+func newSlotLimiter(n int) *slotLimiter {
+	return &slotLimiter{slots: make(chan struct{}, n)}
+}
+
+// tryAcquire takes a slot, reporting false when none is free.
+func (l *slotLimiter) tryAcquire() bool {
+	if l == nil || l.slots == nil {
+		return false
+	}
+	select {
+	case l.slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// release returns a slot.
+func (l *slotLimiter) release() {
+	if l == nil || l.slots == nil {
+		return
+	}
+	select {
+	case <-l.slots:
+	default:
+	}
 }
 
 // pendingStream is an open stream placeholder (finish=false) that the real
@@ -72,9 +114,10 @@ const thinkingMsg = "正在处理，请稍候…"
 // blocks: the SDK dials in the background and reconnects on its own schedule.
 func NewConn(botID, secret string) *Conn {
 	c := &Conn{
-		events:  make(chan []byte, 64),
-		done:    make(chan struct{}),
-		pending: make(map[string][]*pendingStream),
+		events:       make(chan []byte, 64),
+		done:         make(chan struct{}),
+		pending:      make(map[string][]*pendingStream),
+		placeholders: newSlotLimiter(placeholderSlots),
 	}
 	c.client = aibot.NewWSClient(aibot.WSClientOptions{
 		BotID:  botID,
@@ -94,9 +137,17 @@ func NewConn(botID, secret string) *Conn {
 		c.mu.Lock()
 		c.pending[target] = append(c.pending[target], ps)
 		c.mu.Unlock()
-		go func() {
-			_, _ = c.client.ReplyStream(frame, ps.streamID, thinkingMsg, false, nil, nil)
-		}()
+		if c.placeholders.tryAcquire() {
+			go func() {
+				defer c.placeholders.release()
+				_, _ = c.client.ReplyStream(frame, ps.streamID, thinkingMsg, false, nil, nil)
+			}()
+		} else {
+			// Every slot is stuck on an unacknowledged send: skip the
+			// "processing" hint instead of adding another parked goroutine.
+			// The reply itself still reaches the user via Send.
+			slog.Warn("wecom: placeholder slots exhausted, skipping the in-progress hint")
+		}
 		select {
 		case c.events <- raw:
 		case <-c.done:

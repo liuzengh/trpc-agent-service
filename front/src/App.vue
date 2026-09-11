@@ -5,6 +5,7 @@ import { useTenantStore } from './stores/tenant'
 import { useSkillStore } from './stores/skill'
 import { useKBStore } from './stores/kb'
 import { useAgentStore } from './stores/agent'
+import { useEndpointStore } from './stores/endpoint'
 import { useAuthStore } from './stores/auth'
 
 const route = useRoute()
@@ -13,9 +14,12 @@ const tenantStore = useTenantStore()
 const skillStore = useSkillStore()
 const kbStore = useKBStore()
 const agentStore = useAgentStore()
+const endpointStore = useEndpointStore()
 const authStore = useAuthStore()
 
 const isLoginPage = computed(() => route.path === '/login')
+// 只有平台级 owner 需要跨租户切换；admin/member 固定属于自己的租户。
+const isOwner = computed(() => authStore.userRole === 'owner')
 
 onMounted(() => {
   // Gate on the session, not on the route path: the router resolves the initial
@@ -27,10 +31,9 @@ onMounted(() => {
 })
 
 // Switching tenants re-fetches tenant-scoped collections.
-// Permission-aware on purpose: a plain member cannot read KBs or skills, so an
-// unconditional refresh fires 403s on every login (rejected by the backend and
-// merely noise server-side). Each store mirrors the permission its page route
-// declares.
+// Permission-aware on purpose: each store mirrors the permission its page route
+// declares, so a role that cannot read a collection never fires a request that
+// the backend would reject (and the member/agent scoping stays coherent).
 watch(
   () => tenantStore.currentTenantId,
   (id) => {
@@ -38,6 +41,7 @@ watch(
     if (authStore.hasPermission('skill:manage')) skillStore.fetch()
     if (authStore.hasPermission('kb:manage')) kbStore.fetch()
     if (authStore.hasPermission('agent:read')) agentStore.fetch()
+    if (authStore.hasPermission('endpoint:manage')) endpointStore.fetch()
   },
 )
 
@@ -51,7 +55,7 @@ const handleLogout = () => {
 const navItems = computed(() => {
   const items = [
     { path: '/', label: '租户管理', icon: '📊', permission: 'tenant:manage' },
-    { path: '/endpoints', label: '模型端点', icon: '🔌', permission: 'agent:read' },
+    { path: '/endpoints', label: '模型端点', icon: '🔌', permission: 'endpoint:manage' },
     { path: '/agents', label: 'Agent 配置', icon: '🤖', permission: 'agent:read' },
     { path: '/tools', label: '工具目录', icon: '🔧', permission: 'tool:manage' },
     { path: '/kbs', label: '知识库', icon: '📚', permission: 'kb:manage' },
@@ -61,8 +65,8 @@ const navItems = computed(() => {
     { path: '/channels', label: 'IM 通道', icon: '🔗', permission: 'channel:manage' },
     { path: '/secrets', label: '密钥管理', icon: '🔐', permission: 'secret:manage' },
     { path: '/audit', label: '审计日志', icon: '📝', permission: 'audit:read' },
-    { path: '/usage', label: '用量计量', icon: '📈', permission: 'audit:read' },
-    { path: '/users', label: '用户管理', icon: '👥', permission: 'tenant:manage' },
+    { path: '/usage', label: '用量计量', icon: '📈', permission: 'usage:read' },
+    { path: '/users', label: '用户管理', icon: '👥', permission: 'member:manage' },
   ]
 
   // 根据权限过滤
@@ -83,7 +87,7 @@ const navItems = computed(() => {
   <div v-else class="layout">
     <aside class="sidebar">
       <div class="logo">Agent 平台</div>
-      <div class="tenant-picker">
+      <div v-if="isOwner" class="tenant-picker">
         <el-select
           :model-value="tenantStore.currentTenantId"
           placeholder="选择租户"

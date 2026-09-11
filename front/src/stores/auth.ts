@@ -134,27 +134,52 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   // 检查是否有某个权限
+  //
+  // 与后端 web/rolePermissions 保持一致：owner 平台级（所有租户），admin 管理
+  // 整个租户，member 是租户员工——可创建并共享租户资产（知识库/Skill/IM 绑定/
+  // 模型端点）、给 Agent 授权工具、对话，并查看自己的用量；但不可管理租户、
+  // 成员、密钥与审计。
+  //
+  // 注意：admin 与 member 持有的资产权限字符串相同，差别在**范围**——
+  // admin 管全租户，member 只管自己创建的行。行级判断在视图层用
+  // `canManageAsset(row)` 完成，不能只看权限位。
   const hasPermission = (permission: string) => {
     const ROLE_PERMISSIONS = {
       owner: [
-        'tenant:manage', 'tenant:read',
+        'tenant:manage', 'tenant:read', 'member:manage',
         'agent:create', 'agent:read', 'agent:update', 'agent:delete',
-        'tool:manage', 'kb:manage', 'skill:manage', 'channel:manage',
-        'secret:manage', 'audit:read', 'chat', 'dlq:manage'
+        'tool:manage', 'kb:manage', 'skill:manage', 'channel:manage', 'endpoint:manage',
+        'secret:manage', 'audit:read', 'usage:read', 'chat', 'dlq:manage'
       ],
       admin: [
-        'tenant:read',
+        'tenant:read', 'member:manage',
         'agent:create', 'agent:read', 'agent:update',
-        'tool:manage', 'kb:manage', 'skill:manage', 'channel:manage',
-        'audit:read', 'chat', 'dlq:manage'
+        'tool:manage', 'kb:manage', 'skill:manage', 'channel:manage', 'endpoint:manage',
+        'audit:read', 'usage:read', 'chat', 'dlq:manage'
       ],
       member: [
         'tenant:read',
-        'agent:read', 'chat'
+        'agent:create', 'agent:read', 'agent:update', 'agent:delete',
+        'tool:manage', 'kb:manage', 'skill:manage', 'channel:manage', 'endpoint:manage',
+        'usage:read', 'chat'
       ]
     }
     return ROLE_PERMISSIONS[user.value?.role || '']?.includes(permission) ?? false
   }
+
+  // 是否管理整个租户的资产（admin/owner）。member 只能管理自己创建的行，
+  // 因此视图层要配合 canManageAsset 做行级判断。
+  const managesTenantAssets = computed(
+    () => user.value?.role === 'owner' || user.value?.role === 'admin'
+  )
+
+  // 行级：我是否创建了这条资产。
+  const ownsAsset = (row: { created_by?: string } | null | undefined) =>
+    !!row?.created_by && row.created_by === user.value?.user_id
+
+  // 行级：我能否修改/删除这条资产（admin/owner 可管全部，member 仅自己的）。
+  const canManageAsset = (row: { created_by?: string } | null | undefined) =>
+    managesTenantAssets.value || ownsAsset(row)
 
   const isAuthenticated = computed(() => !!token.value)
   const userInfo = computed(() => user.value)
@@ -175,5 +200,8 @@ export const useAuthStore = defineStore('auth', () => {
     ensureSession,
     register,
     hasPermission,
+    managesTenantAssets,
+    ownsAsset,
+    canManageAsset,
   }
 })

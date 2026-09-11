@@ -1,7 +1,6 @@
 package web
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,29 +13,25 @@ func newTenantServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	NewTenantAPI(tenant.NewManager()).Register(mux)
-	return httptest.NewServer(mux)
+	return httptest.NewServer(asClaims(mux))
 }
 
 func TestTenantAPICRUD(t *testing.T) {
 	srv := newTenantServer(t)
 	defer srv.Close()
 
+	// Tenant management is owner-only, so these hit the API as the owner.
+	c := clientAs(ownerClaims())
+
 	// create
-	resp, err := http.Post(srv.URL+"/tenants", "application/json",
-		bytes.NewBufferString(`{"id":"t1","name":"acme","status":"active"}`))
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
+	resp := postAs(t, c, srv.URL+"/tenants", `{"id":"t1","name":"acme","status":"active"}`)
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("create status = %d, want %d", resp.StatusCode, http.StatusCreated)
 	}
 	resp.Body.Close()
 
 	// get
-	resp, err = http.Get(srv.URL + "/tenants/t1")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
+	resp = getAs(t, c, srv.URL+"/tenants/t1")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("get status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
@@ -50,10 +45,7 @@ func TestTenantAPICRUD(t *testing.T) {
 	}
 
 	// list
-	resp, err = http.Get(srv.URL + "/tenants")
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
+	resp = getAs(t, c, srv.URL+"/tenants")
 	var all []tenant.Tenant
 	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
 		t.Fatalf("decode list: %v", err)
@@ -64,38 +56,87 @@ func TestTenantAPICRUD(t *testing.T) {
 	}
 
 	// update
-	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/tenants/t1",
-		bytes.NewBufferString(`{"name":"acme-corp","status":"active"}`))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("update: %v", err)
-	}
+	resp = doAs(t, c, http.MethodPut, srv.URL+"/tenants/t1", `{"name":"acme-corp","status":"active"}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("update status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	resp.Body.Close()
 
 	// delete
-	req, _ = http.NewRequest(http.MethodDelete, srv.URL+"/tenants/t1", nil)
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("delete: %v", err)
-	}
+	resp = doAs(t, c, http.MethodDelete, srv.URL+"/tenants/t1", "")
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("delete status = %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
 	resp.Body.Close()
 
 	// get after delete -> not found
-	resp, err = http.Get(srv.URL + "/tenants/t1")
-	if err != nil {
-		t.Fatalf("get after delete: %v", err)
-	}
+	resp = getAs(t, c, srv.URL+"/tenants/t1")
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("get after delete status = %d, want %d", resp.StatusCode, http.StatusNotFound)
 	}
 	resp.Body.Close()
+}
+
+// TestTenantRoutesAreScopedToTheCallersTenant covers the tenant-level tenant
+// isolation: an admin of tenant-a may read its own tenant, but another tenant
+// is reported as missing and can neither be mutated nor rolled back.
+func TestTenantRoutesAreScopedToTheCallersTenant(t *testing.T) {
+	srv := newTenantServer(t)
+	defer srv.Close()
+
+	owner := clientAs(ownerClaims())
+	for _, id := range []string{"tenant-a", "tenant-b"} {
+		resp := postAs(t, owner, srv.URL+"/tenants", `{"id":"`+id+`","name":"`+id+`","status":"active"}`)
+		resp.Body.Close()
+	}
+
+	admin := clientAs(adminClaims("tenant-a"))
+
+	// Own tenant is readable.
+	resp := getAs(t, admin, srv.URL+"/tenants/tenant-a")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("own tenant status = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// A foreign tenant is not even confirmed to exist.
+	resp = getAs(t, admin, srv.URL+"/tenants/tenant-b")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("foreign tenant status = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = doAs(t, admin, http.MethodPut, srv.URL+"/tenants/tenant-b", `{"name":"hijacked","status":"active"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("foreign tenant update status = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = doAs(t, admin, http.MethodDelete, srv.URL+"/tenants/tenant-b", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("foreign tenant delete status = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// The directory is narrowed to the caller's tenant.
+	resp = getAs(t, admin, srv.URL+"/tenants")
+	var list []tenant.Tenant
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	resp.Body.Close()
+	if len(list) != 1 || list[0].ID != "tenant-a" {
+		t.Errorf("admin tenant list = %+v, want only tenant-a", list)
+	}
+
+	// The foreign tenant survived untouched.
+	resp = getAs(t, owner, srv.URL+"/tenants/tenant-b")
+	var b tenant.Tenant
+	_ = json.NewDecoder(resp.Body).Decode(&b)
+	resp.Body.Close()
+	if b.Name != "tenant-b" {
+		t.Errorf("tenant-b name = %q, want untouched", b.Name)
+	}
 }
 
 // TestTenantConfigVersionsAndRollback covers the tenant-level configuration
@@ -104,21 +145,14 @@ func TestTenantConfigVersionsAndRollback(t *testing.T) {
 	srv := newTenantServer(t)
 	defer srv.Close()
 
-	if resp, err := http.Post(srv.URL+"/tenants", "application/json",
-		bytes.NewBufferString(`{"id":"t1","name":"acme","status":"active"}`)); err != nil {
-		t.Fatalf("create: %v", err)
-	} else {
-		resp.Body.Close()
-	}
+	c := clientAs(ownerClaims())
+
+	resp := postAs(t, c, srv.URL+"/tenants", `{"id":"t1","name":"acme","status":"active"}`)
+	resp.Body.Close()
 
 	put := func(body string) {
 		t.Helper()
-		req, _ := http.NewRequest(http.MethodPut, srv.URL+"/tenants/t1", bytes.NewBufferString(body))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("put: %v", err)
-		}
+		resp := doAs(t, c, http.MethodPut, srv.URL+"/tenants/t1", body)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("put status = %d, want 200 (body %s)", resp.StatusCode, body)
@@ -129,10 +163,7 @@ func TestTenantConfigVersionsAndRollback(t *testing.T) {
 	put(`{"name":"acme","status":"active","quota":{"token_quota":5000}}`)
 
 	// History lists newest first.
-	resp, err := http.Get(srv.URL + "/tenants/t1/config-versions")
-	if err != nil {
-		t.Fatalf("config-versions: %v", err)
-	}
+	resp = getAs(t, c, srv.URL+"/tenants/t1/config-versions")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("config-versions status = %d", resp.StatusCode)
 	}
@@ -146,13 +177,7 @@ func TestTenantConfigVersionsAndRollback(t *testing.T) {
 	}
 
 	// Rollback to version 1 restores quota 1000 and records a new head v3.
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/tenants/t1/config-rollback",
-		bytes.NewBufferString(`{"version":1}`))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("rollback: %v", err)
-	}
+	resp = doAs(t, c, http.MethodPost, srv.URL+"/tenants/t1/config-rollback", `{"version":1}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("rollback status = %d", resp.StatusCode)
 	}
@@ -166,26 +191,14 @@ func TestTenantConfigVersionsAndRollback(t *testing.T) {
 	}
 
 	// Unknown version -> 404.
-	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/tenants/t1/config-rollback",
-		bytes.NewBufferString(`{"version":99}`))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("rollback unknown: %v", err)
-	}
+	resp = doAs(t, c, http.MethodPost, srv.URL+"/tenants/t1/config-rollback", `{"version":99}`)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("rollback unknown version status = %d, want 404", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	// Zero version rejected.
-	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/tenants/t1/config-rollback",
-		bytes.NewBufferString(`{"version":0}`))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("rollback zero: %v", err)
-	}
+	resp = doAs(t, c, http.MethodPost, srv.URL+"/tenants/t1/config-rollback", `{"version":0}`)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("rollback zero version status = %d, want 400", resp.StatusCode)
 	}

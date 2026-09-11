@@ -43,7 +43,19 @@
 - **KeySource**：llm 侧的凭据解析接口（`Get(ctx,key)`），由 secret.Store 满足——避免 llm 反向依赖 secret 包；`Endpoint.APIKeyRef` 在 Resolve 时经它取用，取代明文 `APIKey`。
 - **AES-256-GCM**：密文 `base64(nonce‖ciphertext)`，随机 nonce；不同主密钥无法解密（GCM tag 校验失败）。
 
-## 用量计量（阶段 22 确立）
+## 资产归属与共享（阶段 41 确立）
+
+- **租户资产（Tenant Asset）**：知识库 / Skill / IM 通道绑定 / 模型端点。四者同构：带 `tenant_id` + `created_by`（作者，weak ref）+ `visibility`。
+- **作者（Author）**：创建资产的那个 member（`created_by = JWT user_id`）。**所有权是行属性，不是权限位**——同一个 `kb:manage` 权限对 admin 是"管全租户"，对 member 是"只管自己创建的"，差别在范围而不在权限字符串。`created_by` 为空（历史数据/系统创建）的行只归租户管理员管。
+- **可见性（Visibility）**：`private`（默认，仅作者与租户管理员可见）| `shared`（作者主动共享后租户内**只读**可见）。未知值一律降级为 private——拼写错误绝不能放宽访问。
+- **管理权（Manage）**：作者可改/删自己的行并切换 visibility；admin/owner 可改/删本租户任意行（owner 另有跨租户与全局资产权）。**共享不转移管理权**：shared 行对他人是只读的。
+- **跨租户**：非 owner 一律钉死本租户（`ClaimTenant` 写入锚定、`ScopeTenant` 读取锚定，含省略 `?tenant_id=`）。外部资源统一返回 **404 而非 403**（不确认存在性），但**拒绝会写审计**（deny），所以探测留痕。
+- **global 资产**：scope=global（Skill/端点）是平台资产，**只有 owner 可建/改**；对所有人可见可用。
+- **成员资产权限（member）**：可创建并共享知识库 / Skill / IM 绑定 / 模型端点，可看工具目录并给自己的 Agent 授权工具（**无工具定义写接口**），可对话，可查看**自己触发的**用量；不可管理租户/成员/密钥/审计/DLQ，不可创建 Agent。
+- **用量归属（Usage Attribution）**：`usage_records.member_id` 记录触发该消耗的成员；member 的 `GET /usage` 被强制钉到自身 member 维度（`?member_id=` 无法放宽），admin/owner 看租户全部（含 member_id 为空的历史行）。
+- **资产变更审计（Asset Change Audit）**：每次资产写操作落一行 audit_logs——`channel=console`、`agent_name=资产种类`（kb/skill/binding/endpoint）、`tool_name=资产 id`、`session_id=asset:<kind>:<id>`、`decision=executed|deny`。被拒的探测（跨租户、非作者的 shared 行）同样入账。
+
+## 用量计量（阶段 22 确立，阶段 41 扩展归属）
 
 - **Usage 计量（Metering）**：按租户/Agent/维度记录平台消耗量，用于成本归属；**只计量、不折价**（无单价价目，金额口径未定）。
 - **维度（Dimension）**：`token | tool | sandbox | artifact | skill`；worker 每回合自动写入各维度（token 取模型用量，tool/sandbox 取工具调用次数，artifact 取制品保存数，skill 取本轮注入的 SKILL.md 数）。

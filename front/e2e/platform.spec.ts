@@ -15,6 +15,10 @@ const memberId = `e2e-member-${ts}`
 // the pattern at the end of the whole URL.
 const loginUrl = /\/login(\?|$)/
 
+// Direct API calls must hit whatever backend the SPA was pointed at; the
+// side-stack config overrides this so a run can never touch another deployment.
+const apiBase = process.env.E2E_API_BASE ?? 'http://localhost:8080'
+
 // State is held by the in-memory backend that the playwright webServer boots,
 // so ids must be unique per run (they persist across tests within one run).
 
@@ -97,6 +101,21 @@ test.describe('认证与成员管理', () => {
 })
 
 test.describe('端点 → 知识库 → Agent 发布链路', () => {
+  // The tenant is seeded over the API and idempotently: the in-memory backend
+  // keeps state across runs, so the UI "create tenant" step would fail with 409
+  // on a reused id and take the whole chain down with it.
+  test.beforeAll(async ({ browser }) => {
+    const page = await browser.newPage()
+    await login(page)
+    const token = await page.evaluate(() => localStorage.getItem('auth_token'))
+    const res = await page.request.post(`${apiBase}/tenants`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { id: tenantId, name: 'E2E 租户', status: 'active' },
+    })
+    expect([201, 409]).toContain(res.status())
+    await page.close()
+  })
+
   test('新建模型端点', async ({ page }) => {
     await login(page)
     await page.goto('/endpoints')
@@ -132,10 +151,19 @@ test.describe('端点 → 知识库 → Agent 发布链路', () => {
 
   test('发布 Agent 挂载端点 + 知识库', async ({ page }) => {
     await login(page)
-    // Seed the bare agent over the API (the UI only edits/publishes).
-    const res = await page.request.post('http://localhost:8080/agents', {
+    // Seed the bare agent over the API (the UI only edits/publishes). The tenant
+    // is explicit because the owner is platform-wide, and it is created shared
+    // so the member-BAC case below can use it.
+    const res = await page.request.post('${apiBase}/agents', {
       headers: { Authorization: `Bearer ${await page.evaluate(() => localStorage.getItem('auth_token'))}` },
-      data: { id: agentId, tenant_id: tenantId, name: agentName, status: 'draft', current_version: 0 },
+      data: {
+        id: agentId,
+        tenant_id: tenantId,
+        name: agentName,
+        status: 'draft',
+        current_version: 0,
+        visibility: 'shared',
+      },
     })
     expect(res.ok()).toBeTruthy()
 
@@ -164,21 +192,23 @@ test.describe('端点 → 知识库 → Agent 发布链路', () => {
     await page.getByRole('heading', { name: 'Agent 配置' }).waitFor()
     const row = page.locator('tr', { hasText: agentName })
     await expect(row).toBeVisible()
-    await expect(row.locator('td').nth(3)).toContainText('1')
+    // Columns: 名称 | 租户 | 可见性 | 作者 | 状态 | 版本 | ...
+    await expect(row.locator('td').nth(5)).toContainText('1')
     await expect(row).toContainText('published')
   })
 })
 
-// A plain member is the only role that exercises the guard's permission
-// fallback and the permission-aware data refresh, so it gets its own coverage:
-// limited navigation, no rejected (403) request, and a forbidden URL falling
-// back instead of looping or bouncing through /login.
+// A plain member is an employee who authors tenant assets: it sees the asset
+// pages, creates and shares its own rows, and reads its own usage — while still
+// never reaching tenant/member/credential/audit management. It is also the only
+// role that exercises the guard's permission fallback and the permission-aware
+// data refresh, so it gets its own coverage.
 const rbacMemberId = `e2e-rbac-${ts}`
-const memberVisible = ['模型端点', 'Agent 配置', 'Agent 对话']
-const memberHidden = [
-  '租户管理', '用户管理', '工具目录', '知识库', 'Skill 资产',
-  'IM 通道', '密钥管理', '审计日志', '用量计量',
+const memberVisible = [
+  '模型端点', 'Agent 配置', 'Agent 对话', '工具目录', '知识库',
+  'Skill 资产', 'IM 通道', '会话历史', '用量计量',
 ]
+const memberHidden = ['租户管理', '用户管理', '密钥管理', '审计日志']
 
 test.describe('member 角色 RBAC', () => {
   test('member 只能看到被授权的页面，且不触发 403', async ({ page }) => {
@@ -225,7 +255,7 @@ test.describe('member 角色 RBAC', () => {
 
     // cleanup keeps the suite repeatable (user_id is globally unique)
     const deleted = await page.request.delete(
-      `http://localhost:8080/members/${encodeURIComponent(rbacMemberId)}`,
+      `${apiBase}/members/${encodeURIComponent(rbacMemberId)}`,
       { headers: { Authorization: `Bearer ${ownerToken}` } },
     )
     expect(deleted.ok()).toBeTruthy()

@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/asset"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/llm"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/sqlutil"
 )
@@ -27,13 +29,15 @@ func NewMySQLManager(db *sql.DB, llmReg *llm.Registry) *agent.Manager {
 }
 
 // agentCols lists the agents columns shared by Get and List.
-const agentCols = "agent_id, tenant_id, name, description, status, current_version"
+const agentCols = "agent_id, tenant_id, name, description, status, current_version, created_by, visibility, gray"
 
 func (s *mysqlStore) Create(ctx context.Context, a agent.Agent) error {
+	a.Visibility = asset.VisibilityOrDefault(a.Visibility)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO agents (agent_id, tenant_id, agent_code, name, description, status, current_version)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		a.ID, a.TenantID, a.ID, a.Name, sqlutil.Null(a.Description), a.Status, a.CurrentVersion)
+		`INSERT INTO agents (agent_id, tenant_id, name, description, status, current_version, created_by, visibility)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.TenantID, a.Name, sqlutil.Null(a.Description), a.Status, a.CurrentVersion,
+		sqlutil.Null(a.CreatedBy), a.Visibility)
 	if sqlutil.IsDuplicate(err) {
 		return fmt.Errorf("agent: %q already exists", a.ID)
 	}
@@ -72,8 +76,9 @@ func (s *mysqlStore) List(ctx context.Context, tenantID string) ([]agent.Agent, 
 }
 
 func (s *mysqlStore) Update(ctx context.Context, a agent.Agent) error {
-	query := `UPDATE agents SET name = ?, description = ?`
-	args := []any{a.Name, sqlutil.Null(a.Description)}
+	// created_by is set at creation and never rewritten: ownership does not move.
+	query := `UPDATE agents SET name = ?, description = ?, visibility = ?`
+	args := []any{a.Name, sqlutil.Null(a.Description), asset.VisibilityOrDefault(a.Visibility)}
 	if a.Status != "" {
 		query += `, status = ?`
 		args = append(args, a.Status)
@@ -218,17 +223,72 @@ func (s *mysqlStore) Versions(ctx context.Context, id string) ([]agent.VersionIn
 	return out, rows.Err()
 }
 
+// ResolveVersion returns one published version's profile. The existence of the
+// agent is checked explicitly so "no such agent" and "no such version" are
+// distinguishable errors rather than both surfacing as ErrNotFound.
+func (s *mysqlStore) ResolveVersion(ctx context.Context, id string, version int) (agent.RuntimeProfile, error) {
+	var exists int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM agents WHERE agent_id = ? AND is_deleted = 0`, id).Scan(&exists); err != nil {
+		return agent.RuntimeProfile{}, sqlutil.NoRows(err, agent.ErrNotFound)
+	}
+	var profile []byte
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT runtime_profile FROM agent_versions WHERE agent_id = ? AND version = ?`,
+		id, version).Scan(&profile); err != nil {
+		return agent.RuntimeProfile{}, sqlutil.NoRows(err, agent.ErrNotFound)
+	}
+	var p agent.RuntimeProfile
+	if err := json.Unmarshal(profile, &p); err != nil {
+		return agent.RuntimeProfile{}, err
+	}
+	return p, nil
+}
+
+// SetGray stores or clears (nil) the canary release.
+func (s *mysqlStore) SetGray(ctx context.Context, id string, g *agent.GrayRelease) error {
+	var payload any
+	if g != nil {
+		encoded, err := json.Marshal(g)
+		if err != nil {
+			return err
+		}
+		payload = string(encoded)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE agents SET gray = ? WHERE agent_id = ? AND is_deleted = 0`, payload, id)
+	if err != nil {
+		return err
+	}
+	return sqlutil.RowsAffected(res, agent.ErrNotFound, id)
+}
+
 func scanAgent(sc sqlutil.RowScanner) (*agent.Agent, error) {
 	var (
 		a           agent.Agent
 		description sql.NullString
+		createdBy   sql.NullString
+		gray        []byte
 	)
-	if err := sc.Scan(&a.ID, &a.TenantID, &a.Name, &description, &a.Status, &a.CurrentVersion); err != nil {
+	if err := sc.Scan(&a.ID, &a.TenantID, &a.Name, &description, &a.Status, &a.CurrentVersion,
+		&createdBy, &a.Visibility, &gray); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, agent.ErrNotFound
 		}
 		return nil, err
 	}
 	a.Description = description.String
+	a.CreatedBy = createdBy.String
+	a.Visibility = asset.VisibilityOrDefault(a.Visibility)
+	if len(gray) > 0 {
+		var g agent.GrayRelease
+		if err := json.Unmarshal(gray, &g); err != nil {
+			// A hand-edited column must not make the agent unreadable: the
+			// agent works, the canary is simply off.
+			slog.Warn("agentstore: unreadable gray release ignored", "agent", a.ID, "err", err)
+		} else if g.Version >= 1 && g.Percent > 0 {
+			a.Gray = &g
+		}
+	}
 	return &a, nil
 }

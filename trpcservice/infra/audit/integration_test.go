@@ -100,7 +100,7 @@ func TestMySQLRecorderAsyncFlush(t *testing.T) {
 
 	// The read side: List must return the flushed rows for a tenant in
 	// newest-first order with the dimensions a front-end table needs.
-	logs, err := r.List(ctx, "t1", 50)
+	logs, err := r.List(ctx, ListQuery{TenantID: "t1", Limit: 50})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestMySQLRecorderAsyncFlush(t *testing.T) {
 	}
 
 	// Empty tenant filter returns every tenant's rows.
-	all, err := r.List(ctx, "", 100)
+	all, err := r.List(ctx, ListQuery{Limit: 100})
 	if err != nil {
 		t.Fatalf("List all: %v", err)
 	}

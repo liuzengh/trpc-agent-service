@@ -13,6 +13,9 @@ export interface CreateMemberInput {
   user_id: string
   password: string
   role: MemberRole
+  /** Only the platform owner may choose the tenant; an admin's value is ignored
+   * server-side and the member always lands in the admin's own tenant. */
+  tenant_id?: string
 }
 
 export async function listMembers(): Promise<Member[]> {

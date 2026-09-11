@@ -18,9 +18,17 @@ func newMySQLStoreForTest(t *testing.T) *MySQLStore {
 	t.Helper()
 	ctx := context.Background()
 
-	scripts, err := filepath.Glob(filepath.Join("..", "..", "deployments", "mysql", "init", "*.sql"))
+	// This package sits three levels below the repo root
+	// (trpcservice/infra/secret), so the schema lives at ../../../deployments.
+	// The old two-level path silently globbed nothing, and the test then failed
+	// with "Table 'test.secrets' doesn't exist" — a broken test, not a broken
+	// store.
+	scripts, err := filepath.Glob(filepath.Join("..", "..", "..", "deployments", "mysql", "init", "*.sql"))
 	if err != nil {
 		t.Fatalf("glob init sql: %v", err)
+	}
+	if len(scripts) == 0 {
+		t.Fatal("no init sql found: the schema this test needs was never loaded")
 	}
 	c, err := mysql.Run(ctx, "mysql:8.0",
 		mysql.WithUsername("test"), mysql.WithPassword("test"), mysql.WithDatabase("test"),

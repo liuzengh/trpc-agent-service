@@ -1,14 +1,20 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useTenantStore, type Tenant } from '../stores/tenant'
 import type { TenantAuditPolicy, TenantQuota, TenantConfigVersion } from '../api/tenant'
 import { listConfigVersions, rollbackConfig } from '../api/tenant'
 import { listTools, type ToolDef } from '../api/tool'
+import { useAuthStore } from '../stores/auth'
 
 const store = useTenantStore()
+const authStore = useAuthStore()
 const dialogVisible = ref(false)
 const editing = ref(false)
+
+// 租户本身的增删改、治理与回滚都是 owner 专属：admin 只有 tenant:read，
+// 后端对其写接口一律返回 404，前端也不应把按钮暴露出来。
+const canManage = computed(() => authStore.hasPermission('tenant:manage'))
 
 const form = reactive<Tenant>({ id: '', name: '', status: 'active' })
 
@@ -80,6 +86,7 @@ const gov = reactive<GovForm>({
 
 onMounted(async () => {
   store.fetch()
+  if (!canManage.value) return
   try {
     tools.value = await listTools()
   } catch {
@@ -175,7 +182,8 @@ async function saveGovernance() {
 <template>
   <main class="tenant-page">
     <h1>租户管理</h1>
-    <div class="toolbar">
+    <p v-if="!canManage" class="hint">当前租户：{{ authStore.tenantId }}（仅 owner 可管理租户）</p>
+    <div v-if="canManage" class="toolbar">
       <el-button type="primary" @click="openCreate">新建租户</el-button>
     </div>
 
@@ -183,7 +191,7 @@ async function saveGovernance() {
       <el-table-column prop="id" label="ID" width="220" />
       <el-table-column prop="name" label="名称" />
       <el-table-column prop="status" label="状态" width="120" />
-      <el-table-column label="操作" width="360">
+      <el-table-column v-if="canManage" label="操作" width="360">
         <template #default="{ row }">
           <el-button size="small" @click="openEdit(row)">编辑</el-button>
           <el-button size="small" @click="openGovernance(row)">治理</el-button>

@@ -1,17 +1,22 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { sendChat, openChatStream, type ChatMessageEvent } from '../api/chat'
 import { useAgentStore } from '../stores/agent'
+import { useAuthStore } from '../stores/auth'
 
 const agents = useAgentStore()
+const authStore = useAuthStore()
+// 对话同样按租户隔离：owner 可指定任意租户，其他角色固定为自己的租户
+// （后端也会强制，前端只是不再暴露可编辑入口）。
+const isOwner = computed(() => authStore.userRole === 'owner')
 
 interface ChatMsg {
   role: 'user' | 'assistant' | 'system'
   text: string
 }
 
-const tenantId = ref('')
+const tenantId = ref(authStore.tenantId)
 const agentId = ref('')
 const sessionId = ref('')
 const messages = ref<ChatMsg[]>([])
@@ -95,7 +100,8 @@ function roleClass(r: ChatMsg['role']) {
     <h1>Agent 对话</h1>
     <p class="hint">通过 admin 通道与 Agent 对话（SSE 实时回复），走与 IM 相同的 worker 链路——审批/技能/工具/RBAC 全部生效。</p>
     <div class="chat-config">
-      <el-input v-model="tenantId" placeholder="租户 ID" class="cfg-item" />
+      <el-input v-if="isOwner" v-model="tenantId" placeholder="租户 ID" class="cfg-item" />
+      <el-tag v-else type="info" class="cfg-item">租户：{{ authStore.tenantId }}</el-tag>
       <el-select v-model="agentId" placeholder="选择 Agent" class="cfg-item" filterable>
         <el-option v-for="a in agents.agents" :key="a.id" :label="`${a.name} (${a.id})`" :value="a.id" />
       </el-select>

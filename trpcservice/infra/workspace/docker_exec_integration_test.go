@@ -112,3 +112,59 @@ func TestDockerExecutorNetworkIsIsolated(t *testing.T) {
 		t.Errorf("container network is not isolated (output %q)", res.Output)
 	}
 }
+
+// TestDockerExecutorMemoryCapIsEnforced proves the memory cap is real rather than
+// decorative: a script that allocates well past the limit must die instead of
+// taking the host down with it.
+func TestDockerExecutorMemoryCapIsEnforced(t *testing.T) {
+	if !dockerAvailable(t) {
+		return
+	}
+	// A small cap keeps the test fast while still proving enforcement.
+	e := NewDockerExecutor().WithResourceLimits("64m", "", "", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	res, err := e.ExecuteCode(ctx, codeexecutor.CodeExecutionInput{
+		CodeBlocks: []codeexecutor.CodeBlock{{
+			Language: "python",
+			// 1 GiB in one list: far beyond the 64m cap.
+			Code: "chunks = []\nfor _ in range(1024):\n    chunks.append(bytearray(1024 * 1024))\nprint('ALLOCATED', len(chunks))\n",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("memory cap probe: %v", err)
+	}
+	if strings.Contains(res.Output, "ALLOCATED") {
+		t.Errorf("container exceeded its memory cap without dying (output %q)", res.Output)
+	}
+	// The kill surfaces as a run-level error in the output, not as a silent pass.
+	lower := strings.ToLower(res.Output)
+	if !strings.Contains(lower, "memory") && !strings.Contains(lower, "killed") {
+		t.Logf("output = %q (expected a memory/killed message; docker versions differ)", res.Output)
+	}
+}
+
+// TestDockerExecutorPIDCapIsEnforced proves the process-table cap blocks a fork
+// bomb, which would otherwise exhaust host PIDs.
+func TestDockerExecutorPIDCapIsEnforced(t *testing.T) {
+	if !dockerAvailable(t) {
+		return
+	}
+	e := NewDockerExecutor().WithResourceLimits("", "", "32", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	res, err := e.ExecuteCode(ctx, codeexecutor.CodeExecutionInput{
+		CodeBlocks: []codeexecutor.CodeBlock{{
+			Language: "bash",
+			Code:     "n=0\nwhile [ $n -lt 500 ]; do (sleep 5) & n=$((n+1)); done\nwait\necho FORKED_ALL\n",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("pid cap probe: %v", err)
+	}
+	if strings.Contains(res.Output, "FORKED_ALL") {
+		t.Errorf("container forked past its pid cap (output %q)", res.Output)
+	}
+}

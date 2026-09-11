@@ -1,4 +1,5 @@
 import api from './index'
+import type { AssetVisibility } from './asset'
 
 export type SkillScope = 'global' | 'tenant'
 export type SkillStatus = 'draft' | 'published' | 'disabled'
@@ -12,6 +13,10 @@ export interface Skill {
   description?: string
   current_version: number
   status: SkillStatus
+  /** 作者（成员 id）；作者可编辑/删除并决定是否共享 */
+  created_by?: string
+  /** private=仅作者与租户管理员可见；shared=租户内共享只读 */
+  visibility?: AssetVisibility
   created_at: string
   updated_at: string
 }
@@ -22,6 +27,7 @@ export interface SkillInput {
   description?: string
   scope: SkillScope
   owner_tenant_id?: string
+  visibility?: AssetVisibility
 }
 
 export interface SkillVersion {

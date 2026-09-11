@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/asset"
 )
 
 // IM channel/account values for ChannelBinding.Channel.
@@ -31,7 +33,11 @@ type ChannelBinding struct {
 	AccountID            string    `json:"account_id"`
 	CredentialRef        string    `json:"credential_ref,omitempty"`
 	VerificationTokenRef string    `json:"verification_token_ref,omitempty"` // feishu event-subscription verify token
-	CreatedAt            time.Time `json:"created_at"`
+	// CreatedBy is the member that bound the account; Visibility decides whether
+	// the rest of the tenant may see the binding (see domain/asset).
+	CreatedBy  string    `json:"created_by,omitempty"`
+	Visibility string    `json:"visibility,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // BindingStore persists IM channel bindings behind a swappable backend.
@@ -69,6 +75,7 @@ func (s *memBindingStore) Create(_ context.Context, b ChannelBinding) error {
 	if b.CreatedAt.IsZero() {
 		b.CreatedAt = time.Now().UTC()
 	}
+	b.Visibility = asset.VisibilityOrDefault(b.Visibility)
 	s.items[b.BindingID] = b
 	s.byKey[key] = b.BindingID
 	return nil

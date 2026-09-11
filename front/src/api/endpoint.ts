@@ -1,4 +1,5 @@
 import api from './index'
+import type { AssetVisibility } from './asset'
 
 export interface Endpoint {
   id: string
@@ -11,6 +12,10 @@ export interface Endpoint {
   model_name: string
   api_key?: string
   api_key_ref?: string
+  /** 作者（成员 id）；作者可编辑/删除并决定是否共享 */
+  created_by?: string
+  /** private=仅作者与租户管理员可见；shared=租户内共享只读；global 端点全平台共享 */
+  visibility?: AssetVisibility
 }
 
 export async function listEndpoints(tenantId = ''): Promise<Endpoint[]> {

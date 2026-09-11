@@ -6,12 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"log/slog"
 	"sync"
 
 	fwagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	fwtool "trpc.group/trpc-go/trpc-agent-go/tool"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/asset"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/llm"
 )
 
@@ -44,6 +47,47 @@ type Agent struct {
 	Description    string `json:"description,omitempty"`
 	Status         string `json:"status"`
 	CurrentVersion int    `json:"current_version"`
+	// CreatedBy is the member that authored the agent; Visibility decides
+	// whether the rest of the tenant may see it (see domain/asset).
+	CreatedBy  string `json:"created_by,omitempty"`
+	Visibility string `json:"visibility,omitempty"`
+	// Gray optionally routes part of the traffic to another published version.
+	Gray *GrayRelease `json:"gray,omitempty"`
+}
+
+// GrayRelease is a canary (gray) release: a share of the sessions runs a
+// different published version of the same agent so a change can be observed on
+// real traffic before it is promoted. Sessions are bucketed by their id, so one
+// conversation never flips between versions mid-flight, and rollback is
+// immediate (clear the release, or promote the version).
+type GrayRelease struct {
+	// Version is the alternate published version (1-based).
+	Version int `json:"version"`
+	// Percent is the share of sessions routed to Version, 1..100.
+	Percent int `json:"percent"`
+}
+
+// Validate reports whether the release is usable.
+func (g *GrayRelease) Validate() error {
+	if g == nil {
+		return nil
+	}
+	if g.Version < 1 {
+		return fmt.Errorf("agent: gray version must be >= 1")
+	}
+	if g.Percent < 1 || g.Percent > 100 {
+		return fmt.Errorf("agent: gray percent must be between 1 and 100")
+	}
+	return nil
+}
+
+// GrayBucket maps a session key to a stable bucket in [0,100), the unit the
+// release percentage is compared against. Deterministic hashing (not random)
+// keeps a conversation on one version for its whole life.
+func GrayBucket(sessionKey string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(sessionKey))
+	return int(h.Sum32() % 100)
 }
 
 // VersionInfo describes a published version for the rollback UI.
@@ -65,6 +109,11 @@ type Store interface {
 	Rollback(ctx context.Context, id string, version int) error
 	Resolve(ctx context.Context, id string) (RuntimeProfile, error)
 	Versions(ctx context.Context, id string) ([]VersionInfo, error)
+	// ResolveVersion returns one published version's profile (gray releases
+	// need the profile of a version that is not the current one).
+	ResolveVersion(ctx context.Context, id string, version int) (RuntimeProfile, error)
+	// SetGray stores or clears (nil) the agent's canary release.
+	SetGray(ctx context.Context, id string, g *GrayRelease) error
 }
 
 // Manager owns tenant-scoped agent definitions and their immutable versions
@@ -72,6 +121,9 @@ type Store interface {
 type Manager struct {
 	store  Store
 	llmReg *llm.Registry
+	// memoryPreload is the framework's long-term-memory preload budget applied
+	// to every agent this manager builds. 0 keeps long-term memory off.
+	memoryPreload int
 }
 
 // NewManager returns an in-memory manager backed by the given model registry.
@@ -84,6 +136,17 @@ func NewManager(llmReg *llm.Registry) *Manager {
 func NewManagerWithStore(s Store, llmReg *llm.Registry) *Manager {
 	return &Manager{store: s, llmReg: llmReg}
 }
+
+// SetPreloadMemory sets the framework-side long-term-memory preload budget for
+// every agent built from a profile. The value is the platform-wide
+// config.MemoryConfig.PreloadCount (0 = off, -1 = all, N > 0 = adaptive budget);
+// it is applied at startup, before any turn runs, so it needs no locking.
+func (m *Manager) SetPreloadMemory(n int) { m.memoryPreload = n }
+
+// MemoryPreload reports the configured preload budget. The worker reads it to
+// decide whether to resolve the tenant's memory service and expose the memory
+// tools at all, so the switch has exactly one owner.
+func (m *Manager) MemoryPreload() int { return m.memoryPreload }
 
 // Validate returns an error if the agent's identity fields are not set.
 func Validate(a Agent) error {
@@ -100,6 +163,8 @@ func (m *Manager) Create(ctx context.Context, a Agent) error {
 	}
 	a.Status = StatusDraft
 	a.CurrentVersion = 0
+	// A new agent is private to its author until the author shares it.
+	a.Visibility = asset.VisibilityOrDefault(a.Visibility)
 	return m.store.Create(ctx, a)
 }
 
@@ -118,6 +183,7 @@ func (m *Manager) Update(ctx context.Context, a Agent) error {
 	if err := Validate(a); err != nil {
 		return err
 	}
+	a.Visibility = asset.VisibilityOrDefault(a.Visibility)
 	return m.store.Update(ctx, a)
 }
 
@@ -144,6 +210,73 @@ func (m *Manager) Resolve(ctx context.Context, id string) (RuntimeProfile, error
 // Versions lists the published versions of an agent.
 func (m *Manager) Versions(ctx context.Context, id string) ([]VersionInfo, error) {
 	return m.store.Versions(ctx, id)
+}
+
+// ResolveVersion returns one published version's profile.
+func (m *Manager) ResolveVersion(ctx context.Context, id string, version int) (RuntimeProfile, error) {
+	return m.store.ResolveVersion(ctx, id, version)
+}
+
+// SetGray installs or clears (nil) the agent's canary release. The target must
+// be an already published version: a gray release is a traffic decision, never
+// a way to publish something unreviewed.
+func (m *Manager) SetGray(ctx context.Context, id string, g *GrayRelease) error {
+	if err := g.Validate(); err != nil {
+		return err
+	}
+	if g == nil {
+		return m.store.SetGray(ctx, id, nil)
+	}
+	ag, err := m.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if g.Version == ag.CurrentVersion {
+		// Same version on both sides: the release would be a no-op, and a
+		// silent no-op is worse than a clear rejection.
+		return fmt.Errorf("agent: gray version %d is already the current version", g.Version)
+	}
+	if _, err := m.store.ResolveVersion(ctx, id, g.Version); err != nil {
+		return err
+	}
+	return m.store.SetGray(ctx, id, g)
+}
+
+// ClearGray removes the canary release (all traffic returns to the current
+// version). It is the fast rollback: no publish, no restart.
+func (m *Manager) ClearGray(ctx context.Context, id string) error {
+	return m.store.SetGray(ctx, id, nil)
+}
+
+// ResolveForSession picks the runtime profile for one session, applying the
+// agent's canary release. It returns the profile and the version it came from
+// so the caller can record which behaviour actually served the turn.
+//
+// Bucketing is by session id, so a conversation stays on one version end to
+// end; a gray version that vanished (deleted agent row, hand-edited database)
+// falls back to the current version instead of failing the user's turn.
+func (m *Manager) ResolveForSession(ctx context.Context, id, sessionKey string) (RuntimeProfile, int, error) {
+	ag, err := m.store.Get(ctx, id)
+	if err != nil {
+		return RuntimeProfile{}, 0, err
+	}
+	g := ag.Gray
+	if g == nil || g.Percent <= 0 {
+		p, err := m.store.Resolve(ctx, id)
+		return p, ag.CurrentVersion, err
+	}
+	if GrayBucket(sessionKey) >= g.Percent {
+		p, err := m.store.Resolve(ctx, id)
+		return p, ag.CurrentVersion, err
+	}
+	p, err := m.store.ResolveVersion(ctx, id, g.Version)
+	if err != nil {
+		slog.Warn("agent: gray version unavailable, falling back to the current version",
+			"agent", id, "gray_version", g.Version, "err", err)
+		p, err = m.store.Resolve(ctx, id)
+		return p, ag.CurrentVersion, err
+	}
+	return p, g.Version, nil
 }
 
 // BuildAgent assembles a tRPC-Agent-Go agent from the current profile.
@@ -180,11 +313,18 @@ func (m *Manager) BuildFromProfile(ctx context.Context, agentID string, p Runtim
 		}
 		instruction += extraInstruction
 	}
-	return llmagent.New(agentID,
+	opts := []llmagent.Option{
 		llmagent.WithModel(mdl),
 		llmagent.WithInstruction(instruction),
 		llmagent.WithTools(tools),
-	), nil
+	}
+	if m.memoryPreload != 0 {
+		// Framework-side memory preload: the LLM agent's request processor
+		// injects the user's stored memories into the system prompt, so the
+		// model sees long-term context without calling a tool first.
+		opts = append(opts, llmagent.WithPreloadMemory(m.memoryPreload))
+	}
+	return llmagent.New(agentID, opts...), nil
 }
 
 // memStore keeps agents and their versioned runtime profiles in maps; the
@@ -220,6 +360,7 @@ func (s *memStore) Get(_ context.Context, id string) (*Agent, error) {
 		return nil, ErrNotFound
 	}
 	cp := a
+	cp.Visibility = asset.VisibilityOrDefault(cp.Visibility)
 	return &cp, nil
 }
 
@@ -229,6 +370,7 @@ func (s *memStore) List(_ context.Context, tenantID string) ([]Agent, error) {
 	out := make([]Agent, 0)
 	for _, a := range s.agents {
 		if tenantID == "" || a.TenantID == tenantID {
+			a.Visibility = asset.VisibilityOrDefault(a.Visibility)
 			out = append(out, a)
 		}
 	}
@@ -244,6 +386,10 @@ func (s *memStore) Update(_ context.Context, a Agent) error {
 	}
 	// version is managed by publish/rollback; status may be edited (enable/disable).
 	a.CurrentVersion = cur.CurrentVersion
+	// Ownership is fixed at creation: a write may publish/unpublish but never
+	// reassign the author.
+	a.CreatedBy = cur.CreatedBy
+	a.Visibility = asset.VisibilityOrDefault(a.Visibility)
 	if a.Status == "" {
 		a.Status = cur.Status
 	}
@@ -318,4 +464,29 @@ func (s *memStore) Versions(_ context.Context, id string) ([]VersionInfo, error)
 		out = append(out, VersionInfo{Version: i + 1, Status: StatusPublished})
 	}
 	return out, nil
+}
+
+func (s *memStore) ResolveVersion(_ context.Context, id string, version int) (RuntimeProfile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.agents[id]; !ok {
+		return RuntimeProfile{}, ErrNotFound
+	}
+	vs := s.versions[id]
+	if version < 1 || version > len(vs) {
+		return RuntimeProfile{}, ErrNotFound
+	}
+	return vs[version-1], nil
+}
+
+func (s *memStore) SetGray(_ context.Context, id string, g *GrayRelease) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.agents[id]
+	if !ok {
+		return ErrNotFound
+	}
+	a.Gray = g
+	s.agents[id] = a
+	return nil
 }

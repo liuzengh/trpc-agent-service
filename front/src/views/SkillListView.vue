@@ -2,15 +2,48 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useSkillStore } from '../stores/skill'
+import { useAuthStore } from '../stores/auth'
 import type { Skill, SkillScope, SkillVersion } from '../api/skill'
 
 const store = useSkillStore()
+const authStore = useAuthStore()
+
+// 行级权限：admin/owner 管全租户；member 只能改自己创建的行。global Skill 是
+// 平台资产，只有 owner 可改（后端同样拒绝）。
+const isGlobal = (row: Skill) => row.scope === 'global'
+const canManage = (row: Skill) =>
+  isGlobal(row) ? authStore.userRole === 'owner' : authStore.canManageAsset(row as { created_by?: string })
+
+async function toggleVisibility(row: Skill) {
+  const next = row.visibility === 'shared' ? 'private' : 'shared'
+  try {
+    await store.update(row.skill_id, {
+      code: row.code,
+      name: row.name,
+      description: row.description,
+      scope: row.scope,
+      owner_tenant_id: row.owner_tenant_id,
+      visibility: next,
+    })
+    ElMessage.success(next === 'shared' ? '已共享给租户' : '已收回为私有')
+  } catch (e) {
+    ElMessage.error(String(e))
+    void store.fetch()
+  }
+}
 
 // ---- create / edit dialog ----
 const dialogVisible = ref(false)
 const editingId = ref('')
 const editingStatus = ref<'draft' | 'published' | 'disabled'>('draft')
-const form = reactive({ code: '', name: '', description: '', scope: 'tenant' as SkillScope, owner_tenant_id: '' })
+const form = reactive({
+  code: '',
+  name: '',
+  description: '',
+  scope: 'tenant' as SkillScope,
+  owner_tenant_id: '',
+  visibility: 'private' as 'private' | 'shared',
+})
 
 // ---- versions dialog ----
 const versionsVisible = ref(false)
@@ -29,7 +62,14 @@ function scopeTag(s: SkillScope) {
 
 function openCreate() {
   editingId.value = ''
-  Object.assign(form, { code: '', name: '', description: '', scope: 'tenant' as SkillScope, owner_tenant_id: '' })
+  Object.assign(form, {
+    code: '',
+    name: '',
+    description: '',
+    scope: 'tenant' as SkillScope,
+    owner_tenant_id: '',
+    visibility: 'private' as 'private' | 'shared',
+  })
   dialogVisible.value = true
 }
 
@@ -41,6 +81,7 @@ function openEdit(row: Skill) {
     description: row.description ?? '',
     scope: row.scope,
     owner_tenant_id: row.owner_tenant_id ?? '',
+    visibility: (row.visibility === 'shared' ? 'shared' : 'private') as 'private' | 'shared',
   })
   dialogVisible.value = true
 }
@@ -53,6 +94,7 @@ async function submit() {
       description: form.description.trim() || undefined,
       scope: form.scope,
       owner_tenant_id: form.scope === 'tenant' && form.owner_tenant_id.trim() ? form.owner_tenant_id.trim() : undefined,
+      visibility: form.visibility,
     }
     if (editingId.value) {
       await store.update(editingId.value, body)
@@ -156,22 +198,43 @@ function versionStatusTag(s: string) {
           <el-tag :type="scopeTag(row.scope)" size="small">{{ row.scope }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="owner_tenant_id" label="租户" width="140">
+      <el-table-column prop="owner_tenant_id" label="租户" width="120">
         <template #default="{ row }">{{ row.owner_tenant_id ?? '—' }}</template>
       </el-table-column>
-      <el-table-column prop="current_version" label="当前版本" width="100" />
-      <el-table-column label="状态" width="110">
+      <el-table-column label="可见性" width="120">
+        <template #default="{ row }">
+          <el-tag v-if="row.scope === 'global'" type="info" size="small">平台共享</el-tag>
+          <el-tag v-else :type="row.visibility === 'shared' ? 'success' : 'info'" size="small">
+            {{ row.visibility === 'shared' ? '租户共享' : '私有' }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="作者" width="110">
+        <template #default="{ row }">
+          <span v-if="row.created_by">{{ row.created_by }}</span>
+          <span v-else class="muted">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column prop="current_version" label="当前版本" width="90" />
+      <el-table-column label="状态" width="100">
         <template #default="{ row }">
           <el-tag :type="row.status === 'published' ? 'success' : row.status === 'disabled' ? 'danger' : 'warning'" size="small">
             {{ row.status }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="210">
+      <el-table-column label="操作" width="260">
         <template #default="{ row }">
-          <el-button size="small" type="primary" @click="openVersions(row)">版本</el-button>
-          <el-button size="small" @click="openEdit(row)">编辑</el-button>
-          <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
+          <el-button size="small" type="primary" @click="openVersions(row)">
+            {{ canManage(row) ? '版本' : '查看版本' }}
+          </el-button>
+          <template v-if="canManage(row)">
+            <el-button size="small" @click="openEdit(row)">编辑</el-button>
+            <el-button v-if="row.scope !== 'global'" size="small" @click="toggleVisibility(row)">
+              {{ row.visibility === 'shared' ? '收回' : '共享' }}
+            </el-button>
+            <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
+          </template>
         </template>
       </el-table-column>
     </el-table>
@@ -190,12 +253,19 @@ function versionStatusTag(s: string) {
         </el-form-item>
         <el-form-item label="Scope">
           <el-select v-model="form.scope" style="width: 100%">
-            <el-option label="tenant（租户私有）" value="tenant" />
-            <el-option label="global（平台共享）" value="global" />
+            <el-option label="tenant（租户资产）" value="tenant" />
+            <!-- global 是平台资产，只有 owner 能建（后端强制） -->
+            <el-option v-if="authStore.userRole === 'owner'" label="global（平台共享）" value="global" />
           </el-select>
         </el-form-item>
         <el-form-item v-if="form.scope === 'tenant'" label="属主租户">
-          <el-input v-model="form.owner_tenant_id" placeholder="tenant id" />
+          <el-input v-model="form.owner_tenant_id" placeholder="留空 = 当前登录租户" />
+        </el-form-item>
+        <el-form-item v-if="form.scope === 'tenant'" label="可见性">
+          <el-radio-group v-model="form.visibility">
+            <el-radio value="private">私有（仅我与租户管理员）</el-radio>
+            <el-radio value="shared">共享给租户</el-radio>
+          </el-radio-group>
         </el-form-item>
       </el-form>
       <template #footer>

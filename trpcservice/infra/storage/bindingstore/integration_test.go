@@ -17,7 +17,12 @@ func TestMySQLBindingStoreLifecycle(t *testing.T) {
 	ctx := context.Background()
 	c, err := mysql.Run(ctx, "mysql:8.0",
 		mysql.WithUsername("test"), mysql.WithPassword("test"), mysql.WithDatabase("test"),
-		mysql.WithScripts("../../../../deployments/mysql/init/008_channels_outbox.sql"))
+		mysql.WithScripts(
+			"../../../../deployments/mysql/init/006_knowledge.sql",
+			"../../../../deployments/mysql/init/005_skills.sql",
+			"../../../../deployments/mysql/init/002_model_endpoints.sql",
+			"../../../../deployments/mysql/init/009_audit_usage_artifacts.sql",
+			"../../../../deployments/mysql/init/008_channels_outbox.sql"))
 	if err != nil {
 		t.Fatalf("mysql run: %v", err)
 	}

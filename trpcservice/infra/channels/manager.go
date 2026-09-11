@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // CredentialSource resolves a credential value by secret-store reference. The
@@ -56,7 +57,7 @@ type Manager struct {
 // NewManager returns a binding-driven IM connection manager. creds may be nil
 // (no bindings will connect until one is configured); build must not be nil.
 func NewManager(b Bus, bindings BindingStore, creds CredentialSource, build AdapterBuilder) *Manager {
-	return &Manager{
+	m := &Manager{
 		bus:      b,
 		bindings: bindings,
 		creds:    creds,
@@ -64,6 +65,21 @@ func NewManager(b Bus, bindings BindingStore, creds CredentialSource, build Adap
 		gw:       NewGateway(b, bindings),
 		conns:    make(map[string]connHandle),
 	}
+	// The gateway needs to resolve a persisted route's binding back to a live
+	// adapter; the Manager owns the connections, so it answers.
+	m.gw.SetAdapterLookup(m.adapterByBinding)
+	return m
+}
+
+// adapterByBinding resolves a live adapter by its binding id.
+func (m *Manager) adapterByBinding(bindingID string) (Adapter, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	h, ok := m.conns[bindingID]
+	if !ok || h.adapter == nil {
+		return nil, false
+	}
+	return h.adapter, true
 }
 
 // Reload reconciles live adapters with the current binding set. It is safe to
@@ -130,13 +146,57 @@ func (m *Manager) start(ctx context.Context, b ChannelBinding) (connHandle, erro
 	// Attach then pumps inbound into the bus. Both are required — without
 	// Start the Conn's events are never consumed and nothing reaches the
 	// worker (the IM-no-reply bug).
-	go func() {
-		if err := adapter.Start(actx); err != nil && actx.Err() == nil {
-			slog.Warn("channels: adapter start failed", "channel", b.Channel, "err", err)
-		}
-	}()
-	m.gw.Attach(actx, adapter, Attach{AccountID: b.AccountID, AgentID: b.AgentID})
+	//
+	// A supervised restart keeps a binding connected for the process lifetime:
+	// adapters return from Start when their connection ends (which used to
+	// leave the binding silently dead until the next manual Reload).
+	go m.supervise(actx, b, adapter)
+	m.gw.Attach(actx, adapter, Attach{BindingID: b.BindingID, AccountID: b.AccountID, AgentID: b.AgentID})
 	return connHandle{adapter: adapter, cancel: cancel}, nil
+}
+
+// adapterRestartMaxBackoff caps the restart delay.
+const adapterRestartMaxBackoff = 30 * time.Second
+
+// supervise runs one adapter's read loop, restarting it with exponential
+// backoff while the binding lives. Start returning is not an error of the
+// platform: it means the underlying connection ended (network drop, server
+// drain, credential rotation), and the only correct reaction is to connect
+// again. Retrying stops as soon as the binding's context is cancelled.
+func (m *Manager) supervise(ctx context.Context, b ChannelBinding, adapter Adapter) {
+	backoff := time.Second
+	for {
+		err := adapter.Start(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Warn("channels: adapter stopped, reconnecting",
+			"channel", b.Channel, "binding", b.BindingID, "in", backoff, "err", err)
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return
+		}
+		if backoff < adapterRestartMaxBackoff {
+			if backoff *= 2; backoff > adapterRestartMaxBackoff {
+				backoff = adapterRestartMaxBackoff
+			}
+		}
+	}
+}
+
+// Close stops every live adapter and releases their connections. It is called
+// on shutdown: without it a node that is re-created (or a gateway whose config
+// changed) leaves IM connections open on the platform side until they time out.
+func (m *Manager) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, h := range m.conns {
+		h.stop()
+		delete(m.conns, id)
+		slog.Info("channels: closed adapter", "binding", id)
+	}
+	return nil
 }
 
 // SetRateLimiter installs an inbound rate limiter shared by all adapters

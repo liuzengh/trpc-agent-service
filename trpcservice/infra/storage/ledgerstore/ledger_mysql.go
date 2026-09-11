@@ -5,6 +5,7 @@ package ledgerstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -108,6 +109,23 @@ func (l *MySQLLedger) Sessions(ctx context.Context, q chat.SessionQuery) ([]chat
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// Session loads one session by id.
+func (l *MySQLLedger) Session(ctx context.Context, sessionID string) (*chat.Session, error) {
+	var s chat.Session
+	err := l.db.QueryRowContext(ctx,
+		`SELECT session_id, tenant_id, agent_id, member_id, channel, last_message_at, updated_at
+		 FROM chat_sessions WHERE session_id = ?`, sessionID).
+		Scan(&s.SessionID, &s.TenantID, &s.AgentID, &s.MemberID, &s.Channel,
+			&s.LastMessageAt, &s.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, chat.ErrSessionNotFound
+		}
+		return nil, fmt.Errorf("chat: get session: %w", err)
+	}
+	return &s, nil
 }
 
 // Messages lists one session's messages, newest turn first (both rows of a

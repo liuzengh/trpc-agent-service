@@ -2,6 +2,7 @@ package log
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -22,7 +23,7 @@ func TestMask(t *testing.T) {
 }
 
 func TestIsSensitiveKey(t *testing.T) {
-	yes := []string{"api_key", "secret", "password", "mysql_dsn", "access_token", "master_key", "authorization"}
+	yes := []string{"api_key", "secret", "password", "mysql_dsn", "access_token", "master_key", "authorization", "access_key", "secret_key"}
 	no := []string{"tenant_id", "err", "session", "name", "latency_ms"}
 	for _, k := range yes {
 		if !isSensitiveKey(k) {
@@ -33,6 +34,52 @@ func TestIsSensitiveKey(t *testing.T) {
 		if isSensitiveKey(k) {
 			t.Errorf("isSensitiveKey(%q) = true, want false", k)
 		}
+	}
+}
+
+// TestSanitizeTextStripsURLSecrets covers the credential-in-a-URL leak: a Redis
+// URL, a DSN, or a signed webhook URL carries its secret inside an otherwise
+// ordinary string, so key-based masking never sees it.
+func TestSanitizeTextStripsURLSecrets(t *testing.T) {
+	cases := []struct{ in, want, forbidden string }{
+		{"redis://:hunter2@cache:6379/0", "redis://***@cache:6379/0", "hunter2"},
+		{"postgres://user:hunter2@db:5432/app", "postgres://***@db:5432/app", "hunter2"},
+		{"https://open.feishu.cn/hook?token=abc123&x=1", "https://open.feishu.cn/hook?token=***&x=1", "abc123"},
+		{"wss://openws.work.weixin.qq.com?secret=zzz", "wss://openws.work.weixin.qq.com?secret=***", "zzz"},
+		{"plain text with no secret", "plain text with no secret", ""},
+	}
+	for _, c := range cases {
+		got := SanitizeText(c.in)
+		if got != c.want {
+			t.Errorf("SanitizeText(%q) = %q, want %q", c.in, got, c.want)
+		}
+		if c.forbidden != "" && strings.Contains(got, c.forbidden) {
+			t.Errorf("SanitizeText(%q) leaked %q", c.in, c.forbidden)
+		}
+	}
+}
+
+// TestRedactsNonStringValues covers the values key-based masking used to miss:
+// a secret handed over as `any` (slog.Any) and credentials embedded in an error
+// message. Both used to reach the log verbatim.
+func TestRedactsNonStringValues(t *testing.T) {
+	var buf bytes.Buffer
+	base := slog.NewTextHandler(&buf, nil)
+	l := slog.New(&redactHandler{next: base})
+
+	l.Info("op",
+		"access_key", any("AKIA-secret-value"),
+		"err", any(errors.New("dial redis://:hunter2@cache:6379: connection refused")),
+		"endpoint", "redis://default:hunter3@cache:6379/0",
+	)
+	out := buf.String()
+	for _, leaked := range []string{"AKIA-secret-value", "hunter2", "hunter3"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("%q leaked into log: %s", leaked, out)
+		}
+	}
+	if !strings.Contains(out, "connection refused") {
+		t.Errorf("the diagnostic part of the error was lost: %s", out)
 	}
 }
 

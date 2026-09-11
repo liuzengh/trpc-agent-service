@@ -148,7 +148,9 @@ func (a *AuthMiddleware) Register(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 		return
 	}
-	if !HasPermission(claims.Role, PermTenantManage) {
+	// Only owner/admin may register new members; the route gate (member:manage)
+	// already enforces this, and the tenant is always the caller's own.
+	if !HasPermission(claims.Role, PermMemberManage) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "insufficient permissions"})
 		return
 	}

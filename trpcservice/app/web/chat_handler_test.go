@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/member"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/auth"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/bus"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -75,29 +77,37 @@ func adminReply(session, text, id string) *bus.Message {
 	return &bus.Message{ID: id, TenantID: "t1", SessionID: session, Channel: "admin", Content: &content}
 }
 
-func newChatServer(f *fakeChatBus) *httptest.Server {
+func newChatMux(f *fakeChatBus) *http.ServeMux {
 	mux := http.NewServeMux()
 	NewChatAPI(f).Register(mux)
-	return httptest.NewServer(mux)
+	return mux
+}
+
+// postChat sends an authenticated chat POST directly to the mux.
+func postChat(mux *http.ServeMux, claims *auth.Claims, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(body))
+	if claims != nil {
+		req = req.WithContext(context.WithValue(req.Context(), AuthUserKey, claims))
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
 }
 
 func TestChatSendRoutesAndPublishes(t *testing.T) {
 	f := &fakeChatBus{routes: map[string]string{}}
-	srv := newChatServer(f)
-	defer srv.Close()
+	mux := newChatMux(f)
+	// The send path now requires an authenticated caller; the owner may target
+	// any tenant, mirroring the production auth middleware.
+	owner := &auth.Claims{TenantID: "t1", UserID: "root", Role: member.RoleOwner}
 
 	// first message: explicit agent binds the session route
-	body := `{"tenant_id":"t1","agent_id":"a1","session_id":"s1","text":"hi"}`
-	resp, err := http.Post(srv.URL+"/chat", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	rec := postChat(mux, owner, `{"tenant_id":"t1","agent_id":"a1","session_id":"s1","text":"hi"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
 	}
 	var out chatSendResponse
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	resp.Body.Close()
+	_ = json.NewDecoder(rec.Body).Decode(&out)
 	if out.SessionID != "s1" || out.AgentID != "a1" || out.MessageID == "" {
 		t.Errorf("response = %+v", out)
 	}
@@ -108,37 +118,54 @@ func TestChatSendRoutesAndPublishes(t *testing.T) {
 	if m.TenantID != "t1" || m.AgentID != "a1" || m.Channel != "admin" || m.SessionID != "s1" {
 		t.Errorf("message envelope = %+v", m)
 	}
+	if m.UserID != "root" {
+		t.Errorf("user_id = %q, want root (from claims)", m.UserID)
+	}
 	if m.Content == nil || m.Content.Content != "hi" {
 		t.Errorf("content = %+v, want hi", m.Content)
 	}
 
 	// subsequent message without agent_id resolves via the route
-	body2 := `{"tenant_id":"t1","session_id":"s1","text":"again"}`
-	resp, err = http.Post(srv.URL+"/chat", "application/json", strings.NewReader(body2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	resp.Body.Close()
+	rec = postChat(mux, owner, `{"tenant_id":"t1","session_id":"s1","text":"again"}`)
+	_ = json.NewDecoder(rec.Body).Decode(&out)
 	if out.AgentID != "a1" {
 		t.Errorf("routed agent = %q, want a1", out.AgentID)
 	}
 
 	// unknown session + no agent -> 400
-	bad := `{"tenant_id":"t1","session_id":"ghost","text":"x"}`
-	resp, _ = http.Post(srv.URL+"/chat", "application/json", strings.NewReader(bad))
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("no-agent status = %d, want 400", resp.StatusCode)
+	rec = postChat(mux, owner, `{"tenant_id":"t1","session_id":"ghost","text":"x"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("no-agent status = %d, want 400", rec.Code)
 	}
-	resp.Body.Close()
 
 	// empty text -> 400
-	bad = `{"tenant_id":"t1","agent_id":"a1","text":""}`
-	resp, _ = http.Post(srv.URL+"/chat", "application/json", strings.NewReader(bad))
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("empty text status = %d, want 400", resp.StatusCode)
+	rec = postChat(mux, owner, `{"tenant_id":"t1","agent_id":"a1","text":""}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("empty text status = %d, want 400", rec.Code)
 	}
-	resp.Body.Close()
+}
+
+func TestChatSendRequiresAuth(t *testing.T) {
+	f := &fakeChatBus{routes: map[string]string{}}
+	mux := newChatMux(f)
+	rec := postChat(mux, nil, `{"tenant_id":"t1","agent_id":"a1","session_id":"s1","text":"hi"}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestChatSendPinsTenantToToken(t *testing.T) {
+	f := &fakeChatBus{routes: map[string]string{}}
+	mux := newChatMux(f)
+	// A member may not push a turn into another tenant via a crafted body.
+	alice := &auth.Claims{TenantID: "t1", UserID: "alice", Role: member.RoleMember}
+	rec := postChat(mux, alice, `{"tenant_id":"t2","agent_id":"a1","session_id":"s1","text":"hi"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+	if len(f.published) != 1 || f.published[0].TenantID != "t1" {
+		t.Errorf("published tenant = %+v, want t1 (pinned to token)", f.published)
+	}
 }
 
 func TestChatStreamForwardsOnlySessionAdminReplies(t *testing.T) {

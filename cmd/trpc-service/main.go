@@ -56,6 +56,12 @@ import (
 // the first execution.
 var dockerExec = workspace.NewDockerExecutor()
 
+// devJWTSecret is the signing secret used only when no secret is configured.
+// It is public knowledge (it lives in the source), so it must never sign a
+// production token; server.production=true turns its use into a startup error.
+const devJWTSecret = "dev-jwt-secret-change-me"
+
+// envOrDefault returns the environment value, or the fallback when unset.
 func envOrDefault(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -63,10 +69,36 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
+// adminPassword resolves the bootstrap owner password. With no explicit
+// password the built-in development default is used, but only when the node is
+// not declared production: a well-known password on a public deployment would
+// hand over the owner account. An empty password disables the bootstrap.
+func adminPassword(cfg *config.Config, logger *slog.Logger) string {
+	if pw := os.Getenv("ADMIN_PASSWORD"); pw != "" {
+		return pw
+	}
+	if cfg.Server.Production {
+		logger.Warn("ADMIN_PASSWORD unset in production: skipping the default owner password",
+			"hint", "set ADMIN_PASSWORD to bootstrap the owner account")
+		return ""
+	}
+	logger.Warn("using the built-in development owner password; never run this in production",
+		"hint", "set ADMIN_PASSWORD, or server.production=true to disable the default")
+	return "admin123"
+}
+
 func main() {
 	role := flag.String("role", "all", "service role: gateway|worker|admin|all")
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
+
+	// Resolve the role before anything else: an unknown value must fail loudly
+	// instead of silently producing a node with no capabilities.
+	plan, planErr := planFor(*role)
+	if planErr != nil {
+		fmt.Fprintf(os.Stderr, "invalid -role: %v\n", planErr)
+		os.Exit(2)
+	}
 
 	fmt.Printf("trpc-agent-service %s (role=%s)\n", trpcservice.Version, *role)
 
@@ -94,15 +126,15 @@ func main() {
 
 	// With a MySQL DSN configured, the management domains (tenants, endpoints,
 	// tools, agents) persist across restarts; otherwise they stay in memory.
+	// The connection is waited for (see deps.go), so a node that boots in
+	// parallel with its database does not silently fall back to memory.
 	var db *sql.DB
 	if cfg.MySQL.DSN != "" {
-		db, err = storage.OpenMySQL(cfg.MySQL.DSN)
-		if err != nil {
+		db = openMySQLWhenReady(runCtx, cfg.MySQL.DSN, logger)
+		if db == nil {
 			// A configured-but-unreachable MySQL is a degraded state, not a
 			// silent fallback: persistence, audit and the worker all stay off.
-			// Make it loud (error log + /healthz 503) so a transient outage at
-			// startup is visible instead of running in-memory unnoticed.
-			logger.Error("mysql unavailable, running degraded (no persistence/audit/worker)", "err", err)
+			// Make it loud (/healthz 503) so the outage is visible.
 			health.SetDegraded("mysql unavailable")
 		}
 	}
@@ -149,6 +181,10 @@ func main() {
 		skillMgr = skill.NewManager()
 	}
 	registerBuiltinTools(toolReg)
+	// Long-term memory: the budget is the single switch for the feature (see
+	// config.MemoryConfig). The agent manager applies it to every built agent
+	// and the worker reads it back to decide whether to expose memory tools.
+	agentMgr.SetPreloadMemory(cfg.Memory.PreloadCount)
 
 	// Member management + auth. With MySQL we read tenant_members; without
 	// MySQL we fall back to an in-memory store for local development.
@@ -158,15 +194,24 @@ func main() {
 	} else {
 		memberMgr = member.NewManager()
 	}
-	if err := web.EnsureInitialOwner(
-		runCtx,
-		tenantMgr,
-		memberMgr,
-		envOrDefault("ADMIN_TENANT_ID", "t-demo"),
-		envOrDefault("ADMIN_USER_ID", "admin"),
-		envOrDefault("ADMIN_PASSWORD", "admin123"),
-	); err != nil {
-		logger.Warn("initial owner bootstrap failed", "err", err)
+	// Bootstrap owner: an empty password (production without ADMIN_PASSWORD)
+	// skips bootstrapping entirely rather than creating a well-known account.
+	// Only the control-plane node bootstraps: it owns the member table, and
+	// letting every data-plane node race the same insert makes each of their
+	// starts log a spurious duplicate-key failure.
+	if pw := adminPassword(cfg, logger); pw == "" {
+		logger.Info("owner bootstrap skipped: no ADMIN_PASSWORD configured")
+	} else if plan.AdminAPI {
+		if err := web.EnsureInitialOwner(
+			runCtx,
+			tenantMgr,
+			memberMgr,
+			envOrDefault("ADMIN_TENANT_ID", "t-demo"),
+			envOrDefault("ADMIN_USER_ID", "admin"),
+			pw,
+		); err != nil {
+			logger.Warn("initial owner bootstrap failed", "err", err)
+		}
 	}
 
 	// Audit recorder writes governance decisions + per-request accounting.
@@ -218,43 +263,83 @@ func main() {
 	reg.SetKeySink(secretStore)
 
 	// Auth middleware: wraps all API routes. Skip paths are unauthenticated.
+	//
+	// The JWT secret has three sources, in order: a dedicated TRPC_JWT_SECRET, the
+	// credential-store master key, and finally a built-in development value. The
+	// last one is a real security hole outside development — anyone who reads the
+	// source can mint tokens for any tenant — so it is gated.
 	jwtSecret := os.Getenv("TRPC_JWT_SECRET")
 	if jwtSecret == "" {
 		jwtSecret = cfg.Secret.MasterKey // fallback to master key if no dedicated JWT secret
 	}
 	if jwtSecret == "" {
-		jwtSecret = "dev-jwt-secret-change-me" // dev mode only
+		if cfg.Server.Production {
+			logger.Error("refusing to start: production mode requires a signing secret",
+				"hint", "set TRPC_JWT_SECRET (or secret.master_key)")
+			os.Exit(1)
+		}
+		logger.Warn("using the built-in development JWT secret; never run this in production",
+			"hint", "set TRPC_JWT_SECRET, or server.production=true to make this fatal")
+		jwtSecret = devJWTSecret
 	}
 	authMW := web.NewAuthMiddleware(memberMgr, jwtSecret)
 
-	web.NewTenantAPI(tenantMgr).Register(mux)
-	web.NewMemberAPI(memberMgr).Register(mux)
-	agentAPI := web.NewAgentAPI(agentMgr)
-	agentAPI.SetGrants(toolReg, skillMgr)
-	agentAPI.Register(mux)
-	web.NewEndpointAPI(reg).Register(mux)
-	web.NewToolAPI(toolReg).Register(mux)
-	web.NewKnowledgeAPI(kbMgr).Register(mux)
-	web.NewSkillAPI(skillMgr).Register(mux)
+	// IM channel API: registered on the admin node (binding CRUD) and needed by
+	// the gateway node, which reconciles live adapters when bindings change.
 	channelAPI := web.NewChannelAPI(bindStore)
-	channelAPI.Register(mux)
-	if secretStore != nil {
-		web.NewSecretAPI(secretStore).Register(mux)
-	}
+	channelAPI.SetAgentSource(agentMgr)
 	if auditRec != nil {
-		web.NewAuditAPI(auditRec).Register(mux)
-		web.NewUsageAPI(auditRec).Register(mux)
+		channelAPI.SetAuditor(auditRec)
+	}
+
+	// Admin REST surface: management APIs. A worker or gateway node does not
+	// expose it (see rolePlan) so a compromised data-plane node cannot rewrite
+	// platform configuration.
+	if plan.AdminAPI {
+		registerAdminAPI(mux, adminAPI{
+			tenants:   tenantMgr,
+			members:   memberMgr,
+			agents:    agentMgr,
+			tools:     toolReg,
+			kb:        kbMgr,
+			skills:    skillMgr,
+			channels:  channelAPI,
+			secrets:   secretStore,
+			auditor:   auditRec,
+			endpoints: reg,
+		})
 	}
 
 	// Login is unauthenticated; registration and session validation are
-	// protected by the outer auth middleware.
-	mux.HandleFunc("/auth/login", authMW.Login)
-	mux.HandleFunc("/auth/register", authMW.Register)
-	mux.HandleFunc("/auth/me", authMW.Me)
+	// protected by the outer auth middleware. The auth routes are needed on any
+	// node that serves REST, so they follow the admin surface.
+	if plan.AdminAPI {
+		mux.HandleFunc("/auth/login", authMW.Login)
+		mux.HandleFunc("/auth/register", authMW.Register)
+		mux.HandleFunc("/auth/me", authMW.Me)
+	}
 
-	// Worker + outbox dispatcher + IM gateway: started when the role includes
-	// worker and both Redis and MySQL are configured.
-	startRuntime(runCtx, cfg, db, router, tenantMgr, agentMgr, toolReg, kbMgr, skillMgr, auditor, auditRec, secretStore, bindStore, mux, channelAPI, logger)
+	// Data plane: the worker loop, the outbox dispatcher and the IM gateway, each
+	// gated by the role plan. All three need Redis; the worker and the ledger
+	// also need MySQL.
+	startDataPlane(runCtx, dataPlaneDeps{
+		plan:        plan,
+		cfg:         cfg,
+		db:          db,
+		router:      router,
+		tenantMgr:   tenantMgr,
+		agentMgr:    agentMgr,
+		toolReg:     toolReg,
+		kbMgr:       kbMgr,
+		skillMgr:    skillMgr,
+		auditor:     auditor,
+		auditRec:    auditRec,
+		secretStore: secretStore,
+		bindStore:   bindStore,
+		mux:         mux,
+		channelAPI:  channelAPI,
+		logger:      logger,
+	})
 
 	logger.Info("starting server", "addr", cfg.Server.HTTPAddr, "role", cfg.Role)
 	// Middleware order matters: CORS is outermost so that every response —
@@ -263,9 +348,14 @@ func main() {
 	// The auth middleware then lets preflights through and enforces the Bearer
 	// token: /healthz and /auth/login are public, everything else needs a token.
 	skipAuth := []string{"/healthz", "/auth/login"}
+	readHeaderTimeout := cfg.Server.ReadHeaderTimeout
+	if readHeaderTimeout <= 0 {
+		readHeaderTimeout = config.DefaultReadHeaderTimeout
+	}
 	srv := &http.Server{
-		Addr:    cfg.Server.HTTPAddr,
-		Handler: web.CORS(authMW.Wrap(skipAuth, web.RequireRoutePermission(mux))),
+		Addr:              cfg.Server.HTTPAddr,
+		Handler:           web.CORS(authMW.Wrap(skipAuth, web.RequireRoutePermission(mux))),
+		ReadHeaderTimeout: readHeaderTimeout,
 	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
@@ -286,35 +376,128 @@ func main() {
 	}
 }
 
-// startRuntime wires and starts the worker, outbox dispatcher and IM gateway
-// when the role includes worker and both Redis and MySQL are configured (the
-// bus needs Redis, the outbox MySQL). Extracted from main so the composition
-// root stays a thin assembly over the wiring below. router is the shared
-// per-tenant data-backend router built in main (session/memory defaults come
-// from config; vector/artifact/audit dispatchers hang off the same tenant
-// selections).
-func startRuntime(runCtx context.Context, cfg *config.Config, db *sql.DB, router *storage.Router,
-	tenantMgr *tenant.Manager, agentMgr *agent.Manager, toolReg *tool.Registry,
-	kbMgr *knowledge.Manager, skillMgr *skill.Manager, auditor audit.Recorder,
-	auditRec *audit.MySQLRecorder, secretStore secret.Store,
-	bindStore channels.BindingStore, mux *http.ServeMux,
-	channelAPI *web.ChannelAPI, logger *slog.Logger,
-) {
-	if !isWorkerRole(cfg.Role) || db == nil || cfg.Redis.URL == "" {
+// adminAPI is the dependency set of the management REST surface. It is a struct
+// rather than a parameter list so adding a domain does not ripple through the
+// assembly function's signature.
+type adminAPI struct {
+	tenants   *tenant.Manager
+	members   *member.Manager
+	agents    *agent.Manager
+	tools     *tool.Registry
+	kb        *knowledge.Manager
+	skills    *skill.Manager
+	channels  *web.ChannelAPI
+	secrets   secret.Store
+	auditor   *audit.MySQLRecorder
+	endpoints *llm.Registry
+}
+
+// registerAdminAPI mounts the management REST surface: the platform's control
+// plane. Asset writes are audited when a recorder exists.
+func registerAdminAPI(mux *http.ServeMux, d adminAPI) {
+	web.NewTenantAPI(d.tenants).Register(mux)
+	web.NewMemberAPI(d.members).Register(mux)
+
+	agentAPI := web.NewAgentAPI(d.agents)
+	agentAPI.SetGrants(d.tools, d.skills)
+	endpointAPI := web.NewEndpointAPI(d.endpoints)
+	kbAPI := web.NewKnowledgeAPI(d.kb)
+	skillAPI := web.NewSkillAPI(d.skills)
+	toolAPI := web.NewToolAPI(d.tools)
+	toolAPI.SetAgentSource(d.agents)
+	if d.auditor != nil {
+		agentAPI.SetAuditor(d.auditor)
+		endpointAPI.SetAuditor(d.auditor)
+		kbAPI.SetAuditor(d.auditor)
+		skillAPI.SetAuditor(d.auditor)
+	}
+	agentAPI.Register(mux)
+	endpointAPI.Register(mux)
+	toolAPI.Register(mux)
+	kbAPI.Register(mux)
+	skillAPI.Register(mux)
+	d.channels.Register(mux)
+
+	if d.secrets != nil {
+		web.NewSecretAPI(d.secrets).Register(mux)
+	}
+	if d.auditor != nil {
+		web.NewAuditAPI(d.auditor).Register(mux)
+		web.NewUsageAPI(d.auditor).Register(mux)
+	}
+}
+
+// dataPlaneDeps is the dependency set of the data plane (worker loop, outbox
+// dispatcher, IM gateway). Grouped so the plan's gates read as one decision.
+type dataPlaneDeps struct {
+	plan        rolePlan
+	cfg         *config.Config
+	db          *sql.DB
+	router      *storage.Router
+	tenantMgr   *tenant.Manager
+	agentMgr    *agent.Manager
+	toolReg     *tool.Registry
+	kbMgr       *knowledge.Manager
+	skillMgr    *skill.Manager
+	auditor     audit.Recorder
+	auditRec    *audit.MySQLRecorder
+	secretStore secret.Store
+	bindStore   channels.BindingStore
+	mux         *http.ServeMux
+	channelAPI  *web.ChannelAPI
+	logger      *slog.Logger
+}
+
+// startDataPlane wires and starts the node's data-plane components according to
+// the role plan. Each component is gated by the capability it implements:
+//
+//   - worker loop + outbox + ledger + chat API: plan.WorkerLoop (needs MySQL for
+//     the outbox and Redis for the bus)
+//   - IM gateway (adapters + outbound fan-out): plan.IMGatway (needs Redis)
+//
+// A gateway-only node therefore holds no REST surface and consumes no inbound
+// messages, while a worker-only node exposes no management API. Extracted from
+// main so the composition root stays a thin assembly.
+func startDataPlane(runCtx context.Context, d dataPlaneDeps) {
+	needsRedis := d.plan.WorkerLoop || d.plan.IMGatway
+	if !needsRedis || d.cfg.Redis.URL == "" {
+		if needsRedis {
+			d.logger.Error("redis url not configured, data plane disabled",
+				"worker", d.plan.WorkerLoop, "gateway", d.plan.IMGatway)
+		}
 		return
 	}
-	rb, err := bus.NewRedisFromURL(cfg.Redis.URL)
+	// Wait for Redis before the bus is used: the worker would otherwise start,
+	// fail every command, and leave the IM/chat path unresponsive until an
+	// operator restarted the node.
+	redisWhenReady(runCtx, d.cfg.Redis.URL, d.logger)
+	rb, err := bus.NewRedisFromURL(d.cfg.Redis.URL)
 	if err != nil {
-		logger.Error("redis bus unavailable, worker disabled", "err", err)
+		d.logger.Error("redis bus unavailable, data plane disabled", "err", err)
 		return
 	}
 
-	outbox := bus.NewOutbox(db)
+	if d.plan.WorkerLoop {
+		startWorkerLoop(runCtx, d, rb)
+	}
+	if d.plan.IMGatway {
+		startIMGatway(runCtx, d, rb)
+	}
+}
+
+// startWorkerLoop starts message consumption, the outbox dispatcher and the
+// conversation surface. It needs MySQL (outbox + ledger) on top of Redis.
+func startWorkerLoop(runCtx context.Context, d dataPlaneDeps, rb *bus.RedisBus) {
+	if d.db == nil {
+		d.logger.Error("mysql not configured, worker disabled")
+		return
+	}
+	outbox := bus.NewOutbox(d.db)
 
 	// Dead-letter policy: after 5 business failures an inbound message is
 	// moved out of the live stream (Redis DLQ copy) and persisted to MySQL so
 	// an operator can inspect and replay it via the admin API.
-	dlqStore := dlqstore.NewStore(db)
+	dlqStore := dlqstore.NewStore(d.db)
 	rb.SetDeadLetter(bus.DefaultMaxDeliveries, func(ctx context.Context, e bus.DeadLetter) {
 		entry := dlqstore.Entry{
 			MessageID:   e.MessageID,
@@ -330,10 +513,10 @@ func startRuntime(runCtx context.Context, cfg *config.Config, db *sql.DB, router
 			Attempts:    e.Attempts,
 		}
 		if err := dlqStore.Record(ctx, entry); err != nil {
-			slog.Error("dlq persistence failed (redis copy retained)", "message", e.MessageID, "err", err)
+			d.logger.Error("dlq persistence failed (redis copy retained)", "message", e.MessageID, "err", err)
 		}
 	})
-	web.NewDLQAPI(dlqStore, rb).Register(mux)
+	web.NewDLQAPI(dlqStore, rb).Register(d.mux)
 
 	// Artifact persistence on MinIO when configured; without it the runner
 	// just does not persist artifacts. When MinIO is up, per-tenant routing
@@ -341,44 +524,42 @@ func startRuntime(runCtx context.Context, cfg *config.Config, db *sql.DB, router
 	// MinIO the domain stays disabled rather than silently degrading to an
 	// ephemeral in-memory store.
 	var artSvc artifact.Service
-	if cfg.MinIO.Endpoint != "" {
-		bucket := cfg.MinIO.Bucket
+	if d.cfg.MinIO.Endpoint != "" {
+		bucket := d.cfg.MinIO.Bucket
 		if bucket == "" {
 			bucket = "artifacts"
 		}
 		svc, err := storage.NewMinioArtifactService(context.Background(),
-			cfg.MinIO.Endpoint, cfg.MinIO.AccessKey, cfg.MinIO.SecretKey, bucket, cfg.MinIO.UseSSL)
+			d.cfg.MinIO.Endpoint, d.cfg.MinIO.AccessKey, d.cfg.MinIO.SecretKey, bucket, d.cfg.MinIO.UseSSL)
 		if err != nil {
-			logger.Error("minio unavailable, artifact persistence disabled", "err", err)
+			d.logger.Error("minio unavailable, artifact persistence disabled", "err", err)
 		} else {
-			artSvc = storage.NewRouterArtifactService(router, svc, nil)
-			logger.Info("artifact persistence enabled", "endpoint", cfg.MinIO.Endpoint, "bucket", bucket)
+			artSvc = storage.NewRouterArtifactService(d.router, svc, nil)
+			d.logger.Info("artifact persistence enabled", "endpoint", d.cfg.MinIO.Endpoint, "bucket", bucket)
 		}
 	}
 
-	// Data-domain assembly point: session/memory/vector/artifact/audit all
-	// resolve per tenant through the Router (or a Router-wrapped dispatcher);
-	// knowledge keeps its manager (metadata + routed vector stores). Summary
-	// has no standalone domain (lives in the session backend).
-	dss := storage.NewDataStores(router, kbMgr, artSvc, auditor)
-
 	// Admin chat rides the same worker pipeline: POST /chat publishes inbound,
-	// replies come back over outbound and are SSE-forwarded.
-	web.NewChatAPI(rb).Register(mux)
+	// replies come back over outbound and are SSE-forwarded. Registered here
+	// because a chat API without a consumer would accept turns nobody runs.
+	web.NewChatAPI(rb).Register(d.mux)
 	// Business conversation ledger writes every turn (USER+ASSISTANT) for the
 	// session-history API; it shares the worker's MySQL.
-	ledger := ledgerstore.NewMySQLLedger(db)
-	web.NewChatHistoryAPI(ledger).Register(mux)
+	ledger := ledgerstore.NewMySQLLedger(d.db)
+	web.NewChatHistoryAPI(ledger).Register(d.mux)
 
-	w := worker.New(rb, agentMgr, worker.NewToolResolver(toolReg, builtinToolSource, dss.Knowledge), outbox, dss.Router, skillMgr, dss.Auditor, dss.Artifacts, ledger)
+	// Sessions resolve per tenant through the Router; knowledge is also a
+	// Router-wrapped domain, and the auditor was already wrapped in main.
+	w := worker.New(rb, d.agentMgr, worker.NewToolResolver(d.toolReg, builtinToolSource, d.kbMgr),
+		outbox, d.router, d.skillMgr, d.auditor, artSvc, ledger)
 	// Tenant governance: per-tenant quota + audit_policy come from the tenants
 	// table (configured in the tenant UI); budgets apply only when a tenant
 	// sets quota.token_quota > 0. The token meter reads usage_records when the
 	// audit recorder is wired; without it no budget is ever enforced.
 	var usageFn func(ctx context.Context, tenantID string) (int64, error)
-	if auditRec != nil {
+	if d.auditRec != nil {
 		usageFn = func(ctx context.Context, tenantID string) (int64, error) {
-			sums, err := auditRec.UsageSummary(ctx, audit.UsageQuery{TenantID: tenantID, Dimension: audit.UsageDimensionToken})
+			sums, err := d.auditRec.UsageSummary(ctx, audit.UsageQuery{TenantID: tenantID, Dimension: audit.UsageDimensionToken})
 			if err != nil {
 				return 0, err
 			}
@@ -389,43 +570,53 @@ func startRuntime(runCtx context.Context, cfg *config.Config, db *sql.DB, router
 			return total, nil
 		}
 	}
-	w.SetGovernance(tenantMgr, usageFn)
+	w.SetGovernance(d.tenantMgr, usageFn)
 
 	go func() {
 		if err := w.Run(runCtx); err != nil {
-			logger.Error("worker stopped", "err", err)
+			d.logger.Error("worker stopped", "err", err)
 		}
 	}()
 	go func() {
 		if err := outbox.Run(runCtx, rb, time.Second); err != nil {
-			logger.Error("outbox dispatcher stopped", "err", err)
+			d.logger.Error("outbox dispatcher stopped", "err", err)
 		}
 	}()
+	d.logger.Info("worker started", "group", worker.Group)
+}
 
-	// IM gateway: binding-driven connection manager. Reload connects each bound
-	// account at startup; ChannelAPI reconciles live adapters on every binding
-	// create/delete.
-	imMgr := channels.NewManager(rb, bindStore, secretStore, buildAdapter)
-	if cfg.RateLimit.Enable && cfg.Redis.URL != "" {
+// startIMGatway starts the binding-driven IM connection manager: it holds the IM
+// long connections and fans outbound replies back to the originating channel.
+func startIMGatway(runCtx context.Context, d dataPlaneDeps, rb *bus.RedisBus) {
+	imMgr := channels.NewManager(rb, d.bindStore, d.secretStore, buildAdapter)
+	if d.cfg.RateLimit.Enable {
 		// Inbound rate limiting shares the bus's Redis so the limit holds
 		// across gateway nodes; a limiter error fails open.
-		if rcli, err := bus.NewRedisFromURL(cfg.Redis.URL); err != nil {
-			logger.Error("rate limiter unavailable, inbound limiting disabled", "err", err)
+		if rcli, err := bus.NewRedisFromURL(d.cfg.Redis.URL); err != nil {
+			d.logger.Error("rate limiter unavailable, inbound limiting disabled", "err", err)
 		} else {
-			imMgr.SetRateLimiter(channels.NewRedisRateLimiter(rcli.Client(), cfg.RateLimit.PerMinute, time.Minute))
-			logger.Info("IM inbound rate limiting enabled", "per_minute", cfg.RateLimit.PerMinute)
+			imMgr.SetRateLimiter(channels.NewRedisRateLimiter(rcli.Client(), d.cfg.RateLimit.PerMinute, time.Minute))
+			d.logger.Info("IM inbound rate limiting enabled", "per_minute", d.cfg.RateLimit.PerMinute)
 		}
 	}
-	channelAPI.SetManager(imMgr)
+	d.channelAPI.SetManager(imMgr)
 	if err := imMgr.Reload(context.Background()); err != nil {
-		logger.Error("IM gateway reload failed", "err", err)
+		d.logger.Error("IM gateway reload failed", "err", err)
 	}
 	go func() {
 		if err := imMgr.Run(runCtx); err != nil {
-			logger.Error("IM gateway stopped", "err", err)
+			d.logger.Error("IM gateway stopped", "err", err)
 		}
 	}()
-	logger.Info("worker started", "group", worker.Group)
+	// Release the IM connections on shutdown: an exited node must not leave
+	// half-open sessions (and a stale bot presence) behind on the platform.
+	go func() {
+		<-runCtx.Done()
+		if err := imMgr.Close(); err != nil {
+			d.logger.Warn("IM gateway close", "err", err)
+		}
+	}()
+	d.logger.Info("IM gateway started")
 }
 
 // setupTelemetry wires OpenTelemetry trace + metrics when an OTLP endpoint is
@@ -465,11 +656,6 @@ func setupTelemetry(t config.TelemetryConfig, logger *slog.Logger) func() {
 	}
 	metrics.Init() // re-bind platform metrics to the real provider
 	return func() { _ = cleanup() }
-}
-
-// isWorkerRole reports whether the role runs message workers.
-func isWorkerRole(role string) bool {
-	return role == "worker" || role == "all"
 }
 
 // builtinTool couples a built-in tool's registry definition with its runtime

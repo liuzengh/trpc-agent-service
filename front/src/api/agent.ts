@@ -1,4 +1,5 @@
 import api from './index'
+import type { AssetVisibility } from './asset'
 
 export interface Agent {
   id: string
@@ -7,6 +8,17 @@ export interface Agent {
   description?: string
   status: 'draft' | 'published' | 'disabled'
   current_version: number
+  /** 作者（成员 id）；作者可编辑/删除并决定是否共享 */
+  created_by?: string
+  /** private=仅作者与租户管理员可见；shared=租户内共享只读 */
+  visibility?: AssetVisibility
+  /** 灰度发布：按会话 id 稳定分桶，percent% 的会话走 version 版本；空=全量走 current_version */
+  gray?: GrayRelease
+}
+
+export interface GrayRelease {
+  version: number
+  percent: number
 }
 
 export interface RuntimeProfile {
@@ -59,4 +71,15 @@ export async function listVersions(id: string): Promise<VersionInfo[]> {
 export async function getProfile(id: string): Promise<RuntimeProfile> {
   const { data } = await api.get<RuntimeProfile>(`/agents/${id}/profile`)
   return data
+}
+
+/** 设置灰度发布：percent% 的会话走 version 版本（会话维度稳定分桶）。 */
+export async function setAgentGray(id: string, gray: GrayRelease): Promise<GrayRelease> {
+  const { data } = await api.put<GrayRelease>(`/agents/${id}/gray`, gray)
+  return data
+}
+
+/** 清除灰度发布：全部流量回到当前版本（灰度回滚）。 */
+export async function clearAgentGray(id: string): Promise<void> {
+  await api.delete(`/agents/${id}/gray`)
 }

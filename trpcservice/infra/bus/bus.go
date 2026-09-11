@@ -53,6 +53,23 @@ func ApprovalResKey(tenantID, sessionID string) string {
 	return "approval:res:" + tenantID + ":" + sessionID
 }
 
+// OutboundCursorKey is the persisted read position of the outbound follower.
+// The gateway resumes from it after a restart instead of jumping to the stream
+// tail, so a reply published while the gateway was down is still delivered.
+// There is one key, not one per node: the platform assumes a single gateway
+// node, because two nodes would open competing IM connections for the same bot
+// account (see docs/多后端适配方案.md).
+func OutboundCursorKey() string {
+	return "cursor:outbound"
+}
+
+// IMRouteKey returns the persisted reply route of an IM conversation. The
+// in-memory route table dies with the process; without this a restarted gateway
+// could read a missed reply but would not know which chat to send it to.
+func IMRouteKey(sessionID string) string {
+	return "imroute:" + sessionID
+}
+
 // ---------------------------------------------------------------- envelope --
 
 // Message is the normalized envelope flowing through the platform.
@@ -66,8 +83,8 @@ type Message struct {
 	UserID    string         `json:"user_id"`
 	Content   *model.Message `json:"content"`
 	ReplyTo   string         `json:"reply_to,omitempty"` // outbound routing hint
-	Kind      string         `json:"kind,omitempty"`        // text | stream | card
-	Segments  []Segment      `json:"segments,omitempty"`   // card segments
+	Kind      string         `json:"kind,omitempty"`     // text | stream | card
+	Segments  []Segment      `json:"segments,omitempty"` // card segments
 }
 
 // Segment represents a rich content segment for card messages.
@@ -336,11 +353,21 @@ loop:
 	return nil
 }
 
+// ErrRequeue marks a handler outcome that must be retried later WITHOUT counting
+// as a business failure. Transient contention (a session lock held by another
+// turn) is the canonical case: the message is healthy, so counting it toward the
+// dead-letter threshold would dead-letter messages merely because one session
+// was busy.
+var ErrRequeue = errors.New("bus: requeue without counting as a failure")
+
+// Requeue reports whether err asks for a counted-exempt retry.
+func Requeue(err error) bool { return errors.Is(err, ErrRequeue) }
+
 // handle decodes one stream message, runs fn, and acks on success. A malformed
 // envelope is acked too, so it can never become a poison pill. A business
 // failure increments the DLQ retry counter (see dlq.go): under the threshold
 // the message stays pending for XAUTOCLAIM; at the threshold it is moved to
-// the dead-letter stream.
+// the dead-letter stream. ErrRequeue stays pending without touching the counter.
 func (b *RedisBus) handle(ctx context.Context, group string, msg redis.XMessage, fn func(ctx context.Context, m *Message) error) {
 	m, err := decode(msg.Values)
 	if err != nil {
@@ -352,6 +379,12 @@ func (b *RedisBus) handle(ctx context.Context, group string, msg redis.XMessage,
 		return
 	}
 	if err := fn(ctx, m); err != nil {
+		if Requeue(err) {
+			// Healthy message, transient contention: leave it pending for the
+			// next XAUTOCLAIM pass without incrementing the failure counter.
+			slog.Debug("bus: requeue inbound", "id", msg.ID, "reason", err)
+			return
+		}
 		b.onFailed(ctx, group, msg, m, err)
 		return // under the threshold: left pending, XAUTOCLAIM retries it
 	}
@@ -399,8 +432,23 @@ func (b *RedisBus) reclaim(ctx context.Context, group, consumer string, enqueue 
 
 const (
 	routeTTL = 7 * 24 * time.Hour
-	lockTTL  = 30 * time.Second
-	idemTTL  = 24 * time.Hour
+	// LockTTL is the session-lock lifetime. Deliberately short: a worker that
+	// dies mid-turn must not block its session forever, so liveness relies on
+	// the holder refreshing the lock for as long as it works (see RefreshLock)
+	// rather than on a generous TTL.
+	lockTTL = 30 * time.Second
+	// idemTTL is the lifetime of a *committed* idempotency marker: long enough
+	// that a redelivered message never re-runs its turn.
+	idemTTL = 24 * time.Hour
+	// idemLeaseTTL is the lifetime of the *in-flight* marker set when a worker
+	// claims a message. Two-phase idempotency: the claim only becomes durable
+	// (idemTTL) once the reply is safely in the outbox. A worker that dies
+	// mid-turn therefore releases the message by lease expiry instead of
+	// swallowing it forever — the redelivery reprocesses the turn and the
+	// durable MySQL marker keeps that reprocess from double-replying. The
+	// holder refreshes the lease while it works (see ExpireIdemLease), so the
+	// TTL only has to cover the gap between two heartbeats.
+	idemLeaseTTL = 90 * time.Second
 	// approvalResTTL keeps a resolved human decision visible long enough for
 	// the waiting reviewer to pick it up (poll interval is ~1s).
 	approvalResTTL = 2 * time.Minute
@@ -408,6 +456,79 @@ const (
 	// RedisBus when no explicit value is configured.
 	defaultConsumeWorkers = 16
 )
+
+// SessionLockTTL exposes the session-lock lifetime so the holder can schedule
+// its refresh heartbeat relative to it instead of duplicating the constant.
+func SessionLockTTL() time.Duration { return lockTTL }
+
+// SessionLockRefreshInterval is how often a lock holder should refresh to stay
+// comfortably ahead of SessionLockTTL.
+func SessionLockRefreshInterval() time.Duration { return lockTTL / 3 }
+
+// IdemLeaseTTL exposes the in-flight idempotency lease so the holder can
+// schedule its refresh relative to it.
+func IdemLeaseTTL() time.Duration { return idemLeaseTTL }
+
+// IdemLeaseRefreshInterval is how often the lease holder should refresh it.
+func IdemLeaseRefreshInterval() time.Duration { return idemLeaseTTL / 3 }
+
+// imRouteTTL keeps a conversation's reply route long enough to cover a gateway
+// restart, an upgrade, or a weekend outage.
+const imRouteTTL = 30 * 24 * time.Hour
+
+// LoadOutboundCursor returns the persisted outbound read position, or "$" (the
+// stream tail) when the gateway has never stored one.
+func (b *RedisBus) LoadOutboundCursor(ctx context.Context) (string, error) {
+	id, err := b.client.Get(ctx, OutboundCursorKey()).Result()
+	if errors.Is(err, redis.Nil) {
+		return "$", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("bus: load outbound cursor: %w", err)
+	}
+	if id == "" {
+		return "$", nil
+	}
+	return id, nil
+}
+
+// SaveOutboundCursor records the last dispatched outbound entry id. The key has
+// no TTL: a stale cursor only means the follower re-reads entries it already
+// delivered, which is the safe direction.
+func (b *RedisBus) SaveOutboundCursor(ctx context.Context, id string) error {
+	if id == "" || id == "$" {
+		return nil
+	}
+	if err := b.client.Set(ctx, OutboundCursorKey(), id, 0).Err(); err != nil {
+		return fmt.Errorf("bus: save outbound cursor: %w", err)
+	}
+	return nil
+}
+
+// SaveIMRoute persists a conversation's reply route (opaque JSON for the
+// channels package).
+func (b *RedisBus) SaveIMRoute(ctx context.Context, sessionID, payload string) error {
+	if sessionID == "" || payload == "" {
+		return nil
+	}
+	if err := b.client.Set(ctx, IMRouteKey(sessionID), payload, imRouteTTL).Err(); err != nil {
+		return fmt.Errorf("bus: save im route: %w", err)
+	}
+	return nil
+}
+
+// LoadIMRoute returns a persisted conversation route. found=false means the
+// conversation was never seen (or its route expired).
+func (b *RedisBus) LoadIMRoute(ctx context.Context, sessionID string) (string, bool, error) {
+	payload, err := b.client.Get(ctx, IMRouteKey(sessionID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("bus: load im route: %w", err)
+	}
+	return payload, payload != "", nil
+}
 
 // SetRoute binds a session to an agent so stateless workers can resolve the
 // right agent for any session.
@@ -427,37 +548,38 @@ func (b *RedisBus) Route(ctx context.Context, tenantID, sessionID string) (strin
 	return v, nil
 }
 
-// Idempotent reports true when msgKey is seen for the first time within the
-// TTL window, i.e. the caller should process the message.
+// Idempotent claims msgKey for processing. The claim is a *lease*
+// (idemLeaseTTL), not a durable marker: the caller must CommitIdem once the
+// work is durably recorded, or the claim expires and the message is processed
+// again. That two-phase shape is what stops a crash mid-turn from dropping the
+// message on the floor.
 func (b *RedisBus) Idempotent(ctx context.Context, msgKey string) (bool, error) {
-	ok, err := b.client.SetNX(ctx, IdemKey(msgKey), "1", idemTTL).Result()
+	ok, err := b.client.SetNX(ctx, IdemKey(msgKey), "1", idemLeaseTTL).Result()
 	if err != nil {
 		return false, fmt.Errorf("bus: setnx idem: %w", err)
 	}
 	return ok, nil
 }
 
-// SeenIdem reports whether msgKey was marked, without setting it. Check-then-
-// process flows mark only after the durable work committed, so a crash between
-// check and commit still reprocesses on redelivery.
-func (b *RedisBus) SeenIdem(ctx context.Context, msgKey string) (bool, error) {
-	_, err := b.client.Get(ctx, IdemKey(msgKey)).Result()
-	if errors.Is(err, redis.Nil) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("bus: get idem: %w", err)
-	}
-	return true, nil
-}
-
-// MarkIdem records msgKey as processed for the TTL window (the fast-path
-// cache in front of the MySQL idempotency_keys table).
-func (b *RedisBus) MarkIdem(ctx context.Context, msgKey string) error {
+// CommitIdem turns the in-flight lease into a durable marker: the message is
+// handled (its reply is in the outbox, or it was deliberately dropped) and must
+// never be processed again within idemTTL.
+func (b *RedisBus) CommitIdem(ctx context.Context, msgKey string) error {
 	if err := b.client.Set(ctx, IdemKey(msgKey), "1", idemTTL).Err(); err != nil {
-		return fmt.Errorf("bus: set idem: %w", err)
+		return fmt.Errorf("bus: commit idem: %w", err)
 	}
 	return nil
+}
+
+// ExpireIdemLease extends the in-flight claim while its holder is still working.
+// It reports false when the lease is gone, i.e. this worker no longer owns the
+// message and another consumer may already be reprocessing it.
+func (b *RedisBus) ExpireIdemLease(ctx context.Context, msgKey string) (bool, error) {
+	ok, err := b.client.Expire(ctx, IdemKey(msgKey), idemLeaseTTL).Result()
+	if err != nil {
+		return false, fmt.Errorf("bus: expire idem lease: %w", err)
+	}
+	return ok, nil
 }
 
 // ClearIdem removes a msgKey marker so a failed attempt can be retried on

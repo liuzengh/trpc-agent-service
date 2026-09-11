@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/member"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/tenant"
 )
 
@@ -30,8 +31,26 @@ func (a *TenantAPI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /tenants/{id}/config-rollback", a.configRollback)
 }
 
+// ownsTenant reports whether the caller may address the tenant named in the
+// path. The platform owner may address any tenant; everyone else only their
+// own. A foreign tenant is reported as not found.
+func (a *TenantAPI) ownsTenant(r *http.Request) bool {
+	claims := GetClaims(r.Context())
+	if claims == nil {
+		return false
+	}
+	if claims.Role == member.RoleOwner {
+		return true
+	}
+	return claims.TenantID == r.PathValue("id")
+}
+
 // configVersions returns the tenant's configuration history, newest first.
 func (a *TenantAPI) configVersions(w http.ResponseWriter, r *http.Request) {
+	if !a.ownsTenant(r) {
+		WriteCrossTenant(w)
+		return
+	}
 	vs, err := a.mgr.ConfigVersions(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -42,6 +61,10 @@ func (a *TenantAPI) configVersions(w http.ResponseWriter, r *http.Request) {
 
 // configRollback restores a tenant to a recorded configuration version.
 func (a *TenantAPI) configRollback(w http.ResponseWriter, r *http.Request) {
+	if !a.ownsTenant(r) {
+		WriteCrossTenant(w)
+		return
+	}
 	var body struct {
 		Version int `json:"version"`
 	}
@@ -79,8 +102,7 @@ func (a *TenantAPI) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *TenantAPI) get(w http.ResponseWriter, r *http.Request) {
-	if claims := GetClaims(r.Context()); claims != nil && claims.TenantID != r.PathValue("id") &&
-		!HasPermission(claims.Role, PermTenantManage) {
+	if !a.ownsTenant(r) {
 		writeError(w, http.StatusNotFound, tenant.ErrNotFound)
 		return
 	}
@@ -102,7 +124,10 @@ func (a *TenantAPI) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if claims := GetClaims(r.Context()); claims != nil && !HasPermission(claims.Role, PermTenantManage) {
+	// Only the platform owner sees the whole tenant directory; everyone else is
+	// scoped to their own tenant, which also keeps the front-end tenant store
+	// pinned to a tenant the caller may actually use.
+	if claims := GetClaims(r.Context()); claims != nil && claims.Role != member.RoleOwner {
 		filtered := make([]*tenant.Tenant, 0, 1)
 		for _, item := range all {
 			if item.ID == claims.TenantID {
@@ -116,6 +141,10 @@ func (a *TenantAPI) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *TenantAPI) update(w http.ResponseWriter, r *http.Request) {
+	if !a.ownsTenant(r) {
+		WriteCrossTenant(w)
+		return
+	}
 	var t tenant.Tenant
 	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -141,6 +170,10 @@ func (a *TenantAPI) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *TenantAPI) delete(w http.ResponseWriter, r *http.Request) {
+	if !a.ownsTenant(r) {
+		WriteCrossTenant(w)
+		return
+	}
 	if err := a.mgr.Delete(r.Context(), r.PathValue("id")); err != nil {
 		if errors.Is(err, tenant.ErrNotFound) {
 			writeError(w, http.StatusNotFound, err)

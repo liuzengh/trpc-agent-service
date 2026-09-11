@@ -6,8 +6,12 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrSessionNotFound is returned when a ledger session id is unknown.
+var ErrSessionNotFound = errors.New("chat: session not found")
 
 // Message roles recorded in the ledger (a subset of the DDL enum: tool calls
 // stay in the framework session_events / audit trail).
@@ -86,6 +90,10 @@ type Ledger interface {
 	// Sessions lists sessions (tenant-scoped, optionally member-filtered),
 	// newest activity first.
 	Sessions(ctx context.Context, q SessionQuery) ([]Session, error)
+	// Session loads one session by id. History access is decided from the
+	// session's own tenant/member, so a member cannot read someone else's
+	// conversation by guessing a session id.
+	Session(ctx context.Context, sessionID string) (*Session, error)
 	// Messages lists a session's messages, turn-descending.
 	Messages(ctx context.Context, q MessageQuery) ([]Message, error)
 }

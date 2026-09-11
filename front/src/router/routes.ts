@@ -31,7 +31,7 @@ export const routes: RouteRecordRaw[] = [
     path: '/endpoints',
     name: 'endpoints',
     component: () => import('../views/EndpointListView.vue'),
-    meta: { requiresAuth: true, permission: 'agent:read' }
+    meta: { requiresAuth: true, permission: 'endpoint:manage' }
   },
   {
     path: '/tools',
@@ -85,12 +85,12 @@ export const routes: RouteRecordRaw[] = [
     path: '/usage',
     name: 'usage',
     component: () => import('../views/UsageView.vue'),
-    meta: { requiresAuth: true, permission: 'audit:read' }
+    meta: { requiresAuth: true, permission: 'usage:read' }
   },
   {
     path: '/users',
     name: 'users',
     component: () => import('../views/UserManagementView.vue'),
-    meta: { requiresAuth: true, permission: 'tenant:manage' }
+    meta: { requiresAuth: true, permission: 'member:manage' }
   },
 ]

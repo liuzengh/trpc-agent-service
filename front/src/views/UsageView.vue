@@ -4,8 +4,14 @@ import { ElMessage } from 'element-plus'
 import { getUsage, type UsageResponse, type UsageRow, type UsageSummary } from '../api/usage'
 import { listTenants, type Tenant } from '../api/tenant'
 import { listAgents, type Agent } from '../api/agent'
+import { useAuthStore } from '../stores/auth'
 import { formatBeijingTime } from '../utils/time'
 
+const authStore = useAuthStore()
+// 用量按租户隔离：只有平台 owner 能跨租户查看，其余角色由后端固定到本租户。
+const isOwner = computed(() => authStore.userRole === 'owner')
+// admin/owner 看整个租户，member 只看自己触发的用量（后端按 member_id 过滤）。
+const managesTenant = computed(() => authStore.managesTenantAssets)
 const loading = ref(false)
 const tenants = ref<Tenant[]>([])
 const agents = ref<Agent[]>([])
@@ -35,7 +41,7 @@ async function load() {
   loading.value = true
   try {
     data.value = await getUsage({
-      tenant_id: tenantId.value || undefined,
+      tenant_id: isOwner.value ? tenantId.value || undefined : undefined,
       agent_id: agentId.value || undefined,
       dimension: dimension.value || undefined,
     })
@@ -86,11 +92,17 @@ function detailTags(row: UsageRow): string[] {
   <main class="usage-page">
     <h1>用量计量</h1>
     <p class="hint">按租户/Agent/维度统计用量（仅计量、不折算金额）；token 维度由每次 Agent 会话自动写入。</p>
+    <p v-if="!isOwner && !managesTenant" class="hint">
+      当前为<b>个人用量</b>视图：只统计你自己触发的会话与工具调用（后端按 member 归属过滤）。
+    </p>
 
     <div class="filters">
-      <el-select v-model="tenantId" clearable placeholder="全部租户" style="width: 180px" @change="load">
+      <el-select v-if="isOwner" v-model="tenantId" clearable placeholder="全部租户" style="width: 180px" @change="load">
         <el-option v-for="t in tenants" :key="t.id" :label="t.name" :value="t.id" />
       </el-select>
+      <el-tag v-else type="info">
+        {{ managesTenant ? `当前租户：${authStore.tenantId}` : `我的用量 · 租户 ${authStore.tenantId}` }}
+      </el-tag>
       <el-select v-model="agentId" clearable placeholder="全部 Agent" style="width: 200px" @change="load">
         <el-option v-for="a in agents" :key="a.id" :label="`${a.name}（${a.id}）`" :value="a.id" />
       </el-select>
@@ -128,8 +140,15 @@ function detailTags(row: UsageRow): string[] {
           <span v-else class="muted">—</span>
         </template>
       </el-table-column>
-      <el-table-column prop="tenant_id" label="租户" width="160" />
-      <el-table-column prop="agent_id" label="Agent" width="200" show-overflow-tooltip />
+      <el-table-column prop="tenant_id" label="租户" width="150" />
+      <!-- 触发成员：member 只看自己的行，该列对其恒为自身；管理员可据此做归属核对 -->
+      <el-table-column label="成员" width="130">
+        <template #default="{ row }">
+          <span v-if="row.member_id">{{ row.member_id }}</span>
+          <span v-else class="muted">租户</span>
+        </template>
+      </el-table-column>
+      <el-table-column prop="agent_id" label="Agent" width="180" show-overflow-tooltip />
       <el-table-column prop="created_at" label="时间">
         <template #default="{ row }">{{ formatAt(row.created_at) }}</template>
       </el-table-column>

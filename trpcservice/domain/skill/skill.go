@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/asset"
 )
 
 // Sentinel errors.
@@ -56,8 +58,12 @@ type Skill struct {
 	Description    string    `json:"description,omitempty"`
 	CurrentVersion int       `json:"current_version"`
 	Status         string    `json:"status"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	// CreatedBy is the member that authored the skill; Visibility decides
+	// whether the rest of the tenant may see it (see domain/asset).
+	CreatedBy  string    `json:"created_by,omitempty"`
+	Visibility string    `json:"visibility,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // SkillVersion is one immutable snapshot of a skill's SKILL.md body and
@@ -130,12 +136,15 @@ func (m *Manager) Create(ctx context.Context, s *Skill) error {
 	if s.SkillID == "" {
 		s.SkillID = uuid.NewString()
 	}
+	// A new skill is private to its author until the author shares it.
+	s.Visibility = asset.VisibilityOrDefault(s.Visibility)
 	return m.store.Create(ctx, s)
 }
 
-// Update mutates mutable fields (name, description, status). Code and
-// Scope are immutable to keep references stable.
+// Update mutates mutable fields (name, description, status, visibility). Code
+// and Scope are immutable to keep references stable.
 func (m *Manager) Update(ctx context.Context, s *Skill) error {
+	s.Visibility = asset.VisibilityOrDefault(s.Visibility)
 	return m.store.Update(ctx, s)
 }
 
@@ -354,6 +363,7 @@ func (s *memStore) Update(_ context.Context, sk *Skill) error {
 	cur.Name = sk.Name
 	cur.Description = sk.Description
 	cur.Status = sk.Status
+	cur.Visibility = asset.VisibilityOrDefault(sk.Visibility)
 	cur.UpdatedAt = time.Now()
 	*sk = *cur
 	return nil
@@ -546,4 +556,8 @@ func (s *memStore) ListAgentSkills(_ context.Context, agentID string) ([]*AgentS
 	return out, nil
 }
 
-func copySkill(s *Skill) *Skill { cp := *s; return &cp }
+func copySkill(s *Skill) *Skill {
+	cp := *s
+	cp.Visibility = asset.VisibilityOrDefault(cp.Visibility)
+	return &cp
+}

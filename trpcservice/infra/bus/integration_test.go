@@ -151,6 +151,68 @@ func TestBusIdempotency(t *testing.T) {
 	}
 }
 
+// TestBusIdempotencyIsATwoPhaseLease pins the crash-safety contract of the
+// dedup marker. A claim must start as a short lease (so a worker that dies
+// mid-turn releases the message by expiry and the redelivery reprocesses it)
+// and only become durable when the caller commits it after recording the
+// outcome. A single long-lived claim would silently swallow every message a
+// crashing worker had claimed.
+func TestBusIdempotencyIsATwoPhaseLease(t *testing.T) {
+	ctx := context.Background()
+	b := newBusForTest(t)
+
+	claimed, err := b.Idempotent(ctx, "msg-lease")
+	if err != nil || !claimed {
+		t.Fatalf("Idempotent: claimed=%v err=%v", claimed, err)
+	}
+	lease, err := b.client.TTL(ctx, IdemKey("msg-lease")).Result()
+	if err != nil {
+		t.Fatalf("ttl: %v", err)
+	}
+	if lease > IdemLeaseTTL() {
+		t.Errorf("in-flight lease TTL = %v, want at most %v", lease, IdemLeaseTTL())
+	}
+	if lease >= time.Hour {
+		t.Errorf("in-flight lease TTL = %v, want a short lease, not the durable TTL", lease)
+	}
+
+	// The holder refreshes its lease while it works; losing the key means the
+	// claim is gone and another consumer may be running the message.
+	held, err := b.ExpireIdemLease(ctx, "msg-lease")
+	if err != nil || !held {
+		t.Fatalf("ExpireIdemLease: held=%v err=%v", held, err)
+	}
+	if err := b.ClearIdem(ctx, "msg-lease"); err != nil {
+		t.Fatalf("ClearIdem: %v", err)
+	}
+	if held, err = b.ExpireIdemLease(ctx, "msg-lease"); err != nil || held {
+		t.Errorf("ExpireIdemLease on a released claim = %v/%v, want false", held, err)
+	}
+
+	// Phase two: committing makes the marker durable, and a committed message
+	// is refused for the rest of the dedup window.
+	if _, err := b.Idempotent(ctx, "msg-lease"); err != nil {
+		t.Fatalf("re-claim after release: %v", err)
+	}
+	if err := b.CommitIdem(ctx, "msg-lease"); err != nil {
+		t.Fatalf("CommitIdem: %v", err)
+	}
+	committed, err := b.client.TTL(ctx, IdemKey("msg-lease")).Result()
+	if err != nil {
+		t.Fatalf("ttl: %v", err)
+	}
+	if committed <= time.Hour {
+		t.Errorf("committed TTL = %v, want the durable window so a redelivery never re-runs the turn", committed)
+	}
+	again, err := b.Idempotent(ctx, "msg-lease")
+	if err != nil {
+		t.Fatalf("Idempotent after commit: %v", err)
+	}
+	if again {
+		t.Error("a committed message must never be reprocessed")
+	}
+}
+
 func TestBusSessionLock(t *testing.T) {
 	ctx := context.Background()
 	b := newBusForTest(t)
@@ -414,16 +476,36 @@ func TestBusReadOutboundCursor(t *testing.T) {
 		t.Fatalf("after cursor: msgs=%+v, want only o4", msgs)
 	}
 
-	// "$" = only new messages
+	// "$" follows the live tail: it resolves to the newest entry at call time,
+	// so it returns only what arrives while the read is blocked — which is
+	// exactly the contract a live follower (the IM gateway) needs. The earlier
+	// version of this test published first and then read "$", which cannot
+	// return anything under Redis semantics.
+	live, liveCancel := context.WithCancel(ctx)
+	defer liveCancel()
+	type readResult struct {
+		msgs []*Message
+		err  error
+	}
+	got := make(chan readResult, 1)
+	go func() {
+		msgs, _, err := b.ReadOutbound(live, "$")
+		got <- readResult{msgs: msgs, err: err}
+	}()
+	time.Sleep(200 * time.Millisecond) // let the blocking read establish its position
 	if err := b.PublishOutbound(ctx, mk("o5", "t1", "s1")); err != nil {
 		t.Fatal(err)
 	}
-	msgs, _, err = b.ReadOutbound(ctx, "$")
-	if err != nil {
-		t.Fatalf("read $: %v", err)
-	}
-	if len(msgs) != 1 || msgs[0].ID != "o5" {
-		t.Fatalf("dollar read: msgs=%+v, want only o5", msgs)
+	select {
+	case res := <-got:
+		if res.err != nil {
+			t.Fatalf("read $: %v", res.err)
+		}
+		if len(res.msgs) != 1 || res.msgs[0].ID != "o5" {
+			t.Fatalf("dollar read: msgs=%+v, want only o5", res.msgs)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocking dollar read never returned")
 	}
 	_ = cursor2
 }

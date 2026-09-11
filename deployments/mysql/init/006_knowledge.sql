@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
     vector_store    VARCHAR(32)  NOT NULL DEFAULT 'milvus',
     collection_name VARCHAR(128) NULL                COMMENT 'Milvus collection; default = {tenant_id}_{kb_id}',
     dimension       INT          NOT NULL DEFAULT 1536 COMMENT 'embedding dimension; must match the Milvus collection',
+    created_by      VARCHAR(64)  NULL                COMMENT 'authoring member id (weak ref); NULL = pre-authorship row, treated as tenant-shared',
+    visibility      ENUM('private','shared') NOT NULL DEFAULT 'private'
+                                                     COMMENT 'private = author + tenant managers only; shared = tenant-readable (others read-only)',
     created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     is_deleted      TINYINT      NOT NULL DEFAULT 0,

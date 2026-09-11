@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/asset"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/skill"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/infra/storage/sqlutil"
 )
@@ -26,7 +27,7 @@ type mysqlStore struct {
 
 func newMySQLStore(db *sql.DB) *mysqlStore { return &mysqlStore{db: db} }
 
-const skillCols = "skill_id, scope, owner_tenant_id, code, name, description, current_version, status, created_at, updated_at"
+const skillCols = "skill_id, scope, owner_tenant_id, code, name, description, current_version, status, created_by, visibility, created_at, updated_at"
 
 const skillVersionCols = "skill_id, version, content_md, checksum, prompt_template, executor_type, timeout_seconds, status, published_at"
 
@@ -43,10 +44,11 @@ func (s *mysqlStore) Create(ctx context.Context, sk *skill.Skill) error {
 	if sk.Description != "" {
 		desc = sk.Description
 	}
+	sk.Visibility = asset.VisibilityOrDefault(sk.Visibility)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO skills (skill_id, scope, owner_tenant_id, code, name, description, current_version, status)
-		 VALUES (?, ?, ?, ?, ?, ?, 0, 'draft')`,
-		sk.SkillID, sk.Scope, owner, sk.Code, sk.Name, desc)
+		`INSERT INTO skills (skill_id, scope, owner_tenant_id, code, name, description, current_version, status, created_by, visibility)
+		 VALUES (?, ?, ?, ?, ?, ?, 0, 'draft', ?, ?)`,
+		sk.SkillID, sk.Scope, owner, sk.Code, sk.Name, desc, sqlutil.Null(sk.CreatedBy), sk.Visibility)
 	if sqlutil.IsDuplicate(err) {
 		return skill.ErrSkillCodeExists
 	}
@@ -61,9 +63,11 @@ func (s *mysqlStore) Update(ctx context.Context, sk *skill.Skill) error {
 	if sk.Description != "" {
 		desc = sk.Description
 	}
+	// visibility is author-controlled, so an update may publish or privatise the
+	// skill as well as rename it. Code and scope stay immutable.
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE skills SET name = ?, description = ?, status = ? WHERE skill_id = ? AND is_deleted = 0`,
-		sk.Name, desc, sk.Status, sk.SkillID)
+		`UPDATE skills SET name = ?, description = ?, status = ?, visibility = ? WHERE skill_id = ? AND is_deleted = 0`,
+		sk.Name, desc, sk.Status, asset.VisibilityOrDefault(sk.Visibility), sk.SkillID)
 	if err != nil {
 		return err
 	}
@@ -144,12 +148,14 @@ func (s *mysqlStore) fillSkill(ctx context.Context, sk *skill.Skill) error {
 
 func scanSkill(s sqlutil.RowScanner) (*skill.Skill, error) {
 	var (
-		sk      skill.Skill
-		owner   sql.NullString
-		desc    sql.NullString
-		current int
+		sk        skill.Skill
+		owner     sql.NullString
+		desc      sql.NullString
+		createdBy sql.NullString
+		current   int
 	)
-	if err := s.Scan(&sk.SkillID, &sk.Scope, &owner, &sk.Code, &sk.Name, &desc, &current, &sk.Status, &sk.CreatedAt, &sk.UpdatedAt); err != nil {
+	if err := s.Scan(&sk.SkillID, &sk.Scope, &owner, &sk.Code, &sk.Name, &desc, &current, &sk.Status,
+		&createdBy, &sk.Visibility, &sk.CreatedAt, &sk.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if owner.Valid {
@@ -159,6 +165,8 @@ func scanSkill(s sqlutil.RowScanner) (*skill.Skill, error) {
 	if desc.Valid {
 		sk.Description = desc.String
 	}
+	sk.CreatedBy = createdBy.String
+	sk.Visibility = asset.VisibilityOrDefault(sk.Visibility)
 	sk.CurrentVersion = current
 	return &sk, nil
 }

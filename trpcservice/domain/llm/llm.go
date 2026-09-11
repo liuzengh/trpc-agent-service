@@ -21,6 +21,8 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model/anthropic"
 	"trpc.group/trpc-go/trpc-agent-go/model/gemini"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/domain/asset"
 )
 
 // DefaultHTTPTimeout bounds a single model HTTP request. Without it the
@@ -97,6 +99,10 @@ type Endpoint struct {
 	// reference resolved at build time via Registry.SetKeySource.
 	APIKey    string `json:"api_key,omitempty"`
 	APIKeyRef string `json:"api_key_ref,omitempty"`
+	// CreatedBy is the member that registered the endpoint; Visibility decides
+	// whether the rest of the tenant may see it (see domain/asset).
+	CreatedBy  string `json:"created_by,omitempty"`
+	Visibility string `json:"visibility,omitempty"`
 }
 
 // KeySource resolves a credential value by reference (the secret store
@@ -386,6 +392,8 @@ func (r *Registry) Create(ctx context.Context, ep Endpoint) error {
 	if ep.Scope == "" {
 		ep.Scope = ScopeTenant
 	}
+	// A new endpoint is private to its author until the author shares it.
+	ep.Visibility = asset.VisibilityOrDefault(ep.Visibility)
 	if err := r.normalizeCredentials(ctx, &ep); err != nil {
 		return err
 	}
@@ -433,6 +441,7 @@ func (s *memStore) Create(_ context.Context, ep Endpoint) error {
 	if _, ok := s.eps[ep.ID]; ok {
 		return ErrEndpointExists
 	}
+	ep.Visibility = asset.VisibilityOrDefault(ep.Visibility)
 	s.eps[ep.ID] = ep
 	return nil
 }
@@ -440,9 +449,13 @@ func (s *memStore) Create(_ context.Context, ep Endpoint) error {
 func (s *memStore) Update(_ context.Context, ep Endpoint) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.eps[ep.ID]; !ok {
+	cur, ok := s.eps[ep.ID]
+	if !ok {
 		return ErrEndpointNotFound
 	}
+	// created_by is set at creation and never rewritten: ownership does not move.
+	ep.CreatedBy = cur.CreatedBy
+	ep.Visibility = asset.VisibilityOrDefault(ep.Visibility)
 	s.eps[ep.ID] = ep
 	return nil
 }
@@ -464,6 +477,7 @@ func (s *memStore) Get(_ context.Context, id string) (Endpoint, error) {
 	if !ok {
 		return Endpoint{}, ErrEndpointNotFound
 	}
+	ep.Visibility = asset.VisibilityOrDefault(ep.Visibility)
 	return ep, nil
 }
 
@@ -472,6 +486,7 @@ func (s *memStore) List(_ context.Context) ([]Endpoint, error) {
 	defer s.mu.RUnlock()
 	out := make([]Endpoint, 0, len(s.eps))
 	for _, ep := range s.eps {
+		ep.Visibility = asset.VisibilityOrDefault(ep.Visibility)
 		out = append(out, ep)
 	}
 	return out, nil
@@ -480,6 +495,7 @@ func (s *memStore) List(_ context.Context) ([]Endpoint, error) {
 func (s *memStore) Upsert(_ context.Context, ep Endpoint) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ep.Visibility = asset.VisibilityOrDefault(ep.Visibility)
 	s.eps[ep.ID] = ep
 	return nil
 }

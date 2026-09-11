@@ -6,7 +6,7 @@ import { useEndpointStore } from '../stores/endpoint'
 import { useKBStore } from '../stores/kb'
 import { useSkillStore } from '../stores/skill'
 import { listTools, type ToolDef } from '../api/tool'
-import { listVersions, type Agent, type VersionInfo } from '../api/agent'
+import { listVersions, setAgentGray, clearAgentGray, type Agent, type VersionInfo } from '../api/agent'
 import { useAuthStore } from '../stores/auth'
 
 const store = useAgentStore()
@@ -15,12 +15,32 @@ const kbs = useKBStore()
 const skills = useSkillStore()
 const authStore = useAuthStore()
 const canCreate = computed(() => authStore.hasPermission('agent:create'))
-const canUpdate = computed(() => authStore.hasPermission('agent:update'))
-const canDelete = computed(() => authStore.hasPermission('agent:delete'))
+
+// 行级权限：admin/owner 管全租户；member 只能改自己创建的 Agent（共享只放可读）。
+const canManage = (row: Agent) => authStore.canManageAsset(row as { created_by?: string })
 
 const dialogVisible = ref(false)
 const editing = ref(false)
-const form = reactive<Agent>({ id: '', tenant_id: '', name: '', description: '', status: 'draft', current_version: 0 })
+const form = reactive<Agent>({
+  id: '',
+  tenant_id: '',
+  name: '',
+  description: '',
+  status: 'draft',
+  current_version: 0,
+  visibility: 'private',
+})
+
+async function toggleVisibility(row: Agent) {
+  const next = row.visibility === 'shared' ? 'private' : 'shared'
+  try {
+    await store.update({ ...row, visibility: next })
+    ElMessage.success(next === 'shared' ? '已共享给租户' : '已收回为私有')
+  } catch (e) {
+    ElMessage.error(String(e))
+    void store.fetch()
+  }
+}
 
 // publish dialog
 const publishVisible = ref(false)
@@ -56,7 +76,15 @@ onMounted(() => {
 
 function openCreate() {
   editing.value = false
-  Object.assign(form, { id: '', tenant_id: '', name: '', description: '', status: 'draft', current_version: 0 })
+  Object.assign(form, {
+    id: '',
+    tenant_id: authStore.tenantId,
+    name: '',
+    description: '',
+    status: 'draft',
+    current_version: 0,
+    visibility: 'private',
+  })
   dialogVisible.value = true
 }
 
@@ -163,6 +191,44 @@ async function rollback() {
   }
 }
 
+// gray release dialog
+const grayVisible = ref(false)
+const graying = ref('')
+const grayVersion = ref(0)
+const grayPercent = ref(10)
+
+async function openGray(row: Agent) {
+  graying.value = row.id
+  versions.value = await listVersions(row.id)
+  // Default to the newest version that is not the current one: that is the
+  // release an operator wants to canary.
+  const candidate = versions.value.map((v) => v.version).filter((v) => v !== row.current_version)
+  grayVersion.value = row.gray?.version ?? candidate[candidate.length - 1] ?? row.current_version
+  grayPercent.value = row.gray?.percent ?? 10
+  grayVisible.value = true
+}
+
+async function saveGray() {
+  try {
+    await setAgentGray(graying.value, { version: grayVersion.value, percent: grayPercent.value })
+    grayVisible.value = false
+    ElMessage.success(`已灰度：${grayPercent.value}% 会话走 v${grayVersion.value}`)
+    await store.fetch()
+  } catch (e) {
+    ElMessage.error(String(e))
+  }
+}
+
+async function clearGray(row: Agent) {
+  try {
+    await clearAgentGray(row.id)
+    ElMessage.success('已清除灰度，全部流量回到当前版本')
+    await store.fetch()
+  } catch (e) {
+    ElMessage.error(String(e))
+  }
+}
+
 function statusTag(s: string) {
   return s === 'published' ? 'success' : s === 'disabled' ? 'info' : 'warning'
 }
@@ -171,28 +237,62 @@ function statusTag(s: string) {
 <template>
   <main class="page">
     <h1>Agent 配置</h1>
-    <p class="hint">Agent 是团队级助手；通过发布冻结版本、可原子回滚，运行中会话不受切换影响。</p>
+    <p class="hint">
+      Agent 是租户资产，作者所有：新建默认<b>私有</b>（仅你与租户管理员可见），点「共享」后租户内成员可读与对话；
+      发布冻结版本、可原子回滚，运行中会话不受切换影响。
+    </p>
     <div class="toolbar">
       <el-button v-if="canCreate" type="primary" @click="openCreate">新建 Agent</el-button>
     </div>
 
     <el-table v-loading="store.loading" :data="store.agents" border>
-      <el-table-column prop="name" label="名称" width="160" />
-      <el-table-column prop="tenant_id" label="租户" width="160" />
-      <el-table-column label="状态" width="110">
+      <el-table-column prop="name" label="名称" width="150" />
+      <el-table-column prop="tenant_id" label="租户" width="130" />
+      <el-table-column label="可见性" width="120">
+        <template #default="{ row }">
+          <el-tag :type="row.visibility === 'shared' ? 'success' : 'info'" size="small">
+            {{ row.visibility === 'shared' ? '租户共享' : '私有' }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="作者" width="110">
+        <template #default="{ row }">
+          <span v-if="row.created_by">{{ row.created_by }}</span>
+          <span v-else class="muted">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="状态" width="100">
         <template #default="{ row }">
           <el-tag :type="statusTag(row.status)">{{ row.status }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="current_version" label="当前版本" width="100" />
-      <el-table-column prop="description" label="描述" show-overflow-tooltip />
-      <el-table-column label="操作" width="340">
+      <el-table-column prop="current_version" label="版本" width="80" />
+      <el-table-column label="灰度" width="150">
         <template #default="{ row }">
-          <el-button v-if="canUpdate" size="small" @click="openEdit(row)">编辑</el-button>
-          <el-button v-if="canUpdate" size="small" @click="toggle(row)">{{ row.status === 'disabled' ? '启用' : '禁用' }}</el-button>
-          <el-button v-if="canUpdate" size="small" type="primary" @click="openPublish(row)">发布</el-button>
-          <el-button v-if="canUpdate" size="small" @click="openRollback(row)">回滚</el-button>
-          <el-button v-if="canDelete" size="small" type="danger" @click="remove(row)">删除</el-button>
+          <el-tag v-if="row.gray" type="warning" size="small">
+            {{ row.gray.percent }}% → v{{ row.gray.version }}
+          </el-tag>
+          <span v-else class="muted">全量 v{{ row.current_version }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column prop="description" label="描述" show-overflow-tooltip />
+      <el-table-column label="操作" width="440">
+        <template #default="{ row }">
+          <template v-if="canManage(row)">
+            <el-button size="small" @click="openEdit(row)">编辑</el-button>
+            <el-button size="small" @click="toggle(row)">{{ row.status === 'disabled' ? '启用' : '禁用' }}</el-button>
+            <el-button size="small" type="primary" @click="openPublish(row)">发布</el-button>
+            <el-button size="small" @click="openRollback(row)">回滚</el-button>
+            <el-button size="small" @click="openGray(row)">灰度</el-button>
+            <el-button v-if="row.gray" size="small" type="warning" plain @click="clearGray(row)">
+              清除灰度
+            </el-button>
+            <el-button size="small" @click="toggleVisibility(row)">
+              {{ row.visibility === 'shared' ? '收回' : '共享' }}
+            </el-button>
+            <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
+          </template>
+          <span v-else class="muted">只读（可在对话页使用）</span>
         </template>
       </el-table-column>
     </el-table>
@@ -211,6 +311,12 @@ function statusTag(s: string) {
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="form.description" type="textarea" />
+        </el-form-item>
+        <el-form-item label="可见性">
+          <el-radio-group v-model="form.visibility">
+            <el-radio value="private">私有（仅我与租户管理员）</el-radio>
+            <el-radio value="shared">共享给租户</el-radio>
+          </el-radio-group>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -285,6 +391,27 @@ function statusTag(s: string) {
       <template #footer>
         <el-button @click="rollbackVisible = false">取消</el-button>
         <el-button type="primary" @click="rollback">回滚</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- gray release -->
+    <el-dialog v-model="grayVisible" :title="`灰度发布 ${graying}`" width="460px">
+      <el-form label-width="110px">
+        <el-form-item label="灰度版本">
+          <el-select v-model="grayVersion" style="width: 100%">
+            <el-option v-for="v in versions" :key="v.version" :label="`v${v.version} (${v.status})`" :value="v.version" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="流量比例">
+          <el-slider v-model="grayPercent" :min="1" :max="100" show-input />
+        </el-form-item>
+        <div class="form-tip">
+          按会话 id 稳定分桶：同一会话始终走同一版本，不会中途切换。清除灰度即回滚，无需重新发布。
+        </div>
+      </el-form>
+      <template #footer>
+        <el-button @click="grayVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveGray">保存</el-button>
       </template>
     </el-dialog>
   </main>

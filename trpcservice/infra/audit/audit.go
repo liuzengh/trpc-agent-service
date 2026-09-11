@@ -136,22 +136,53 @@ func (r *MySQLRecorder) Dropped() int64 {
 	return atomic.LoadInt64(&r.dropped)
 }
 
+// ListQuery filters the audit read side. Zero values mean "no filter", so the
+// caller only sets what the operator asked for.
+type ListQuery struct {
+	TenantID string
+	// Channel separates asset mutations (channel "console", i.e.
+	// AuditSourceAsset) from agent runs (the IM/admin channel of the turn).
+	Channel string
+	// Kind matches the audited asset kind recorded in agent_name
+	// ("agent" | "kb" | "skill" | "binding" | "endpoint"), used by the asset
+	// view; runs leave it empty.
+	Kind string
+	// Decision filters on the outcome (executed | deny | failed | allow |
+	// approve).
+	Decision string
+	// UserID narrows to one actor, for "what did this member change" reviews.
+	UserID string
+	Limit  int
+}
+
 const listSQL = `SELECT audit_id, tenant_id, channel, user_id, session_id,
 	COALESCE(agent_name, ''), COALESCE(tool_name, ''), COALESCE(decision, ''),
 	COALESCE(latency_ms, 0), COALESCE(error_type, ''), CAST(COALESCE(cost, 0) AS DOUBLE),
 	trace_id, created_at
 FROM audit_logs
 WHERE (? = '' OR tenant_id = ?)
+  AND (? = '' OR channel = ?)
+  AND (? = '' OR agent_name = ?)
+  AND (? = '' OR decision = ?)
+  AND (? = '' OR user_id = ?)
 ORDER BY id DESC
 LIMIT ?`
 
-// List returns the most recent audit rows, newest first, optionally scoped to
-// one tenant ("" = all tenants). It is the read side backing the admin page.
-func (r *MySQLRecorder) List(ctx context.Context, tenantID string, limit int) ([]Log, error) {
+// List returns the most recent audit rows, newest first, filtered by q. It is
+// the read side backing the admin page: the source/kind/decision/actor filters
+// are what make a member's asset edits traceable next to the agent runs.
+func (r *MySQLRecorder) List(ctx context.Context, q ListQuery) ([]Log, error) {
+	limit := q.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := r.db.QueryContext(ctx, listSQL, tenantID, tenantID, limit)
+	rows, err := r.db.QueryContext(ctx, listSQL,
+		q.TenantID, q.TenantID,
+		q.Channel, q.Channel,
+		q.Kind, q.Kind,
+		q.Decision, q.Decision,
+		q.UserID, q.UserID,
+		limit)
 	if err != nil {
 		return nil, err
 	}
