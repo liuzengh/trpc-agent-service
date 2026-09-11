@@ -98,6 +98,8 @@ schema 30 增加 `channel_connection`、`channel_credential`、`channel_connecti
 
 列表中的“已连接”表示连接配置已激活；具体收发仍以消息记录为准。暂停阻止新的正常接入，不撤回已经执行的工具或发送结果。主密钥恢复、生产网络和备份要求与模型连接相同。
 
+维护前的未知结果检查同时查询 Outbound 分段和 Tool Journal，不能只看请求或出站总状态：总状态已进入 dead，仍可能存在 unknown/attempting 分段。必须先按证据对账，再更换或移除连接。
+
 ## 3. 工具、审批与业务幂等
 
 ToolFilter 控制模型可见性，PermissionPolicy 控制执行；工具自身和 MCP 包装器还校验可信 Scope。白名单、用户限制、调用次数和总执行时间随 Revision 固定。

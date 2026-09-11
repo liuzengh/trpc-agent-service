@@ -51,12 +51,14 @@ func (s *Store) lockEditable(ctx context.Context, c Connection, version int64) (
 	e = s.sql(ctx).QueryRowContext(ctx, `SELECT
  EXISTS(SELECT 1 FROM agent_run r JOIN conversation v ON v.conversation_id=r.conversation_id WHERE v.tenant_id=$1 AND v.channel_binding_id=$2 AND r.status NOT IN ('completed','dead','expired','cancelled'))
  OR EXISTS(SELECT 1 FROM outbound_message WHERE tenant_id=$1 AND channel_binding_id=$2 AND status IN ('pending','sending','unknown'))
+ OR EXISTS(SELECT 1 FROM outbound_part p JOIN outbound_message o ON o.outbound_id=p.outbound_id AND o.tenant_id=p.tenant_id WHERE o.tenant_id=$1 AND o.channel_binding_id=$2 AND p.status IN ('attempting','unknown'))
+ OR EXISTS(SELECT 1 FROM tool_execution e JOIN agent_run r ON r.request_id=e.request_id AND r.tenant_id=e.tenant_id JOIN conversation v ON v.conversation_id=r.conversation_id WHERE v.tenant_id=$1 AND v.channel_binding_id=$2 AND e.status IN ('running','unknown'))
  OR EXISTS(SELECT 1 FROM tool_approval WHERE tenant_id=$1 AND channel_binding_id=$2 AND expires_at>now() AND (status='pending' OR (status='approved' AND resumed_at IS NULL)))`, c.TenantID, current.BindingID).Scan(&pending)
 	if e != nil {
 		return b, safe(e)
 	}
 	if pending {
-		return b, errors.New("还有未完成请求、待处理审批或未确认投递，请先到消息记录核对；本次未修改连接")
+		return b, errors.New("还有未完成请求、待处理审批或未确认的工具/投递结果，请先到消息记录核对；本次未修改连接")
 	}
 	return s.repo.GetChannelBinding(ctx, c.TenantID, current.BindingID)
 }
