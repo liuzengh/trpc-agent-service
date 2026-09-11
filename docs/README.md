@@ -37,5 +37,5 @@ npx --yes @mermaid-js/mermaid-cli@11 -i docs/系统架构图.mmd -o docs/系统�
 ## 文档说明
 
 - 所有文档基于项目事实代码，非理论设计；每条结论尽量给出代码位置或测试名
-- 中间过程文档（详细设计、技术选型、存储设计、联调手册、容量评估、答辩教学文档等）在 `tempdocs/` 目录
+- 中间过程文档（技术选型、联调手册、容量评估等）为本地过程产物，不随仓库发布
 - 部署资产（Docker Compose、MySQL DDL、OTel/Prometheus 配置）在 `deployments/` 与 `configs/` 目录

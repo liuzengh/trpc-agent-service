@@ -44,3 +44,6 @@ credentials.json
 
 
 deployments/prod/certs/
+
+# Local process docs (not part of the repository)
+tempdocs/
