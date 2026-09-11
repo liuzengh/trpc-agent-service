@@ -1,0 +1,186 @@
+# Prometheus alerting rules for the platform stack.
+#
+# Metric names, labels and units below are the ones the running stack actually
+# exports (verified against the live Prometheus, 2026-09-11):
+#
+#   platform_inbound_messages_total{tenant_id,channel}
+#   platform_outbound_messages_total{tenant_id,channel}
+#   platform_im_delivery_total{channel,ok}
+#   platform_dlq_total{tenant_id,channel}
+#   platform_tenant_cost_total{tenant_id}
+#   platform_token_usage_total{tenant_id}
+#   platform_agent_run_duration_seconds_{bucket,sum,count}{tenant_id,agent_id}
+#   platform_session_latency_seconds_{bucket,sum,count}{tenant_id}
+#   platform_agent_run_errors_total{tenant_id,agent_id}
+#   platform_model_call_duration_seconds_* / platform_tool_call_duration_seconds_*
+#     (appear with the first turn that records them)
+#
+# Thresholds are tied to configured constants rather than taste:
+#   - worker runTimeout = 300s, llm HTTP timeout = 120s  → turn-latency alerts
+#   - the consumer/follower reconnect cap is 30s          → black-hole alert
+#   - session latency is a shared-backend call, not a model call → 1s
+#
+# /healthz is deliberately NOT an alert source here: Prometheus in this stack has
+# no blackbox exporter. A node that is up but degraded is caught by
+# PlatformInboundAcceptedWithoutReplies below; a node that is down is caught by
+# the scrape gap (PlatformMetricsMissing / PlatformCollectorDown). The compose
+# healthcheck restarts the second case.
+groups:
+  - name: platform-availability
+    rules:
+      # The signature failure this platform was fixed for: publishing keeps
+      # working (HTTP 202 on /chat, IM callbacks accepted) while nothing drains
+      # stream:inbound, so users get silence and every dashboard looks fine.
+      #
+      # Two rules, because the two counters have different scope: inbound counts
+      # every accepted message (including the console's admin channel), while
+      # outbound is IM-only (channels.Gateway counts what it actually delivered —
+      # a console reply is read over SSE and never counted here). Comparing them
+      # without that distinction fires on console-only traffic, so the first rule
+      # is scoped to IM channels and the channel-agnostic signal is "no agent run
+      # completed", which is what a detached consumer really looks like.
+      - alert: PlatformIMInboundWithoutDelivery
+        expr: |
+          sum(rate(platform_inbound_messages_total{channel!="admin"}[5m])) > 0
+            and
+          sum(rate(platform_outbound_messages_total[5m])) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "IM messages are being accepted but nothing is delivered back"
+          description: >-
+            IM inbound is flowing while zero IM deliveries happened for 10
+            minutes: the consumer or the IM outbound follower is detached from
+            Redis. Check `docker logs <backend> | grep 'lost the bus'` and
+            GET /healthz (it reports 503 while a loop is detached).
+
+      - alert: PlatformInboundWithoutAgentRuns
+        expr: |
+          sum(rate(platform_inbound_messages_total[5m])) > 0
+            and
+          sum(rate(platform_agent_run_duration_seconds_count[5m])) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Inbound messages arrive but no agent turn completes"
+          description: >-
+            Messages are accepted and not one turn finished in 10 minutes. Either
+            the consumer is detached (check /healthz and the logs) or every
+            message is failing before the run (agent not bound, tenant mismatch,
+            tenant quota) — GET /audit?decision=deny shows the second case.
+
+      # The collector is the only scrape target (see prometheus.yml), so a gap
+      # here means the whole node or the observability sidecar went away — not
+      # that the platform is idle.
+      - alert: PlatformCollectorDown
+        expr: up{job="otel-collector"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OTel collector is not scrapeable"
+          description: "The node exports metrics through the collector; a 2 minute gap hides every other alert."
+
+      - alert: PlatformMetricsMissing
+        expr: absent_over_time(platform_inbound_messages_total[10m])
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No platform metrics at all for 10 minutes"
+          description: "The backend stopped reporting (crash-loop, no traffic at all, or a broken OTLP export path)."
+
+  - name: platform-delivery
+    rules:
+      - alert: PlatformIMDeliveryFailing
+        expr: |
+          sum(rate(platform_im_delivery_total{ok="false"}[5m]))
+            /
+          clamp_min(sum(rate(platform_im_delivery_total[5m])), 0.001) > 0.2
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 20% of IM deliveries are failing"
+          description: >-
+            Replies are produced but not reaching the chat platform (expired
+            credentials, rate limit, platform-side error). Check the channel
+            binding's credential and the IM platform's own error codes.
+
+      # Any dead letter is a message that ran out of retries: it is a user
+      # request that was never answered, so it pages rather than warns.
+      - alert: PlatformDeadLetters
+        expr: increase(platform_dlq_total[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Messages reached the dead-letter queue"
+          description: >-
+            {{ $value }} message(s) exceeded the retry threshold in the last
+            15 minutes. Inspect stream:inbound:dlq and the dead_letters table;
+            replay after fixing the cause.
+
+  - name: platform-latency
+    rules:
+      # p99 above a minute is the upstream model degrading, not platform load:
+      # measured turns sit at a 4-5s p50 with the model used in the capacity
+      # tests (docs/容量评估指南.md §4.1).
+      - alert: PlatformTurnLatencyDegraded
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(platform_agent_run_duration_seconds_bucket[10m])) by (le)) > 60
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 agent turn latency is above 60s"
+          description: "Upstream model latency, not the queue: check the endpoint's provider status and per-endpoint p99."
+
+      # The worker's runTimeout is 300s: a p99 in this range means turns are
+      # being cut off by the platform's own guard rather than answered.
+      - alert: PlatformTurnLatencySevere
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(platform_agent_run_duration_seconds_bucket[10m])) by (le)) > 180
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "p99 agent turn latency is above 180s (runTimeout is 300s)"
+          description: "Users are waiting minutes for a reply; expect runTimeout terminations and audit rows with error_type=timeout."
+
+      - alert: PlatformRunErrors
+        expr: sum(rate(platform_agent_run_errors_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent runs are failing"
+          description: "Sustained run errors: check audit rows (error_type) and the endpoint credentials, then GET /version to confirm which release is serving."
+
+      - alert: PlatformSessionBackendSlow
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(platform_session_latency_seconds_bucket[5m])) by (le)) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 session/memory backend latency is above 1s"
+          description: "Redis/MySQL contention or an undersized instance: every turn reads and writes session state, so this multiplies into turn latency."
+
+  - name: platform-tenant-usage
+    rules:
+      # Per-tenant token burn, used for quota conversations with a tenant rather
+      # than as a hard stop (the platform enforces quota at run time and records
+      # the authoritative numbers in usage_records).
+      - alert: PlatformTenantTokenBurnHigh
+        expr: sum(rate(platform_token_usage_total[1h])) by (tenant_id) > 100
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} is burning >100 tokens/s over an hour"
+          description: "Sustained burn at this rate is ~360k tokens/hour for one tenant; confirm it is intended and check the tenant's quota."

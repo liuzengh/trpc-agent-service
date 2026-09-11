@@ -1,0 +1,160 @@
+# Production topology: role-split nodes behind a TLS edge.
+#
+#   docker compose -f deployments/docker-compose.yml \
+#                  -f deployments/docker-compose.prod.yml up -d
+#
+#   bash scripts/gen-selfsigned.sh          # or drop a real certificate in prod/certs/
+#
+# What changes versus the single-node stack:
+#
+#   * the one `backend` (role=all) becomes three roles, because the role plan
+#     exists for exactly this: the control plane must not ride a data-plane node
+#     (see cmd/trpc-service/role.go). The old `backend`/`frontend` services are
+#     parked in the `legacy` profile so they are not started here.
+#   * workers scale out: `--scale backend-worker=3` (or replicas below).
+#   * the edge terminates TLS and routes by role: the conversation surface
+#     (/chat, /sessions, /dlq) goes to the worker pool, the management surface
+#     to the control-plane node.
+#   * every service gets a restart policy, a healthcheck where it has an HTTP
+#     surface, and resource ceilings: an unbounded agent turn must not be able
+#     to take the host down with it.
+#
+# The IM gateway stays a single replica on purpose: one bot account can only be
+# held by one process, so a second gateway would open a competing connection for
+# the same bot and answer every message twice. Scale it by moving the node
+# (blue/green), never by adding replicas.
+services:
+  backend:
+    profiles: ["legacy"]
+
+  frontend:
+    profiles: ["legacy"]
+
+  # ---- Control plane: management REST API (tenants, agents, keys, audit…) ----
+  backend-admin:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-prod}
+    restart: unless-stopped
+    command: ["--config", "/etc/trpc-service/config.yaml", "--role", "admin"]
+    environment:
+      TRPC_BUILD_VERSION: ${APP_VERSION:-prod}
+      TRPC_SECRET_MASTER_KEY: ${TRPC_SECRET_MASTER_KEY:?set it in deployments/.env}
+      ADMIN_TENANT_ID: ${ADMIN_TENANT_ID:-t-demo}
+      ADMIN_USER_ID: ${ADMIN_USER_ID:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set a real owner password}
+      TRPC_MYSQL_DSN: ${TRPC_MYSQL_DSN:-root:trpc123@tcp(mysql:3306)/trpc_agent_service?parseTime=true&multiStatements=true}
+      TRPC_JWT_SECRET: ${TRPC_JWT_SECRET:?set a dedicated signing secret}
+    volumes:
+      - ./backend-compose.config.yaml:/etc/trpc-service/config.yaml:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 1g }
+        reservations: { cpus: "0.25", memory: 256m }
+
+  # ---- Data plane workers: conversation API + message consumption ----
+  # Stateless by construction (shared Session/Memory + Redis locks), which is
+  # what makes replicas safe and rolling restarts invisible.
+  backend-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-prod}
+    restart: unless-stopped
+    command: ["--config", "/etc/trpc-service/config.yaml", "--role", "worker"]
+    environment:
+      TRPC_BUILD_VERSION: ${APP_VERSION:-prod}
+      TRPC_SECRET_MASTER_KEY: ${TRPC_SECRET_MASTER_KEY:?set it in deployments/.env}
+      # The worker serves the conversation API (/chat, /sessions), so it
+      # validates the same bearer tokens the control plane issues. Every node
+      # that answers HTTP needs this IDENTICAL secret — a rollout that forgets it
+      # looks healthy (the admin API works) while every conversation request
+      # answers 401 "invalid or expired token".
+      TRPC_JWT_SECRET: ${TRPC_JWT_SECRET:?set a dedicated signing secret}
+      TRPC_MYSQL_DSN: ${TRPC_MYSQL_DSN:-root:trpc123@tcp(mysql:3306)/trpc_agent_service?parseTime=true&multiStatements=true}
+    volumes:
+      - ./backend-compose.config.yaml:/etc/trpc-service/config.yaml:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+      resources:
+        limits: { cpus: "4.0", memory: 2g }
+        reservations: { cpus: "0.5", memory: 512m }
+
+  # ---- IM gateway: the stateful node (see the note above) ----
+  backend-gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-prod}
+    restart: unless-stopped
+    command: ["--config", "/etc/trpc-service/config.yaml", "--role", "gateway"]
+    environment:
+      TRPC_BUILD_VERSION: ${APP_VERSION:-prod}
+      TRPC_SECRET_MASTER_KEY: ${TRPC_SECRET_MASTER_KEY:?set it in deployments/.env}
+      TRPC_MYSQL_DSN: ${TRPC_MYSQL_DSN:-root:trpc123@tcp(mysql:3306)/trpc_agent_service?parseTime=true&multiStatements=true}
+    volumes:
+      - ./backend-compose.config.yaml:/etc/trpc-service/config.yaml:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m }
+        reservations: { cpus: "0.1", memory: 128m }
+
+  # ---- Edge: TLS + SPA + role-based API routing ----
+  edge:
+    build:
+      context: ../front
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: /api
+    restart: unless-stopped
+    ports:
+      # Parameterised so a second (probe) instance of the topology can run next
+      # to an existing deployment without fighting over 80/443.
+      - "${EDGE_HTTP_PORT:-80}:80"
+      - "${EDGE_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./prod/edge.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./prod/proxy-common.inc:/etc/nginx/conf.d/proxy-common.inc:ro
+      - ./prod/certs:/etc/nginx/certs:ro
+    depends_on:
+      - backend-admin
+      - backend-worker
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 256m }

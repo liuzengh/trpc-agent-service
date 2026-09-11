@@ -13,5 +13,37 @@ coverage.html
 
 vendor/
 
+# Go 模块缓存 / 构建缓存（沙箱工作区本地缓存，禁止提交）
+.mc*/
+.gc*/
+.gomodcache/
+.gocache/
+go.mod.gen
+
 data/*
 !data/README.md
+
+# Agent 工作记忆（不入库）
+.workbuddy/
+
+# 环境配置与密钥（安全：防止敏感信息泄露）
+.env
+.env.local
+.env.*.local
+deployments/.env
+*.pem
+*.key
+*.crt
+secrets.json
+credentials.json
+
+# IDE 临时文件
+*.bak
+*.tmp
+*~
+
+
+deployments/prod/certs/
+
+# Local process docs (not part of the repository)
+tempdocs/

@@ -1,0 +1,8 @@
+# Side-stack e2e config (front/playwright.side.config.ts).
+#
+# Same in-memory dev profile as configs/config.yaml, but on its own port so the
+# suite can run while a `docker compose` deployment is up. NOT for deployment.
+server:
+  http_addr: "127.0.0.1:8081"
+log:
+  level: "warn"

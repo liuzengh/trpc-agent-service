@@ -1,0 +1,181 @@
+// Package config loads tenant, model, channel, and storage backend settings.
+package config
+
+import (
+	"fmt"
+	"os"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// DefaultReadHeaderTimeout bounds request-header reads when the config leaves
+// server.read_header_timeout unset. Slowloris-style clients hold a connection
+// (and a goroutine) open by dribbling headers, so a bound is always applied.
+const DefaultReadHeaderTimeout = 15 * time.Second
+
+// Config is the root configuration for the service.
+type Config struct {
+	Server    ServerConfig    `yaml:"server"`
+	Log       LogConfig       `yaml:"log"`
+	Role      string          `yaml:"role"`
+	MySQL     MySQLConfig     `yaml:"mysql"`
+	Redis     RedisConfig     `yaml:"redis"`
+	Milvus    MilvusConfig    `yaml:"milvus"`
+	MinIO     MinIOConfig     `yaml:"minio"`
+	Secret    SecretConfig    `yaml:"secret"`
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
+	Memory    MemoryConfig    `yaml:"memory"`
+	IM        IMConfig        `yaml:"im"`
+	Telemetry TelemetryConfig `yaml:"telemetry"`
+}
+
+// ServerConfig configures the HTTP server.
+type ServerConfig struct {
+	HTTPAddr string `yaml:"http_addr"`
+	// Production turns development conveniences into hard failures: a missing
+	// signing secret currently falls back to a built-in value, which would let
+	// anyone mint tokens. Set this on real deployments.
+	Production bool `yaml:"production"`
+	// ReadHeaderTimeout bounds how long a client may take to send its request
+	// headers. Zero uses DefaultReadHeaderTimeout; a slow-header client would
+	// otherwise hold a connection and a goroutine indefinitely.
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+}
+
+// MySQLConfig configures the platform MySQL backend. An empty DSN keeps the
+// service in memory mode (no persistence).
+type MySQLConfig struct {
+	DSN string `yaml:"dsn"`
+}
+
+// RedisConfig configures the shared Redis backend.
+type RedisConfig struct {
+	URL string `yaml:"url"`
+}
+
+// MilvusConfig configures the Milvus vector backend. An empty address keeps
+// knowledge bases on the in-memory vector store (dev/test mode).
+type MilvusConfig struct {
+	Address  string `yaml:"address"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// MinIOConfig configures the S3-compatible object store that holds agent
+// artifacts. An empty endpoint disables artifact persistence (runner runs
+// without an artifact service).
+type MinIOConfig struct {
+	Endpoint  string `yaml:"endpoint"` // host:port, e.g. minio:9000
+	AccessKey string `yaml:"access_key"`
+	SecretKey string `yaml:"secret_key"`
+	Bucket    string `yaml:"bucket"` // default "artifacts"
+	UseSSL    bool   `yaml:"use_ssl"`
+}
+
+// SecretConfig configures the credential store. MasterKey is the encryption
+// master key (also settable via env TRPC_SECRET_MASTER_KEY, which wins). With
+// MySQL the credential store is disabled when no master key is present, so
+// plaintext is never written at rest.
+type SecretConfig struct {
+	MasterKey string `yaml:"master_key"`
+}
+
+// TelemetryConfig configures OpenTelemetry trace + metrics export. An empty
+// OTLPEndpoint keeps the noop provider (no export, recording is a no-op).
+type TelemetryConfig struct {
+	OTLPEndpoint string `yaml:"otlp_endpoint"` // OTLP collector host:port (grpc)
+	ServiceName  string `yaml:"service_name"`
+}
+
+// LogConfig configures structured logging.
+type LogConfig struct {
+	Level string `yaml:"level"`
+}
+
+// RateLimitConfig configures the IM inbound rate limiter. When disabled (the
+// default) no limiter is installed and all inbound messages are accepted.
+// Limit is the allowed inbound messages per tenant+channel+sender within one
+// Window (seconds).
+type RateLimitConfig struct {
+	Enable    bool  `yaml:"enable"`
+	PerMinute int64 `yaml:"per_minute"`
+}
+
+// IMConfig configures the IM ingress above the binding store. Bindings decide
+// which accounts exist and who they belong to; this is the deployment-level
+// choice of how events reach the platform.
+type IMConfig struct {
+	Webhook WebhookConfig `yaml:"webhook"`
+}
+
+// WebhookConfig enables the HTTP callback ingress for IM channels. It is off by
+// default: the endpoint is unauthenticated except for the platform's own
+// signature, so opening it must be a deliberate act.
+//
+// Channels lists the channels served over HTTP callbacks instead of a long
+// connection. A channel the platform cannot call back (WeCom's AI bot only
+// speaks its own WSS protocol) is rejected at startup rather than left with an
+// endpoint that could never work.
+type WebhookConfig struct {
+	Enable   bool     `yaml:"enable"`
+	Channels []string `yaml:"channels"`
+}
+
+// MemoryConfig configures the platform's long-term memory feature. Memory is
+// stored in a per-tenant backend chosen through the tenant's data_backend
+// selection (storage.Router); this knobs controls whether the feature is
+// switched on at all.
+//
+// PreloadCount is the framework's adaptive preload budget - an operator-visible
+// cost/quality tradeoff, not a hard count:
+//
+//	0  long-term memory is off: no memory service, no memory tools. The agent
+//	   still has the session transcript (short-term context).
+//	-1 every stored memory is injected. Grows the prompt with the memory set,
+//	   so it is not recommended in production.
+//	N>0 when the user has at most N memories they are all injected; beyond that
+//	   the N most relevant to the current question are.
+type MemoryConfig struct {
+	PreloadCount int `yaml:"preload_count"`
+}
+
+// DefaultMemoryPreloadCount is the preload budget applied when the config file
+// does not mention memory at all. The framework default is 0 (memory off);
+// this platform turns long-term memory on by default because cross-session
+// recall is a product requirement and the budget is small enough to bound the
+// prompt growth (only users who actually stored memories are affected).
+const DefaultMemoryPreloadCount = 10
+
+// Default returns a Config populated with safe defaults.
+func Default() *Config {
+	return &Config{
+		Server:    ServerConfig{HTTPAddr: ":8080"},
+		Log:       LogConfig{Level: "info"},
+		Role:      "all",
+		RateLimit: RateLimitConfig{Enable: false, PerMinute: 60},
+		Memory:    MemoryConfig{PreloadCount: DefaultMemoryPreloadCount},
+		Telemetry: TelemetryConfig{ServiceName: "trpc-agent-service"},
+	}
+}
+
+// Load reads a YAML config file, applying defaults for any unset fields.
+// ${ENV_VAR} references in the file are expanded from the environment before
+// parsing, so secrets such as the MySQL DSN can stay out of version control:
+//
+//	dsn: "${TRPC_MYSQL_DSN}"
+//
+// An undefined variable expands to the empty string (e.g. empty DSN keeps the
+// service in memory mode).
+func Load(path string) (*Config, error) {
+	cfg := Default()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("config: read %q: %w", path, err)
+	}
+	expanded := os.ExpandEnv(string(data))
+	if err := yaml.Unmarshal([]byte(expanded), cfg); err != nil {
+		return nil, fmt.Errorf("config: parse %q: %w", path, err)
+	}
+	return cfg, nil
+}

@@ -107,48 +107,171 @@
 
 ## 代码目录
 
-下面只是一个示范目录，用来说明平台需要覆盖的职责分层。实现时不必严格按这个结构组织代码，只要模块边界清晰、能对应到设计方案即可。
+实际代码组织（后端按**分层架构**组织在 `trpcservice/` 下，分 `domain/`（领域层）`infra/`（基础设施）`app/`（应用）三层；入口在 `cmd/trpc-service`；前端在 `front/`，部署资产在 `deployments/`）。依赖方向 `domain ← infra ← app`。
 
 ```txt
-|-- README.md              # 说明文档，包含设计、安装、使用
-|-- go.mod                 # Go module 定义
-|-- build.sh               # 构建项目
-|-- clean.sh               # 清理中间产物
-|-- coverage.sh            # 运行单测覆盖率
-|-- format.sh              # 格式化 Go 代码
-|-- lint.sh                # 静态检查
-|-- start.sh               # 启动服务
-|-- stop.sh                # 停止服务
-|-- data                   # 服务运行时数据
-|-- docs                   # 各模块说明与架构设计文档
 |-- cmd
-|   `-- trpc-service       # 命令行入口，可直接启动服务
-`-- trpcservice            # 源码
-    |-- agent              # 基于 tRPC-Agent-Go 的 Agent 定义
-    |-- channels           # 对接 IM 的 Channel Adapter
-    |-- config             # 租户与节点配置
-    |-- log                # 日志级别与脱敏
-    |-- metrics            # 监控指标
-    |-- skill              # 可运行的 Skill
-    |-- tenant             # 多租户模型与隔离
-    |-- tool               # 平台 Tool
-    |-- version.go         # 版本信息
-    |-- web                # 管理 / 对话页面
-    `-- workspace          # 工作目录，包含本地、容器等沙箱环境
+|   `-- trpc-service       # 入口 main.go（角色 gateway|worker|admin|all）
+|-- configs
+|   |-- config.yaml        # 本地 dev 默认配置（注释后端/redis/milvus/telemetry 段）
+|   `-- otel-collector.yaml  # OTel Collector 配置（compose 复用）
+|-- deployments
+|   |-- docker-compose.yml / .env.example    # 本地完整栈
+|   |-- backend-compose.config.yaml          # compose 后端挂载的完整运行配置
+|   |-- prometheus.yml                        # compose Prometheus 抓取
+|   `-- mysql/init/001~013.sql                # 13 个建表脚本（按文件序号执行，22 张核心表）
+|-- docs                   # 架构/详细设计/多后端/风险清单/可复用性评估
+|-- front                  # Vue3 + Vite + TS + Pinia + Element Plus + Vitest + Playwright
+|   |-- e2e/               # Playwright E2E 核心链路
+|   |-- src/{api,stores,views,router}
+|   `-- playwright.config.ts
+`-- trpcservice
+    |-- domain             # 领域层：模型 + Store 接口 + 内存默认（纯逻辑零 IO）
+    |   |-- tenant         # 租户模型（Quota/AuditPolicy 治理配置）
+    |   |-- agent          # Agent 定义 + 不可变版本（RuntimeProfile）
+    |   |-- llm            # ModelEndpoint 归一化（多协议模型构建）
+    |   |-- tool / skill / knowledge / chat / governance
+    |-- infra              # 基础设施层：存储实现 + 总线 + 可观测 + 适配
+    |   |-- storage        # 后端适配（OpenMySQL/sessions/memories/router/artifact/stores）
+    |   |   |-- sqlutil    # 共享 SQL helper
+    |   |   |-- tenantstore/agentstore/llmstore/toolstore  # 各域 MySQL 实现
+    |   |   `-- skillstore/knowledgestore/bindingstore/ledgerstore
+    |   |-- bus            # Redis Streams + 路由/幂等/会话锁
+    |   |-- channels/{wecom,feishu}   # IM 适配器 + binding 驱动连接管理
+    |   |-- audit / secret / metrics / workspace / config / log / health
+    `-- app                # 应用层：编排与入口
+        |-- worker         # inbound → runner.Run → outbox（幂等+锁+审批+审计）
+        `-- web            # Admin REST + /chat SSE + 各管理 handler
 ```
 
+> 能力边界：`workspace` 承载 Docker 代码执行（code-exec，隔离容器+无网络+高风险自动审批；K8s Pod 后端已决策不需要——生产部署为 Docker Compose）；Admin 对话（/chat，SSE）与 IM 通道绑定（/channels CRUD）已实现；`chat_messages` 账本表已启用（会话历史）；secret manager 已实现（统一凭据 AES-256-GCM，见 ADR-0002）；IM 桥接层（gateway，adapter↔总线双向）与真实 WSS Conn 已实现——企业微信走 `go-sphere/wecom-aibot-go-sdk`（长连接）、飞书走 lark-go SDK（ws.Client），连接由 **binding 驱动**的 `channels.Manager` 管理（前端通道页填 Bot/App ID + Secret 保存即连接，无需改 config）；真实收发仍需本地账号手测联调。
+
 ## 快速开始
+
+### 前置条件
+
+- [Docker](https://docs.docker.com/get-docker/) 和 Docker Compose（v2 推荐）
+- Git
+- Go 1.26+（仅本地开发需要，Docker 部署不需要）
+
+### 方式一：Docker Compose（推荐，自动建表）
+
+MySQL 首次启动时会自动执行 `deployments/mysql/init/001~013.sql` 建表（**仅在数据卷首次创建时执行**，改表结构后需 `./begin.sh reset` 或手工 ALTER），无需手动操作。
+
+**Linux / macOS：**
 
 ```bash
 git clone https://github.com/liuzengh/trpc-agent-service.git
 cd trpc-agent-service
 
+# 一键启动完整栈（MySQL + Redis + Milvus + MinIO + Jaeger + Prometheus + 后端 + 前端）
+./begin.sh up
+
+# 查看服务状态
+./begin.sh status
+
+# 查看日志
+./begin.sh logs
+```
+
+**Windows（PowerShell）：**
+
+```powershell
+git clone https://github.com/liuzengh/trpc-agent-service.git
+cd trpc-agent-service
+
+# 复制环境配置
+copy deployments\.env.example deployments\.env
+
+# 启动完整栈
+docker compose -f deployments\docker-compose.yml up -d --build
+```
+
+**启动后访问地址：**
+
+| 服务 | 地址 |
+|------|------|
+| 后端 API | http://127.0.0.1:8080 |
+| 健康检查 | http://127.0.0.1:8080/healthz |
+| 管理前端 | http://127.0.0.1:5173 |
+| Jaeger 追踪 | http://127.0.0.1:16686 |
+| Prometheus | http://127.0.0.1:9090 |
+
+**首次使用：管理员账号已自动创建**
+
+`./begin.sh` 启动完成后会自动注册管理员账号：
+- tenant: `t-demo`
+- user: `admin`
+- password: `admin123`
+
+可通过环境变量自定义：`ADMIN_TENANT_ID`、`ADMIN_USER_ID`、`ADMIN_PASSWORD`。
+
+**登录获取 Token：**
+
+```bash
+curl -X POST http://127.0.0.1:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"admin","password":"admin123"}'
+```
+
+**停止服务（数据保留）：**
+
+```bash
+# Linux / macOS
+./begin.sh down
+
+# Windows
+docker compose -f deployments\docker-compose.yml down
+```
+
+> 注意：`docker compose down` 不会删除数据卷。下次启动时 MySQL 不会重新建表（表已存在）。
+> 如需重置数据库：`docker compose -f deployments\docker-compose.yml down -v`
+
+### 方式二：本地开发（无 Docker）
+
+需要已安装 MySQL 8.0 + Redis 7。
+
+```bash
+# 建表
+for f in deployments/mysql/init/*.sql; do
+  mysql -uroot -p trpc_agent_service < "$f"
+done
+
+# 配置环境变量
+export TRPC_MYSQL_DSN="root:yourpassword@tcp(127.0.0.1:3306)/trpc_agent_service?parseTime=true"
+export TRPC_SECRET_MASTER_KEY="dev-master-key"
+export TRPC_JWT_SECRET="dev-jwt-secret"
+
+# 编译运行
 ./build.sh
 ./start.sh
 ```
 
-停止服务：
+### 验收测试
 
 ```bash
-./stop.sh
+# 一键验收向导（自动启动 + 健康检查 + 数据库验证 + 输出访问地址）
+bash scripts/supervisor.sh
+
+# 单独验证数据库初始化
+bash scripts/verify_init.sh
+
+# 负载测试
+go run ./scripts/loadtest/chat_load.go \
+  -tenant t-demo -agent a-demo -concurrency 8 -each 5 -text "你好"
 ```
+
+### 文档导航
+
+| 文档 | 说明 |
+|------|------|
+| [架构设计文档](docs/架构设计文档.md) | 多租户、部署拓扑、消息链路、数据层、IM、治理、故障恢复 |
+| [系统架构图](docs/系统架构图.png) | 全组件关系图（PNG 可直接查看） |
+| [核心时序图](docs/核心时序图.png) | 完整消息链路时序（PNG 可直接查看） |
+| [ER 图](docs/ER图.png) | 数据库表关系图（PNG 可直接查看） |
+| [数据模型设计](docs/数据模型设计.md) | 22 张平台表结构（另含框架自建会话/记忆表）+ ER 图 + Redis 键 + JSON 字段示例 |
+| [数据同步与幂等策略](docs/数据同步与幂等策略.md) | 并发一致性、更新顺序、迁移方案、IM 幂等 |
+| [多后端适配方案](docs/多后端适配方案.md) | 五域路由、Redis/MySQL/Milvus/MinIO 适配 |
+| [风险清单](docs/风险清单.md) | 11 个生产风险及缓解措施 |
+| [验收检查清单](docs/验收检查清单.md) | 32 项验收测试用例 |
+

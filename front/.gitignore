@@ -1,0 +1,10 @@
+node_modules
+dist
+coverage
+*.local
+
+dist-new
+test-results
+playwright-report
+
+.vite

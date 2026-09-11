@@ -1,0 +1,49 @@
+import { defineStore } from 'pinia'
+import * as api from '../api/kb'
+import type { Document, KnowledgeBase, SearchHit } from '../api/kb'
+import { useTenantStore } from './tenant'
+
+export const useKBStore = defineStore('kb', {
+  state: () => ({
+    kbs: [] as KnowledgeBase[],
+    loading: false,
+    error: '',
+  }),
+  actions: {
+    async fetch(tenantId?: string) {
+      this.loading = true
+      this.error = ''
+      try {
+        const tenantStore = useTenantStore()
+        this.kbs = await api.listKBs(tenantId ?? tenantStore.currentTenantId)
+      } catch (e) {
+        this.error = String(e)
+      } finally {
+        this.loading = false
+      }
+    },
+    async create(kb: api.KBInput) {
+      const created = await api.createKB(kb)
+      this.kbs.push(created)
+    },
+    async remove(id: string) {
+      await api.deleteKB(id)
+      this.kbs = this.kbs.filter((x) => x.id !== id)
+    },
+    /** 共享/收回：只有作者与租户管理员有权限（后端按行校验 created_by）。 */
+    async setVisibility(row: KnowledgeBase, visibility: 'private' | 'shared') {
+      const updated = await api.updateKB({ ...row, visibility })
+      const i = this.kbs.findIndex((x) => x.id === row.id)
+      if (i >= 0) this.kbs[i] = updated
+    },
+    async addDocument(kbId: string, doc: Partial<Document>) {
+      return api.addDocument(kbId, doc)
+    },
+    async listDocuments(kbId: string): Promise<Document[]> {
+      return api.listDocuments(kbId)
+    },
+    async search(kbId: string, query: string): Promise<SearchHit[]> {
+      return api.searchKB(kbId, query)
+    },
+  },
+})
