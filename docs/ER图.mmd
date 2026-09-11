@@ -22,6 +22,16 @@ erDiagram
     secrets ||--o{ channel_bindings : "credential_ref"
     secrets ||--o{ model_endpoints : "api_key_ref"
 
+    %% 框架自建表（session/mysql、memory/mysql 首次连接自动创建）。
+    %% 隔离键统一为 app_name = 租户 id；一行的 user_id 是消息触发者。
+    %% 会话事件流 = event，会话摘要 = summary，长期记忆 = memory。
+    tenants ||--o{ session_events : "app_name=tenant_id"
+    tenants ||--o{ session_states : "app_name=tenant_id"
+    tenants ||--o{ session_summaries : "app_name=tenant_id"
+    tenants ||--o{ memories : "app_name=tenant_id"
+    chat_sessions ||--o{ session_events : "session_id"
+    chat_sessions ||--o{ session_summaries : "session_id"
+
     tenants {
         varchar tenant_id PK
         varchar name
@@ -35,10 +45,12 @@ erDiagram
     agents {
         varchar agent_id PK
         varchar tenant_id FK
-        varchar agent_code
         varchar name
         enum status
         int current_version
+        varchar created_by
+        enum visibility
+        json gray
     }
 
     agent_versions {
@@ -56,6 +68,12 @@ erDiagram
         enum type
         json definition
         enum risk_level
+    }
+
+    agent_tool_grants {
+        varchar agent_id PK,FK
+        varchar tool_id PK
+        varchar tenant_id "授权所属租户"
     }
 
     skills {
@@ -92,6 +110,7 @@ erDiagram
         varchar channel
         varchar account_id
         varchar credential_ref FK
+        varchar verification_token_ref "webhook 验签 token（预留）"
     }
 
     chat_sessions {
@@ -100,6 +119,23 @@ erDiagram
         varchar agent_id FK
         varchar member_id
         varchar channel
+    }
+
+    chat_messages {
+        bigint id PK
+        varchar message_id
+        varchar session_id FK
+        varchar turn_id
+        varchar role
+        mediumtext content
+    }
+
+    outbox_events {
+        varchar event_id PK
+        varchar tenant_id FK
+        json payload
+        enum status
+        int retries
     }
 
     audit_logs {
@@ -113,14 +149,50 @@ erDiagram
         int latency_ms
     }
 
+    usage_records {
+        varchar record_id PK
+        varchar tenant_id FK
+        varchar member_id
+        varchar dimension
+        bigint value
+    }
+
     tenant_members {
         varchar tenant_id PK,FK
         varchar user_id PK
         enum role
     }
 
-    roles {
-        varchar role_id PK
-        varchar tenant_id FK
-        varchar name
+    session_events {
+        bigint id PK
+        varchar app_name FK "= 租户 id"
+        varchar user_id
+        varchar session_id
+        json event "含 RequestID=入站消息 id"
+        timestamp created_at
+    }
+
+    session_states {
+        bigint id PK
+        varchar app_name FK
+        varchar user_id
+        varchar session_id
+        json state
+    }
+
+    session_summaries {
+        bigint id PK
+        varchar app_name FK
+        varchar user_id
+        varchar session_id
+        varchar filter_key
+        json summary
+    }
+
+    memories {
+        varchar app_name PK,FK
+        varchar user_id PK
+        varchar memory_id PK
+        json memory_data
+        timestamp deleted_at
     }

@@ -45,9 +45,16 @@ if ! $MYSQL_CMD -e "USE $MYSQL_DATABASE;" > /dev/null 2>&1; then
 fi
 echo "✅ 数据库 '$MYSQL_DATABASE' 存在。"
 
-# 必需表 (26个)
+# 必需表（22 个，= deployments/mysql/init/*.sql 建出的全部表）
+#
+# 历史说明：roles / role_permissions / member_roles（阶段 43 删除，鉴权改由
+# tenant_members.role + 资产 created_by 推导）与 artifacts（阶段 34 删除，制品
+# 存 MinIO 由框架 artifact.Service 承担）都**不再是**初始化产物，故不在此列。
+# 框架自建表（session_states/session_events/session_track_events/
+# session_summaries/app_states/user_states、memories）由 session/mysql 与
+# memory/mysql 在首次连接时创建，取决于租户的数据后端选择，因此也不在校验集内。
 REQUIRED_TABLES=(
-    "tenants" "tenant_members" "roles" "role_permissions" "member_roles"
+    "tenants" "tenant_members"
     "model_endpoints"
     "agents" "agent_versions"
     "tools" "agent_tool_grants"
@@ -55,7 +62,7 @@ REQUIRED_TABLES=(
     "knowledge_bases" "knowledge_documents"
     "chat_sessions" "chat_messages"
     "channel_bindings" "outbox_events" "idempotency_keys"
-    "audit_logs" "usage_records" "artifacts"
+    "audit_logs" "usage_records"
     "secrets"
     "tenant_config_versions"
     "dead_letters"

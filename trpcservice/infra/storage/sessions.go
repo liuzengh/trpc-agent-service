@@ -8,9 +8,12 @@ import (
 )
 
 // Sessions wraps a session service with tenant-scoped access, mapping the
-// tenant id to the framework's AppName isolation boundary.
+// tenant id to the framework's AppName isolation boundary. The inner service is
+// decorated with spans (see trace_sessions.go) so the shared state layer shows
+// up in the trace next to agent.run.
 type Sessions struct {
-	svc session.Service
+	svc     session.Service
+	backend Backend
 }
 
 // NewSessions builds a session service for the given backend (see
@@ -24,7 +27,7 @@ func NewSessions(cfg SessionConfig) (*Sessions, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Sessions{svc: svc}, nil
+	return &Sessions{svc: withTracingSessions(svc, cfg.Backend), backend: cfg.Backend}, nil
 }
 
 // Create creates a session with the given initial state for the tenant,

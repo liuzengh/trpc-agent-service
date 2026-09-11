@@ -8,9 +8,12 @@ import (
 )
 
 // Memories wraps a memory service with tenant-scoped access, mapping the
-// tenant id to the framework's AppName isolation boundary.
+// tenant id to the framework's AppName isolation boundary. The inner service is
+// decorated with spans (see trace_memories.go) so preload reads and
+// agent-driven writes appear in the same trace as agent.run.
 type Memories struct {
-	svc memory.Service
+	svc     memory.Service
+	backend Backend
 }
 
 // NewMemories builds a memory service for the given backend (see backends.go
@@ -24,7 +27,7 @@ func NewMemories(cfg MemoryConfig) (*Memories, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Memories{svc: svc}, nil
+	return &Memories{svc: withTracingMemories(svc, cfg.Backend), backend: cfg.Backend}, nil
 }
 
 // Add stores a memory entry for the tenant's user.
