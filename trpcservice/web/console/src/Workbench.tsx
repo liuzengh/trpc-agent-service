@@ -44,6 +44,7 @@ import { navigate } from "./App";
 import { RunsPage } from "./pages";
 import { DebugPanel } from "./debug";
 import { CredentialSelect } from "./CredentialSelect";
+import { channelLabels } from "./channel-types";
 import { ActivityPanel } from "./ActivityPanel";
 import {
   ConnectionSelect,
@@ -102,6 +103,7 @@ export function Workbench({
     items: [],
     enabled: false,
     allowed_origins: [],
+    endpoint_policy: "allowlist",
   });
   const [connectionsError, setConnectionsError] = useState("");
   const [connectionOpen, setConnectionOpen] = useState(false);
@@ -448,6 +450,7 @@ export function Workbench({
         <CreateModelConnection
           tenant={tenant}
           origins={connections.allowed_origins}
+          policy={connections.endpoint_policy}
           onCancel={() => setConnectionOpen(false)}
           onCreated={(created) => {
             setConnectionOpen(false);
@@ -1633,8 +1636,8 @@ function ChannelSummary({ tenant, appID }: { tenant: string; appID: string }) {
   return (
     <div className="workbench-content">
       <div className="section-title">
-        <h2>业务通道</h2>
-        <Button onClick={() => navigate("channels")}>管理通道接入</Button>
+        <h2>机器人</h2>
+        <Button onClick={() => navigate("channels")}>连接机器人</Button>
       </div>
       {error && <Failure error={error} />}
       <Table
@@ -1642,7 +1645,11 @@ function ChannelSummary({ tenant, appID }: { tenant: string; appID: string }) {
         dataSource={rows}
         pagination={false}
         columns={[
-          { title: "通道", dataIndex: "channel_type" },
+          {
+            title: "通道",
+            render: (_, r: Dict) =>
+              channelLabels[r.channel_type] || r.channel_type,
+          },
           { title: "账号", dataIndex: "account_id" },
           {
             title: "状态",

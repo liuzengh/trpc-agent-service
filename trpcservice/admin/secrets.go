@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/telegram"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secret"
@@ -70,6 +72,16 @@ func (s *Service) authorizeChannelSecrets(ctx context.Context, binding controlpl
 }
 
 func validateChannelShape(binding controlplane.ChannelBinding) error {
+	switch binding.ChannelType {
+	case "telegram":
+		if telegram.ValidateBindingConfig(binding) != nil {
+			return invalidf("Telegram 配置不完整：检查机器人与 Webhook 凭据引用、群 ID；启用群提及过滤时还需要机器人数字 ID 和用户名")
+		}
+	case "wecom":
+		if wecom.ValidateBindingConfig(binding) != nil {
+			return invalidf("企业微信自建应用配置不完整：检查 CorpID、数字 AgentID，以及回调 Token、AES Key 和应用 Secret 引用；只有 MCP URL 时应选择企业微信消息 MCP")
+		}
+	}
 	if channels.RealtimeChannel(binding.ChannelType) {
 		if _, err := channels.ParseMessagePolicy(binding.Config); err != nil {
 			return invalidf("invalid message policy")

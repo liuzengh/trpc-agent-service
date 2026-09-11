@@ -35,9 +35,13 @@ func SQL(schema, prefix string) (string, error) {
 			fmt.Fprintf(&out, "GRANT UPDATE (status,error_type,completed_at) ON %s.agent_run TO %s;\nGRANT SELECT (tenant_id,request_id), UPDATE (status,processed_at) ON %s.inbound_message TO %s;\n", schema, name, schema, name)
 		}
 		if role == "admin" {
+			fmt.Fprintf(&out, "GRANT SELECT (tenant_id,channel_binding_id,status,expires_at,resumed_at) ON %s.tool_approval TO %s;\n", schema, name)
 			fmt.Fprintf(&out, "GRANT UPDATE (display_name,encrypted_key,credential_version,version,superseded_by,updated_by,updated_at) ON %s.model_connection TO %s;\n", schema, name)
 			fmt.Fprintf(&out, "GRANT EXECUTE ON FUNCTION %s.platform_reconcile_outbound_part(TEXT,TEXT,INTEGER,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT) TO %s;\n", schema, name)
 			fmt.Fprintf(&out, "GRANT EXECUTE ON FUNCTION %s.platform_tenant_policy_update(TEXT,BIGINT,JSONB,JSONB,TEXT,TEXT) TO %s;\n", schema, name)
+		}
+		if role == "gateway" {
+			fmt.Fprintf(&out, "GRANT UPDATE (last_received_at) ON %s.channel_connection TO %s;\n", schema, name)
 		}
 		grants := roleGrants(role)
 		tables := make([]string, 0, len(grants))
@@ -67,6 +71,18 @@ func roleGrants(role string) map[string][]string {
 				}
 			}
 		}
+	}
+	if role == "gateway" || role == "sender" || role == "worker" || role == "admin" {
+		add("SELECT", "channel_credential")
+	}
+	if role == "gateway" {
+		add("SELECT", "channel_connection")
+		add("SELECT,INSERT,UPDATE", "channel_connection_group")
+	}
+	if role == "admin" {
+		add("INSERT", "channel_credential")
+		add("SELECT,INSERT,UPDATE", "channel_connection", "channel_connection_group", "channel_connection_setting")
+		add("DELETE", "channel_connection_group")
 	}
 	switch role {
 	case "gateway":

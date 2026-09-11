@@ -4,6 +4,10 @@ import { APIError, api, errorText } from "./api";
 import { Failure } from "./components";
 import { navigate } from "./App";
 import type { ModelConnection } from "./ModelConnections";
+import {
+  ModelEndpointHint,
+  type ModelEndpointPolicy,
+} from "./ModelEndpointHint";
 
 interface Usage {
   app_id: string;
@@ -29,6 +33,7 @@ export function EditModelConnection({
   id,
   rotate,
   origins,
+  policy,
   onCancel,
   onSaved,
 }: {
@@ -36,6 +41,7 @@ export function EditModelConnection({
   id: string;
   rotate: boolean;
   origins: string[];
+  policy: ModelEndpointPolicy;
   onCancel: () => void;
   onSaved: (result: Result) => void;
 }) {
@@ -189,9 +195,7 @@ export function EditModelConnection({
                   name="base_url"
                   label="API Base URL"
                   extra={
-                    "部署允许的服务：" +
-                    origins.join("、") +
-                    "。新地址仍须在允许列表内。"
+                    <ModelEndpointHint policy={policy} origins={origins} />
                   }
                   rules={[
                     {

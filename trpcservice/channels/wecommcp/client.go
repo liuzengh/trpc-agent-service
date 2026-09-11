@@ -15,11 +15,15 @@ import (
 // A client can invoke exactly one preselected tool with exact arguments; no
 // discovery, files, subscription, generic message_send or automatic retry.
 func callRuntime(ctx context.Context, endpoint string, httpClient *http.Client, name string, args map[string]any) (json.RawMessage, bool, error) {
-	if err := ValidateEndpoint(endpoint); err != nil {
-		return nil, false, err
-	}
 	if name != messagesTool && name != replyTool {
 		return nil, false, errors.New("unsupported WeCom MCP runtime tool")
+	}
+	return callLimited(ctx, endpoint, httpClient, name, args)
+}
+
+func callLimited(ctx context.Context, endpoint string, httpClient *http.Client, name string, args map[string]any) (json.RawMessage, bool, error) {
+	if err := ValidateEndpoint(endpoint); err != nil {
+		return nil, false, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()

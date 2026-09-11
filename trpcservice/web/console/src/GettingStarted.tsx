@@ -138,9 +138,8 @@ export function GettingStarted({
                 {state.connections ? "已有模型连接" : "可配置真实模型"}
               </Tag>
               <p>
-                管理员在页面输入模型 ID、API 地址和
-                Key。也可跳过，先使用部署者默认模型；Mock 只演示流程，不代表真实
-                AI。
+                添加模型地址和 API Key，然后在 Agent
+                里选择。也可以先用服务器已经配置好的模型。
               </p>
               <Button onClick={() => navigate("models")}>配置模型连接</Button>
             </Panel>
@@ -151,10 +150,7 @@ export function GettingStarted({
               <Tag color={app ? "green" : "default"}>
                 {app ? "已有 Agent" : "待创建"}
               </Tag>
-              <p>
-                首次只需模型和提示词。调试会真正经过
-                Runner；换一份配置后请创建新的调试快照。
-              </p>
+              <p>先写清楚 Agent 要做什么，在右侧发消息看看效果。</p>
               <Space wrap>
                 <Button
                   type="primary"
@@ -178,14 +174,13 @@ export function GettingStarted({
                 {published ? "已有发布版本" : "待发布"}
               </Tag>
               <p>
-                网页调试不要求公网域名或机器人账号。需要 Telegram /
-                企业微信时，再准备自己的凭据和授权；发布成功不等于已完成通道绑定。
+                发布后，可以连接 Telegram 或企业微信，让用户直接给机器人发消息。
               </p>
               <Button
                 disabled={!published}
                 onClick={() => navigate("channels")}
               >
-                配置业务通道
+                连接机器人
               </Button>
             </Panel>
           </div>
@@ -194,12 +189,6 @@ export function GettingStarted({
               进度按当前加载的前 100 个应用显示，其他应用请在 Agent 列表中查看。
             </p>
           )}
-          <Alert
-            type="info"
-            showIcon
-            title="怎样判断已跑通？"
-            description="网页收到一次回复 → 同一调试会话能延续上下文 → 发布记录出现新版本。接入 IM 后再检查机器人回复与运行记录，二者是不同的验证阶段。"
-          />
         </>
       )}
     </div>

@@ -68,7 +68,9 @@ Kubernetes 的分角色 Secret、NetworkPolicy 和依赖标签要在实际集群
 - API Key 使用 AES-256-GCM、随机 nonce 加密后写入 `model_connection`。附加认证数据绑定 tenant、connection ID、模型与地址，不能把密文复制给另一租户或换个地址继续解密。
 - 主密钥来自独立部署配置 `TRPC_AGENT_MODEL_MASTER_KEY`（base64 的 32 字节值），Admin/Worker/Jobs 必须一致。数据库只保存主密钥指纹，不存主密钥；配置缺失时功能关闭，不回退明文存储。指纹不匹配时启动失败。
 - 连接列表、Agent 草稿/版本和审计均不含 Key 或密文。模型配置只保存 `{"source":"connection","connection_id":"..."}`，不能同时覆盖 provider/name/base_url/api_key_ref；ID 固定一个模型/地址配置版本。Worker 按可信 tenant 解析，继续调用框架 `model/openai` 与 Runner。
-- `TRPC_AGENT_MODEL_ALLOWED_ORIGINS` 是部署者控制的精确地址允许列表，不接受通配符。保存/运行都检查地址；客户端拒绝重定向，避免将凭据转发给其他地址。它不取代出口防火墙、可信 DNS 和代理配置；本地 HTTP 仅供受保护开发网络使用。
+- `TRPC_AGENT_MODEL_ENDPOINT_POLICY` 默认 `public_https`，管理员可配置任意兼容协议的公网 HTTPS 供应商，不需逐个授权域名；可选 `allowlist` 模式只允许 `TRPC_AGENT_MODEL_ALLOWED_ORIGINS` 中的精确 origin。后者在公网模式下是受信任例外，用于本地/内网/HTTP 模型或企业代理，不接受路径、凭据、query 或通配符。保存、发布与运行均校验地址格式与策略；错误分别说明格式、严格白名单或非公网限制，不将其混称为 Key 错误。
+- 未列为例外的公网地址使用独立 transport：禁用代理，建连时验证全部 IPv4/IPv6 DNS 结果并直接连接已验证 IP，保留原域名的 TLS 校验，拒绝私有、回环、链路本地、保留及 IPv6 转换地址，防止二次解析改变目标。DNS 解析检查发生在实际连接时，保存不访问供应商。显式允许的 origin 使用部署者信任的 DNS/代理/别名，因而需要管理员审核；现有 `.env` 默认模型不经过网页模型策略。这些措施不代替出口防火墙、可信路由与代理策略。实现依据 [OWASP SSRF 防护指南](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)，特殊地址参考 [IANA IPv6 注册表](https://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xhtml)。
+- 所有网页模型请求仍拒绝重定向和跨 origin 转发凭据。策略仅由部署者设置，租户和模型输入不能修改；修改后重启 Admin/Worker/Jobs。升级后若要保持 rc.3 的严格限制，须显式设置 `allowlist`，不能仅凭旧地址列表推断仍是严格模式。
 - 名称可原地修改，不改变模型或地址。修改模型 ID/地址时生成新 connection_id 和递增配置版本，旧 ID 与已有 Agent/调试快照继续有效；已有后继的旧配置不能再次分叉，但仍能更名或更新它自己的 Key。新配置须显式通过 Agent 草稿、调试与发布切换。
 - API Key 可以独立更新：留空表示保留，填写新值表示更新；更换地址必须重新填写目标服务的 Key，不能自动向新地址转发旧凭据。Key 的版本只属于所选配置版本，不自动联动同组其他版本。已经发出的请求可能仍持有旧 Key，紧急撤销仍须在供应商侧执行。
 - 框架模型实例只保留凭据占位符；受控 HTTP transport 在每次请求前从共享 PostgreSQL 读取和解密当前 Key，再克隆请求并注入认证头。因此更新已提交后，新取用凭据的请求使用新 Key，包括缓存模型实例和其他 Worker；读取失败不会回退到旧缓存。数据库需使用一致的写主库，代价是每次模型请求多一次 SQL 读取。SDK 响应中的 Request 不保留注入后的认证头。
@@ -76,9 +78,25 @@ Kubernetes 的分角色 Secret、NetworkPolicy 和依赖标签要在实际集群
 
 API Key 更新不等于加密主密钥轮换：**仍不能直接替换 `TRPC_AGENT_MODEL_MASTER_KEY`**，也不能丢失 setup 卷后生成新主密钥冒充恢复。首次升级此功能必须停旧 Worker 并升级相关执行节点，旧版模型实例不会自动获得新的逐请求凭据机制。
 
-容器与宿主机切换可选用部署级 `TRPC_AGENT_MODEL_HOST_ALIASES_JSON`，把模型连接中的 DNS 名映射到回环 IP。配置只影响模型专用 transport，映射目标不允许非回环地址；对于映射命中的名称直连本机，其他请求继续使用原代理/DNS 规则。URL 允许列表、租户边界、TLS 主机名与凭据绑定仍保留，不能从租户表单或模型输入设置此映射。
+容器与宿主机切换可选用部署级 `TRPC_AGENT_MODEL_HOST_ALIASES_JSON`，把模型连接中的 DNS 名映射到回环 IP。配置只影响显式允许 origin 的模型 transport，映射目标不允许非回环地址；对于映射命中的名称直连本机，其他受信任例外继续使用原代理/DNS 规则。未显式允许的公网目标不采用别名。租户边界、TLS 主机名与凭据绑定仍保留，不能从租户表单或模型输入设置此映射。
 
 完整体验 Compose 自动生成主密钥、数据库密码和 Admin Token 并放入专用 setup 卷；启动日志不输出它们。只有管理员显式执行 `trpc-init -show-token` 才显示登录凭据。数据库与 setup 卷应分别加密备份、限制访问；源码交付不包括这些卷。
+
+### 2.2 网页机器人连接
+
+schema 30 增加 `channel_connection`、`channel_credential`、`channel_connection_group` 和 `channel_connection_setting`。网页连接只允许平台管理员操作；列表读取仍检查租户范围。沿用同源、CSRF、请求限流和审计，不向模型开放这些管理接口。
+
+- Bot Token、Webhook Secret 和完整 MCP URL 使用 AES-256-GCM 加密，认证数据绑定租户、引用和用途。复用已备份的 `TRPC_AGENT_MODEL_MASTER_KEY`；不得直接换值。Gateway、Sender 和需要下载 Telegram 附件的 Worker 也需注入此密钥。数据库分角色权限与运行时用途检查共同限制使用；这不等于不同角色持有独立加密主密钥，生产需保护密钥注入和数据库账号。
+- Admin 可验证和管理网页提交的 IM 凭据；该功能没有扩大对旧环境变量的读取授权。新引用使用 `managed://`，仅用于内部绑定，页面与连接 API 不返回密文或真实密钥。原 `env://` 授权继续有效，不会自动导入旧 Token。
+- Telegram 连接先验证 `getMe` 并读取现有 Webhook。占用其他服务时必须确认，注册前还会检查远端是否变化。随机生成校验密钥，固定访问 Telegram 官方接口，拒绝重定向，保留未处理更新。对本服务已有 Bot 不建立重复路由。
+- 外部设置请求前持久记录操作状态，使用版本检查和有界租约防止并发覆盖。响应丢失时保存为待检查；只读检查确认 URL 已生效后完成本地激活，不自动重新登记。管理员可以明确重试同一回调设置，操作会审计。Telegram 不提供跨系统原子的 Webhook 比较交换，仍无法阻止外部管理员同时修改同一个 Bot。
+- MCP 验证阶段只执行初始化和工具发现。读取群列表、读取所选群确认消息分别要求用户同意。确认消息窗口最多 10 分钟；不保存非匹配消息正文，不查询其他群，不自动发送探测消息。识别出成员后仍须确认才激活接收。
+- 网页管理的 MCP 目标由数据库动态提供，与旧环境变量目标合并去重。群级租约、Inbox、Session、队列和 Runner 沿用现有实现。新增群/成员由 Binding 版本约束授权变化，管理型身份格式保持已有群检查点稳定；旧绑定的身份格式不变。
+- schema 31 的授权按群保存成员及授权起点，接收适配器逐条核对，不能将群名单与用户名单交叉组合。撤销某群成员不扩大其他群权限；重新授权不会放行撤权期间的积压消息。
+- 更新凭据、换绑、移除前要求暂停，并检查未完成请求、审批和未知投递。事务锁与入站准入的共享 advisory lock 配合，防止检查结束后旧绑定又入队。换绑创建新绑定/会话；旧绑定用 `retired_at` 保留且数据库禁止重新启用。管理型绑定不能绕过机器人 API，通过旧通用接口直接改写。
+- Telegram 移除的意图与激活意图区分持久化；只读对账不会把一次未确认移除当作重新激活。正常移除保留上游待处理更新，明确的“仅移除本地”不宣称已经更改上游。退役记录和旧凭据保留在受控数据库中，按备份及保留策略保护，不等于完成密钥销毁。
+
+列表中的“已连接”表示连接配置已激活；具体收发仍以消息记录为准。暂停阻止新的正常接入，不撤回已经执行的工具或发送结果。主密钥恢复、生产网络和备份要求与模型连接相同。
 
 ## 3. 工具、审批与业务幂等
 

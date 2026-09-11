@@ -40,6 +40,17 @@ tool_approval / tool_execution / background_job / audit_log
 
 Session/State/Event/Summary、Memory、向量和对象内容由租户选择的 tRPC-Agent-Go backend 管理；Control DB 保存消息、运行、审批、迁移、任务和审计真相。
 
+### 网页机器人连接（030）
+
+| 表 | 主要字段与约束 |
+| --- | --- |
+| `channel_credential` | `(tenant_id,reference)` 主键；用途数组、AES-GCM 密文、主密钥指纹。明文不入库；租户/引用/用途绑定到密文。 |
+| `channel_connection` | 租户、应用、通道、账号、内部 Binding、凭据引用、连接状态、版本、操作租约、校验状态与接收时间；账号唯一，应用/Binding/凭据使用同租户外键。 |
+| `channel_connection_group` | `(tenant_id,connection_id,chat_id)` 主键；只保存群名称和观察时间，不保存聊天正文。 |
+| `channel_connection_setting` | 部署级公网地址，平台管理员修改，已有连接保持其登记时的地址。 |
+
+Telegram 在准备阶段创建停用 Binding，远端登记确认后再激活。MCP 在群与成员确认后创建或更新 Binding。连接状态和操作版本用于控制设置流程；业务会话、消息和投递仍引用原有 `channel_binding`，不另外构造一套 Agent 执行记录。
+
 ## 2. 租户和 Agent App
 
 ```sql
@@ -450,6 +461,17 @@ CREATE INDEX idx_audit_trace
 
 ## 9. 删除和保留策略
 
+以下租户/对象批量销毁属于生产数据治理设计，当前没有租户级自动销毁接口。已实现的机器人移除采用软退役，见下一节。
+
 租户删除采用两阶段流程：先冻结写入和撤销密钥，再异步清理 Session、Memory、Knowledge、Artifact 和审计数据。每个后端产生删除清单和校验结果，完成前租户状态保持 `deleting`。
 
 Session、Memory 和 Artifact 的保留期可以不同。Artifact 到期先删除对象，再标记元数据；如果对象删除失败，任务进入重试和人工对账，不能只删 SQL 记录后留下孤儿对象。
+
+## 10. 机器人连接维护（schema 31）
+
+- `channel_binding.retired_at` 标记退役；约束要求退役绑定保持 disabled。当前有效绑定使用部分唯一索引，退役记录仍供旧 conversation、inbound、outbound 和 audit 引用。
+- `channel_connection.status` 增加 removed；目录隐藏移除项，当前账号唯一索引排除 removed，允许重新添加。`operation` 区分 activate/remove，不能将待确认移除误判成激活成功。
+- 管理型企业微信 `config.group_grants` 以 chat_id 为键，每群记录 start_at 及成员的 id/name/since。新群和成员有各自时间下界；空成员列表表示不接收该群。接收进度与消息正文不存入授权配置。
+- 凭据更新写入新的加密引用，旧会话、审计和退役绑定保留；更换企业微信地址会清理旧群列表缓存并重新确认授权。换绑 Agent 创建新的 BindingID，不修改历史会话所属应用。
+
+实际 SQL 以 [031_connection_lifecycle.sql](../trpcservice/database/migrations/031_connection_lifecycle.sql) 为准。

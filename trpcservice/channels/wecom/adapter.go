@@ -370,6 +370,13 @@ func providerError(operation string, code int, message string) error {
 	}
 }
 
+// ValidateBindingConfig checks shape only; it does not decrypt, send or register callbacks.
+func ValidateBindingConfig(binding controlplane.ChannelBinding) error {
+	binding.Status = controlplane.StatusActive
+	_, err := parseBinding(binding)
+	return err
+}
+
 func parseBinding(binding controlplane.ChannelBinding) (bindingConfig, error) {
 	if _, err := channels.ParseMessagePolicy(binding.Config); err != nil {
 		return bindingConfig{}, err

@@ -14,8 +14,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
-	"sort"
 	"strings"
 	"time"
 
@@ -26,7 +24,7 @@ import (
 )
 
 var ErrUnavailable = errors.New("model connection store unavailable; check schema, role permissions and encryption key")
-var ErrEndpoint = errors.New("模型地址未获部署者允许；请检查 TRPC_AGENT_MODEL_ALLOWED_ORIGINS，不要把 API Key 放入 URL")
+var ErrEndpoint = errors.New("模型 API 地址不可用")
 var ErrInvalid = errors.New("模型连接需要有效的名称、模型 ID、API 地址和 API Key")
 
 type Connection struct {
@@ -47,11 +45,13 @@ type Connection struct {
 }
 
 type Store struct {
-	db        *sql.DB
-	aead      cipher.AEAD
-	keyID     string
-	origins   map[string]bool
-	transport http.RoundTripper
+	db              *sql.DB
+	aead            cipher.AEAD
+	keyID           string
+	origins         map[string]bool
+	transport       http.RoundTripper
+	publicTransport http.RoundTripper
+	endpointPolicy  string
 }
 
 // New is opt-in. Existing installations without a master key are unchanged.
@@ -77,8 +77,9 @@ func New(ctx context.Context, repository any, encodedKey, allowedOrigins string,
 		return nil, ErrUnavailable
 	}
 	digest := sha256.Sum256(key)
-	s := &Store{db: provider.SQLDB(), aead: aead, keyID: hex.EncodeToString(digest[:]), origins: map[string]bool{}}
+	s := &Store{db: provider.SQLDB(), aead: aead, keyID: hex.EncodeToString(digest[:]), origins: map[string]bool{}, endpointPolicy: PolicyPublicHTTPS}
 	s.transport = http.DefaultTransport
+	s.publicTransport = newPublicTransport()
 	for _, option := range options {
 		if option != nil {
 			if err := option(s); err != nil {
@@ -86,10 +87,10 @@ func New(ctx context.Context, repository any, encodedKey, allowedOrigins string,
 			}
 		}
 	}
-	if allowedOrigins == "" {
-		allowedOrigins = "https://api.openai.com"
-	}
 	for _, raw := range strings.Split(allowedOrigins, ",") {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
 		u, err := endpoint(strings.TrimSpace(raw))
 		if err != nil || (u.Path != "" && u.Path != "/") {
 			return nil, ErrEndpoint
@@ -102,33 +103,6 @@ func New(ctx context.Context, repository any, encodedKey, allowedOrigins string,
 		return nil, ErrUnavailable
 	}
 	return s, nil
-}
-
-func endpoint(raw string) (*url.URL, error) {
-	u, err := url.Parse(raw)
-	if err != nil || u == nil || len(raw) > 2048 || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || strings.ContainsAny(raw, "\r\n\\") {
-		return nil, ErrEndpoint
-	}
-	return u, nil
-}
-func origin(u *url.URL) string { return strings.ToLower(u.Scheme + "://" + u.Host) }
-func (s *Store) AllowedOrigins() []string {
-	if s == nil {
-		return []string{}
-	}
-	result := []string{}
-	for value := range s.origins {
-		result = append(result, value)
-	}
-	sort.Strings(result)
-	return result
-}
-func (s *Store) allows(raw string) bool {
-	if s == nil {
-		return false
-	}
-	u, err := endpoint(raw)
-	return err == nil && s.origins[origin(u)]
 }
 
 type executor interface {
@@ -183,10 +157,7 @@ func (s *Store) ValidateReference(ctx context.Context, tenant, id string) error 
 	if err != nil {
 		return err
 	}
-	if !s.allows(c.BaseURL) {
-		return ErrEndpoint
-	}
-	return nil
+	return s.validateEndpoint(c.BaseURL)
 }
 func (s *Store) List(ctx context.Context, tenant, after string) ([]Connection, string, error) {
 	result := []Connection{}
@@ -223,8 +194,8 @@ func (s *Store) insert(ctx context.Context, c Connection, apiKey string) (Connec
 	if s == nil {
 		return Connection{}, ErrUnavailable
 	}
-	if !s.allows(c.BaseURL) {
-		return Connection{}, ErrEndpoint
+	if err := s.validateEndpoint(c.BaseURL); err != nil {
+		return Connection{}, err
 	}
 	for _, v := range []string{c.TenantID, c.ID, c.Name, c.Model, c.CreatedBy} {
 		if strings.TrimSpace(v) == "" || len(v) > 256 || strings.ContainsAny(v, "\x00\r\n") {
@@ -258,11 +229,15 @@ func (s *Store) Resolve(ctx context.Context, tenant, id string) (config.ModelCon
 	if err != nil {
 		return config.ModelConfig{}, err
 	}
-	if !s.allows(c.BaseURL) {
-		return config.ModelConfig{}, ErrEndpoint
+	if err := s.validateEndpoint(c.BaseURL); err != nil {
+		return config.ModelConfig{}, err
 	}
 	u, _ := endpoint(c.BaseURL)
-	client := &http.Client{Transport: boundTransport{base: s.transport, expectedOrigin: origin(u), store: s, connection: c}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	transport := s.publicTransport
+	if s.origins[origin(u)] {
+		transport = s.transport
+	}
+	client := &http.Client{Transport: boundTransport{base: transport, expectedOrigin: origin(u), store: s, connection: c}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	// The SDK only retains a placeholder. The real key is resolved and injected
 	// immediately before each HTTP request, including cached compiled Agents.
 	return config.ModelConfig{Provider: "openai", Name: c.Model, BaseURL: c.BaseURL, APIKey: "managed-credential", HTTPClient: client}, nil
@@ -293,8 +268,11 @@ type boundTransport struct {
 }
 
 func (t boundTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.URL == nil || origin(r.URL) != t.expectedOrigin || !t.store.origins[t.expectedOrigin] {
+	if r.URL == nil || origin(r.URL) != t.expectedOrigin {
 		return nil, ErrEndpoint
+	}
+	if err := t.store.validateEndpoint(r.URL.String()); err != nil {
+		return nil, err
 	}
 	key, err := t.store.credential(r.Context(), t.connection)
 	if err != nil {

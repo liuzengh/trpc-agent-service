@@ -34,12 +34,19 @@ type bindingConfig struct {
 	AllowedChatIDs     []int64                 `json:"allowed_chat_ids,omitempty"`
 	RequireMention     bool                    `json:"require_mention,omitempty"`
 	IgnoreBotMessages  bool                    `json:"ignore_bot_messages,omitempty"`
+	GroupsEnabled      *bool                   `json:"groups_enabled,omitempty"`
 }
 
 type Adapter struct {
 	customClient bool
 	secrets      secret.Store
 	client       *http.Client
+	observe      func(context.Context, controlplane.ChannelBinding, int64, string) error
+}
+
+func (a *Adapter) WithObserver(fn func(context.Context, controlplane.ChannelBinding, int64, string) error) *Adapter {
+	a.observe = fn
+	return a
 }
 
 func New(secrets secret.Store, client *http.Client) (*Adapter, error) {
@@ -95,6 +102,21 @@ func (a *Adapter) Callback(
 	if message == nil {
 		message = update.EditedMessage
 	}
+	if a.observe != nil {
+		var chat telegramChat
+		if message != nil {
+			chat = message.Chat
+		} else if update.MyChatMember != nil {
+			chat = update.MyChatMember.Chat
+		}
+		groupID := int64(0)
+		if chat.Type == "group" || chat.Type == "supergroup" {
+			groupID = chat.ID
+		}
+		if err := a.observe(ctx, binding, groupID, chat.Title); err != nil {
+			return channels.CallbackResult{}, err
+		}
+	}
 	if message == nil || message.From == nil {
 		return result, nil
 	}
@@ -133,6 +155,9 @@ type telegramUpdate struct {
 	UpdateID      int64            `json:"update_id"`
 	Message       *telegramMessage `json:"message"`
 	EditedMessage *telegramMessage `json:"edited_message"`
+	MyChatMember  *struct {
+		Chat telegramChat `json:"chat"`
+	} `json:"my_chat_member"`
 }
 
 type telegramMessage struct {
@@ -209,6 +234,9 @@ func acceptMessage(cfg bindingConfig, message *telegramMessage) bool {
 	}
 	if message.Chat.Type == "private" {
 		return true
+	}
+	if cfg.GroupsEnabled != nil && !*cfg.GroupsEnabled {
+		return false
 	}
 	if len(cfg.AllowedChatIDs) > 0 && !containsChatID(cfg.AllowedChatIDs, message.Chat.ID) {
 		return false
@@ -295,8 +323,9 @@ type telegramUser struct {
 }
 
 type telegramChat struct {
-	ID   int64  `json:"id"`
-	Type string `json:"type"`
+	ID    int64  `json:"id"`
+	Type  string `json:"type"`
+	Title string `json:"title"`
 }
 
 type telegramTarget struct {
@@ -381,6 +410,14 @@ func (a *Adapter) Send(
 	}, nil
 }
 
+// ValidateBindingConfig checks shape without resolving secrets or contacting Telegram.
+// Disabled bindings can be prepared before the external webhook is registered.
+func ValidateBindingConfig(binding controlplane.ChannelBinding) error {
+	binding.Status = controlplane.StatusActive
+	_, err := parseBinding(binding)
+	return err
+}
+
 func parseBinding(binding controlplane.ChannelBinding) (bindingConfig, error) {
 	if _, err := channels.ParseMessagePolicy(binding.Config); err != nil {
 		return bindingConfig{}, err
@@ -396,6 +433,9 @@ func parseBinding(binding controlplane.ChannelBinding) (bindingConfig, error) {
 	}
 	if cfg.BotTokenRef == "" || cfg.WebhookSecretRef == "" {
 		return bindingConfig{}, fmt.Errorf("telegram binding config is incomplete")
+	}
+	if strings.HasPrefix(cfg.BotTokenRef, "managed://") && cfg.APIBaseURL != "" && cfg.APIBaseURL != defaultAPIBase {
+		return bindingConfig{}, errors.New("managed Telegram connections require the official API endpoint")
 	}
 	cfg.BotUsername = strings.TrimPrefix(strings.TrimSpace(cfg.BotUsername), "@")
 	if cfg.RequireMention && (cfg.BotUserID <= 0 || cfg.BotUsername == "") {

@@ -25,9 +25,11 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/connections"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/console"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/credentials"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/docsmcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/idempotency"
@@ -156,11 +158,13 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load secret grants: %w", err)
 	}
-	secretStore, err := secret.NewEnvStore(roles.SecretGrants(secretGrants))
+	envSecrets, err := secret.NewEnvStore(roles.SecretGrants(secretGrants))
 	if err != nil {
 		return err
 	}
-	backends, err := config.LoadRuntimeBackends(roles, len(wecomMCPTargets) > 0)
+	var secretStore secret.Store = envSecrets
+	managedConnectionsEnabled := os.Getenv("TRPC_AGENT_MODEL_MASTER_KEY") != ""
+	backends, err := config.LoadRuntimeBackends(roles, len(wecomMCPTargets) > 0 || managedConnectionsEnabled)
 	if err != nil {
 		return fmt.Errorf("load role backend config: %w", err)
 	}
@@ -234,6 +238,20 @@ func run() error {
 		_ = sessionCoordinator.Close()
 		_ = sessionService.Close()
 		return fmt.Errorf("build control-plane repository: %w", err)
+	}
+	var credentialVault *credentials.Vault
+	if roles.Admin || roles.Gateway || roles.Sender || roles.Worker {
+		credentialVault, err = credentials.New(controlPlaneRepository, os.Getenv("TRPC_AGENT_MODEL_MASTER_KEY"))
+		if err != nil {
+			return err
+		}
+		allowed := []string{}
+		for _, purpose := range credentials.Purposes {
+			if len(roles.SecretGrants([]secret.Grant{{Purpose: purpose}})) > 0 {
+				allowed = append(allowed, purpose)
+			}
+		}
+		secretStore = credentials.Routed{Vault: credentialVault, Fallback: envSecrets, Allowed: allowed}
 	}
 	startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
 	quotaGuard, err := tenant.NewGuard(startupCtx, controlPlaneRepository, quotaConfig)
@@ -383,7 +401,9 @@ func run() error {
 	var modelConnections *modelregistry.Store
 	if roles.Worker || roles.Jobs || roles.Admin {
 		startupCtx, cancelStartup = context.WithTimeout(context.Background(), 5*time.Second)
-		modelConnections, err = modelregistry.New(startupCtx, controlPlaneRepository, os.Getenv("TRPC_AGENT_MODEL_MASTER_KEY"), os.Getenv("TRPC_AGENT_MODEL_ALLOWED_ORIGINS"), modelregistry.WithLoopbackAliases(os.Getenv("TRPC_AGENT_MODEL_HOST_ALIASES_JSON")))
+		modelConnections, err = modelregistry.New(startupCtx, controlPlaneRepository, os.Getenv("TRPC_AGENT_MODEL_MASTER_KEY"), os.Getenv("TRPC_AGENT_MODEL_ALLOWED_ORIGINS"),
+			modelregistry.WithEndpointPolicy(os.Getenv("TRPC_AGENT_MODEL_ENDPOINT_POLICY")),
+			modelregistry.WithLoopbackAliases(os.Getenv("TRPC_AGENT_MODEL_HOST_ALIASES_JSON")))
 		cancelStartup()
 		if err != nil {
 			return err
@@ -569,6 +589,7 @@ func run() error {
 		_ = controlPlaneRepository.Close()
 		return fmt.Errorf("build Agent Worker: %w", err)
 	}
+	connectionStore := connections.New(controlPlaneRepository, credentialVault, auditWriter, os.Getenv("TRPC_AGENT_PUBLIC_BASE_URL"), nil)
 	wecomAdapter, err := wecom.New(secretStore, nil)
 	if err != nil {
 		_ = agentQueue.Close()
@@ -584,6 +605,9 @@ func run() error {
 		_ = gatewayIntake.Close()
 		_ = controlPlaneRepository.Close()
 		return fmt.Errorf("build Telegram Adapter: %w", err)
+	}
+	if connectionStore != nil {
+		telegramAdapter.WithObserver(connectionStore.ObserveTelegram)
 	}
 	wecomMCPState, err := wecommcp.NewStore(controlPlaneRepository)
 	if err != nil {
@@ -638,8 +662,13 @@ func run() error {
 		return fmt.Errorf("build channel poll coordinator: %w", err)
 	}
 	defer func() { _ = pollCoordinator.Close() }()
+	var dynamicTargets func(context.Context) ([]config.WeComMCPTarget, error)
+	if connectionStore != nil {
+		dynamicTargets = connectionStore.Targets
+	}
 	wecomPoller, err := gateway.NewWeComPoller(controlPlaneRepository, wecomMCPAdapter, callbackGateway, wecomMCPState, pollCoordinator, gateway.WeComPollOptions{
-		Targets: wecomMCPTargets, Interval: 5 * time.Second, Window: time.Minute, Overlap: time.Minute, SettleDelay: 2 * time.Second, Timeout: 45 * time.Second, Audit: auditWriter, Metrics: metricRecorder,
+		TargetProvider: dynamicTargets,
+		Targets:        wecomMCPTargets, Interval: 5 * time.Second, Window: time.Minute, Overlap: time.Minute, SettleDelay: 2 * time.Second, Timeout: 45 * time.Second, Audit: auditWriter, Metrics: metricRecorder,
 	})
 	if err != nil {
 		return fmt.Errorf("build WeCom MCP receiver: %w", err)
@@ -658,6 +687,7 @@ func run() error {
 		adminService.WithSkills(skillRegistry)
 		adminService.WithConsoleStore(consoleStore)
 		adminService.WithModelConnections(modelConnections)
+		adminService.WithConnections(connectionStore)
 		checks := map[string]func(context.Context) error{}
 		if roles.Worker {
 			checks["session"] = sessionRouter.Ready
@@ -684,7 +714,7 @@ func run() error {
 		adminService.WithToolOperations(operations, toolExecutionJournal)
 		// Admin checks grants but cannot resolve model/IM values on an Admin-only node.
 		grantAuthorizer, _ := secret.NewEnvStore(secretGrants)
-		adminService.WithSecretAuthorizer(grantAuthorizer)
+		adminService.WithSecretAuthorizer(credentials.Routed{Vault: credentialVault, Fallback: grantAuthorizer, Allowed: credentials.Purposes})
 		principals := make([]adminservice.Principal, 0, len(adminConfig.Principals))
 		for _, principal := range adminConfig.Principals {
 			principals = append(principals, adminservice.Principal{
@@ -750,7 +780,7 @@ func run() error {
 		idempotencyConfig.CompletedTTL,
 	)
 	fmt.Printf("control-plane backend=%s\n", controlPlaneConfig.Backend)
-	fmt.Printf("wecom_mcp receiver bindings=%d (empty means disabled)\n", len(wecomMCPTargets))
+	fmt.Printf("wecom_mcp receiver configured_bindings=%d browser_connections=%t\n", len(wecomMCPTargets), connectionStore != nil)
 	fmt.Printf("queue backend=%s stream=%s group=%s\n", queueConfig.Backend, queueConfig.Stream, queueConfig.Group)
 	serverEnabled := roles.Gateway || roles.Admin
 	if serverEnabled {
@@ -868,7 +898,7 @@ func run() error {
 		handlerOptions = append(handlerOptions,
 			web.WithAPIAccess(apiAccess), web.WithSynchronousChat(roles.Worker),
 			web.WithGatewayIntake(gatewayIntake), web.WithCallbackGateway(callbackGateway))
-		if len(wecomMCPTargets) > 0 {
+		if len(wecomMCPTargets) > 0 || connectionStore != nil {
 			handlerOptions = append(handlerOptions, web.WithReadinessCheck("wecom-mcp-state", wecomMCPState.Ready))
 		}
 	}
@@ -925,7 +955,7 @@ func run() error {
 	if roles.Relay {
 		group.Go(func() error { return ignoreCancellation(outboxRelay.Run(groupCtx)) })
 	}
-	if roles.Gateway && len(wecomMCPTargets) > 0 {
+	if roles.Gateway && (len(wecomMCPTargets) > 0 || connectionStore != nil) {
 		group.Go(func() error { return ignoreCancellation(wecomPoller.Run(groupCtx)) })
 	}
 	if roles.Worker {

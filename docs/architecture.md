@@ -208,7 +208,7 @@ tRPC-Agent-Go 的 Runner 在构造时接收 Session、Memory 和 Artifact Servic
 
 配置隔离通过 Control DB 的 `tenant_id` 外键、不可变 revision 和服务端授权实现。数据隔离通过 Storage Router 强制命名空间实现。工具隔离不能只依赖工具列表：`WithToolFilter` 控制模型可见性，`WithToolPermissionPolicy` 和 Tool 自身的 `PermissionChecker` 才是执行边界。
 
-控制面只保存密钥引用；当前 EnvStore 按租户/用途精确授权，相关角色按需解析，不写入 Session、Memory、日志或 trace。短期凭据、Workload Identity 与 KMS 是生产扩展目标。日志记录规范化 ID 和参数摘要，原始内容留存须单独配置加密、访问控制与保留期。
+发布版本和通道绑定只保存密钥引用；凭据由按租户/用途授权的 EnvStore 或 AES-256-GCM 加密库解析，不写入 Session、Memory、日志或 trace。加密主密钥由部署者注入并单独备份。短期凭据、Workload Identity 与 KMS 是生产扩展目标。日志记录规范化 ID 和参数摘要，原始内容留存须单独配置加密、访问控制与保留期。
 
 ## 9. 可复用能力和平台新增能力
 
@@ -238,6 +238,8 @@ tRPC-Agent-Go 的 Runner 在构造时接收 Session、Memory 和 Artifact Servic
 | Telemetry Collector | `telemetry`、`metrics`、`audit` 与 `deploy/compose` 配置 | 应用埋点及独立 Collector |
 
 管理工作台源码位于 `trpcservice/web/console`，构建资源内嵌到 `admin/ui/dist`，由 Admin/all 角色提供；运行时不需要 Node 服务。草稿与不可变发布版本分开保存，发布事务同时检查草稿/App 版本、分配新序号并切换稳定版本。草稿修改不影响线上会话。
+
+`connections` 管理网页机器人接入和维护，不执行 Agent。企业微信以群和成员的对应授权约束接收；Token/地址更新、换绑与移除在暂停并核对未完成任务后执行。换绑创建独立 Binding/Session，旧绑定软退役；外部回调操作使用持久意图与只读对账，不能与数据库事务冒充跨系统原子操作。
 
 Console Worker 消费独立的 PostgreSQL 调试任务（开发模式可用 InMemory），通过内部上下文和仓储适配复用同一个 Runtime/Runner。调试审批与 Journal 独立存储，原 IM 外键不变；调试内容只有发起者能查看，元数据按租户/RBAC 查询。状态流来自持久记录，浏览器断线不重跑 Agent，节点中断时保守标记未知结果。
 

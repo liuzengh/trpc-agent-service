@@ -5,12 +5,14 @@ import type { Page } from "./types";
 
 // The browser receives authorized references only, not credential values.
 export function CredentialSelect({
+  id,
   tenant,
   purpose,
   value,
   onChange,
   disabled,
 }: {
+  id?: string;
   tenant: string;
   purpose: string;
   value?: string;
@@ -52,6 +54,7 @@ export function CredentialSelect({
   return (
     <>
       <Select
+        id={id}
         style={{ width: "100%" }}
         showSearch
         allowClear

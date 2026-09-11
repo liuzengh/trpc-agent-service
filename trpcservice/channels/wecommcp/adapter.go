@@ -140,6 +140,9 @@ func (a *Adapter) ReadWindowBatch(ctx context.Context, b controlplane.ChannelBin
 	if err != nil || b.Status != controlplane.StatusActive || !slices.Contains(cfg.AllowedChatIDs, chat) || !to.After(from) || to.Sub(from) > 2*time.Minute || from.Nanosecond() != 0 || to.Nanosecond() != 0 {
 		return WindowBatch{}, errors.New("invalid WeCom MCP read scope or window")
 	}
+	if cfg.ManagedIdentity && (len(cfg.GroupGrants[chat].Members) == 0 || from.Before(cfg.StartFor(chat))) {
+		return WindowBatch{}, errors.New("group read is outside its authorization boundary")
+	}
 	endpoint, err := a.endpoint(ctx, b, secret.WeComMCPRead)
 	if err != nil {
 		return WindowBatch{}, err
@@ -238,7 +241,7 @@ func decodePageBatch(payload []byte, b controlplane.ChannelBinding, cfg BindingC
 			reject(raw, "invalid_identity")
 			continue
 		}
-		if !slices.Contains(cfg.AllowedUserIDs, header.UserID) {
+		if !cfg.AllowsUser(chat, header.UserID) {
 			continue
 		}
 		var m struct {
@@ -255,7 +258,7 @@ func decodePageBatch(payload []byte, b controlplane.ChannelBinding, cfg BindingC
 		}
 		// Human-ID allowlist is mandatory. No reliance on names, model output,
 		// unverified is_bot fields or an assumption that bots are never returned.
-		if !slices.Contains(cfg.AllowedUserIDs, m.UserID) {
+		if !cfg.AllowsUser(chat, m.UserID) {
 			continue
 		}
 		stamp, err := time.ParseInLocation("2006-01-02 15:04:05", m.Time, cfg.Location())
@@ -264,6 +267,9 @@ func decodePageBatch(payload []byte, b controlplane.ChannelBinding, cfg BindingC
 			continue
 		}
 		if stamp.Before(from) || !stamp.Before(to) {
+			continue
+		}
+		if !cfg.AllowsMessage(chat, m.UserID, stamp) {
 			continue
 		}
 		if m.Type == "text" && m.Text.Content == "" {
@@ -281,6 +287,12 @@ func decodePageBatch(payload []byte, b controlplane.ChannelBinding, cfg BindingC
 			continue
 		}
 		body := strings.TrimSpace(m.Text.Content)
+		if connectMarkerPattern.MatchString(strings.TrimSpace(strings.TrimPrefix(body, cfg.MentionPrefix))) {
+			continue
+		}
+		if cfg.SetupMarker != "" && strings.HasSuffix(body, cfg.SetupMarker) {
+			continue
+		}
 		if !strings.HasPrefix(body, cfg.MentionPrefix) {
 			continue
 		}

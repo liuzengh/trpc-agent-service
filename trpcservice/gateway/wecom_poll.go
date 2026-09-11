@@ -32,6 +32,7 @@ type PolledIntake interface {
 }
 type WeComPollOptions struct {
 	Targets                                         []config.WeComMCPTarget
+	TargetProvider                                  func(context.Context) ([]config.WeComMCPTarget, error)
 	Interval, Window, Overlap, SettleDelay, Timeout time.Duration
 	Audit                                           audit.Writer
 	Metrics                                         *platformmetrics.Recorder
@@ -67,7 +68,24 @@ func (p *WeComPoller) ProcessBackfillOnce(ctx context.Context) (int, error) {
 func (p *WeComPoller) processOnce(ctx context.Context, backfill bool) (int, error) {
 	count := 0
 	var failures error
-	for _, target := range p.opts.Targets {
+	targets := append([]config.WeComMCPTarget(nil), p.opts.Targets...)
+	if p.opts.TargetProvider != nil {
+		extra, err := p.opts.TargetProvider(ctx)
+		if err != nil {
+			return 0, err
+		}
+		seen := map[config.WeComMCPTarget]bool{}
+		for _, t := range targets {
+			seen[t] = true
+		}
+		for _, t := range extra {
+			if !seen[t] {
+				targets = append(targets, t)
+				seen[t] = true
+			}
+		}
+	}
+	for _, target := range targets {
 		binding, err := p.repository.GetChannelBinding(ctx, target.TenantID, target.BindingID)
 		if err != nil {
 			failures = errors.Join(failures, p.failure(ctx, target, err))
@@ -95,6 +113,9 @@ func (p *WeComPoller) processOnce(ctx context.Context, backfill bool) (int, erro
 			continue
 		}
 		for _, chat := range cfg.AllowedChatIDs {
+			if cfg.ManagedIdentity && len(cfg.GroupGrants[chat].Members) == 0 {
+				continue
+			}
 			if ctx.Err() != nil {
 				return count, context.Cause(ctx)
 			}
@@ -137,7 +158,7 @@ func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBi
 		_ = lease.Release(releaseCtx)
 	}()
 	ctx = lease.Context()
-	checkpoint, err := p.state.Checkpoint(ctx, key, wecommcp.ConfigFingerprint(b, cfg), cfg.Start())
+	checkpoint, err := p.state.Checkpoint(ctx, key, wecommcp.ConfigFingerprint(b, cfg), cfg.StartFor(chat))
 	if err != nil {
 		return 0, err
 	}
@@ -159,8 +180,8 @@ func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBi
 	if policy.Mode == channels.RealtimeMessages {
 		from = now.Add(-policy.MaxAge())
 	}
-	if from.Before(cfg.Start()) {
-		from = cfg.Start()
+	if from.Before(cfg.StartFor(chat)) {
+		from = cfg.StartFor(chat)
 	}
 	if from.Before(checkpoint.Floor) {
 		from = checkpoint.Floor
@@ -172,7 +193,7 @@ func (p *WeComPoller) pollGroup(parent context.Context, b controlplane.ChannelBi
 		if err != nil || !found {
 			return 0, err
 		}
-		if gap.ConfigHash != checkpoint.ConfigHash || gap.Cursor.Before(checkpoint.Floor) {
+		if gap.ConfigHash != checkpoint.ConfigHash || gap.Cursor.Before(checkpoint.Floor) || gap.Cursor.Before(cfg.StartFor(chat)) {
 			return 0, p.state.AdvanceGap(ctx, b, key, gap, gap.Cursor, "checkpoint_changed")
 		}
 		from = gap.Cursor

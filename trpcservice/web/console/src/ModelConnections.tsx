@@ -17,6 +17,10 @@ import { Blank, Failure, Icon, PageHeading, Panel } from "./components";
 import { date, type Principal } from "./types";
 import { navigate } from "./App";
 import { EditModelConnection } from "./EditModelConnection";
+import {
+  ModelEndpointHint,
+  type ModelEndpointPolicy,
+} from "./ModelEndpointHint";
 
 export interface ModelConnection {
   tenant_id: string;
@@ -37,16 +41,19 @@ export interface ModelConnectionPage {
   next?: string;
   enabled: boolean;
   allowed_origins: string[];
+  endpoint_policy: ModelEndpointPolicy;
 }
 
 export function CreateModelConnection({
   tenant,
   origins,
+  policy,
   onCreated,
   onCancel,
 }: {
   tenant: string;
   origins: string[];
+  policy: ModelEndpointPolicy;
   onCreated: (value: ModelConnection) => void;
   onCancel: () => void;
 }) {
@@ -87,17 +94,9 @@ export function CreateModelConnection({
       destroyOnHidden
     >
       <p className="muted">
-        连接只属于当前租户。API Key 在服务端加密保存，不会回显，也不会写入 Agent
-        草稿或版本。
+        添加后，当前工作空间的 Agent 就能选择这个模型。API Key 加密保存。
       </p>
-      <Form
-        form={form}
-        layout="vertical"
-        onFinish={save}
-        initialValues={{
-          base_url: (origins[0] || "https://api.openai.com") + "/v1",
-        }}
-      >
+      <Form form={form} layout="vertical" onFinish={save}>
         <Form.Item
           label="连接名称"
           name="name"
@@ -132,9 +131,13 @@ export function CreateModelConnection({
           label="API Base URL"
           name="base_url"
           rules={[{ required: true, message: "请输入完整 API 地址" }]}
-          extra="填写 OpenAI Chat Completions 兼容地址，通常以 /v1 结尾；不要填 /chat/completions 或在地址中放 Key。"
+          extra="填写服务商提供的 OpenAI 兼容 API 地址，通常以 /v1 结尾。"
         >
-          <Input disabled={busy} maxLength={2048} />
+          <Input
+            disabled={busy}
+            maxLength={2048}
+            placeholder="https://你的模型服务地址/v1"
+          />
         </Form.Item>
         <Form.Item
           label="API Key"
@@ -154,15 +157,11 @@ export function CreateModelConnection({
             maxLength={16384}
           />
         </Form.Item>
-        <p className="muted">
-          部署允许的服务：{origins.join("、") || "未配置"}。容器内的 127.0.0.1
-          指容器自身；访问宿主机请使用部署者提供的可达地址。
-        </p>
+        <ModelEndpointHint policy={policy} origins={origins} />
         <Alert
           type="info"
           showIcon
-          title="保存不会调用模型"
-          description="保存后在 Agent 中选择这个连接，通过右侧调试发送消息验证。调试沿用 Runner、权限、预算和运行记录，会消耗模型额度。"
+          title="保存后，在 Agent 里选择这个模型并试聊。"
         />
         {error && <Failure error={error} />}
         <Button
@@ -214,7 +213,7 @@ export function ModelConnections({
       <PageHeading
         eyebrow="MODELS"
         title="模型连接"
-        subtitle="由平台管理员为租户配置模型，Agent 选择连接即可使用，无需逐个填写密钥。"
+        subtitle="在这里添加模型，在 Agent 里选择使用。"
         action={
           <Space>
             <Button onClick={() => setRefresh((v) => v + 1)}>刷新</Button>
@@ -250,9 +249,15 @@ export function ModelConnections({
               中选择本租户已有连接；管理连接与密钥请联系平台管理员。
             </p>
           )}
+          {data.enabled && (
+            <ModelEndpointHint
+              policy={data.endpoint_policy}
+              origins={data.allowed_origins}
+            />
+          )}
           <Panel
             title="当前租户的连接"
-            subtitle="名称可编辑，Key 可单独更新。修改模型或地址会生成新配置版本，原 Agent 不会被自动切换；密钥更新仅作用于所选配置版本。"
+            subtitle="修改模型或地址后，需要在 Agent 里切换。"
           >
             {data.items.length ? (
               <Table
@@ -350,6 +355,7 @@ export function ModelConnections({
         <CreateModelConnection
           tenant={tenant}
           origins={data.allowed_origins}
+          policy={data.endpoint_policy}
           onCancel={() => setOpen(false)}
           onCreated={() => {
             setOpen(false);
@@ -365,6 +371,7 @@ export function ModelConnections({
           id={editing.id}
           rotate={editing.rotate}
           origins={data?.allowed_origins || []}
+          policy={data?.endpoint_policy || "allowlist"}
           onCancel={() => setEditing(null)}
           onSaved={(result) => {
             setEditing(null);

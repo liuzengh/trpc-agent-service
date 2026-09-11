@@ -73,8 +73,8 @@ func (s *Store) Edit(ctx context.Context, in Edit, rotateOnly bool) (EditResult,
 			if in.NewID == "" || in.NewID == current.ID {
 				return ErrInvalid
 			}
-			if !s.allows(in.BaseURL) {
-				return ErrEndpoint
+			if err := s.validateEndpoint(in.BaseURL); err != nil {
+				return err
 			}
 			if current.BaseURL != in.BaseURL && in.APIKey == "" {
 				return ErrAddressKey
@@ -99,8 +99,8 @@ func (s *Store) Edit(ctx context.Context, in Edit, rotateOnly bool) (EditResult,
 			return nil
 		}
 		if in.APIKey != "" {
-			if !s.allows(current.BaseURL) {
-				return ErrEndpoint
+			if err := s.validateEndpoint(current.BaseURL); err != nil {
+				return err
 			}
 			sealed, err := s.encrypt(current, in.APIKey)
 			if err != nil {

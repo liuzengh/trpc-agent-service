@@ -33,7 +33,13 @@ docker compose --env-file deploy/compose/demo.env.example -f compose.demo.yaml e
 3. 创建 Agent，在工作台选择模型连接、填写指令、保存草稿，在右侧发送消息。修改配置后用“新调试”创建新快照；连接保存本身不代表模型可用，真实调试会调用模型并受平台预算约束。
 4. 确认回复后发布版本，在发布记录里查看结果。网页调试不需要机器人或域名；需要 IM 时，再按[通道说明](im-channels.md)准备自己的凭据、授权和公网回调。
 
-模型连接只允许部署者声明的服务地址。`deploy/compose/demo.env.example` 的 `TRPC_AGENT_MODEL_ALLOWED_ORIGINS` 填 **origin**（例如 `https://provider.example`，不含 `/v1`）；网页填写完整 Base URL（例如 `https://provider.example/v1`）。更换允许列表后重建 platform 容器即可，新建连接不要求重启 Worker。文件中不得填写 Key。默认允许 OpenAI 官方地址和宿主机 8787 端口，不意味着它们已经有可用模型。
+模型连接默认使用 `TRPC_AGENT_MODEL_ENDPOINT_POLICY=public_https`：管理员可直接在网页填写任意 OpenAI Chat Completions 兼容的**公网 HTTPS** Base URL、模型 ID 和 API Key，不限供应商，不需要每换一个域名就改配置或重启。保存仅保存配置，不代表凭据、协议或模型已通过连通验证。
+
+本地、自建内网或 HTTP 服务才需要部署者设置 `TRPC_AGENT_MODEL_ALLOWED_ORIGINS`，内容为逗号分隔的 **origin**（例如宿主机运行时的 `http://127.0.0.1:8787`），不含 `/v1`；网页仍填写完整 Base URL（例如 `http://127.0.0.1:8787/v1`）。新部署模板默认没有内网例外，不依赖作者的本地模型。修改部署策略后，宿主机服务停止再启动；Compose 重新创建 platform 容器。分角色部署的 Admin/Worker/Jobs 必须保持策略一致。
+
+公网模式对未显式允许的地址直连：每次建连前检查全部 DNS 结果并只拨号已验证的公网 IP，拒绝本地、内网、链路本地及保留地址，不跟随重定向；不使用系统 HTTP(S) 代理或本地别名，避免代理代为解析绕过检查。模型服务只能通过企业代理访问时，可由部署者把**该服务的精确 origin** 加入例外，使用受信任的部署代理/DNS，并在出口侧实施限制。不要通过关闭 TLS 验证或填写通配符解决网络问题。
+
+企业环境需要只允许指定供应商时，设置 `TRPC_AGENT_MODEL_ENDPOINT_POLICY=allowlist`，并维护 `TRPC_AGENT_MODEL_ALLOWED_ORIGINS`。这是可选的严格模式，不是交付版的默认体验。**从 rc.3 或更早版本升级且希望维持原来的严格限制时，必须显式设置 `allowlist`**；`public_https` 下原列表的含义是额外授权，不再是全部可用供应商。API Key 只填写在网页独立字段或私有 Secret，不写入公开配置。
 
 容器内的 `127.0.0.1` 不是宿主机。若模型只监听宿主机回环地址，`host.docker.internal` 仍可能无法访问；需部署者提供容器可达的受保护监听/代理地址，或选择下面的宿主机运行方式。不要为了连通而将低强度认证的模型服务暴露到公网。
 
@@ -59,9 +65,10 @@ chmod 600 .env
 ./build.sh
 openssl rand -hex 24
 openssl rand -hex 24
+openssl rand -base64 32
 ```
 
-两次生成的不同值分别填入 `.env` 的 Admin Token 和 HTTP Token；不要提交或截图这些值。将模板中以下同名字段改为下列内容，其余字段保留默认值：
+前两份随机值分别填入 `.env` 的 Admin Token 和 HTTP Token，第三份作为模型和 IM 凭据的加密主密钥；不要提交或截图。已有安装不得重新生成主密钥。将模板中以下同名字段改为下列内容，其余字段保留默认值：
 
 ```dotenv
 TRPC_AGENT_ADDR=127.0.0.1:8080
@@ -78,6 +85,7 @@ TRPC_AGENT_QUOTA_BACKEND=redis
 REDIS_URL=redis://127.0.0.1:6379/0
 TRPC_AGENT_ADMIN_ENABLED=true
 TRPC_AGENT_ADMIN_TOKEN="第一份随机值"
+TRPC_AGENT_MODEL_MASTER_KEY="第三份 Base64 随机值"
 TRPC_AGENT_HTTP_API_ENABLED=true
 TRPC_AGENT_HTTP_API_TOKEN="第二份随机值"
 ```
@@ -99,15 +107,15 @@ curl -fsS http://127.0.0.1:8080/readyz
 
 1. 打开 `http://127.0.0.1:8080/admin/ui/`，使用刚设置的 **Admin Token** 登录。
 2. 选择 `tutorial-tenant` → Agent 应用 → `tutorial-app`，在右侧创建独立调试会话。可连续发送“我叫小明”和“我叫什么”查看会话；切到真实模型后回复措辞不要求固定。
-3. 创建第二个租户：例如 ID `tenant-b`、名称“第二租户”、region `local`、secret namespace `tenant-b`，配额/审计配置可先填 `{}`。secret namespace 只是元数据，不会自动授予密钥权限。
-4. 切换至第二租户，在 Agent 应用中新建 ID `app-b`、名称“第二 Agent”。通过页面创建的应用会自动注册/继承 Session 后端；模型先选执行节点默认模型，设置提示词、工具白名单、预算后保存草稿并调试。
-5. 发布后再建立该应用的 IM 或 HTTP 绑定。两个租户使用不同绑定；没有共享授权时，不能相互读取会话、记忆、知识库或使用对方工具。要选择不同模型凭据，先按治理文档增加精确 `model` grant，再重启执行节点；页面只能选择已授权引用。
+3. 在工作空间选择处创建“第二租户”，切换后新建“第二 Agent”；页面生成内部 ID，不需要手填 region 或 Secret namespace。
+4. 页面创建的应用自动注册/继承 Session 后端。在“模型连接”填写自己的模型地址与 Key，再到 Agent 工作台选择连接、设置提示词、工具白名单和预算，保存草稿并调试。环境变量模型仍可作为部署者维护的可选方式。
+5. 发布后，在“机器人”连接自己的 IM 账号。两个租户使用不同绑定；没有共享授权时，不能相互读取会话、记忆、知识库或使用对方工具。网页机器人凭据管理目前需要平台管理员；不把此边界描述成已开放租户自助接入。
 
 HTTP 调用用第 3 节示例，使用 **HTTP Token** 而不是 Admin/模型 Token。curl 不会自动读取 `.env`，应在受控终端提供对应 Token，不要 `source .env`。真实 IM 按 [IM 接入](im-channels.md)为自己的账号注册，不要使用作者的域名或测试群。Telegram + 企业微信即可覆盖本项目选择的两类 IM。
 
 ### 0.4 启用对象存储、向量库、Skill 等功能
 
-核心平台不要求这些资源全部启用。需要附件/知识库时，再执行：
+以下命令对应 **0.1 的宿主机部署**。核心平台不要求这些资源全部启用。需要附件/知识库时，再执行：
 
 ```bash
 docker compose up -d --wait --wait-timeout 60 minio qdrant
@@ -123,6 +131,8 @@ docker compose run --rm minio-init
 需要验证多节点时，在上述 all 进程保持运行的同时，在另一个终端执行 `./bin/trpc-service -env-file .env -role worker`。额外 Worker 不监听 8080，自动产生独立消费者身份，共享相同 PostgreSQL/Redis；不需要复制真实数据或启动第二套数据库。完整角色拆分及生产权限见第 4 节与治理文档。
 
 完成上述路径后，交付方应能独立登录、创建应用、调试/发布、配置所选后端及通道。IM 账号开通、模型额度和生产 Secret 是接收方提供的外部条件，不随源码包提供。
+
+0.0 的完整 Compose 默认只有平台、PostgreSQL 和 Redis，不挂载 Docker socket、Skill 或作者的其他服务。需要体验本节所有高级能力时，可选择完整的宿主机路径；若继续采用容器部署，应给容器提供可达的存储地址、用途授权和受控的独立沙箱执行环境，不能照抄宿主机的 `127.0.0.1` 地址。两种路径任选其一，不需要长期运行两套平台。
 
 ## 1. 环境与配置
 
@@ -253,12 +263,14 @@ docker compose --profile observability up -d
 
 1. 备份配置、当前二进制和数据库，先核对未完成工具及 unknown/attempting 发送事实。
 2. 停止旧 Worker/Jobs/Sender，不能混跑不兼容的队列、权限或分段发送协议。
-3. 构建，使用迁移身份应用缺失 migrations；当前新部署 schema 为 29，不能修改已应用 SQL 文件。026 增加持久化等待、调度代数和独立补读，027 增加 Run 收尾回执，028/029 增加加密模型连接及受控编辑，不重建业务会话。Worker 需要 INSERT queue_outbox，Gateway 需要 UPDATE channel_poll_gap；模型连接表仅 Admin 有 SELECT/INSERT 与指定列 UPDATE、Worker/Jobs 有 SELECT。同步更新权限后再启动新版本，不给 Worker 开放修改投递状态的权限。既有环境不开启模型加密存储时，原环境变量模式保持不变；要启用时先迁移，再向 Admin/Worker/Jobs 注入一致的主密钥与地址允许列表。首次升级到逐请求模型凭据机制需更新全部相关 Worker/Jobs，不能只升级管理页面就宣称旧实例已支持热更新。
+3. 构建，使用迁移身份应用缺失 migrations；当前新部署 schema 为 31，不能修改已应用 SQL 文件。026 增加持久化等待、调度代数和独立补读，027 增加 Run 收尾回执，028/029 增加加密模型连接及受控编辑，不重建业务会话。Worker 需要 INSERT queue_outbox，Gateway 需要 UPDATE channel_poll_gap；模型连接表仅 Admin 有 SELECT/INSERT 与指定列 UPDATE、Worker/Jobs 有 SELECT。同步更新权限后再启动新版本，不给 Worker 开放修改投递状态的权限。既有环境不开启模型加密存储时，原环境变量模式保持不变；要启用时先迁移，再向 Admin/Worker/Jobs 注入一致的主密钥与地址允许列表。首次升级到逐请求模型凭据机制需更新全部相关 Worker/Jobs，不能只升级管理页面就宣称旧实例已支持热更新。 030 增加网页机器人连接和加密 IM 凭据；Admin/Gateway/Sender/Worker 需按职责获得新增表权限，使用同一已备份主密钥。Gateway 的连接表写权限仅限接收时间，模型连接表仍不向 Gateway/Sender 开放。
 4. 核对新增表/函数/Redis 命令权限，再启动候选实例，检查就绪和受控请求。
 5. Agent 行为通过不可变 Revision、stable/canary 和 conversation pin 灰度；切回稳定 revision 不会自动迁移已 pin 的会话。
 6. 数据迁移按[迁移协议](data-consistency.md)执行。回滚配置不会撤销已提交的工作项或已发送消息，不得恢复旧备份后盲目重放。
 
-`0.3.0-rc.1` 的升级检查已在独立 PostgreSQL 上验证：基线 `0ce285f`（`0.2.0-rc.10`）可在保留 schema 24 新增表时启动、查询 Admin 并完成 HTTP Agent 执行。回退仍须先停止新版本、处理或保留在途调试任务，不混跑新旧实例；旧版不提供新工作台，也不会消费独立调试队列。此结论不代表任意历史版本、所有供应商或生产容灾均已验证。
+schema 31 增加绑定退役标记和连接操作类型。更新全部相关角色的权限后再启动：Admin 需要查询审批状态的有限列、清理失效的群缓存；Gateway 仍不获得修改控制面绑定的权限。逐群授权保存在绑定配置中；单群旧网页连接保留原授权，多群平面名单需要逐群重新确认。升级不会改写旧服务器绑定、模型配置或会话。
+
+回退前暂停接入、保留未完成任务并核对当前 schema/配置。使用了逐群授权或退役绑定后，旧程序不能安全解释这些状态，禁止只替换为旧二进制；需要保留新数据协议的回退构建，或在独立环境恢复备份并逐项对账。不要清空连接、seen、队列或发送尝试来强行回退，也不要将历史版本的回退记录当成当前版本保证。
 
 ## 6. 容量与恢复
 
@@ -291,9 +303,9 @@ docker compose --profile observability up -d
 
 管理工作台随 Agent 二进制内嵌，运行时不需要 Node/npm 或额外前端服务。配置 `TRPC_AGENT_ADMIN_ENABLED=true` 和已有的 Admin Token/Principals，在 admin/all 角色启动后访问 `http://127.0.0.1:8080/admin/ui/`，输入 **Admin Token**，不是模型或 IM Key。登录换取最长 8 小时的 HttpOnly 会话，刷新后恢复；长期 Token 不进入浏览器本地存储。远程浏览器登录要求 HTTPS，本机回环 HTTP 仅用于开发。
 
-新版工作台从 `0.3.0-rc.1` 提供，需要 schema 24。先升级 Admin/Worker，再开放工作台。网页调试使用独立 SQL 调试队列，不会被旧版 IM Worker 误领；旧版本的管理页不支持新的登录会话。升级不会自动发布 Agent 版本或迁移已有 IM 会话。
+当前工作台使用 schema 31。先升级相关服务角色，再开放管理页面；网页调试使用独立 SQL 任务。升级不会自动发布 Agent 版本、重新注册真实 Webhook 或迁移已有 IM 会话。
 
-`0.4.0-rc.2` 在首次体验引导和加密模型连接基础上增加 schema 29 的编辑与 API Key 更新；继续保留 rc.4 / schema 27 的消息恢复协议。“近期优先”的 30～120 秒是接收窗口，不是请求有效期；配置键 `max_age_seconds` 为兼容保留。已接收消息持久保存，模型尚未产生输出且无工具执行时，暂时连接故障进入 waiting，5/10/20/30 秒退避，不消耗普通执行错误的三次尝试。模型恢复后自动继续，管理页展示等待原因与下一次调度时间。每条请求最多一条等待提示；未发出的提示会在最终完成时撤回，已经发送或结果未知的提示不能撤销。
+工作台支持模型连接编辑、API Key 更新和机器人维护，并保留持久化消息恢复协议。“近期优先”的 30～120 秒是接收窗口，不是请求有效期；配置键 `max_age_seconds` 为兼容保留。已接收消息持久保存，模型尚未产生输出且无工具执行时，暂时连接故障进入 waiting，5/10/20/30 秒退避，不消耗普通执行错误的三次尝试。模型恢复后自动继续，管理页展示等待原因与下一次调度时间。每条请求最多一条等待提示；未发出的提示会在最终完成时撤回，已经发送或结果未知的提示不能撤销。
 
 编辑模型连接时，名称直接保存；模型 ID 或地址变化生成新的配置版本，不会改动 Agent 的现有引用。到工作台选择新版本后，保存草稿、点击“新调试”，确认后再发布。API Key 留空保留，填写新值则更新当前配置版本的凭据；地址改变必须重新填写 Key。也可直接点“更新 Key”，查看相关 Agent 后确认，后续调用无需重启即可取用新 Key，在途请求不强行中断。更新 Key 不会改变模型/地址，也不会同时更新其他配置版本或撤销供应商侧旧 Key。
 

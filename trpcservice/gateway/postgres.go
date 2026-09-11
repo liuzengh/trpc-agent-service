@@ -62,6 +62,19 @@ func (j *PostgresJournal) Accept(
 		return AcceptResult{}, fmt.Errorf("begin inbound transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Serialize admission with managed route retirement/rebinding without
+	// granting the Gateway UPDATE permission on control-plane bindings.
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('channel-binding/' || $1,0))`, request.Scope.ChannelBindingID); err != nil {
+		return AcceptResult{}, err
+	}
+	var bindingApp, bindingStatus string
+	var bindingVersion int64
+	if err = tx.QueryRowContext(ctx, `SELECT app_id,status,version FROM channel_binding WHERE tenant_id=$1 AND channel_binding_id=$2`, request.Scope.TenantID, request.Scope.ChannelBindingID).Scan(&bindingApp, &bindingStatus, &bindingVersion); err != nil {
+		return AcceptResult{}, err
+	}
+	if bindingStatus != "active" || bindingApp != request.Scope.AppID || (request.Scope.BindingVersion != 0 && bindingVersion != request.Scope.BindingVersion) {
+		return AcceptResult{}, errors.New("channel authorization changed before admission")
+	}
 	var ignored bool
 	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM channel_message_disposition WHERE tenant_id=$1 AND channel_binding_id=$2 AND message_id=$3)`, request.Scope.TenantID, request.Scope.ChannelBindingID, request.ExternalMessageID).Scan(&ignored); err != nil {
 		return AcceptResult{}, err

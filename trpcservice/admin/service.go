@@ -19,6 +19,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/audit"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/background"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecommcp"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/connections"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/console"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/controlplane"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
@@ -41,6 +42,7 @@ type Service struct {
 	debugMu                sync.Mutex
 	startupModelName       string
 	models                 *modelregistry.Store
+	connections            *connections.Store
 	consoleStore           *console.Store
 	dependencyObservations func() []DependencyCheck
 	outboundParts          gateway.PartJournal
@@ -544,6 +546,9 @@ func (s *Service) CreateChannelBinding(
 	ctx context.Context,
 	binding controlplane.ChannelBinding,
 ) (controlplane.ChannelBinding, error) {
+	if strings.HasPrefix(binding.SecretRef, "managed://") {
+		return controlplane.ChannelBinding{}, invalidf("网页机器人请通过机器人页面创建")
+	}
 	if binding.ID == "" {
 		binding.ID = "binding-" + uuid.NewString()
 	}
@@ -606,6 +611,9 @@ func (s *Service) UpdateChannelBinding(
 	current, err := s.repository.GetChannelBinding(ctx, tenantID, bindingID)
 	if err != nil {
 		return controlplane.ChannelBinding{}, err
+	}
+	if strings.HasPrefix(current.SecretRef, "managed://") {
+		return controlplane.ChannelBinding{}, invalidf("请到机器人页面修改此连接")
 	}
 	current.Config = config
 	if err := validateChannelShape(current); err != nil {

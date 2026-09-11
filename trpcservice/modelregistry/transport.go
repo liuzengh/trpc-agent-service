@@ -16,7 +16,7 @@ type Option func(*Store) error
 // WithLoopbackAliases is a deployment-only compatibility setting for moving
 // container-created model connections to a host process. It does not modify
 // immutable connection URLs, system DNS, /etc/hosts, or unrelated HTTP clients.
-// Every connection still passes the exact origin allowlist and tenant checks.
+// An alias is used only for an explicitly allowed origin, with tenant checks.
 func WithLoopbackAliases(raw string) Option {
 	return func(s *Store) error {
 		if strings.TrimSpace(raw) == "" {

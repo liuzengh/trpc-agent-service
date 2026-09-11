@@ -27,7 +27,7 @@ import {
   type Principal,
 } from "./types";
 import { navigate } from "./App";
-import { ChannelDiagnostics } from "./ChannelDiagnostics";
+import { channelLabels } from "./channel-types";
 import { JobTable } from "./ActivityPanel";
 
 export function AgentList({
@@ -340,9 +340,6 @@ export function ResourcePage({
     form.resetFields();
     form.setFieldsValue({
       status: "disabled",
-      channel_type: "telegram",
-      message_mode: "realtime",
-      message_age: 120,
       resource_type: "session",
       backend_type: "inmemory",
       region: "local",
@@ -356,8 +353,6 @@ export function ResourcePage({
     form.resetFields();
     form.setFieldsValue({
       ...selected,
-      message_mode: selected.config?.message_policy?.mode || "realtime",
-      message_age: selected.config?.message_policy?.max_age_seconds || 120,
       config: JSON.stringify(selected.config || {}, null, 2),
       quota_config: JSON.stringify(selected.quota_config || {}, null, 2),
       audit_policy: JSON.stringify(selected.audit_policy || {}, null, 2),
@@ -368,15 +363,8 @@ export function ResourcePage({
   async function save(values: Dict) {
     setSaving(true);
     try {
-      let path =
-        kind === "tenants"
-          ? "tenants"
-          : kind === "channels"
-            ? "channel-bindings"
-            : "backend-bindings";
+      let path = kind === "tenants" ? "tenants" : "backend-bindings";
       let body: Dict = { ...values, tenant_id: tenant };
-      delete body.message_mode;
-      delete body.message_age;
       if (kind === "tenants") {
         if (edit) {
           path = "tenants/policies";
@@ -392,27 +380,6 @@ export function ResourcePage({
         }
       } else {
         body.config = JSON.parse(values.config || "{}");
-        if (
-          kind === "channels" &&
-          ["telegram", "wecom", "wecom_mcp"].includes(
-            edit ? selected!.channel_type : values.channel_type,
-          )
-        ) {
-          body.config.message_policy = {
-            mode: values.message_mode || "realtime",
-            max_age_seconds: values.message_age || 120,
-          };
-        }
-        if (edit) {
-          path = "channel-bindings/update";
-          body = {
-            tenant_id: tenant,
-            binding_id: selected!.channel_binding_id,
-            expected_version: selected!.version,
-            status: values.status,
-            config: body.config,
-          };
-        }
       }
       if (JSON.stringify(body).includes("[REDACTED"))
         throw new Error("请将脱敏占位值替换为有效引用，不要直接保存");
@@ -430,7 +397,7 @@ export function ResourcePage({
   }
   const canCreate =
     writable(principal) &&
-    ["backends", "channels", "tenants"].includes(kind) &&
+    ["backends", "tenants"].includes(kind) &&
     (kind !== "tenants" || principal.role === "superadmin");
   const columns = [
     {
@@ -442,6 +409,7 @@ export function ResourcePage({
             {v.display_name ||
               v.name ||
               v.tool_name ||
+              channelLabels[v.channel_type] ||
               v.channel_type ||
               v.resource_type ||
               v.decision ||
@@ -457,6 +425,7 @@ export function ResourcePage({
       render: (_: unknown, v: Dict) => (
         <Tag>
           {v.backend_type ||
+            channelLabels[v.channel_type] ||
             v.channel_type ||
             (kind === "skills"
               ? "v" + v.version
@@ -496,7 +465,7 @@ export function ResourcePage({
         title={initial === "skills" ? "资源中心" : resourceNames[kind]}
         subtitle={
           kind === "channels"
-            ? "连接业务通道；凭据使用服务端引用，不在页面填写真实 Token。"
+            ? "选择机器人类型，按字段说明填写配置；保存后继续完成回调注册或轮询登记。"
             : kind === "tenants"
               ? "管理租户范围、配额与审计策略。"
               : "为 Agent 选择已获授权的能力和数据资源。"
@@ -605,7 +574,7 @@ export function ResourcePage({
         extra={
           selected &&
           writable(principal) &&
-          ["channels", "tenants"].includes(kind) && (
+          kind === "tenants" && (
             <Button onClick={startEdit}>
               编辑{kind === "tenants" ? "策略" : "绑定"}
             </Button>
@@ -654,14 +623,12 @@ export function ResourcePage({
                 description="物理后端切换应走受控迁移，避免丢失会话和知识库。"
               />
             )}
-            {kind === "channels" && (
-              <ChannelDiagnostics
-                tenant={tenant}
-                bindingID={selected.channel_binding_id}
-              />
-            )}
-            <h4>配置与记录</h4>
-            <pre className="json-view">{JSON.stringify(selected, null, 2)}</pre>
+            <>
+              <h4>配置与记录</h4>
+              <pre className="json-view">
+                {JSON.stringify(selected, null, 2)}
+              </pre>
+            </>
           </>
         )}
       </Drawer>
@@ -709,92 +676,22 @@ export function ResourcePage({
           ) : (
             <>
               {!edit && (
-                <Form.Item
-                  name="app_id"
-                  label="所属 Agent"
-                  rules={kind === "channels" ? [{ required: true }] : []}
-                >
+                <Form.Item name="app_id" label="所属 Agent">
                   <Select
                     allowClear
                     options={apps.map((a) => ({
                       value: a.app_id,
                       label: a.name,
                     }))}
-                    placeholder={
-                      kind === "backends"
-                        ? "留空作为租户默认后端"
-                        : "选择 Agent"
-                    }
+                    placeholder="留空作为租户默认后端"
                   />
                 </Form.Item>
               )}
-              {kind === "channels" ? (
-                <>
-                  {!edit && (
-                    <>
-                      <Form.Item name="channel_type" label="通道类型">
-                        <Select
-                          options={[
-                            { value: "telegram", label: "Telegram" },
-                            { value: "wecom", label: "企业微信自建应用" },
-                            { value: "wecom_mcp", label: "企业微信消息 MCP" },
-                            { value: "http", label: "HTTP" },
-                          ]}
-                        />
-                      </Form.Item>
-                      <Form.Item
-                        name="account_id"
-                        label="外部账号标识"
-                        rules={[{ required: true }]}
-                      >
-                        <Input />
-                      </Form.Item>
-                      <Form.Item name="secret_ref" label="通道凭据引用">
-                        <Input placeholder="env://DEPLOYMENT_SECRET" />
-                      </Form.Item>
-                    </>
-                  )}
-                  <Form.Item name="status" label="接入状态">
-                    <Select
-                      options={[
-                        { value: "disabled", label: "停用" },
-                        { value: "active", label: "启用" },
-                      ]}
-                    />
-                  </Form.Item>
-                  <Form.Item
-                    name="message_mode"
-                    label="聊天消息处理策略"
-                    help="近期优先：及时接收新消息，历史缺口独立补读；消息不会仅因等待时间过长而丢弃。"
-                  >
-                    <Select
-                      options={[
-                        { value: "realtime", label: "近期优先（默认）" },
-                        {
-                          value: "reliable",
-                          label: "按历史顺序接收（可能延迟近期消息）",
-                        },
-                      ]}
-                    />
-                  </Form.Item>
-                  <Form.Item
-                    name="message_age"
-                    label="近期接收窗口（秒）"
-                    help="30～120 秒；这是企业微信的优先接收窗口，不是消息过期时间。"
-                  >
-                    <InputNumber min={30} max={120} precision={0} />
-                  </Form.Item>
-                </>
-              ) : (
-                <>
-                  <Form.Item name="resource_type" label="资源类型">
-                    <Select
-                      options={[
-                        "session",
-                        "memory",
-                        "knowledge",
-                        "artifact",
-                      ].map((value) => ({
+              <>
+                <Form.Item name="resource_type" label="资源类型">
+                  <Select
+                    options={["session", "memory", "knowledge", "artifact"].map(
+                      (value) => ({
                         value,
                         label: {
                           session: "会话",
@@ -802,25 +699,25 @@ export function ResourcePage({
                           knowledge: "知识库",
                           artifact: "附件",
                         }[value],
-                      }))}
-                    />
-                  </Form.Item>
-                  <Form.Item name="backend_type" label="后端类型">
-                    <Select
-                      options={[
-                        "inmemory",
-                        "redis",
-                        "postgres",
-                        "qdrant",
-                        "s3",
-                      ].map((value) => ({ value, label: value }))}
-                    />
-                  </Form.Item>
-                  <Form.Item name="secret_ref" label="凭据引用">
-                    <Input placeholder="env://DEPLOYMENT_SECRET" />
-                  </Form.Item>
-                </>
-              )}
+                      }),
+                    )}
+                  />
+                </Form.Item>
+                <Form.Item name="backend_type" label="后端类型">
+                  <Select
+                    options={[
+                      "inmemory",
+                      "redis",
+                      "postgres",
+                      "qdrant",
+                      "s3",
+                    ].map((value) => ({ value, label: value }))}
+                  />
+                </Form.Item>
+                <Form.Item name="secret_ref" label="凭据引用">
+                  <Input placeholder="env://DEPLOYMENT_SECRET" />
+                </Form.Item>
+              </>
               <Form.Item
                 name="config"
                 label="连接配置（高级 JSON）"

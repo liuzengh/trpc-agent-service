@@ -3,7 +3,7 @@
 name: trpc-agent-demo
 
 x-platform: &platform
-  image: trpc-agent-service:demo
+  image: ${TRPC_AGENT_IMAGE:-trpc-agent-service:demo}
   build:
     context: .
     args:
@@ -63,8 +63,10 @@ services:
     <<: *platform
     command: ["-env-file", "/setup/platform.env"]
     environment:
-      # Exact origins only. Model API paths (e.g. /v1) are entered in the UI.
-      TRPC_AGENT_MODEL_ALLOWED_ORIGINS: ${TRPC_AGENT_MODEL_ALLOWED_ORIGINS:-https://api.openai.com,http://host.docker.internal:8787}
+      # Public HTTPS providers need no per-provider deployment changes.
+      TRPC_AGENT_MODEL_ENDPOINT_POLICY: ${TRPC_AGENT_MODEL_ENDPOINT_POLICY:-public_https}
+      # Optional trusted origins for private models / controlled proxy egress.
+      TRPC_AGENT_MODEL_ALLOWED_ORIGINS: ${TRPC_AGENT_MODEL_ALLOWED_ORIGINS:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

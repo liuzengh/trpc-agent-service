@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Descriptions, Skeleton, Table } from "antd";
+import { Alert, Button, Descriptions, Skeleton, Table, Typography } from "antd";
 import { api, errorText } from "./api";
 import { Failure, Status } from "./components";
 import { date, type Dict } from "./types";
@@ -63,7 +63,28 @@ export function ChannelDiagnostics({
                     {
                       key: "path",
                       label: "回调路径",
-                      children: <code>{data.callback_path}</code>,
+                      children: (
+                        <Typography.Text copyable>
+                          {data.callback_path}
+                        </Typography.Text>
+                      ),
+                    },
+                    {
+                      key: "url",
+                      label: "完整回调 URL",
+                      children: data.callback_url ? (
+                        <>
+                          <Typography.Paragraph copyable>
+                            {data.callback_url}
+                          </Typography.Paragraph>
+                          <span className="muted">
+                            按部署配置生成，尚未核实此路径的公网可达性或 IM
+                            注册状态。
+                          </span>
+                        </>
+                      ) : (
+                        "部署者尚未配置有效的 TRPC_AGENT_PUBLIC_BASE_URL。请用自己的公网 HTTPS 域名拼接上述路径。"
+                      ),
                     },
                   ]
                 : []),
@@ -102,7 +123,13 @@ export function ChannelDiagnostics({
                   },
                   {
                     title: "补读状态",
-                    render: (_, r: Dict) => ({ pending: "补读中", completed: "已补读", blocked: `需处理：${r.last_error}`, skipped: "旧版跳过 · 未重放" }[String(r.status)] || r.status),
+                    render: (_, r: Dict) =>
+                      ({
+                        pending: "补读中",
+                        completed: "已补读",
+                        blocked: `需处理：${r.last_error}`,
+                        skipped: "旧版跳过 · 未重放",
+                      })[String(r.status)] || r.status,
                   },
                   {
                     title: "补读进度",

@@ -50,7 +50,7 @@ func (h *Handler) handleModelConnections(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		items, next, err := h.service.models.List(r.Context(), in.TenantID, in.After)
-		h.writeResult(w, 200, map[string]any{"items": items, "next": next, "enabled": h.service.models != nil, "allowed_origins": h.service.models.AllowedOrigins()}, err)
+		h.writeResult(w, 200, map[string]any{"items": items, "next": next, "enabled": h.service.models != nil, "allowed_origins": h.service.models.AllowedOrigins(), "endpoint_policy": h.service.models.EndpointPolicy()}, err)
 		return
 	}
 	// Credential provisioning belongs to the deployment administrator, not a

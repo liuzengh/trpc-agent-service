@@ -80,6 +80,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/admin/connections/list", "/admin/connections/get", "/admin/connections/prepare", "/admin/connections/activate", "/admin/connections/check", "/admin/connections/retry", "/admin/connections/pause", "/admin/connections/groups", "/admin/connections/select-group", "/admin/connections/check-message", "/admin/connections/save-groups", "/admin/connections/public-address", "/admin/connections/legacy-toggle", "/admin/connections/update-credential", "/admin/connections/rebind", "/admin/connections/remove", "/admin/connections/revoke-member":
+		h.handleConnections(w, r)
 	case "/admin/model-connections/list", "/admin/model-connections/create", "/admin/model-connections/get", "/admin/model-connections/update", "/admin/model-connections/rotate-key":
 		h.handleModelConnections(w, r)
 	case "/admin/releases/list":

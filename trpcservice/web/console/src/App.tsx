@@ -15,6 +15,7 @@ import { AgentList, ResourcePage, RunsPage, SystemPage } from "./pages";
 import { Workbench } from "./Workbench";
 import { GettingStarted } from "./GettingStarted";
 import { ModelConnections } from "./ModelConnections";
+import { Connections } from "./Connections";
 
 const navigation = [
   { id: "start", label: "上手引导", icon: "arrow" },
@@ -22,7 +23,7 @@ const navigation = [
   { id: "models", label: "模型连接", icon: "settings" },
   { id: "agents", label: "Agent 应用", icon: "agent" },
   { id: "resources", label: "资源中心", icon: "layers" },
-  { id: "channels", label: "通道接入", icon: "channel" },
+  { id: "channels", label: "机器人", icon: "channel" },
   { id: "runs", label: "运行记录", icon: "activity" },
   { id: "system", label: "系统状态", icon: "settings" },
 ];
@@ -357,11 +358,7 @@ export function ConsoleApp() {
             ) : current.section === "resources" ? (
               <ResourcePage tenant={tenant} principal={principal} />
             ) : current.section === "channels" ? (
-              <ResourcePage
-                tenant={tenant}
-                principal={principal}
-                initial="channels"
-              />
+              <Connections tenant={tenant} principal={principal} />
             ) : current.section === "runs" ? (
               <RunsPage tenant={tenant} principal={principal} />
             ) : current.section === "system" ? (

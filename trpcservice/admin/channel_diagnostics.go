@@ -3,6 +3,8 @@ package admin
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels"
@@ -55,7 +57,18 @@ func (h *Handler) handleChannelDiagnostics(w http.ResponseWriter, r *http.Reques
 	switch binding.ChannelType {
 	case "telegram", "wecom":
 		result["callback_path"] = "/callbacks/" + binding.ChannelType + "/" + binding.CallbackKey
+		if h.service.system != nil {
+			u, err := url.Parse(h.service.system.publicURL)
+			if err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" && u.Opaque == "" {
+				u.Path = strings.TrimRight(u.Path, "/") + result["callback_path"].(string)
+				u.RawPath = ""
+				result["callback_url"] = u.String()
+			}
+		}
 		result["hint"] = "此处只展示本平台接收后的记录，不能证明 IM 平台 Webhook 已正确配置。尚未到达平台的消息请结合公网入口与服务日志检查。"
+		if value := h.service.connections.CallbackURL(ctx, in.TenantID, binding.ID); value != "" {
+			result["callback_url"] = value
+		}
 	case wecommcp.ChannelType:
 		result["hint"] = "企业微信消息 MCP 使用授权会话轮询，不需要 Webhook。检查点是已保存的消费进度，不等于当前外部服务在线。"
 		if h.service.channelState == nil {
