@@ -6,3 +6,7 @@
 - 核心时序图：IM 消息 → Runner 执行 → Tool 调用 → Session / Memory 写入 → IM 回复
 - 数据模型与多后端适配说明
 - 风险清单
+
+## 评审记录
+
+- [PR 评审过程记录](pr-review-records.md)：其余 PR 的版本快照、评审索引及逐轮记录模板。
