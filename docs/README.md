@@ -10,3 +10,4 @@
 ## 评审记录
 
 - [PR 评审过程记录](pr-review-records.md)：其余 PR 的版本快照、评审索引及逐轮记录模板。
+- [tRPC-Agent-Go 能力复用分析：按 PR 编号](trpc-agent-go-reuse-by-pr.md)：19 个 PR 的复用能力、冻结源码证据与实现限制。
