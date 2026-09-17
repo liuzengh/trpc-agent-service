@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trpc-worker
+  labels:
+    app.kubernetes.io/name: trpc-agent-service
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trpc-agent-service
+        app.kubernetes.io/component: worker
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # This is larger than the worker's bounded drain + HTTP shutdown budget.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/liuzengh/trpc-agent-service:replace-me
+          imagePullPolicy: IfNotPresent
+          args: ["worker"]
+          ports:
+            # Only kubelet probes use this port. There is intentionally no
+            # Service for workers: broker consumption is their inbound path.
+            - name: health
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: trpc-service-runtime
+            - secretRef:
+                name: trpc-service-runtime-secrets
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/trpc-service", "prestop"]
+          env:
+            - name: TRPC_PRESTOP_TARGET_PID
+              value: "1"
+            - name: TRPC_PRESTOP_SETTLE_DELAY
+              value: 2s
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /livez, port: health}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532

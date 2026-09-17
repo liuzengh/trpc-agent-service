@@ -1,0 +1,210 @@
+name: Repository admission
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: admission-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-1-24:
+    # Keep the stable job id for existing branch-protection wiring; the
+    # display name must track the toolchain declared by go.mod.
+    name: Go 1.25 compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.14'
+          cache: false
+      - name: Fresh-cache build, static checks and unit tests
+        run: bash scripts/ci/admission.sh
+
+  race-1-24:
+    name: Go 1.25 race suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.14'
+          cache: false
+      - name: Fresh-cache race tests
+        run: bash scripts/ci/admission.sh --race
+
+  coverage:
+    name: Coverage floor and PR diff ratchet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.14'
+          cache: false
+      - name: Enforce repository, changed-line and core-package coverage
+        env:
+          TRPC_MIN_TOTAL_COVERAGE: '42.0'
+          TRPC_DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          bash scripts/ci/coverage-gate.sh
+          bash scripts/ci/core-coverage-gate.sh
+
+  vulnerabilities:
+    name: Go vulnerability scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.14'
+          cache: false
+      - name: Scan reachable Go vulnerabilities
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  migration-e2e:
+    name: Migration e2e — PostgreSQL schema and control plane
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert Compose input is valid
+        run: docker compose -f deploy/compose/docker-compose.backend-smoke.yml config --quiet
+      - name: Run PostgreSQL migration e2e with no skipped contracts
+        run: bash scripts/e2e/backend-adapter.sh migration
+
+  runtime-e2e:
+    name: Runtime e2e — PostgreSQL, Redis and worker recovery slice
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Redis-backed runtime e2e with no skipped contracts
+        run: bash scripts/e2e/backend-adapter.sh runtime
+
+  storage-e2e:
+    name: Storage e2e — MinIO, Qdrant and Vault adapters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Prometheus configuration
+        run: >-
+          docker run --rm
+          --volume "$PWD/deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
+          --entrypoint promtool
+          prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
+          check config /etc/prometheus/prometheus.yml
+      - name: Validate Prometheus durable-runtime alert rules
+        run: >-
+          docker run --rm
+          --volume "$PWD/deploy/prometheus-alerts.yml:/etc/prometheus/trpc-alerts.yml:ro"
+          --entrypoint promtool
+          prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
+          check rules /etc/prometheus/trpc-alerts.yml
+      - name: Run object, vector and secret storage e2e
+        run: bash scripts/e2e/backend-adapter.sh storage
+
+  im-e2e:
+    name: IM e2e — signed callbacks and durable duplicate ingress
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.14'
+          cache: false
+      - name: Run repository-verifiable IM protocol e2e
+        run: bash scripts/e2e/im.sh
+
+  credential-free-final-acceptance:
+    name: Empty DB, fake provider and SSE final acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.14'
+          cache: false
+      - name: Run static gate and credential-free demo acceptance
+        run: bash scripts/ci/admission.sh --demo
+
+  migration-coverage-e2e:
+    name: Migration coverage e2e — PostgreSQL adapter contract coverage floor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.14'
+          cache: false
+      - name: Assert Compose input is valid
+        run: docker compose -f deploy/compose/docker-compose.backend-smoke.yml config --quiet
+      - name: Run PostgreSQL adapter contract coverage e2e
+        run: bash scripts/e2e/backend-adapter.sh migration-coverage
+      - name: Upload PostgreSQL adapter coverage profile
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-adapter-coverage
+          path: ${{ env.TRPC_ADAPTER_COVERAGE_DIR }}/postgres-adapter.out
+          if-no-files-found: error
+
+  e2e-coverage:
+    name: E2E coverage — runtime slice, storage and artifact attribution floors
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      TRPC_E2E_COVERAGE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.14'
+          cache: false
+      - name: Assert Compose input is valid
+        run: docker compose -f deploy/compose/docker-compose.backend-smoke.yml config --quiet
+      - name: Run runtime-slice coordination-core coverage e2e
+        run: bash scripts/e2e/backend-adapter.sh runtime
+      - name: Run storage adapter coverage e2e
+        run: bash scripts/e2e/backend-adapter.sh storage
+      - name: Run artifact object-store coverage e2e
+        run: bash scripts/e2e/backend-adapter.sh artifact
+      - name: Upload runtime slice coverage profile
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-slice-coverage
+          path: ${{ env.TRPC_E2E_COVERAGE_DIR_RUNTIME }}/runtime-slice.out
+          if-no-files-found: error
+      - name: Upload storage e2e coverage profile
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-e2e-coverage
+          path: ${{ env.TRPC_E2E_COVERAGE_DIR_STORAGE }}/storage-e2e.out
+          if-no-files-found: error
+      - name: Upload artifact e2e coverage profile
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-e2e-coverage
+          path: ${{ env.TRPC_E2E_COVERAGE_DIR_ARTIFACT }}/artifact-e2e.out
+          if-no-files-found: error

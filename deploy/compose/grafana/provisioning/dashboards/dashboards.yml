@@ -1,0 +1,6 @@
+apiVersion: 1
+providers:
+  - name: trpc-agent-service
+    folder: tRPC Agent Service
+    type: file
+    options: {path: /var/lib/grafana/dashboards}

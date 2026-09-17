@@ -1,2 +1,2 @@
-// Package config loads tenant, model, channel, and storage backend settings.
+// Package config defines immutable tenant configuration snapshots and bindings.
 package config

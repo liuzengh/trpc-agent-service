@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "scenario_id": "replace-with-real-scenario",
+  "service_version": "sha256:replace-with-image-digest",
+  "environment": "local-docker",
+  "started_at": "2026-09-04T00:00:00Z",
+  "ended_at": "2026-09-04T00:10:00Z",
+  "criteria": {
+    "minimum_duration_seconds": 600,
+    "minimum_offered_rps": 1,
+    "minimum_sustained_rps": 0.95,
+    "maximum_error_ratio": 0.01,
+    "maximum_p95_latency_millis": 60000,
+    "maximum_broker_lag_seconds": 30,
+    "maximum_drain_seconds": 30,
+    "minimum_metric_coverage_ratio": 0.99,
+    "maximum_audit_lag_seconds": 30,
+    "require_worker_scale_up": false
+  },
+  "offered_requests": 600,
+  "admitted_requests": 600,
+  "completed_requests": 600,
+  "failed_requests": 0,
+  "p95_latency_millis": 1000,
+  "peak_broker_lag_seconds": 1,
+  "final_broker_backlog": 0,
+  "drain_seconds": 5,
+  "metric_coverage_ratio": 1,
+  "audit_dead_letter": 0,
+  "peak_audit_lag_seconds": 1,
+  "initial_worker_replicas": 1,
+  "peak_worker_replicas": 1,
+  "evidence_refs": [
+    "example://replace-with-trace-reference",
+    "example://replace-with-audit-reference"
+  ]
+}

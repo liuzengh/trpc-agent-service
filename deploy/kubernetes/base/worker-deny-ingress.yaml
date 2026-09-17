@@ -1,0 +1,14 @@
+# Worker has no externally callable workload path. Kubelet probes still target
+# its pod-local health endpoint, while every pod-to-worker ingress flow is
+# denied by this policy on CNI implementations that enforce NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: trpc-worker-deny-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: trpc-agent-service
+      app.kubernetes.io/component: worker
+  policyTypes: [Ingress]
+  ingress: []

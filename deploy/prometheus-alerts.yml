@@ -1,0 +1,66 @@
+groups:
+  - name: trpc-agent-service-durable-runtime
+    rules:
+      # The autoscaling gauges are emitted only from a fresh backlog snapshot.
+      # Alert on the absence of a fresh snapshot before treating zero backlog as
+      # a capacity signal.
+      - alert: TRPCBrokerBacklogSnapshotStale
+        expr: max_over_time(trpc_broker_autoscaling_snapshot_ready[5m]) < 1
+        for: 5m
+        labels:
+          severity: warning
+          service: trpc-agent-service
+        annotations:
+          summary: Worker broker backlog snapshot is stale
+          runbook: Check Worker Redis connectivity and the backlog monitor before changing replicas.
+
+      - alert: TRPCBrokerDeliveryLagHigh
+        expr: max by (job) (trpc_broker_delivery_lag_max_seconds) > 300
+        for: 10m
+        labels:
+          severity: warning
+          service: trpc-agent-service
+        annotations:
+          summary: Worker dispatch delivery lag exceeds five minutes
+          runbook: Inspect relay ownership, worker leases, Redis consumer lag, and broker backlog.
+
+      # Audit metrics are exported by the dedicated audit-relay role. A stale
+      # snapshot is deliberately separate from a real zero-length Outbox.
+      - alert: TRPCAuditBacklogSnapshotStale
+        expr: max_over_time(trpc_audit_autoscaling_snapshot_ready[5m]) < 1
+        for: 5m
+        labels:
+          severity: warning
+          service: trpc-agent-service
+        annotations:
+          summary: Audit relay backlog snapshot is stale
+          runbook: Check audit-relay readiness, source PostgreSQL, and compliance-store reachability.
+
+      - alert: TRPCAuditOutboxDeadLetterPresent
+        expr: sum by (job) (trpc_audit_outbox_backlog{state="dead_letter"}) > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: trpc-agent-service
+        annotations:
+          summary: Audit relay has durable dead-letter records
+          runbook: Preserve the records, inspect the failed compliance export, then use the controlled replay path.
+
+      - alert: TRPCAuditExportFailureRateHigh
+        expr: sum by (job) (rate(trpc_audit_export_total{outcome="error"}[5m])) / clamp_min(sum by (job) (rate(trpc_audit_export_total[5m])), 1) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          service: trpc-agent-service
+        annotations:
+          summary: Audit export failure rate exceeds five percent
+          runbook: Check compliance destination availability and relay retry/dead-letter transitions; do not discard the Outbox.
+
+      - alert: TRPCQuarantineAlertExported
+        expr: increase(trpc_quarantine_alert_export_total[10m]) > 0
+        labels:
+          severity: warning
+          service: trpc-agent-service
+        annotations:
+          summary: A durable quarantine alert was exported
+          runbook: Triage the quarantined object or event using its immutable audit evidence.

@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 10s
+scrape_configs:
+  - job_name: otel-collector
+    # Collector self-observability lives on its telemetry endpoint. The 9464
+    # exporter carries application metrics and can be empty until an app emits
+    # one; the dashboard's otelcol_* panels must scrape 8888 instead.
+    static_configs: [{targets: [otel-collector:8888]}]

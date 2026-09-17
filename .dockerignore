@@ -1,0 +1,7 @@
+.git
+.workbuddy
+.codex
+deploy/compose/secrets
+**/*_test.go
+**/testdata
+*.log
